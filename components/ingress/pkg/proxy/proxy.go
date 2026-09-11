@@ -154,7 +154,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del(DeprecatedSandboxIngress)
 	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
 	r.Header.Del(sandbox.FastSandboxCredential)
-	// Host is carried by r.Host, not r.Header. The Phase 1a Fleets provider
+	// Host is carried by r.Host, not r.Header. The Phase 1a Fast Sandbox provider
 	// accepts only the Fastlet route credential in UpstreamHeaders.
 	for name, values := range host.info.UpstreamHeaders {
 		r.Header.Del(name)
@@ -211,7 +211,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 }
 
 func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget) func(*http.Response) {
-	if target.RouteKind != sandbox.RouteKindFleets {
+	if target.RouteKind != sandbox.RouteKindFastSandbox {
 		return nil
 	}
 	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
@@ -239,7 +239,7 @@ func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget) func(*ht
 }
 
 func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error) {
-	if target.RouteKind != sandbox.RouteKindFleets {
+	if target.RouteKind != sandbox.RouteKindFastSandbox {
 		return nil
 	}
 	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)

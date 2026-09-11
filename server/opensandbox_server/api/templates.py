@@ -36,7 +36,7 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.config import get_config
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.templates.template_service import (
-    FsbTemplateService,
+    FastSandboxTemplateService,
     template_to_response,
     total_pages,
 )
@@ -48,10 +48,10 @@ _TEMPLATE_NOT_K8S_DETAIL = {
     "message": "Template management requires the kubernetes runtime.",
 }
 
-_service: Optional[FsbTemplateService] = None
+_service: Optional[FastSandboxTemplateService] = None
 
 
-def _get_template_service() -> FsbTemplateService:
+def _get_template_service() -> FastSandboxTemplateService:
     """Lazily create the service, raising 501 for non-Kubernetes runtimes.
 
     Templates project onto fast-sandbox CRDs through the Kubernetes client,
@@ -67,7 +67,7 @@ def _get_template_service() -> FsbTemplateService:
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail=_TEMPLATE_NOT_K8S_DETAIL,
         )
-    _service = FsbTemplateService(config)
+    _service = FastSandboxTemplateService(config)
     # Watch-driven convergence: DB rows track the CRD build phase even when
     # nobody polls the read API.
     _service.start_background_sync()

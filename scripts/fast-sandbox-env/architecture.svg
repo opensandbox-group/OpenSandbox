@@ -93,7 +93,7 @@
     <rect x="160" y="228" width="540" height="104" rx="12" fill="#ffffff" stroke="#0f766e" stroke-width="1.8" filter="url(#sh)"/>
     <use xlink:href="#ic-chip" href="#ic-chip" x="178" y="244" width="28" height="28" color="#0f766e"/>
     <text x="220" y="256" class="t-name">OpenSandbox server</text>
-    <text x="220" y="276" class="t-body">fleets runtime · template catalog (store) + watch reactor</text>
+    <text x="220" y="276" class="t-body">Fast Sandbox backend · template catalog (store) + watch reactor</text>
     <text x="220" y="292" class="t-body">creates sandboxes via FastPath · signs f1.* gateway routes</text>
     <g>
       <path d="M594 258 v34 a13 5 0 0 0 26 0 v-34" fill="#ccfbf1" stroke="#0f766e" stroke-width="1.6"/>

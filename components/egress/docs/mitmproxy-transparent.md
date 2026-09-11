@@ -58,7 +58,7 @@ Notes:
 
 ### Static Configuration (config.yaml)
 
-Fleet-wide, rarely-changing mitm options live in
+Fast Sandbox-wide, rarely-changing mitm options live in
 `components/egress/mitmproxy/config.yaml`, baked into the image at
 `/var/lib/mitmproxy/.mitmproxy/config.yaml` and auto-loaded by mitmdump.
 This is the single source of truth for:

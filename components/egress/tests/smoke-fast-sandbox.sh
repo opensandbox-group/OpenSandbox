@@ -14,21 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Fleet profile (OSEP-0022) smoke test — real dns+nft end to end, no Docker,
-# no external network. The fleet profile is inherently dns+nft (there is no
-# dns-only mode), so this is the only fleet smoke variant.
+# Fast Sandbox profile (OSEP-0022) smoke test — real dns+nft end to end, no Docker,
+# no external network. The fast-sandbox profile is inherently dns+nft (there is no
+# dns-only mode), so this is the only fast-sandbox smoke variant.
 #
 # Topology (all on the host, requires root):
 #
 #   sandbox netns osb-sandbox-a   Pod/host netns        "ext" netns osb-ext
 #   10.10.0.5/24 ──veth-a── veth-a-p 10.10.0.1/24       (external world)
-#   DNS -> 10.10.0.1:53 ────────────► fleet dnsproxy    osb-ext 10.99.0.2/24
+#   DNS -> 10.10.0.1:53 ────────────► fast-sandbox dnsproxy    osb-ext 10.99.0.2/24
 #   TCP  -> 10.99.0.2:8080 ─────────► forward hook ── veth-ext-p 10.99.0.1/24
-#                                    (nft opensandbox-fleet)         └─ HTTP :8080
+#                                    (nft opensandbox-fast-sandbox)         └─ HTTP :8080
 #
 # Subject lifecycle is driven by the fast-sandbox Sandbox Actions Handler
 # protocol (SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING over
-# /_fastlet/v1/actions); the egress binary runs directly with the fleet
+# /_fastlet/v1/actions); the egress binary runs directly with the fast-sandbox
 # profile. Every assertion below touches the real kernel (nft) or real
 # packets (netns-to-netns).
 
@@ -36,9 +36,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-EGRESS_BIN="/tmp/osb-egress-fleet"
+EGRESS_BIN="/tmp/osb-egress-fast-sandbox"
 
-EGRESS_LOG="/tmp/fleet-egress.log"
+EGRESS_LOG="/tmp/fast-sandbox-egress.log"
 POLICY_PORT=18080
 UPSTREAM_ADDR="127.0.0.1:5300"
 ACTIONS_URL="http://127.0.0.1:${POLICY_PORT}/_fastlet/v1/actions"
@@ -56,7 +56,7 @@ pass() { info "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 require() {
-  [ "$(id -u)" = "0" ] || fail "fleet smoke requires root (ip netns + nft)"
+  [ "$(id -u)" = "0" ] || fail "fast-sandbox smoke requires root (ip netns + nft)"
   for c in go nft ip python3 curl openssl; do
     command -v "${c}" >/dev/null || fail "missing required command: ${c}"
   done
@@ -80,7 +80,7 @@ cleanup() {
     [ "${SAVED_FORWARD_POLICY}" = "-P FORWARD ACCEPT" ] || iptables -t filter -P FORWARD DROP >/dev/null 2>&1 || true
   fi
   [ -n "${SSL_DIR:-}" ] && rm -rf "${SSL_DIR}" 2>/dev/null
-  nft delete table inet opensandbox-fleet 2>/dev/null
+  nft delete table inet opensandbox-fast-sandbox 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -162,9 +162,9 @@ dns_query() {
   # dns_query <netns-or-host> <name>
   local where="$1" name="$2"
   if [ "${where}" = "host" ]; then
-    python3 "${SCRIPT_DIR}/fleet_upstream.py" query 10.10.0.1 "${name}"
+    python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" query 10.10.0.1 "${name}"
   else
-    ip netns exec "${where}" python3 "${SCRIPT_DIR}/fleet_upstream.py" query 10.10.0.1 "${name}"
+    ip netns exec "${where}" python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" query 10.10.0.1 "${name}"
   fi
 }
 
@@ -182,7 +182,7 @@ expect_answers() {
   echo "${out}" | grep -q "answers=$3" || fail "dns ${2}: expected answer $3, got '${out}'"
 }
 
-nft_has() { nft list table inet opensandbox-fleet 2>/dev/null | grep -q "$1"; }
+nft_has() { nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q "$1"; }
 
 # subject_state <uid>: prints the subject's lifecycle state from GET /policy.
 subject_state() {
@@ -190,7 +190,7 @@ subject_state() {
 }
 
 start_egress() {
-  info "Starting fleet egress"
+  info "Starting fast-sandbox egress"
   # DoH env overridable per-test (Test 10 exercises strict mode with an
   # empty blocklist). `${VAR-default}` (no colon) keeps a set-but-empty
   # value empty, so Test 10's `EGRESS_DOH_BLOCKLIST=""` really disables the
@@ -211,7 +211,7 @@ start_egress() {
   # env(1) is required: words produced by "${mitm_env[@]}" expansion are NOT
   # treated as environment assignments by bash (they'd be executed as commands).
   env \
-  OPENSANDBOX_EGRESS_PROFILE=fleet \
+  OPENSANDBOX_EGRESS_PROFILE=fast-sandbox \
   OPENSANDBOX_EGRESS_DNS_UPSTREAM="${UPSTREAM_ADDR}" \
   OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE=allow.test \
   OPENSANDBOX_EGRESS_HTTP_ADDR="127.0.0.1:${POLICY_PORT}" \
@@ -225,7 +225,7 @@ start_egress() {
 
 push_vault() {
   # push_vault <uid> <json>: POST the vault; on failure print the server's
-  # rejection body (the fleet handler reports validation errors there).
+  # rejection body (the fast-sandbox handler reports validation errors there).
   local uid="$1" json="$2" resp code body
   resp="$(curl -s -w '\n%{http_code}' -H "X-Fast-Sandbox-Uid: ${uid}" \
     -XPOST "http://127.0.0.1:${POLICY_PORT}/credential-vault" -d "${json}")"
@@ -255,7 +255,7 @@ set_up_netns() {
 }
 
 ###############################################################################
-info "== Fleet profile smoke (dns+nft) =="
+info "== Fast Sandbox profile smoke (dns+nft) =="
 require
 
 info "Preparing environment"
@@ -290,13 +290,13 @@ ip -n osb-ext route add default via 10.99.0.1
 
 info "Starting helper servers"
 # Self-signed cert for the ext HTTPS :443 echo (TLS interception smoke).
-SSL_DIR="$(mktemp -d -t fleet-ssl.XXXXXX)"
+SSL_DIR="$(mktemp -d -t fast-sandbox-ssl.XXXXXX)"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "${SSL_DIR}/key.pem" \
   -out "${SSL_DIR}/cert.pem" -days 1 -subj "/CN=ext.test" >/dev/null 2>&1
-python3 "${SCRIPT_DIR}/fleet_upstream.py" dns >/dev/null 2>&1 &
+python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" dns >/dev/null 2>&1 &
 UPSTREAM_PID=$!
 EXT_SSL_CERT="${SSL_DIR}/cert.pem" EXT_SSL_KEY="${SSL_DIR}/key.pem" \
-  ip netns exec osb-ext python3 "${SCRIPT_DIR}/fleet_upstream.py" ext >/dev/null 2>&1 &
+  ip netns exec osb-ext python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" ext >/dev/null 2>&1 &
 EXT_PID=$!
 wait_for 5 "ext http server up" ip netns exec osb-ext curl -s -m 2 -o /dev/null http://127.0.0.1:8080/
 wait_for 5 "ext https server up" ip netns exec osb-ext curl -sk -m 2 -o /dev/null https://127.0.0.1:443/
@@ -337,7 +337,7 @@ pass "nft static allow + DNS-learned dynamic lease"
 info "Test 3: real data path through the forward hook"
 if ! ip netns exec osb-sandbox-a curl -s -m 5 -o /dev/null http://10.99.0.2:8080/; then
   echo "--- diagnostics (data path failure) ---"
-  nft list table inet opensandbox-fleet 2>&1 | head -30
+  nft list table inet opensandbox-fast-sandbox 2>&1 | head -30
   echo "--- pod routes ---"; ip route
   echo "--- sandbox routes ---"; ip netns exec osb-sandbox-a ip route
   echo "--- ext routes ---"; ip netns exec osb-ext ip route
@@ -400,7 +400,7 @@ pass "rebind reset + data-plane-ready reactivates"
 ###############################################################################
 info "Test 8: REMOVE_BINDING removes enforcement"
 remove_binding b runtime-b att-b
-wait_for 15 "subject b unloaded" bash -c "! nft list table inet opensandbox-fleet | grep -q subj_s_b"
+wait_for 15 "subject b unloaded" bash -c "! nft list table inet opensandbox-fast-sandbox | grep -q subj_s_b"
 pass "unload removed chain/sets"
 
 ###############################################################################
@@ -413,7 +413,7 @@ kill "${EGRESS_PID}" 2>/dev/null
 wait "${EGRESS_PID}" 2>/dev/null || true
 EGRESS_PID=""
 start_egress
-wait_for 15 "stale dyn leases wiped on restart" bash -c "! nft list table inet opensandbox-fleet | grep -q '1.1.1.1'"
+wait_for 15 "stale dyn leases wiped on restart" bash -c "! nft list table inet opensandbox-fast-sandbox | grep -q '1.1.1.1'"
 expect_rcode osb-sandbox-a allow.test 3
 # The Fastlet's instanceId replay: SET_BINDING + reached Hooks.
 bind_and_ready a 10.10.0.5 5 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
@@ -441,7 +441,7 @@ if ! command -v mitmdump >/dev/null 2>&1 || ! id mitmproxy >/dev/null 2>&1; then
   info "    useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy"
   info "    python3 -m venv /opt/mitmproxy && /opt/mitmproxy/bin/pip install 'mitmproxy==11.0.2'"
   info "    ln -s /opt/mitmproxy/bin/mitmdump /usr/local/bin/mitmdump"
-  info "  then re-run ./tests/smoke-fleet.sh (Test 11 runs last)."
+  info "  then re-run ./tests/smoke-fast-sandbox.sh (Test 11 runs last)."
 else
   # Ship the baked-in mitm config AND the system addon (the egress image
   # carries both under /var/lib/mitmproxy and /var/egress; a bare host may
@@ -457,8 +457,8 @@ else
   EGRESS_PID=""
   EGRESS_MITM=1 start_egress
 
-  # CA exported into the dedicated fleet subdir (the fastlet mount point).
-  wait_for 20 "fleet CA export" test -s /opt/opensandbox/mitm-ca/mitmproxy-ca-cert.pem
+  # CA exported into the dedicated fast-sandbox subdir (the fastlet mount point).
+  wait_for 20 "fast-sandbox CA export" test -s /opt/opensandbox/mitm-ca/mitmproxy-ca-cert.pem
   pass "CA exported to /opt/opensandbox/mitm-ca/mitmproxy-ca-cert.pem"
 
   # Subject a registers (deny-first): the per-subject DNAT is installed at
@@ -578,7 +578,7 @@ else
   # DoH-443 blocking under MITM: the Pod-netns INPUT enforcement chain
   # applies the blocklist to the DNATed 443 (the forward hook only sees the
   # real destination for non-MITM traffic).
-  nft list table inet opensandbox-fleet 2>/dev/null | grep -q 'doh_block_v4 tcp dport 443 drop' \
+  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'doh_block_v4 tcp dport 443 drop' \
     || fail "Pod-layer DoH-443 drop missing under MITM"
   if ip netns exec osb-sandbox-a curl -sk -m 2 -o /dev/null https://203.0.113.1/ 2>/dev/null; then
     fail "blocklisted DoH endpoint 203.0.113.1 must be unreachable under MITM"
@@ -645,4 +645,4 @@ else
 fi
 
 ###############################################################################
-info "All fleet smoke tests passed."
+info "All fast-sandbox smoke tests passed."

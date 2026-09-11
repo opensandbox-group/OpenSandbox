@@ -38,8 +38,8 @@ docker build \
 - `main.go` — entrypoint, HTTP routes, provider initialization.
 - `pkg/flag/` — command-line flags and defaults.
 - `pkg/proxy/` — HTTP/WebSocket reverse proxy logic and route parsing.
-- `pkg/sandbox/` — sandbox provider abstraction (BatchSandbox, AgentSandbox, fleets/FastPath).
-- `pkg/signature/`, `pkg/routescope/` — signed-route and fleets route-scope verification.
+- `pkg/sandbox/` — sandbox provider abstraction (BatchSandbox, AgentSandbox, Fast Sandbox/FastPath).
+- `pkg/signature/`, `pkg/routescope/` — signed-route and Fast Sandbox route-scope verification.
 - `pkg/renewintent/` — renew-intent event publishing to Redis.
 - `pkg/telemetry/` — OpenTelemetry metrics.
 - `vendor/github.com/alibaba/opensandbox/internal/version` — build metadata (ldflags).

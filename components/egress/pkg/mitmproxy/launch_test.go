@@ -39,7 +39,7 @@ func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
-func TestBuildMitmdumpArgsFleetListenHost(t *testing.T) {
+func TestBuildMitmdumpArgsFastSandboxListenHost(t *testing.T) {
 	args := buildMitmdumpArgs(Config{ListenPort: 18081, ListenHost: "0.0.0.0"})
 	require.Contains(t, args, "--listen-host")
 	require.Contains(t, args, "0.0.0.0")

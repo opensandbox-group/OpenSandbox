@@ -832,7 +832,7 @@ def test_snapshot_service_rejects_fsb_without_persisting_or_calling_legacy(tmp_p
         repo, StubSandboxService(), snapshot_runtime=runtime, snapshot_executor=ImmediateExecutor()
     )
     with pytest.raises(HTTPException) as exc_info:
-        service.create_snapshot("flt-001", CreateSnapshotRequest())
+        service.create_snapshot("fsb-001", CreateSnapshotRequest())
     assert exc_info.value.status_code == 501
     assert service.list_snapshots(ListSnapshotsRequest()).items == []
     assert runtime.calls == []

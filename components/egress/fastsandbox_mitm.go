@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fleet-profile shared mitmproxy assembly: ONE mitmdump in the fastlet Pod
+// Fast Sandbox-profile shared mitmproxy assembly: ONE mitmdump in the fastlet Pod
 // netns serving every sandbox (OSEP-0022 A1). Unlike the sidecar profile, the
 // Pod-netns OUTPUT REDIRECT is deliberately NOT installed (it would intercept
 // the Pod's own traffic); interception is the per-subject prerouting DNAT the
-// fleet server installs (pkg/iptables.InstallMitmRedirects), keyed by sandbox
+// fast-sandbox server installs (pkg/iptables.InstallMitmRedirects), keyed by sandbox
 // source IP. The listener binds 0.0.0.0 so DNATed traffic landing on the
-// gateway veth address reaches it (same reason the fleet DNS proxy binds
+// gateway veth address reaches it (same reason the fast-sandbox DNS proxy binds
 // :15353).
 package main
 
@@ -35,11 +35,11 @@ import (
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
-// startFleetMitmproxyIfEnabled starts the shared mitmdump (transparent mode,
-// all interfaces), waits for the listener, and exports the CA into the fleet
+// startFastSandboxMitmproxyIfEnabled starts the shared mitmdump (transparent mode,
+// all interfaces), waits for the listener, and exports the CA into the fast-sandbox
 // subdir that fastlet bind-mounts into every sandbox. Returns nil when
 // OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT is unset.
-func startFleetMitmproxyIfEnabled() (*mitmTransparent, error) {
+func startFastSandboxMitmproxyIfEnabled() (*mitmTransparent, error) {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return nil, nil
 	}
@@ -69,11 +69,11 @@ func startFleetMitmproxyIfEnabled() (*mitmTransparent, error) {
 	if err := mitmproxy.WaitListenPort(waitAddr, 15*time.Second); err != nil {
 		return nil, fmt.Errorf("wait listen %s: %w", waitAddr, err)
 	}
-	log.Infof("fleet mitmproxy: shared transparent listener on 0.0.0.0:%d (interception via per-subject prerouting DNAT)", mpPort)
+	log.Infof("fast-sandbox mitmproxy: shared transparent listener on 0.0.0.0:%d (interception via per-subject prerouting DNAT)", mpPort)
 
 	// No Pod-netns OUTPUT REDIRECT (would intercept the Pod's own traffic);
-	// the fleet server installs the per-subject prerouting DNAT instead.
-	if err := mitmproxy.SyncRootCAFleet("", mpHome); err != nil {
+	// the fast-sandbox server installs the per-subject prerouting DNAT instead.
+	if err := mitmproxy.SyncRootCAFastSandbox("", mpHome); err != nil {
 		return nil, fmt.Errorf("mitm CA export: %w", err)
 	}
 	return &mitmTransparent{
@@ -88,28 +88,28 @@ func startFleetMitmproxyIfEnabled() (*mitmTransparent, error) {
 	}, nil
 }
 
-// fleetActiveSocketPath is the shared unix socket for the subject-aware active
+// fastSandboxActiveSocketPath is the shared unix socket for the subject-aware active
 // vault API; the addon (mitmscripts/system.py) queries it per flow with the
 // client's source IP. Same default location as the sidecar (per-Pod, one
 // egress process).
-func fleetActiveSocketPath() string {
+func fastSandboxActiveSocketPath() string {
 	return envOrDefault(constants.EnvCredentialProxySocket, constants.DefaultCredentialProxySocket)
 }
 
-// startFleetActiveSocket starts the subject-aware active vault API on the
+// startFastSandboxActiveSocket starts the subject-aware active vault API on the
 // shared unix socket: one socket, dispatch inside (clientIp -> subject ->
 // vault snapshot). Cleaned up on ctx cancellation.
-func startFleetActiveSocket(ctx context.Context, srv *fleetPolicyServer) {
+func startFastSandboxActiveSocket(ctx context.Context, srv *fastSandboxPolicyServer) {
 	_, mitmGID, _, err := mitmproxy.LookupUser(mitmproxy.RunAsUser)
 	if err != nil {
 		log.Fatalf("lookup credential proxy user %q: %v (ensure this user exists in the image)", mitmproxy.RunAsUser, err)
 	}
-	socketPath := fleetActiveSocketPath()
+	socketPath := fastSandboxActiveSocketPath()
 	activeSrv, cleanup, err := credentialvault.StartActiveSocketServerRequestAware(srv.handleCredentialVaultActive, socketPath, int(mitmGID))
 	if err != nil {
 		log.Fatalf("credential vault active socket: %v", err)
 	}
-	log.Infof("fleet credential vault active API listening on unix socket %s", socketPath)
+	log.Infof("fast-sandbox credential vault active API listening on unix socket %s", socketPath)
 	_ = activeSrv
 	safego.Go(func() {
 		<-ctx.Done()

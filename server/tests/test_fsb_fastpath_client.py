@@ -25,8 +25,8 @@ from threading import Event, Thread
 import grpc
 import pytest
 
-from opensandbox_server.services.fsb import fastpath_client
-from opensandbox_server.services.fsb.fastpath_client import (
+from opensandbox_server.services.fast_sandbox import fastpath_client
+from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
     FastPathConflict,
     FastPathError,
@@ -38,8 +38,8 @@ from opensandbox_server.services.fsb.fastpath_client import (
     namespaced_reference,
     port_target,
 )
-from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fsb.generated import fastpath_pb2_grpc as pb2_grpc
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2_grpc as pb2_grpc
 
 
 def _sandbox(name: str = "sbx-1") -> pb2.SandboxInfo:

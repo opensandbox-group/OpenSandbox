@@ -39,7 +39,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
-// fakeNft implements fleetNftApplier with recording.
+// fakeNft implements fastSandboxNftApplier with recording.
 type fakeNft struct {
 	mu            sync.Mutex
 	denyFirst     []subject.Subject
@@ -88,11 +88,11 @@ func (f *fakeNft) appliedCount() int {
 	return len(f.policyApplied)
 }
 
-func fleetTestServer(t *testing.T) (*fleetPolicyServer, *subject.MemoryRegistry, *fakeNft) {
+func fastSandboxTestServer(t *testing.T) (*fastSandboxPolicyServer, *subject.MemoryRegistry, *fakeNft) {
 	t.Helper()
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
-	srv := newFleetPolicyServer(context.Background(), reg, nft, time.Minute)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft, time.Minute)
 	// no-op the gateway DNS redirect (no iptables/nft in unit tests)
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
 	srv.dnsRedirectRemove = func() error { return nil }
@@ -103,7 +103,7 @@ func uidHeader(s subject.Subject) string {
 	return strings.TrimPrefix(string(s), "s-")
 }
 
-func doRequest(t *testing.T, srv *fleetPolicyServer, method, path, uid, body string) *httptest.ResponseRecorder {
+func doRequest(t *testing.T, srv *fastSandboxPolicyServer, method, path, uid, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rd *bytes.Reader
 	if body == "" {
@@ -121,7 +121,7 @@ func doRequest(t *testing.T, srv *fleetPolicyServer, method, path, uid, body str
 }
 
 // doAction posts an action envelope to the Fastlet dispatch endpoint.
-func doAction(t *testing.T, srv *fleetPolicyServer, body string) *httptest.ResponseRecorder {
+func doAction(t *testing.T, srv *fastSandboxPolicyServer, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	return doRequest(t, srv, http.MethodPost, constants.ActionsDispatchPath, "", body)
 }
@@ -220,7 +220,7 @@ func removeBody(t *testing.T, uid, runtimeID, attID string) string {
 
 // setBindingAndReady drives a sandbox to active through the action protocol:
 // SET_BINDING -> runtime-ready -> data-plane-ready.
-func setBindingAndReady(t *testing.T, srv *fleetPolicyServer, reg *subject.MemoryRegistry, uid, ip string, input *string) subject.Subject {
+func setBindingAndReady(t *testing.T, srv *fastSandboxPolicyServer, reg *subject.MemoryRegistry, uid, ip string, input *string) subject.Subject {
 	t.Helper()
 	s := subject.FromSandboxUID(uid)
 	rec := doAction(t, srv, bindBody(t, uid, ip, testFenceR, testFenceA, 1, input))
@@ -238,7 +238,7 @@ func setBindingAndReady(t *testing.T, srv *fleetPolicyServer, reg *subject.Memor
 // ---------------------------------------------------------------------------
 
 func TestActionsStatus(t *testing.T) {
-	srv, _, _ := fleetTestServer(t)
+	srv, _, _ := fastSandboxTestServer(t)
 	rec := doRequest(t, srv, http.MethodGet, constants.ActionsStatusPath, "", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	var status actionhandler.StatusResponse
@@ -255,7 +255,7 @@ func TestActionsStatus(t *testing.T) {
 
 func TestActionsStatusMirrorsMitmGate(t *testing.T) {
 	t.Setenv(constants.EnvMitmproxyTransparent, "true")
-	srv, _, _ := fleetTestServer(t)
+	srv, _, _ := fastSandboxTestServer(t)
 	gate := mitmproxy.NewHealthGate()
 	srv.mitmGate = gate
 	gate.SetReady(false)
@@ -277,7 +277,7 @@ func TestActionsStatusMirrorsMitmGate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestActionsSetBindingDenyFirstThenHookActivates(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID(testUID)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 
@@ -307,7 +307,7 @@ func TestActionsSetBindingDenyFirstThenHookActivates(t *testing.T) {
 }
 
 func TestActionsSetBindingUpdateWhileActiveDoesNotReplay(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
 	denyFirstInstalls := len(nft.denyFirst)
@@ -323,7 +323,7 @@ func TestActionsSetBindingUpdateWhileActiveDoesNotReplay(t *testing.T) {
 }
 
 func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
 	denyFirstInstalls := len(nft.denyFirst)
@@ -346,7 +346,7 @@ func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
 }
 
 func TestActionsDataPlaneReadyWithoutPendingPolicyFailsClosed(t *testing.T) {
-	srv, reg, _ := fleetTestServer(t)
+	srv, reg, _ := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID(testUID)
 
 	// binding removed immediately (null input): no pending policy exists
@@ -362,7 +362,7 @@ func TestActionsDataPlaneReadyWithoutPendingPolicyFailsClosed(t *testing.T) {
 }
 
 func TestActionsRebindDiscardsPolicy(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"old.com"}]}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
 
@@ -384,7 +384,7 @@ func TestActionsRebindDiscardsPolicy(t *testing.T) {
 }
 
 func TestActionsSetBindingIdempotentRetry(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID(testUID)
 	input := `{"defaultAction":"deny"}`
 
@@ -407,7 +407,7 @@ func TestActionsSetBindingIdempotentRetry(t *testing.T) {
 }
 
 func TestActionsInvalidPolicyInputRejected(t *testing.T) {
-	srv, reg, _ := fleetTestServer(t)
+	srv, reg, _ := fastSandboxTestServer(t)
 	bad := "not-json"
 	rec := doAction(t, srv, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, &bad))
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -426,7 +426,7 @@ func TestActionsInvalidPolicyInputRejected(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestActionsRemoveBindingCleansUp(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
 
@@ -446,7 +446,7 @@ func TestActionsRemoveBindingCleansUp(t *testing.T) {
 }
 
 func TestActionsRemoveBindingMissingStateSuccess(t *testing.T) {
-	srv, _, nft := fleetTestServer(t)
+	srv, _, nft := fastSandboxTestServer(t)
 	rec := doAction(t, srv, removeBody(t, "ghost", testFenceR, testFenceA))
 	require.Equal(t, http.StatusOK, rec.Code, "missing Handler state is success")
 	require.Len(t, nft.removed, 0)
@@ -462,7 +462,7 @@ func TestActionsRemoveBindingMissingStateSuccess(t *testing.T) {
 }
 
 func TestActionsRemoveBindingStaleFenceIgnored(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
 
@@ -475,7 +475,7 @@ func TestActionsRemoveBindingStaleFenceIgnored(t *testing.T) {
 }
 
 func TestActionsHookForUnregisteredSubjectConflict(t *testing.T) {
-	srv, _, _ := fleetTestServer(t)
+	srv, _, _ := fastSandboxTestServer(t)
 	rec := doAction(t, srv, hookBody(t, "ghost", testFenceR, testFenceA, constants.HookRuntimeReady))
 	require.Equal(t, http.StatusConflict, rec.Code)
 	rec = doAction(t, srv, hookBody(t, "ghost", testFenceR, testFenceA, constants.HookDataPlaneReady))
@@ -487,7 +487,7 @@ func TestActionsHookForUnregisteredSubjectConflict(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestActionsInvalidEnvelopesRejected(t *testing.T) {
-	srv, _, _ := fleetTestServer(t)
+	srv, _, _ := fastSandboxTestServer(t)
 	cases := []struct {
 		name string
 		body string
@@ -512,7 +512,7 @@ func TestActionsInvalidEnvelopesRejected(t *testing.T) {
 }
 
 func TestActionsSetBindingNullDropsPendingPushes(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID(testUID)
 
 	// a policy push races the binding and lands in the pending cache
@@ -538,8 +538,8 @@ func TestActionsSetBindingNullDropsPendingPushes(t *testing.T) {
 // Proxy-route policy/vault surface (unchanged semantics)
 // ---------------------------------------------------------------------------
 
-func TestFleetServerPolicyRouting(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+func TestFastSandboxServerPolicyRouting(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
 	uid := "u-1"
 	s := setBindingAndReady(t, srv, reg, uid, testIP, strPtr(`{"defaultAction":"deny"}`))
 	_ = s
@@ -567,12 +567,12 @@ func TestFleetServerPolicyRouting(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestFleetServerPolicyPushWhileDenyingStaysPending (review fix + binding
+// TestFastSandboxServerPolicyPushWhileDenyingStaysPending (review fix + binding
 // authority): a runtime /policy push for a still-denying subject must neither
 // activate it nor override the SET_BINDING input — data-plane-ready applies
 // the binding's policy, not the pushed one.
-func TestFleetServerPolicyPushWhileDenyingStaysPending(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+func TestFastSandboxServerPolicyPushWhileDenyingStaysPending(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
 	binding := `{"defaultAction":"deny","egress":[{"action":"allow","target":"binding.com"}]}`
 	rec := doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 1, &binding))
@@ -603,8 +603,8 @@ func TestFleetServerPolicyPushWhileDenyingStaysPending(t *testing.T) {
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("pushed.com"))
 }
 
-func TestFleetServerPolicyPendingPushFlushedOnSetBinding(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+func TestFastSandboxServerPolicyPendingPushFlushedOnSetBinding(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
 
 	// push before the binding exists -> cached as pending (202), nothing applied
@@ -632,8 +632,8 @@ func TestFleetServerPolicyPendingPushFlushedOnSetBinding(t *testing.T) {
 	assert.Equal(t, "deny", eff.Evaluate("example.com"), "the binding input is authoritative over cached pushes")
 }
 
-func TestFleetServerPendingGenerationMismatchDropped(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+func TestFastSandboxServerPendingGenerationMismatchDropped(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
 
 	rec := doRequest(t, srv, http.MethodPut, "/policy", "u-1",
@@ -657,8 +657,8 @@ func TestFleetServerPendingGenerationMismatchDropped(t *testing.T) {
 	assert.Equal(t, 0, nft.appliedCount())
 }
 
-func TestFleetServerCredentialVaultPerSubject(t *testing.T) {
-	srv, reg, _ := fleetTestServer(t)
+func TestFastSandboxServerCredentialVaultPerSubject(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
 	sA := subject.FromSandboxUID("a")
 	sB := subject.FromSandboxUID("b")
 	reg.Register(sA, subject.SubjectKey{SourceIP: netip.MustParseAddr("10.0.0.5")}, subject.Fencing{RuntimeInstanceID: "r-a", AttachmentID: "a-a"})
@@ -678,8 +678,8 @@ func TestFleetServerCredentialVaultPerSubject(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `"revision":1`)
 }
 
-func TestFleetServerOnUnloadedDropsPending(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+func TestFastSandboxServerOnUnloadedDropsPending(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
 	rec := doRequest(t, srv, http.MethodPut, "/policy", uidHeader(s), `{"defaultAction":"deny"}`)
 	require.Equal(t, http.StatusAccepted, rec.Code)
@@ -695,8 +695,8 @@ func TestFleetServerOnUnloadedDropsPending(t *testing.T) {
 	assert.Equal(t, subject.StateDenying, state)
 }
 
-func TestFleetServerHealthz(t *testing.T) {
-	srv, _, _ := fleetTestServer(t)
+func TestFastSandboxServerHealthz(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
 	rec := doRequest(t, srv, http.MethodGet, "/healthz", "", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 }
@@ -746,8 +746,8 @@ func mitmAtt(t *testing.T, ip, gw string) actionhandler.NetworkAttachment {
 	}
 }
 
-func TestFleetServerMitmRedirectInstalledOnRegistration(t *testing.T) {
-	srv, _, _ := fleetTestServer(t)
+func TestFastSandboxServerMitmRedirectInstalledOnRegistration(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
 	inst := &fakeMitmInstaller{}
 	srv.SetMitm(nil, 18081, []int{80, 443})
 	srv.mitmInstall = inst.install
@@ -770,8 +770,8 @@ func TestFleetServerMitmRedirectInstalledOnRegistration(t *testing.T) {
 	require.Equal(t, []iptables.MitmRedirectEntry{{SandboxIP: netip.MustParseAddr("10.0.0.6"), Gateway: netip.MustParseAddr("10.0.0.1")}}, inst.snapshot())
 }
 
-func TestFleetServerMitmRedirectFailClosesRegistration(t *testing.T) {
-	srv, _, nft := fleetTestServer(t)
+func TestFastSandboxServerMitmRedirectFailClosesRegistration(t *testing.T) {
+	srv, _, nft := fastSandboxTestServer(t)
 	inst := &fakeMitmInstaller{err: fmt.Errorf("nft unavailable")}
 	srv.SetMitm(nil, 18081, []int{80, 443})
 	srv.mitmInstall = inst.install
@@ -786,8 +786,8 @@ func TestFleetServerMitmRedirectFailClosesRegistration(t *testing.T) {
 	require.Len(t, nft.denyFirst, 1)
 }
 
-func TestFleetServerMitmRedirectCrossFamilyRejected(t *testing.T) {
-	srv, _, _ := fleetTestServer(t)
+func TestFastSandboxServerMitmRedirectCrossFamilyRejected(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
 	inst := &fakeMitmInstaller{}
 	srv.SetMitm(nil, 18081, []int{80, 443})
 	srv.mitmInstall = inst.install
@@ -806,8 +806,8 @@ func TestFleetServerMitmRedirectCrossFamilyRejected(t *testing.T) {
 	require.Nil(t, inst.snapshot())
 }
 
-func TestFleetServerMitmDisabledSkipsInterception(t *testing.T) {
-	srv, _, _ := fleetTestServer(t)
+func TestFastSandboxServerMitmDisabledSkipsInterception(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
 	inst := &fakeMitmInstaller{}
 	// SetMitm never called with a gate: hooks must not install anything
 	srv.mitmInstall = inst.install
@@ -818,9 +818,9 @@ func TestFleetServerMitmDisabledSkipsInterception(t *testing.T) {
 	require.Nil(t, inst.snapshot())
 }
 
-func TestFleetServerHealthzMitmGate(t *testing.T) {
+func TestFastSandboxServerHealthzMitmGate(t *testing.T) {
 	t.Setenv(constants.EnvMitmproxyTransparent, "true")
-	srv, _, _ := fleetTestServer(t)
+	srv, _, _ := fastSandboxTestServer(t)
 	gate := mitmproxy.NewHealthGate()
 	srv.mitmGate = gate
 
@@ -838,8 +838,8 @@ func TestFleetServerHealthzMitmGate(t *testing.T) {
 // Subject-aware active vault API
 // ---------------------------------------------------------------------------
 
-func TestFleetServerActiveVaultClientIPDispatch(t *testing.T) {
-	srv, reg, _ := fleetTestServer(t)
+func TestFastSandboxServerActiveVaultClientIPDispatch(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
 	sA := subject.FromSandboxUID("a")
 	sB := subject.FromSandboxUID("b")
 	reg.Register(sA, subject.SubjectKey{SourceIP: netip.MustParseAddr("10.0.0.5")}, subject.Fencing{RuntimeInstanceID: "r-a", AttachmentID: "a-a"})
@@ -905,7 +905,7 @@ func TestFleetServerActiveVaultClientIPDispatch(t *testing.T) {
 // racing registration is flushed, data-plane-ready activates the policy, and
 // REMOVE_BINDING tears everything down.
 func TestActionsCreateThenConfigureEndToEnd(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	uid := "e2e-1"
 	s := subject.FromSandboxUID(uid)
 
@@ -936,10 +936,10 @@ func TestActionsCreateThenConfigureEndToEnd(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// TestFleetServerAlwaysRulesReachNft: allow.always/deny.always must be
+// TestFastSandboxServerAlwaysRulesReachNft: allow.always/deny.always must be
 // enforced at the IP layer too, not only in DNS dispatch. The nft swap must
 // receive the always-merged effective policy.
-func TestFleetServerAlwaysRulesReachNft(t *testing.T) {
+func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	alwaysDeny, err := policy.ParseValidatedEgressRule("deny", "203.0.113.0/24")
 	require.NoError(t, err)
 	alwaysAllow, err := policy.ParseValidatedEgressRule("allow", "198.51.100.7")
@@ -947,7 +947,7 @@ func TestFleetServerAlwaysRulesReachNft(t *testing.T) {
 
 	reg := subject.NewRegistry([]policy.EgressRule{alwaysDeny}, []policy.EgressRule{alwaysAllow})
 	nft := &fakeNft{}
-	srv := newFleetPolicyServer(context.Background(), reg, nft, time.Minute)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft, time.Minute)
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
 	srv.dnsRedirectRemove = func() error { return nil }
 
@@ -967,11 +967,11 @@ func TestFleetServerAlwaysRulesReachNft(t *testing.T) {
 	require.Contains(t, allowV4, "198.51.100.7", "always-allow IP must reach the nft allow set")
 }
 
-// TestFleetServerNftFailureKeepsRegistryState: a failed nft apply must leave
+// TestFastSandboxServerNftFailureKeepsRegistryState: a failed nft apply must leave
 // the registry (DNS/GET) on the PREVIOUS policy — nft commits before registry
 // state.
-func TestFleetServerNftFailureKeepsRegistryState(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+func TestFastSandboxServerNftFailureKeepsRegistryState(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
 	s := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
@@ -989,13 +989,13 @@ func TestFleetServerNftFailureKeepsRegistryState(t *testing.T) {
 	assert.Equal(t, "deny", eff.Evaluate("example.com"), "failed nft apply must not publish the new policy")
 }
 
-// TestFleetServerGatewayRedirectRefcounted: the shared prerouting REDIRECT
+// TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting REDIRECT
 // installs once per gateway and is removed when the last subject using it is
 // unloaded.
-func TestFleetServerGatewayRedirectRefcounted(t *testing.T) {
+func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
-	srv := newFleetPolicyServer(context.Background(), reg, nft, time.Minute)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft, time.Minute)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -1035,7 +1035,7 @@ func mustState(st subject.State, ok bool) subject.State {
 // Fastlet's retry of the same Hook succeeds instead of 409-ing forever with
 // the subject permanently deny-first.
 func TestActionsDataPlaneReadyRetriesAfterNftFailure(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 	rec := doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 1, &input))
@@ -1065,7 +1065,7 @@ func TestActionsDataPlaneReadyRetriesAfterNftFailure(t *testing.T) {
 // from a previous instance must not consume the replacement sandbox's pending
 // policy or activate it before its own data plane is ready.
 func TestActionsStaleHookFenceRejected(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`
 	rec := doAction(t, srv, bindBody(t, "u-1", testIP, "runtime-2", "attachment-2", 1, &input))
@@ -1091,7 +1091,7 @@ func TestActionsStaleHookFenceRejected(t *testing.T) {
 // REMOVE_BINDING resumes cleanup — otherwise it would succeed with stale
 // rules left for a possibly-reused IP.
 func TestActionsRemoveBindingRetriesAfterNftFailure(t *testing.T) {
-	srv, reg, nft := fleetTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
 	s := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
 
@@ -1118,13 +1118,13 @@ func TestActionsRemoveBindingRetriesAfterNftFailure(t *testing.T) {
 	require.Len(t, nft.removed, 1, "the retry must re-attempt and complete the nft removal")
 }
 
-// TestFleetServerGatewayRedirectDuplicateSetBindingIdempotent (review fix):
+// TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent (review fix):
 // at-least-once SET_BINDING delivery must not double-count the gateway — a
 // duplicate registration is a no-op, and one unload fully releases it.
-func TestFleetServerGatewayRedirectDuplicateSetBindingIdempotent(t *testing.T) {
+func TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
-	srv := newFleetPolicyServer(context.Background(), reg, nft, time.Minute)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft, time.Minute)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -1139,12 +1139,12 @@ func TestFleetServerGatewayRedirectDuplicateSetBindingIdempotent(t *testing.T) {
 	assert.Equal(t, 1, removes, "one unload must fully release the gateway")
 }
 
-// TestFleetServerGatewayRedirectRebindMovesGateway: a rebind that moved the
+// TestFastSandboxServerGatewayRedirectRebindMovesGateway: a rebind that moved the
 // subject to a different gateway releases the old gateway's redirect.
-func TestFleetServerGatewayRedirectRebindMovesGateway(t *testing.T) {
+func TestFastSandboxServerGatewayRedirectRebindMovesGateway(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
-	srv := newFleetPolicyServer(context.Background(), reg, nft, time.Minute)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft, time.Minute)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }

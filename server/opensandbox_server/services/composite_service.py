@@ -30,7 +30,7 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.services.diagnostics import DiagnosticResult
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.fsb.service import FsbSandboxService
+from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
 from opensandbox_server.services.sandbox_service import SandboxService
@@ -39,12 +39,12 @@ logger = logging.getLogger(__name__)
 
 
 class CompositeSandboxService(SandboxService, ExtensionService):
-    def __init__(self, kubernetes: KubernetesSandboxService, fsb: FsbSandboxService):
+    def __init__(self, kubernetes: KubernetesSandboxService, fsb: FastSandboxService):
         self._kubernetes = kubernetes
         self._fsb = fsb
 
-    def _backend(self, sandbox_id: str) -> KubernetesSandboxService | FsbSandboxService:
-        return self._fsb if sandbox_id.startswith("flt-") else self._kubernetes
+    def _backend(self, sandbox_id: str) -> KubernetesSandboxService | FastSandboxService:
+        return self._fsb if sandbox_id.startswith("fsb-") else self._kubernetes
 
     def set_tenant_provider(self, provider: object) -> None:
         self._kubernetes.set_tenant_provider(provider)

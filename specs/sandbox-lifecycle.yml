@@ -2151,7 +2151,7 @@ components:
     CreateFsbTemplateRequest:
       type: object
       description: |
-        Request to create a fleets template: a fast-sandbox golden-image build
+        Request to create a Fast Sandbox template: a fast-sandbox golden-image build
         The server persists the build intent, projects it onto a
         SandboxTemplate CRD, and reports the asynchronous build through the
         template status. Kernel, execd and guest init are server-side build

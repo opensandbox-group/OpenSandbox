@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Helper servers + DNS query tool for the fleet smoke test (tests/smoke-fleet.sh).
+"""Helper servers + DNS query tool for the fast-sandbox smoke test (tests/smoke-fast-sandbox.sh).
 
 Modes:
   dns         UDP DNS upstream on 127.0.0.1:5300. Authoritative for *.test:
@@ -22,7 +22,7 @@ Modes:
               NXDOMAIN. Deterministic, no external network.
   ext         HTTP server on 0.0.0.0:8080 (run inside the "ext" netns,
               plays the role of the external network).
-  query ARGS  Send a DNS A query (python3 fleet_upstream.py query <server> <name>)
+  query ARGS  Send a DNS A query (python3 fast_sandbox_upstream.py query <server> <name>)
               and print "rcode=N [answers=...]".
 """
 

@@ -64,7 +64,7 @@ type Proxy struct {
 
 	// queryPolicySelector, when set, resolves the per-query policy (and
 	// per-query resolved-IP callback) from the client's source address. This
-	// is the fleet-profile dispatch seam: one shared listener, N
+	// is the fast-sandbox-profile dispatch seam: one shared listener, N
 	// subject policies. nil keeps the single-policy behavior unchanged.
 	queryPolicySelector func(remoteAddr netip.Addr) *QueryPolicy
 
@@ -269,7 +269,7 @@ type QueryPolicy struct {
 	OnResolved func(domain string, ips []nftables.ResolvedIP)
 }
 
-// SetQueryPolicySelector installs the per-query policy dispatch (fleet
+// SetQueryPolicySelector installs the per-query policy dispatch (fast-sandbox
 // profile). Passing nil restores the single-policy behavior; the selector is
 // invoked on the serveDNS goroutine. A nil *QueryPolicy result denies the
 // query (fail closed).

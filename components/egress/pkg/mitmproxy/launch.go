@@ -51,10 +51,10 @@ const systemScriptPath = "/var/egress/mitmscripts/system.py"
 type Config struct {
 	ListenPort int
 	// ListenHost overrides the baked-in config.yaml listen_host
-	// (127.0.0.1 for the sidecar). The fleet profile passes 0.0.0.0: the
+	// (127.0.0.1 for the sidecar). The fast-sandbox profile passes 0.0.0.0: the
 	// per-subject interception DNAT lands traffic on the gateway veth
 	// address, which a loopback bind would never receive (same reason the
-	// fleet DNS proxy binds :15353).
+	// fast-sandbox DNS proxy binds :15353).
 	ListenHost string
 	UserName   string
 	// ScriptPaths are optional user-supplied addons, loaded after the system addon

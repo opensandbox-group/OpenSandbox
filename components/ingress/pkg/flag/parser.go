@@ -28,7 +28,7 @@ func InitFlags() {
 	flag.StringVar(&LogLevel, "log-level", "info", "Server log level")
 	flag.IntVar(&Port, "port", 28888, "Server listening port")
 	flag.StringVar(&deprecatedNamespace, "namespace", "opensandbox", "Deprecated compatibility flag (ingress now watches sandbox resources across all namespaces)")
-	flag.StringVar(&ProviderType, "provider-type", "batchsandbox", "The sandbox provider type")
+	flag.StringVar(&ProviderType, "provider-type", "batchsandbox", "The sandbox provider type (batchsandbox, agent-sandbox, fast-sandbox)")
 	flag.StringVar(&Mode, "mode", "header", "The sandbox service discovery mode")
 
 	// Renew-intent publishing.
@@ -38,10 +38,10 @@ func InitFlags() {
 	flag.IntVar(&RenewIntentQueueMaxLen, "renew-intent-queue-max-len", 0, "Max renew-intent queue length (0 = no cap)")
 	flag.IntVar(&RenewIntentMinIntervalSec, "renew-intent-min-interval", 60, "Min seconds between publishing intents for the same sandbox (client-side throttle)")
 
-	// Secure access (signed routes) and FastPath (fleets) routing.
-	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "Verification keys for signed ingress routes and fleets route scopes: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
-	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables fleets routing")
-	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath fleets data-plane mode: central-proxy or direct-fastlet-proxy")
+	// Secure access (signed routes) and FastPath (Fast Sandbox) routing.
+	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "Verification keys for signed ingress routes and Fast Sandbox route scopes: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
+	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables Fast Sandbox routing")
+	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath Fast Sandbox data-plane mode: central-proxy or direct-fastlet-proxy")
 	flag.IntVar(&FastPathWaitTimeoutMillis, "fastpath-wait-timeout-millis", 2000, "FastPath ResolveEndpoint RPC timeout for one ingress request")
 
 	// Network-readiness shadow assessment.

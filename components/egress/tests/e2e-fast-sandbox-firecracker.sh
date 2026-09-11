@@ -27,7 +27,7 @@
 #       └── fastlet container (ubuntu, privileged, /dev/kvm, host netns mounts)
 #           │  netns = Pod netns
 #           ├── egress container (--network container:fastlet, privileged)
-#           │     fleet profile + shared mitmdump; nft/DNAT/loopback services
+#           │     fast-sandbox profile + shared mitmdump; nft/DNAT/loopback services
 #           │     all live in the Pod netns
 #           └── firecracker microVM (sandbox) in netns osb-fc-vm1
 #                 eth0 (tap0) ──br0── veth ──► Pod netns (gateway 10.30.0.1)
@@ -97,7 +97,7 @@ pod_exec() { docker exec "${FASTLET_CT}" "$@"; }
 # the host. netlink creation inside a docker bridge container is brittle on
 # some kernel/driver combos ("RTNETLINK answers: Invalid argument"), so veth
 # pairs are created on the host and the Pod-side end is moved into the
-# container netns, exactly like the fleet smoke test does.
+# container netns, exactly like the fast-sandbox smoke test does.
 FASTLET_PID=""
 pod_ns() { nsenter --net="/proc/${FASTLET_PID}/ns/net" "$@"; }
 
@@ -125,7 +125,7 @@ cleanup() {
   ip netns del "${VM_NETNS1}" >/dev/null 2>&1
   ip netns del "${VM_NETNS2}" >/dev/null 2>&1
   ip netns del "${EXT_CT_NETNS}" >/dev/null 2>&1
-  nft delete table inet opensandbox-fleet 2>/dev/null
+  nft delete table inet opensandbox-fast-sandbox 2>/dev/null
   nft delete table inet opensandbox_gateway_dns 2>/dev/null
   nft delete table inet opensandbox_gateway_mitm 2>/dev/null
 }
@@ -331,7 +331,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "${SSL_DIR}/key.pem" \
 BRIDGE_GW="$(docker network inspect "${BRIDGE_NET}" -f '{{(index .IPAM.Config 0).Gateway}}')"
 [ -n "${BRIDGE_GW}" ] || fail "could not determine the bridge gateway"
 setsid env EXT_ANSWER="ext.test=${EXT_IP},alt.test=${EXT_IP}" \
-  python3 "${SCRIPT_DIR}/fleet_upstream.py" dns >"${WORK_DIR}/dns.log" 2>&1 &
+  python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" dns >"${WORK_DIR}/dns.log" 2>&1 &
 DNS_PID=$!
 sleep 1
 if [ -s "${WORK_DIR}/dns.log" ]; then
@@ -341,7 +341,7 @@ fi
 # netns-exec parent exiting cannot reap it), with a log for startup errors.
 setsid ip netns exec "${EXT_CT_NETNS}" env \
   EXT_SSL_CERT="${SSL_DIR}/cert.pem" EXT_SSL_KEY="${SSL_DIR}/key.pem" \
-  python3 "${SCRIPT_DIR}/fleet_upstream.py" ext >"${WORK_DIR}/ext.log" 2>&1 &
+  python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" ext >"${WORK_DIR}/ext.log" 2>&1 &
 EXT_PID=$!
 sleep 1
 if [ -s "${WORK_DIR}/ext.log" ]; then
@@ -351,7 +351,7 @@ wait_for 5 "ext http" ip netns exec "${EXT_CT_NETNS}" curl -s -m 2 -o /dev/null 
 wait_for 5 "ext https" ip netns exec "${EXT_CT_NETNS}" curl -sk -m 2 -o /dev/null "https://127.0.0.1/"
 # query from inside the Pod netns through the bridge gateway (curl from the
 # fastlet container is used for the Pod loopback services below)
-wait_for 10 "dns upstream" pod_ns python3 "${SCRIPT_DIR}/fleet_upstream.py" query "${BRIDGE_GW}" ext.test "${DNS_UPSTREAM_PORT}"
+wait_for 10 "dns upstream" pod_ns python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" query "${BRIDGE_GW}" ext.test "${DNS_UPSTREAM_PORT}"
 
 # ---------------------------------------------------------------------------
 info "Starting the egress container (shares the fastlet Pod netns)"
@@ -359,7 +359,7 @@ T_EGRESS_START="$(ts)"
 # mitm home: bind a host dir so the mitmproxy user (uid 10042) always has a
 # writable confdir for CA generation, regardless of image-layer permission
 # quirks on the host storage driver. Mirror the smoke test's full prep
-# (config.yaml included): the fleet smoke CI job generates the CA reliably
+# (config.yaml included): the fast-sandbox smoke CI job generates the CA reliably
 # with exactly this confdir content.
 MITM_HOME="${WORK_DIR}/mitm-home"
 mkdir -p "${MITM_HOME}/.mitmproxy"
@@ -375,7 +375,7 @@ EGRESS_CT_ID="$(docker run -d --name "${EGRESS_CT}" \
   -v "${RULES_DIR}:/var/egress/rules" \
   -v "${CA_ROOT}:/opt/opensandbox" \
   -v "${MITM_HOME}:/var/lib/mitmproxy" \
-  -e OPENSANDBOX_EGRESS_PROFILE=fleet \
+  -e OPENSANDBOX_EGRESS_PROFILE=fast-sandbox \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM="${BRIDGE_GW}:${DNS_UPSTREAM_PORT}" \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE=allow.test \
   -e OPENSANDBOX_EGRESS_HTTP_ADDR="127.0.0.1:${POLICY_PORT}" \

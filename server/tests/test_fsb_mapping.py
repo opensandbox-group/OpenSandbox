@@ -33,12 +33,12 @@ from opensandbox_server.api.schema import (
     SandboxLifecycle,
     Volume,
 )
-from opensandbox_server.services.fsb.create_mapping import (
+from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
 )
-from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fsb.status_mapping import map_reason, map_state
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
 
 NOW = datetime(2026, 8, 18, 12, 0, 0, tzinfo=timezone.utc)
 EXPECTED_EXPIRY = int(NOW.timestamp()) + 3600

@@ -14,7 +14,7 @@ This page lists the OpenTelemetry metrics currently implemented in egress.
 | `egress.dns.query.failed_total` | Counter | - | Queries the proxy could not resolve, by `reason`. |
 | `egress.dns.reply.failed_total` | Counter | - | Reply writes that failed after a decision, by `stage`. A nonzero count means a query was handled but its answer never reached the client. |
 | `egress.policy.denied_total` | Counter | - | Number of DNS queries denied by policy. |
-| `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fleet profile: summed across every installed subject's policy, 0 while deny-first). |
+| `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
 | `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
@@ -97,7 +97,7 @@ queried name nor the error text is ever attached:
 | `rcode` | The last resolver answered with a failover-worthy rcode, e.g. `SERVFAIL`. |
 
 `egress.nftables.updates.failed_total` covers the other silent failure. Its `operation`
-attribute is one of `static_apply`, `dynamic_add`, `remove`, or — in the fleet profile
+attribute is one of `static_apply`, `dynamic_add`, `remove`, or — in the fast-sandbox profile
 (OSEP-0022) — `deny_first`, `reset`; `dynamic_add` is the one to
 alert on, because a failed add means the kernel never learned about IPs the policy allows,
 so the chain drops traffic that should pass — which looks exactly like a policy denial from
@@ -106,7 +106,7 @@ inside the sandbox while `egress.policy.denied_total` stays flat.
 `egress.dns.reply.failed_total` covers the last silent failure class: a query that was
 **handled** (decided, maybe forwarded and answered upstream) whose reply write then failed.
 Until the write error was surfaced, such windows were indistinguishable from "query never
-handled" — the fleet-profile case where guest-originated DNS is answered in the proxy but
+handled" — the fast-sandbox-profile case where guest-originated DNS is answered in the proxy but
 the reply never reaches the sandbox (issue #1704). Its `stage` attribute is one of
 `malformed`, `unknown_source`, `deny`, `upstream_error`, `answer`, and every failure also
 emits a `[dns] reply write failed (stage=… remote=… question=…)` warning with the remote

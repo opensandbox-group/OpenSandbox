@@ -107,7 +107,7 @@ jobs:
           chmod +x tests/smoke-dns-upstream-probe.sh
           ./tests/smoke-dns-upstream-probe.sh
 
-  fleet-smoke:
+  fast-sandbox-smoke:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -131,24 +131,24 @@ jobs:
           sudo /opt/mitmproxy/bin/pip install --no-cache-dir 'mitmproxy==11.0.2'
           sudo ln -sf /opt/mitmproxy/bin/mitmdump /usr/local/bin/mitmdump
 
-      - name: Run fleet profile smoke test (dns+nft+mitm)
+      - name: Run fast-sandbox profile smoke test (dns+nft+mitm)
         working-directory: components/egress
         run: |
-          chmod +x tests/smoke-fleet.sh
-          sudo env "PATH=$PATH" ./tests/smoke-fleet.sh
+          chmod +x tests/smoke-fast-sandbox.sh
+          sudo env "PATH=$PATH" ./tests/smoke-fast-sandbox.sh
 
-      - name: Upload fleet egress logs
+      - name: Upload fast-sandbox egress logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fleet-egress-log
-          path: /tmp/fleet-egress.log
+          name: fast-sandbox-egress-log
+          path: /tmp/fast-sandbox-egress.log
           retention-days: 5
 
   required:
     name: Egress CI
     if: always()
-    needs: [changes, test, smoke, fleet-smoke]
+    needs: [changes, test, smoke, fast-sandbox-smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -157,14 +157,14 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TEST_RESULT: ${{ needs.test.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
-          FLEET_SMOKE_RESULT: ${{ needs.fleet-smoke.result }}
+          FAST_SANDBOX_SMOKE_RESULT: ${{ needs.fast-sandbox-smoke.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$TEST_RESULT" == "success" && "$SMOKE_RESULT" == "success" && "$FLEET_SMOKE_RESULT" == "success" ]]
+            [[ "$TEST_RESULT" == "success" && "$SMOKE_RESULT" == "success" && "$FAST_SANDBOX_SMOKE_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$SMOKE_RESULT" == "skipped" && "$FLEET_SMOKE_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$SMOKE_RESULT" == "skipped" && "$FAST_SANDBOX_SMOKE_RESULT" == "skipped" ]]
           fi

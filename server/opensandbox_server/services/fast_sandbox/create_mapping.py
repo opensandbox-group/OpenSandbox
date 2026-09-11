@@ -31,8 +31,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from opensandbox_server.api.schema import CreateSandboxRequest
-from opensandbox_server.services.fsb.network_policy import normalized_policy
-from opensandbox_server.services.fsb.generated import (
+from opensandbox_server.services.fast_sandbox.network_policy import normalized_policy
+from opensandbox_server.services.fast_sandbox.generated import (
     fastpath_pb2 as pb2,
 )
 

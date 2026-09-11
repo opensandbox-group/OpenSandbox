@@ -66,7 +66,7 @@ func (e *fastPathResolutionError) Error() string        { return e.public.Error(
 func (e *fastPathResolutionError) Unwrap() error        { return e.public }
 func (e *fastPathResolutionError) InternalCause() error { return e.cause }
 
-type FleetsProvider struct {
+type FastSandboxProvider struct {
 	resolver    FastPathResolver
 	connection  *grpc.ClientConn
 	waitTimeout time.Duration
@@ -77,7 +77,7 @@ type FleetsProvider struct {
 	cache map[EndpointTarget]EndpointInfo
 }
 
-func NewFleetsProvider(endpoint string, waitTimeout time.Duration, accessMode string) (*FleetsProvider, error) {
+func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMode string) (*FastSandboxProvider, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return nil, errors.New("FastPath endpoint is required")
@@ -95,16 +95,16 @@ func NewFleetsProvider(endpoint string, waitTimeout time.Duration, accessMode st
 	if err != nil {
 		return nil, fmt.Errorf("create FastPath client: %w", err)
 	}
-	provider := NewFleetsProviderWithResolver(fastpathv2.NewFastPathServiceClient(conn), waitTimeout, parsedAccessMode)
+	provider := NewFastSandboxProviderWithResolver(fastpathv2.NewFastPathServiceClient(conn), waitTimeout, parsedAccessMode)
 	provider.connection = conn
 	return provider, nil
 }
 
-func NewFleetsProviderWithResolver(resolver FastPathResolver, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) *FleetsProvider {
+func NewFastSandboxProviderWithResolver(resolver FastPathResolver, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) *FastSandboxProvider {
 	if waitTimeout <= 0 {
 		waitTimeout = 2 * time.Second
 	}
-	return &FleetsProvider{
+	return &FastSandboxProvider{
 		resolver:    resolver,
 		waitTimeout: waitTimeout,
 		accessMode:  accessMode,
@@ -124,7 +124,7 @@ func parseFastPathAccessMode(value string) (fastpathv2.EndpointAccessMode, error
 	}
 }
 
-func (p *FleetsProvider) Start(ctx context.Context) error {
+func (p *FastSandboxProvider) Start(ctx context.Context) error {
 	if p.resolver == nil {
 		return errors.New("FastPath resolver is required")
 	}
@@ -162,7 +162,7 @@ func waitForFastPathReady(ctx context.Context, connection *grpc.ClientConn) erro
 	}
 }
 
-func (p *FleetsProvider) runCacheJanitor(ctx context.Context) {
+func (p *FastSandboxProvider) runCacheJanitor(ctx context.Context) {
 	ticker := time.NewTicker(routeCacheSweepInterval)
 	defer ticker.Stop()
 	for {
@@ -175,7 +175,7 @@ func (p *FleetsProvider) runCacheJanitor(ctx context.Context) {
 	}
 }
 
-func (p *FleetsProvider) sweepExpired(now time.Time) {
+func (p *FastSandboxProvider) sweepExpired(now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for target, info := range p.cache {
@@ -185,11 +185,11 @@ func (p *FleetsProvider) sweepExpired(now time.Time) {
 	}
 }
 
-func (*FleetsProvider) RequiresAuthenticatedRouteScope() {}
+func (*FastSandboxProvider) RequiresAuthenticatedRouteScope() {}
 
-func (p *FleetsProvider) ResolveEndpoint(ctx context.Context, target EndpointTarget) (*EndpointInfo, error) {
+func (p *FastSandboxProvider) ResolveEndpoint(ctx context.Context, target EndpointTarget) (*EndpointInfo, error) {
 	if target.Namespace == "" || target.SandboxID == "" {
-		return nil, errors.New("fleets endpoint target requires namespace and sandbox ID")
+		return nil, errors.New("Fast Sandbox endpoint target requires namespace and sandbox ID")
 	}
 	if target.Port < 1 || target.Port > 65535 {
 		return nil, fmt.Errorf("invalid target port %d", target.Port)
@@ -226,13 +226,13 @@ func (p *FleetsProvider) ResolveEndpoint(ctx context.Context, target EndpointTar
 	return info, nil
 }
 
-func (p *FleetsProvider) Invalidate(target EndpointTarget) {
+func (p *FastSandboxProvider) Invalidate(target EndpointTarget) {
 	p.mu.Lock()
 	delete(p.cache, target)
 	p.mu.Unlock()
 }
 
-func (p *FleetsProvider) cached(target EndpointTarget) (EndpointInfo, bool) {
+func (p *FastSandboxProvider) cached(target EndpointTarget) (EndpointInfo, bool) {
 	p.mu.RLock()
 	info, ok := p.cache[target]
 	p.mu.RUnlock()
@@ -248,11 +248,11 @@ func (p *FleetsProvider) cached(target EndpointTarget) (EndpointInfo, bool) {
 	return info, true
 }
 
-func (*FleetsProvider) fresh(info EndpointInfo, now time.Time) bool {
+func (*FastSandboxProvider) fresh(info EndpointInfo, now time.Time) bool {
 	return !info.ExpiresAt.IsZero() && now.Add(5*time.Second).Before(info.ExpiresAt)
 }
 
-func (p *FleetsProvider) endpointInfo(response *fastpathv2.ResolveEndpointResponse) (*EndpointInfo, error) {
+func (p *FastSandboxProvider) endpointInfo(response *fastpathv2.ResolveEndpointResponse) (*EndpointInfo, error) {
 	if response == nil || response.ProxyEndpoint == "" {
 		return nil, errors.New("FastPath returned an empty proxy endpoint")
 	}

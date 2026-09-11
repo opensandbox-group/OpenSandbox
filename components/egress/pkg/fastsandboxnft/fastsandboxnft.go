@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package fleetnft builds and applies the per-subject nftables ruleset for the
-// fleet egress profile. It is a new layer on top of the egress
+// Package fastsandboxnft builds and applies the per-subject nftables ruleset for the
+// fast-sandbox egress profile. It is a new layer on top of the egress
 // engines: pkg/nftables, pkg/dnsproxy, and pkg/credentialvault are untouched.
 //
 // Enforcement model (Pod netns):
 //
-//	table inet opensandbox-fleet
+//	table inet opensandbox-fast-sandbox
 //	  chain mark { hook prerouting, priority 0 }      <- per-subject allow marks
 //	    ip saddr <ip> jump mark_<id>                  <- one rule per subject
 //	  chain mark_<id> (regular chain)                 <- what to mark
@@ -51,7 +51,7 @@
 // members are marked there. Unregistered sources and deny-first subjects are
 // unmarked and dropped by the tail, so fail-closed is preserved. Mark 0x2 is
 // distinct from the DNS proxy's SO_MARK 0x1 bypass (pkg/constants MarkValue).
-package fleetnft
+package fastsandboxnft
 
 import (
 	"context"
@@ -69,11 +69,11 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
-// TableName is the fleet-profile nftables table, kept distinct from the
+// TableName is the fast-sandbox-profile nftables table, kept distinct from the
 // sidecar profile's "opensandbox" table (the two profiles never run in the
 // same process, but distinct names make a stale leftover impossible to
 // confuse with live rules).
-const TableName = "opensandbox-fleet"
+const TableName = "opensandbox-fast-sandbox"
 
 const (
 	dispatchChain    = "dispatch"
@@ -121,9 +121,9 @@ func DefaultRunner(ctx context.Context, script string) ([]byte, error) {
 
 // ErrUnknownSubject is returned when an operation targets a subject whose
 // deny-first rules have not been installed yet.
-var ErrUnknownSubject = fmt.Errorf("fleetnft: subject rules not installed")
+var ErrUnknownSubject = fmt.Errorf("fastsandboxnft: subject rules not installed")
 
-// Options carries fleet-profile-wide enforcement toggles, loaded once at
+// Options carries fast-sandbox-profile-wide enforcement toggles, loaded once at
 // startup and applied to every table (re)build.
 type Options struct {
 	// BlockDoH443 drops TCP 443 to the DoH blocklist (or all TCP 443 when

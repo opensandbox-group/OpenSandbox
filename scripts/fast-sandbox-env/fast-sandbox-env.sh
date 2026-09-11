@@ -1121,7 +1121,7 @@ render_opensandbox() { # <src> <out>
 	mkdir -p "$GEN_DIR"
 	awk -v server_image="$IMG_SERVER" -v ingress_image="$IMG_INGRESS" \
 		-v api_key="$SERVER_API_KEY" -v signing_key="$(osb_signing_key)" \
-		-v fastpath="$FASTPATH_ENDPOINT" -v fleet_ns="$NS" -v pool="$POOL_NAME" \
+		-v fastpath="$FASTPATH_ENDPOINT" -v fsb_ns="$NS" -v pool="$POOL_NAME" \
 		-v execd="$EXECD" -v gateway="$GATEWAY_ADDRESS" \
 		-v server_np="$SERVER_NODEPORT" -v gateway_np="$GATEWAY_NODEPORT" '
 		{ gsub(/@SERVER_IMAGE@/, server_image)
@@ -1129,7 +1129,7 @@ render_opensandbox() { # <src> <out>
 		  gsub(/@SERVER_API_KEY@/, api_key)
 		  gsub(/@SIGNING_KEY@/, signing_key)
 		  gsub(/@FASTPATH_ENDPOINT@/, fastpath)
-		  gsub(/@FLEETS_NAMESPACE@/, fleet_ns)
+		  gsub(/@FSB_NAMESPACE@/, fsb_ns)
 		  gsub(/@POOL_NAME@/, pool)
 		  gsub(/@EXECD_IMAGE@/, execd)
 		  gsub(/@GATEWAY_ADDRESS@/, gateway)

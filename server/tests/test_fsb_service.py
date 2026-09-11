@@ -39,16 +39,16 @@ from opensandbox_server.config import (
     RuntimeConfig,
     ServerConfig,
 )
-from opensandbox_server.services.fsb.fastpath_client import FastPathClient
+from opensandbox_server.services.fast_sandbox.fastpath_client import FastPathClient
 from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.factory import create_sandbox_service
-from opensandbox_server.services.fsb.service import FsbSandboxService
+from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.informer import WorkloadInformer
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
-from opensandbox_server.services.fsb.cr_mapping import METADATA_PREFIX
-from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fsb.generated import fastpath_pb2_grpc as pb2_grpc
+from opensandbox_server.services.fast_sandbox.cr_mapping import METADATA_PREFIX
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2_grpc as pb2_grpc
 from opensandbox_server.tenants.context import get_current_tenant, set_current_tenant
 from opensandbox_server.tenants.models import TenantEntry
 
@@ -287,7 +287,7 @@ def http_fsb(monkeypatch):
     api.get_namespaced_custom_object.side_effect = get_cr
     api.list_namespaced_custom_object.side_effect = list_crs
     k8s._custom_objects_api = api
-    service = FsbSandboxService(config, fastpath_client=fastpath, k8s_client=k8s)
+    service = FastSandboxService(config, fastpath_client=fastpath, k8s_client=k8s)
     monkeypatch.setattr(lifecycle, "sandbox_service", service)
 
     app = FastAPI()
@@ -316,7 +316,7 @@ def test_http_create_calls_fastpath_with_ready_completion(http_fsb):
 
     assert response.status_code == 202
     body = response.json()
-    assert body["id"].startswith("flt-")
+    assert body["id"].startswith("fsb-")
     assert body["status"]["state"] == "Running"
     assert body["metadata"] == {"team": "agents"}
     assert fake.last_create.request_id == body["id"]
@@ -340,7 +340,7 @@ def test_http_create_recovers_an_ambiguous_post_persistence_failure(http_fsb):
 
     assert response.status_code == 202
     sandbox_id = response.json()["id"]
-    assert sandbox_id.startswith("flt-")
+    assert sandbox_id.startswith("fsb-")
     assert fake.last_get is not None
     assert ("ns-1", sandbox_id) in fake.sandboxes
 
@@ -633,7 +633,7 @@ def test_mixed_list_globally_filters_sorts_and_pages(persisted_fsb, monkeypatch)
 
     legacy.get_sandbox.return_value = base.model_copy(update={"id": "legacy-new"})
     assert client.get("/v1/sandboxes/legacy-new").status_code == 200
-    assert client.get("/v1/sandboxes/flt-missing").status_code == 404
+    assert client.get("/v1/sandboxes/fsb-missing").status_code == 404
     legacy.get_sandbox.assert_called_once_with("legacy-new")
 
 
@@ -721,10 +721,10 @@ def test_http_renew_maps_fence_conflict_and_missing_sandbox(http_fsb):
         json={"expiresAt": expires_at.isoformat()},
     )
     missing_renew = client.post(
-        "/v1/sandboxes/flt-missing/renew-expiration",
+        "/v1/sandboxes/fsb-missing/renew-expiration",
         json={"expiresAt": expires_at.isoformat()},
     )
-    missing_delete = client.delete("/v1/sandboxes/flt-missing")
+    missing_delete = client.delete("/v1/sandboxes/fsb-missing")
 
     assert conflict.status_code == 409
     assert missing_renew.status_code == 404
@@ -756,7 +756,7 @@ def test_event_diagnostics_enforce_stable_scope_contract(http_fsb):
     _, _, service = http_fsb
 
     with pytest.raises(HTTPException) as exc_info:
-        service.get_sandbox_event_diagnostics("flt-1", "lifecycle")
+        service.get_sandbox_event_diagnostics("fsb-1", "lifecycle")
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == {
@@ -773,11 +773,11 @@ def test_unsupported_fsb_operations_are_explicit(http_fsb, operation):
 
     with pytest.raises(HTTPException) as exc_info:
         if operation == "logs":
-            service.get_sandbox_logs("flt-1")
+            service.get_sandbox_logs("fsb-1")
         elif operation == "pause":
-            service.pause_sandbox("flt-1")
+            service.pause_sandbox("fsb-1")
         elif operation == "resume":
-            service.resume_sandbox("flt-1")
+            service.resume_sandbox("fsb-1")
 
     assert exc_info.value.status_code == 501
 
@@ -854,10 +854,10 @@ def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fsb, monkey
 def test_endpoint_binds_port_and_default_namespace(http_fsb, port):
     client, _, service = http_fsb
     service._app_config.ingress = _gateway_config()
-    response = client.get(f"/v1/sandboxes/flt-123/endpoints/{port}")
+    response = client.get(f"/v1/sandboxes/fsb-123/endpoints/{port}")
     assert response.status_code == 200
     scope = response.json()["headers"]["OpenSandbox-Ingress-To"]
-    assert scope.startswith(f"f1.bnMtMQ.Zmx0LTEyMw.{port}.k.")
+    assert scope.startswith(f"f1.bnMtMQ.ZnNiLTEyMw.{port}.k.")
 
 
 @pytest.mark.parametrize(
@@ -873,7 +873,7 @@ def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
         config.ingress.secure_access = None
     with pytest.raises(HTTPException) as exc_info:
         service.get_endpoint(
-            "bad\nidentity" if invalid == "identity" else "flt-123",
+            "bad\nidentity" if invalid == "identity" else "fsb-123",
             0 if invalid == "port" else 44772,
             expires=2_000_000_000 if invalid == "expires" else None,
         )
@@ -881,7 +881,7 @@ def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
 
 
 def test_fsb_snapshot_operations_rejected(http_fsb):
-    """Snapshot operations on fsb (flt-) sandboxes are explicitly rejected
+    """Snapshot operations on fsb (fsb-) sandboxes are explicitly rejected
     at the service layer even though the kubernetes snapshot runtime is
     available for container-sandbox workloads."""
     client, fake, service = http_fsb
@@ -939,7 +939,7 @@ def test_background_lookup_does_not_treat_fastpath_failure_as_namespace_miss(htt
 
     with pytest.raises(HTTPException) as exc_info:
         service.renew_expiration(
-            "flt-1",
+            "fsb-1",
             request=RenewSandboxExpirationRequest(
                 expiresAt=datetime.now(timezone.utc) + timedelta(hours=2)
             ),
@@ -959,7 +959,7 @@ def test_http_create_returns_503_when_fastpath_is_unavailable(monkeypatch):
         ),
     )
     fastpath = FastPathClient(endpoint="127.0.0.1:1", timeout_seconds=1)
-    service = FsbSandboxService(config, fastpath_client=fastpath)
+    service = FastSandboxService(config, fastpath_client=fastpath)
     monkeypatch.setattr(lifecycle, "sandbox_service", service)
     app = FastAPI()
     app.include_router(lifecycle.router, prefix="/v1")
@@ -978,3 +978,26 @@ def test_http_create_returns_503_when_fastpath_is_unavailable(monkeypatch):
             assert response.status_code == 503
     finally:
         fastpath.close()
+
+
+@pytest.mark.parametrize("sandbox_id,is_fsb", [("fsb-123", True), ("flt-123", False)])
+def test_composite_routes_only_fsb_prefix(sandbox_id, is_fsb):
+    kubernetes = Mock(spec=KubernetesSandboxService)
+    fsb = Mock(spec=FastSandboxService)
+    service = CompositeSandboxService(kubernetes, fsb)
+    expected, other = (fsb, kubernetes) if is_fsb else (kubernetes, fsb)
+
+    assert service.get_sandbox(sandbox_id) is expected.get_sandbox.return_value
+    expected.get_sandbox.assert_called_once_with(sandbox_id)
+    other.get_sandbox.assert_not_called()
+
+
+def test_fsb_list_excludes_old_prefix(persisted_fsb):
+    client, fake, _, sandbox_id = persisted_fsb
+    old = deepcopy(fake.crs[("ns-1", sandbox_id)])
+    old["metadata"]["name"] = "flt-123"
+    fake.crs[("ns-1", "flt-123")] = old
+
+    response = client.get("/v1/sandboxes")
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [sandbox_id]

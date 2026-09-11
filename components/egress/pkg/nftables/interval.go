@@ -44,8 +44,8 @@ func normalizeNFTIntervalSet(elems []string) ([]string, error) {
 	return out, nil
 }
 
-// NormalizeIntervalSet is the exported form used by the fleet profile
-// ruleset builder (pkg/fleetnft), which shares the interval-set semantics.
+// NormalizeIntervalSet is the exported form used by the fast-sandbox profile
+// ruleset builder (pkg/fastsandboxnft), which shares the interval-set semantics.
 func NormalizeIntervalSet(elems []string) ([]string, error) {
 	return normalizeNFTIntervalSet(elems)
 }

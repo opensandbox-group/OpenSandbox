@@ -25,7 +25,7 @@ const (
 	EnvCredentialVaultRequireScopedMatch = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH"
 )
 
-// Fleet profile: the egress control plane serves N sandboxes
+// Fast Sandbox profile: the egress control plane serves N sandboxes
 // sharing one host/network domain; sidecar remains the default profile.
 const (
 	EnvEgressProfile  = "OPENSANDBOX_EGRESS_PROFILE"
@@ -34,9 +34,9 @@ const (
 
 const (
 	ProfileSidecar = "sidecar"
-	// ProfileFleet: one egress control plane serving N sandboxes sharing one
+	// ProfileFastSandbox: one egress control plane serving N sandboxes sharing one
 	// host/network domain (fast-sandbox Fastlet Pod).
-	ProfileFleet = "fleet"
+	ProfileFastSandbox = "fast-sandbox"
 )
 
 // Sandbox Actions Handler protocol (fast-sandbox, docs/concepts/
@@ -52,7 +52,7 @@ const (
 	HookDataPlaneReady = "sandbox.data-plane-ready"
 )
 
-// Fleet-profile HTTP listener and trust model: the listener binds the Pod
+// Fast Sandbox-profile HTTP listener and trust model: the listener binds the Pod
 // netns loopback only; the fastlet proxy and the Fastlet's action dispatcher
 // are the only peers. The proxy injects the UID header that routes a push to
 // its subject; the action dispatcher carries the identity in the envelope.
@@ -107,7 +107,7 @@ const (
 
 const (
 	DefaultEgressServerAddr      = ":18080"
-	DefaultFleetServerAddr       = "127.0.0.1:18080"
+	DefaultFastSandboxServerAddr = "127.0.0.1:18080"
 	DefaultMitmproxyPort         = 18081
 	DefaultCredentialProxySocket = "/run/opensandbox/credential-proxy/active.sock"
 	ResolvNameserverCap          = 10

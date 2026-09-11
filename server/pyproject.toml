@@ -104,7 +104,7 @@ dev = [
 target-version = "py310"
 line-length = 100
 src = ["opensandbox_server", "tests"]
-exclude = ["opensandbox_server/services/fleets/generated"]
+exclude = ["opensandbox_server/services/fast_sandbox/generated"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]

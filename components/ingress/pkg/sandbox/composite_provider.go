@@ -19,23 +19,23 @@ import (
 	"fmt"
 )
 
-// CompositeProvider routes legacy and fleets targets to their configured providers.
+// CompositeProvider routes legacy and Fast Sandbox targets to their configured providers.
 type CompositeProvider struct {
 	legacy Provider
-	fleets Provider
+	fsb    Provider
 }
 
 // NewCompositeProvider creates a provider that serves both route kinds.
-func NewCompositeProvider(legacy Provider, fleets Provider) *CompositeProvider {
-	return &CompositeProvider{legacy: legacy, fleets: fleets}
+func NewCompositeProvider(legacy Provider, fsb Provider) *CompositeProvider {
+	return &CompositeProvider{legacy: legacy, fsb: fsb}
 }
 
 func (p *CompositeProvider) Start(ctx context.Context) error {
 	if err := p.legacy.Start(ctx); err != nil {
 		return fmt.Errorf("start legacy provider: %w", err)
 	}
-	if err := p.fleets.Start(ctx); err != nil {
-		return fmt.Errorf("start fleets provider: %w", err)
+	if err := p.fsb.Start(ctx); err != nil {
+		return fmt.Errorf("start Fast Sandbox provider: %w", err)
 	}
 	return nil
 }
@@ -44,18 +44,18 @@ func (p *CompositeProvider) ResolveEndpoint(ctx context.Context, target Endpoint
 	switch target.RouteKind {
 	case RouteKindLegacy:
 		return p.legacy.ResolveEndpoint(ctx, target)
-	case RouteKindFleets:
-		return p.fleets.ResolveEndpoint(ctx, target)
+	case RouteKindFastSandbox:
+		return p.fsb.ResolveEndpoint(ctx, target)
 	default:
 		return nil, fmt.Errorf("%w: route kind %d", ErrTargetUnsupported, target.RouteKind)
 	}
 }
 
 func (p *CompositeProvider) Invalidate(target EndpointTarget) {
-	if target.RouteKind != RouteKindFleets {
+	if target.RouteKind != RouteKindFastSandbox {
 		return
 	}
-	if invalidator, ok := p.fleets.(EndpointInvalidator); ok {
+	if invalidator, ok := p.fsb.(EndpointInvalidator); ok {
 		invalidator.Invalidate(target)
 	}
 }

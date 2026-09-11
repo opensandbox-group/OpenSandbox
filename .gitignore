@@ -269,12 +269,12 @@ nbdist/
 generated/
 **/generated/**
 
-# fleets FastPath gRPC stubs are committed intentionally (deterministic protoc
+# Fast Sandbox FastPath gRPC stubs are committed intentionally (deterministic protoc
 # output; the server package needs them at install time, so they are checked
 # in rather than regenerated).
-!server/opensandbox_server/services/fleets/generated/
-!server/opensandbox_server/services/fleets/generated/**
-server/opensandbox_server/services/fleets/generated/__pycache__/
+!server/opensandbox_server/services/fast_sandbox/generated/
+!server/opensandbox_server/services/fast_sandbox/generated/**
+server/opensandbox_server/services/fast_sandbox/generated/__pycache__/
 
 # execd eBPF kernel BTF dumps (bpf2go build-time only, never committed —
 # see components/execd/pkg/ebpf/prog/audit.bpf.c; regenerate with:

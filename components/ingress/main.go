@@ -78,8 +78,8 @@ func main() {
 	}
 
 	var sandboxProvider sandbox.Provider
-	if providerType == sandbox.ProviderTypeFleets {
-		sandboxProvider, err = sandbox.NewFleetsProvider(
+	if providerType == sandbox.ProviderTypeFastSandbox {
+		sandboxProvider, err = sandbox.NewFastSandboxProvider(
 			flag.FastPathEndpoint,
 			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 			flag.FastPathAccessMode,
@@ -91,14 +91,14 @@ func main() {
 		providerFactory := sandbox.NewProviderFactory(cfg, time.Second*30)
 		sandboxProvider, err = providerFactory.CreateProvider(providerType)
 		if err == nil && fastPathEnabled {
-			var fleetsProvider *sandbox.FleetsProvider
-			fleetsProvider, err = sandbox.NewFleetsProvider(
+			var fsbProvider *sandbox.FastSandboxProvider
+			fsbProvider, err = sandbox.NewFastSandboxProvider(
 				flag.FastPathEndpoint,
 				time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 				flag.FastPathAccessMode,
 			)
 			if err == nil {
-				sandboxProvider = sandbox.NewCompositeProvider(sandboxProvider, fleetsProvider)
+				sandboxProvider = sandbox.NewCompositeProvider(sandboxProvider, fsbProvider)
 			}
 		}
 	}

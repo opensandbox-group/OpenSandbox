@@ -27,7 +27,7 @@ from enum import Enum
 from typing import Optional
 
 
-class FsbTemplatePhase(str, Enum):
+class FastSandboxTemplatePhase(str, Enum):
     """Lifecycle of a template build, mirroring the CRD status phase."""
 
     PENDING = "Pending"
@@ -37,7 +37,7 @@ class FsbTemplatePhase(str, Enum):
 
 
 @dataclass
-class FsbTemplateRecord:
+class FastSandboxTemplateRecord:
     """One persisted template row."""
 
     template_id: str
@@ -45,7 +45,7 @@ class FsbTemplateRecord:
     crd_name: str
     spec: dict  # normalized build intent (image, entrypoint, resourceLimits, readiness, publish, format)
     metadata: dict[str, str] = field(default_factory=dict)
-    phase: FsbTemplatePhase = FsbTemplatePhase.PENDING
+    phase: FastSandboxTemplatePhase = FastSandboxTemplatePhase.PENDING
     manifest_ref: Optional[str] = None
     message: Optional[str] = None
     created_at: Optional[datetime] = None
@@ -61,7 +61,7 @@ class FsbTemplateRecord:
 
 
 @dataclass
-class FsbTemplateListQuery:
+class FastSandboxTemplateListQuery:
     """Tenant-scoped list query evaluated against the store."""
 
     namespace: str
@@ -71,14 +71,14 @@ class FsbTemplateListQuery:
 
 
 @dataclass
-class FsbTemplateListResult:
-    items: list[FsbTemplateRecord]
+class FastSandboxTemplateListResult:
+    items: list[FastSandboxTemplateRecord]
     total_items: int
 
 
 __all__ = [
-    "FsbTemplateListQuery",
-    "FsbTemplateListResult",
-    "FsbTemplatePhase",
-    "FsbTemplateRecord",
+    "FastSandboxTemplateListQuery",
+    "FastSandboxTemplateListResult",
+    "FastSandboxTemplatePhase",
+    "FastSandboxTemplateRecord",
 ]

@@ -156,7 +156,7 @@ type Registry interface {
 }
 
 // LifecycleHooks are invoked by the caller at subject transitions driven by
-// the action protocol (the fleet control plane translates SET_BINDING,
+// the action protocol (the fast-sandbox control plane translates SET_BINDING,
 // LIFECYCLE_HOOK, and REMOVE_BINDING into these calls). The caller installs
 // the platform adapters here (deny-first nft rules, gateway DNS redirect,
 // pending-push flush). A hook error must be treated as fail-closed: the

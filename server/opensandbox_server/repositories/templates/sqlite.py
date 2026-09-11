@@ -29,16 +29,16 @@ import sqlite3
 import uuid
 
 from opensandbox_server.services.templates.template_models import (
-    FsbTemplateListQuery,
-    FsbTemplateListResult,
-    FsbTemplatePhase,
-    FsbTemplateRecord,
+    FastSandboxTemplateListQuery,
+    FastSandboxTemplateListResult,
+    FastSandboxTemplatePhase,
+    FastSandboxTemplateRecord,
 )
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
-class SQLiteFsbTemplateRepository:
+class SQLiteFastSandboxTemplateRepository:
     """File-backed repository for persisted fsb template rows."""
 
     def __init__(self, db_path: str | Path) -> None:
@@ -50,7 +50,7 @@ class SQLiteFsbTemplateRepository:
     def db_path(self) -> Path:
         return self._db_path
 
-    def create(self, record: FsbTemplateRecord) -> FsbTemplateRecord:
+    def create(self, record: FastSandboxTemplateRecord) -> FastSandboxTemplateRecord:
         with self._connect() as conn:
             conn.execute(
                 """
@@ -64,7 +64,7 @@ class SQLiteFsbTemplateRepository:
             )
         return record
 
-    def get(self, template_id: str, namespace: str) -> FsbTemplateRecord | None:
+    def get(self, template_id: str, namespace: str) -> FastSandboxTemplateRecord | None:
         with self._connect() as conn:
             row = conn.execute(
                 self._select_sql() + " WHERE template_id = ? AND namespace = ?",
@@ -72,7 +72,7 @@ class SQLiteFsbTemplateRepository:
             ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
-    def get_by_crd_name(self, namespace: str, crd_name: str) -> FsbTemplateRecord | None:
+    def get_by_crd_name(self, namespace: str, crd_name: str) -> FastSandboxTemplateRecord | None:
         with self._connect() as conn:
             row = conn.execute(
                 self._select_sql() + " WHERE namespace = ? AND crd_name = ?",
@@ -80,7 +80,7 @@ class SQLiteFsbTemplateRepository:
             ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
-    def list(self, query: FsbTemplateListQuery) -> FsbTemplateListResult:
+    def list(self, query: FastSandboxTemplateListQuery) -> FastSandboxTemplateListResult:
         clauses = ["namespace = ?"]
         params: list[object] = [query.namespace]
         if query.metadata:
@@ -106,7 +106,7 @@ class SQLiteFsbTemplateRepository:
                 + f" {where_clause} ORDER BY created_at DESC, template_id DESC LIMIT ? OFFSET ?",
                 tuple([*params, page_size, offset]),
             ).fetchall()
-        return FsbTemplateListResult(
+        return FastSandboxTemplateListResult(
             items=[self._row_to_record(row) for row in rows],
             total_items=total_items,
         )
@@ -124,7 +124,7 @@ class SQLiteFsbTemplateRepository:
         template_id: str,
         namespace: str,
         *,
-        phase: FsbTemplatePhase,
+        phase: FastSandboxTemplatePhase,
         manifest_ref: str | None,
         message: str | None,
     ) -> bool:
@@ -206,7 +206,7 @@ class SQLiteFsbTemplateRepository:
         """
 
     @staticmethod
-    def _to_db_tuple(record: FsbTemplateRecord) -> tuple[object, ...]:
+    def _to_db_tuple(record: FastSandboxTemplateRecord) -> tuple[object, ...]:
         now = _now_iso()
         return (
             record.template_id,
@@ -225,16 +225,16 @@ class SQLiteFsbTemplateRepository:
         )
 
     @staticmethod
-    def _row_to_record(row: sqlite3.Row) -> FsbTemplateRecord:
+    def _row_to_record(row: sqlite3.Row) -> FastSandboxTemplateRecord:
         spec = json.loads(row["spec_json"])
         spec["format"] = row["format"]
-        return FsbTemplateRecord(
+        return FastSandboxTemplateRecord(
             template_id=row["template_id"],
             namespace=row["namespace"],
             crd_name=row["crd_name"],
             spec=spec,
             metadata=json.loads(row["metadata_json"]),
-            phase=FsbTemplatePhase(row["phase"]),
+            phase=FastSandboxTemplatePhase(row["phase"]),
             manifest_ref=row["manifest_ref"],
             message=row["message"],
             created_at=_parse(row["created_at"]),
@@ -261,6 +261,6 @@ def generate_template_id() -> str:
 
 __all__ = [
     "SQLITE_BUSY_TIMEOUT_MS",
-    "SQLiteFsbTemplateRepository",
+    "SQLiteFastSandboxTemplateRepository",
     "generate_template_id",
 ]

@@ -36,7 +36,7 @@ func StartActiveSocketServer(
 }
 
 // StartActiveSocketServerRequestAware passes the request to active-vault
-// handlers. Sidecar handlers inspect conditional snapshot headers; fleet
+// handlers. Sidecar handlers inspect conditional snapshot headers; fast-sandbox
 // handlers additionally dispatch clientIp (source IP -> subject -> snapshot).
 func StartActiveSocketServerRequestAware(
 	activeHandler func(http.ResponseWriter, *http.Request),

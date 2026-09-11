@@ -13,7 +13,7 @@
 #
 # Tokens rendered by fast-sandbox-env.sh (opensandbox stage, into $WORK/gen):
 #   @SERVER_IMAGE@  @SERVER_API_KEY@  @SIGNING_KEY@  @FASTPATH_ENDPOINT@
-#   @FLEETS_NAMESPACE@  @POOL_NAME@  @EXECD_IMAGE@  @GATEWAY_ADDRESS@
+#   @FSB_NAMESPACE@  @POOL_NAME@  @EXECD_IMAGE@  @GATEWAY_ADDRESS@
 #   @SERVER_NODEPORT@ (bare: renders to an integer nodePort)
 # Quotes live in the template (config.toml strings need them); only the
 # bare token is substituted.
@@ -33,7 +33,7 @@ kind: ClusterRole
 metadata:
   name: opensandbox-server-ecosystem
 rules:
-  # Fleets Get/List reads sandbox.fast.io/v1alpha2 Sandbox CRs through the
+  # Fast Sandbox Get/List reads sandbox.fast.io/v1alpha2 Sandbox CRs through the
   # LIST/WATCH cache; writes go through FastPath, so read verbs suffice.
   - apiGroups: ["sandbox.fast.io"]
     resources: ["sandboxes"]
@@ -82,10 +82,10 @@ data:
 
     [kubernetes]
     # One block serves both backends: CR reads (informer settings) and the
-    # fleets (fast-sandbox) settings. Sandboxes are created in the pool's
+    # fsb (fast-sandbox) settings. Sandboxes are created in the pool's
     # namespace so poolRef resolves; execd comes from runtime.execd_image
     # above (the server injects it into server-created SandboxTemplates).
-    namespace = "@FLEETS_NAMESPACE@"
+    namespace = "@FSB_NAMESPACE@"
     fastpath_endpoint = "@FASTPATH_ENDPOINT@"
     fastpath_resource_pool = "@POOL_NAME@"
     fastpath_wait_ready_seconds = 30.0

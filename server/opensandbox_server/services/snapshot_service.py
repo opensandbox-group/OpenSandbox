@@ -123,7 +123,7 @@ class PersistedSnapshotService(SnapshotService):
 
     def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest) -> Snapshot:
         sandbox = self._sandbox_service.get_sandbox(sandbox_id)
-        if sandbox_id.startswith("flt-"):
+        if sandbox_id.startswith("fsb-"):
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
                 detail={

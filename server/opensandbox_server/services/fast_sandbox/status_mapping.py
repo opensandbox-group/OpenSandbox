@@ -27,7 +27,7 @@ retained object maps to Terminated.
 
 from __future__ import annotations
 
-from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 
 
 def map_state(info: pb2.SandboxInfo) -> str:

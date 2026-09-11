@@ -45,39 +45,39 @@ func (p *recordingProvider) Invalidate(target EndpointTarget) {
 
 func TestCompositeProviderRoutesByExplicitKind(t *testing.T) {
 	legacy := &recordingProvider{info: EndpointInfo{Endpoint: "legacy.svc"}}
-	fleets := &recordingProvider{info: EndpointInfo{UpstreamURL: "http://fastlet.svc/route"}}
-	provider := NewCompositeProvider(legacy, fleets)
+	fsb := &recordingProvider{info: EndpointInfo{UpstreamURL: "http://fastlet.svc/route"}}
+	provider := NewCompositeProvider(legacy, fsb)
 
 	require.NoError(t, provider.Start(context.Background()))
 	require.True(t, legacy.started)
-	require.True(t, fleets.started)
+	require.True(t, fsb.started)
 
 	legacyTarget := EndpointTarget{SandboxID: "legacy-sandbox", Port: 8080}
 	info, err := provider.ResolveEndpoint(context.Background(), legacyTarget)
 	require.NoError(t, err)
 	require.Equal(t, "legacy.svc", info.Endpoint)
 	require.Equal(t, []EndpointTarget{legacyTarget}, legacy.resolved)
-	require.Empty(t, fleets.resolved)
+	require.Empty(t, fsb.resolved)
 
-	fleetsTarget := EndpointTarget{RouteKind: RouteKindFleets, Namespace: "tenant-a", SandboxID: "fleet-sandbox", Port: ExecdPort}
-	info, err = provider.ResolveEndpoint(context.Background(), fleetsTarget)
+	fsbTarget := EndpointTarget{RouteKind: RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-sandbox", Port: ExecdPort}
+	info, err = provider.ResolveEndpoint(context.Background(), fsbTarget)
 	require.NoError(t, err)
 	require.Equal(t, "http://fastlet.svc/route", info.UpstreamURL)
-	require.Equal(t, []EndpointTarget{fleetsTarget}, fleets.resolved)
+	require.Equal(t, []EndpointTarget{fsbTarget}, fsb.resolved)
 }
 
-func TestCompositeProviderInvalidatesOnlyFleetsRoutes(t *testing.T) {
+func TestCompositeProviderInvalidatesOnlyFastSandboxRoutes(t *testing.T) {
 	legacy := &recordingProvider{}
-	fleets := &recordingProvider{}
-	provider := NewCompositeProvider(legacy, fleets)
+	fsb := &recordingProvider{}
+	provider := NewCompositeProvider(legacy, fsb)
 
 	provider.Invalidate(EndpointTarget{SandboxID: "legacy-sandbox", Port: 8080})
 	require.Empty(t, legacy.invalidated)
-	require.Empty(t, fleets.invalidated)
+	require.Empty(t, fsb.invalidated)
 
-	fleetsTarget := EndpointTarget{RouteKind: RouteKindFleets, Namespace: "tenant-a", SandboxID: "fleet-sandbox", Port: ExecdPort}
-	provider.Invalidate(fleetsTarget)
-	require.Equal(t, []EndpointTarget{fleetsTarget}, fleets.invalidated)
+	fsbTarget := EndpointTarget{RouteKind: RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-sandbox", Port: ExecdPort}
+	provider.Invalidate(fsbTarget)
+	require.Equal(t, []EndpointTarget{fsbTarget}, fsb.invalidated)
 }
 
 func TestCompositeProviderRejectsUnknownRouteKind(t *testing.T) {

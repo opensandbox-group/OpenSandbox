@@ -129,8 +129,8 @@ class TLSShadowTest(unittest.TestCase):
                 "invalid_snapshot",
             )
 
-    def test_fleet_absence_does_not_claim_passthrough(self):
-        self.system._set_fleet_mode(True)
+    def test_fast_sandbox_absence_does_not_claim_passthrough(self):
+        self.system._set_fast_sandbox_mode(True)
         self.system._observe_tls_shadow(self.flow(), None)
         self.assertEqual(
             self.system.ctx.log.messages[-1],

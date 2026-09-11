@@ -66,7 +66,7 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		return nil, ingressRouteErrHTTPStatus(err), fmt.Errorf("invalid ingress route: %w", err)
 	}
 	if _, required := p.sandboxProvider.(sandbox.AuthenticatedRouteProvider); required && pr.namespace == "" {
-		err = fmt.Errorf("%w: fleets provider requires an authenticated route scope", routescope.ErrUnauthorized)
+		err = fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
 		return nil, ingressRouteErrHTTPStatus(err), err
 	}
 
@@ -137,7 +137,7 @@ func (p *Proxy) parseRequestedHeaderRoute(r *http.Request) (parsedRoute, int, er
 		return parsedRoute{}, http.StatusBadRequest, fmt.Errorf("missing header '%s' or 'Host'", SandboxIngress)
 	}
 	if routescope.IsToken(targetHost) {
-		pr, err := p.parseFleetsScope(targetHost, "")
+		pr, err := p.parseFastSandboxScope(targetHost, "")
 		return pr, 0, err
 	}
 	pr, err := parseHostRoute(targetHost)
@@ -155,7 +155,7 @@ func (p *Proxy) parseRequestedURIRoute(r *http.Request) (parsedRoute, int, error
 		if found && rest != "" {
 			requestURI += rest
 		}
-		pr, err := p.parseFleetsScope(first, requestURI)
+		pr, err := p.parseFastSandboxScope(first, requestURI)
 		if err == nil {
 			pr.requestRawPath = escapedPathSuffix(r.URL.EscapedPath(), 1)
 		}
@@ -190,7 +190,7 @@ func escapedPathSuffix(path string, prefixSegments int) string {
 	return "/" + trimmed
 }
 
-func (p *Proxy) parseFleetsScope(token, requestURI string) (parsedRoute, error) {
+func (p *Proxy) parseFastSandboxScope(token, requestURI string) (parsedRoute, error) {
 	if p.scope == nil {
 		return parsedRoute{}, fmt.Errorf("%w: verifier is not configured", routescope.ErrUnauthorized)
 	}
@@ -199,7 +199,7 @@ func (p *Proxy) parseFleetsScope(token, requestURI string) (parsedRoute, error) 
 		return parsedRoute{}, err
 	}
 	return parsedRoute{
-		routeKind:  sandbox.RouteKindFleets,
+		routeKind:  sandbox.RouteKindFastSandbox,
 		namespace:  scope.Namespace,
 		sandboxID:  scope.SandboxID,
 		port:       scope.Port,

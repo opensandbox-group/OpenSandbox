@@ -73,29 +73,29 @@ func TestPurgeStaleExportedCAFrom_LeavesUnrelatedFiles(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestSyncRootCAFleetExportsToSubdirWithoutSystemTrust(t *testing.T) {
+func TestSyncRootCAFastSandboxExportsToSubdirWithoutSystemTrust(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "mitmhome")
 	confdir := filepath.Join(home, ".mitmproxy")
 	require.NoError(t, os.MkdirAll(confdir, 0o755))
 	cert := filepath.Join(confdir, mitmCACertName)
-	require.NoError(t, os.WriteFile(cert, []byte("fleet-ca"), 0o644))
+	require.NoError(t, os.WriteFile(cert, []byte("fast-sandbox-ca"), 0o644))
 
 	// constants.OpenSandboxRootDir is a fixed /opt/opensandbox path; verify
 	// exportRootCA directly with a temp root instead of the env-dependent
-	// SyncRootCAFleet wrapper.
-	rootDir := filepath.Join(root, "opt", "opensandbox", FleetCAExportDir)
+	// SyncRootCAFastSandbox wrapper.
+	rootDir := filepath.Join(root, "opt", "opensandbox", FastSandboxCAExportDir)
 	require.NoError(t, exportRootCA(confdir, home, rootDir, false))
 
 	dst := filepath.Join(rootDir, mitmCACertName)
 	content, err := os.ReadFile(dst)
 	require.NoError(t, err)
-	require.Equal(t, "fleet-ca", string(content))
+	require.Equal(t, "fast-sandbox-ca", string(content))
 
 	// no system-trust install was attempted: no ca-certificates dirs created
 	entries, err := os.ReadDir(root)
 	require.NoError(t, err)
 	for _, e := range entries {
-		require.NotEqual(t, "usr", e.Name(), "system trust install must be skipped for the fleet export")
+		require.NotEqual(t, "usr", e.Name(), "system trust install must be skipped for the fast-sandbox export")
 	}
 }

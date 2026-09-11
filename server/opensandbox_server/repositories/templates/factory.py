@@ -23,7 +23,7 @@ from functools import cache
 from opensandbox_server.config import AppConfig, get_config
 
 
-class FsbTemplateRepository(Protocol):
+class FastSandboxTemplateRepository(Protocol):
     """Storage contract for the fsb template catalog."""
 
     def create(self, record): ...
@@ -45,24 +45,24 @@ class FsbTemplateRepository(Protocol):
 
 def create_fsb_template_repository(
     config: Optional[AppConfig] = None,
-) -> FsbTemplateRepository:
+) -> FastSandboxTemplateRepository:
     """Create the configured fsb template repository (mirrors snapshots)."""
     from opensandbox_server.repositories.templates.postgresql import (
-        PostgreSQLFsbTemplateRepository,
+        PostgreSQLFastSandboxTemplateRepository,
     )
-    from opensandbox_server.repositories.templates.sqlite import SQLiteFsbTemplateRepository
+    from opensandbox_server.repositories.templates.sqlite import SQLiteFastSandboxTemplateRepository
 
     active_config = config or get_config()
     store_config = active_config.store
 
     if store_config.type == "sqlite":
-        return SQLiteFsbTemplateRepository(store_config.path)  # type: ignore[return-value]
+        return SQLiteFastSandboxTemplateRepository(store_config.path)  # type: ignore[return-value]
     if store_config.type == "postgresql":
         postgresql_config = store_config.postgresql
         dsn = postgresql_config.dsn
         if dsn is None:
             raise ValueError("PostgreSQL fsb template store requires a DSN.")
-        return PostgreSQLFsbTemplateRepository(
+        return PostgreSQLFastSandboxTemplateRepository(
             dsn.get_secret_value(),
             min_pool_size=postgresql_config.min_pool_size,
             max_pool_size=postgresql_config.max_pool_size,
@@ -74,7 +74,7 @@ def create_fsb_template_repository(
 
 
 @cache
-def get_fsb_template_repository() -> FsbTemplateRepository:
+def get_fsb_template_repository() -> FastSandboxTemplateRepository:
     """Return the repository shared by the current server process."""
     return create_fsb_template_repository()
 
@@ -89,7 +89,7 @@ def close_fsb_template_repository() -> None:
 
 
 __all__ = [
-    "FsbTemplateRepository",
+    "FastSandboxTemplateRepository",
     "close_fsb_template_repository",
     "create_fsb_template_repository",
     "get_fsb_template_repository",

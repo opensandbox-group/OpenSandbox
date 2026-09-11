@@ -23,22 +23,28 @@ import (
 
 func TestVerifyCrossLanguageVector(t *testing.T) {
 	verifier := &Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}
-	scope, err := verifier.Verify("f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AQ")
+	scope, err := verifier.Verify("f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.gtJzW337dCO-kStxh2GPfA")
 	require.NoError(t, err)
 	require.Equal(t, Scope{Namespace: "tenant-a", SandboxID: "sandbox-123", Port: 44772}, scope)
 }
 
+func TestVerifyRejectsOldSigningTag(t *testing.T) {
+	verifier := &Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}
+	_, err := verifier.Verify("f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AQ")
+	require.ErrorIs(t, err, ErrUnauthorized)
+}
+
 func TestVerifyRejectsTamperedNamespace(t *testing.T) {
 	verifier := &Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}
-	_, err := verifier.Verify("f1.dGVuYW50LWI.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AQ")
+	_, err := verifier.Verify("f1.dGVuYW50LWI.c2FuZGJveC0xMjM.44772.k.gtJzW337dCO-kStxh2GPfA")
 	require.ErrorIs(t, err, ErrUnauthorized)
 }
 
 func TestVerifyRejectsNonCanonicalBase64URL(t *testing.T) {
 	verifier := &Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}
 	for _, token := range []string{
-		"f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AR",
-		"f1.dGVuYW50LWF.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AQ",
+		"f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.gtJzW337dCO-kStxh2GPfB",
+		"f1.dGVuYW50LWF.c2FuZGJveC0xMjM.44772.k.gtJzW337dCO-kStxh2GPfA",
 	} {
 		_, err := verifier.Verify(token)
 		require.ErrorIs(t, err, ErrInvalidScope)
@@ -47,7 +53,7 @@ func TestVerifyRejectsNonCanonicalBase64URL(t *testing.T) {
 
 func TestVerifyRejectsNonCanonicalPort(t *testing.T) {
 	verifier := &Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}
-	_, err := verifier.Verify("f1.dGVuYW50LWE.c2FuZGJveC0xMjM.+44772.k.uo11HjECmnSuCCRF3v-1AQ")
+	_, err := verifier.Verify("f1.dGVuYW50LWE.c2FuZGJveC0xMjM.+44772.k.gtJzW337dCO-kStxh2GPfA")
 	require.ErrorIs(t, err, ErrInvalidScope)
 }
 

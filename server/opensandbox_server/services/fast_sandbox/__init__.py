@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from opensandbox_server.services.fsb.service import FsbSandboxService
+from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
-__all__ = ["FsbSandboxService"]
+__all__ = ["FastSandboxService"]

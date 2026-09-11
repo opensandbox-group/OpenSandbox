@@ -36,7 +36,7 @@ status: implementing
 
 ## Summary
 
-A single egress control plane serves N sandboxes sharing one host/network domain (fast-sandbox Fastlet Pod, or bwrap isolated sessions). The existing single-sandbox sidecar profile is unchanged; the opt-in `fleet` profile adds a **Subject** abstraction — one opaque identifier per sandbox owning an isolated slice of policy, credentials, and kernel rules — dispatched by platform-provided identity keys. For fast-sandbox, the integration is **API-based, not file-based**: subject lifecycle and policy are delivered by the Fastlet over its public **Sandbox Actions Handler protocol** (`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`, `sandbox.fast.io/actions/v1`) — the earlier slot-store file observation is explicitly not used. Policy rides the Sandbox CRD `actionBindings` (declarative, revisioned, fast-sandbox-owned); only credentials are pushed by the server over fast-sandbox's proxy-route mechanism, staying memory-only in egress (consistent with OSEP-0012). A subject is fail-closed (deny-everything) from `SET_BINDING` registration until its `sandbox.data-plane-ready` Hook lands, so policy delivery can be late, never early-open.
+A single egress control plane serves N sandboxes sharing one host/network domain (fast-sandbox Fastlet Pod, or bwrap isolated sessions). The existing single-sandbox sidecar profile is unchanged; the opt-in `fast-sandbox` profile adds a **Subject** abstraction — one opaque identifier per sandbox owning an isolated slice of policy, credentials, and kernel rules — dispatched by platform-provided identity keys. For fast-sandbox, the integration is **API-based, not file-based**: subject lifecycle and policy are delivered by the Fastlet over its public **Sandbox Actions Handler protocol** (`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`, `sandbox.fast.io/actions/v1`) — the earlier slot-store file observation is explicitly not used. Policy rides the Sandbox CRD `actionBindings` (declarative, revisioned, fast-sandbox-owned); only credentials are pushed by the server over fast-sandbox's proxy-route mechanism, staying memory-only in egress (consistent with OSEP-0012). A subject is fail-closed (deny-everything) from `SET_BINDING` registration until its `sandbox.data-plane-ready` Hook lands, so policy delivery can be late, never early-open.
 
 ## Motivation
 
@@ -48,7 +48,7 @@ Goals:
 
 1. **Subject abstraction**: platform-neutral identity as the unit of policy, credential, and rule ownership; dispatch key pluggable (source IP / host uid / cgroup path).
 2. **Multi-sandbox dispatch**: one egress process hosts N independent subjects.
-3. **Zero impact on single-sandbox mode**: sidecar profile, env, API, behavior unchanged when the `fleet` profile is off.
+3. **Zero impact on single-sandbox mode**: sidecar profile, env, API, behavior unchanged when the `fast-sandbox` profile is off.
 4. **Consume, don't modify**: fast-sandbox CRD, RPC protocol, and fastlet process are used as-is; the integration rides the public Sandbox Actions Handler protocol. The slot-store file observation is explicitly NOT used.
 5. **No new public contract of our own**: `specs/egress-api.yaml` unchanged; policy is carried by the platform's own `actionBindings` (not a new egress-specific carrier); no egress-local persistence.
 6. **Engine reuse**: no behavioral changes inside `pkg/dnsproxy`, `pkg/nftables`, `pkg/credentialvault`, `pkg/mitmproxy`.
@@ -61,16 +61,16 @@ Non-Goals: no per-process policies; no eBPF; no in-guest control plane; no rate 
 
 A **Subject** is one opaque identifier per sandbox (e.g. `s-<sandboxUID>`), owning an isolated slice of policy, credentials, and kernel rules. **Dispatch keys** are platform-provided identity material: fast-sandbox uses the sandbox source IP (from the action attachment); bwrap uses the host uid (cgroup path reserved for the future). The dispatch hot path is a pure map lookup (identity key → Subject); the registry owns the in-process state machine (absent → denying → active); the rule builder is the cold path producing per-subject kernel-rule content.
 
-Single-sandbox mode is the process being one implicit subject (no-op layer); the `fleet` profile is N subjects. The authority over "who is who" never belongs to egress — each adapter must prove its key unforgeable (IPAM + per-sandbox netns without `NET_ADMIN`; execd-assigned uid).
+Single-sandbox mode is the process being one implicit subject (no-op layer); the `fast-sandbox` profile is N subjects. The authority over "who is who" never belongs to egress — each adapter must prove its key unforgeable (IPAM + per-sandbox netns without `NET_ADMIN`; execd-assigned uid).
 
 ### Two Control Channels
 
-The `fleet` profile has **no sandbox-reachable policy surface** (a fast-sandbox guest root is untrusted and must not rewrite its own policy). All policy/credential state flows over two disjoint channels, neither of which involves the earlier slot-store file observation (`/run/fast-sandbox/network/*.json` is not consumed):
+The `fast-sandbox` profile has **no sandbox-reachable policy surface** (a fast-sandbox guest root is untrusted and must not rewrite its own policy). All policy/credential state flows over two disjoint channels, neither of which involves the earlier slot-store file observation (`/run/fast-sandbox/network/*.json` is not consumed):
 
 | Channel | Direction | Auth | Carries |
 |---------|-----------|------|---------|
 | **1. Sandbox Actions Handler protocol** `/_fastlet/v1/actions` + `/_fastlet/v1/actions/status` | Fastlet → egress handler (Pod-loopback HTTP on the action `targetHTTPPort` 18080) | Pod-netns loopback; the envelope carries sandbox UID + revision fencing; the Fastlet is the only caller | Subject lifecycle (`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`) and **policy** (the binding input, declarative via the Sandbox CRD `actionBindings`) |
-| **2. Proxy route** `/v1/sandboxfleets/{sandboxId}/egress/*` | server/SDK → fastlet-proxy → egress listener (`127.0.0.1:18080`, Pod netns) | Ed25519 route credential (proxy-verified) + `X-Fast-Sandbox-Uid` header added by proxy | **Credential pushes** (`/credential-vault`, memory-only in egress) and runtime policy/vault operations (existing `egress-api.yaml` semantics) |
+| **2. Proxy route** `/v1/sandboxes/{sandboxId}/egress/*` | server/SDK → fastlet-proxy → egress listener (`127.0.0.1:18080`, Pod netns) | Ed25519 route credential (proxy-verified) + `X-Fast-Sandbox-Uid` header added by proxy | **Credential pushes** (`/credential-vault`, memory-only in egress) and runtime policy/vault operations (existing `egress-api.yaml` semantics) |
 
 The listener binds `127.0.0.1:18080` (Pod netns loopback) — sandbox netns cannot reach it, so the Fastlet's action dispatcher and fastlet-proxy are the only peers; egress rejects unknown UIDs (404). Credentials are delivered by the server as complete vault revisions over the proxy route, consistent with OSEP-0012 (no Kubernetes Secret, no kubelet sync dependency). There is no unix socket, no Secret volume, and no egress-managed state file.
 
@@ -148,7 +148,7 @@ sequenceDiagram
     F->>F: data plane ready (route published)
     F->>E: LIFECYCLE_HOOK sandbox.data-plane-ready
     E->>E: apply policy atomically → active
-    SRV->>P: PUT /v1/sandboxfleets/{sandboxId}/egress/credential-vault
+    SRV->>P: PUT /v1/sandboxes/{sandboxId}/egress/credential-vault
     P->>E: forward (vault revision → subject vault, memory-only)
     SRV-->>SDK: sandbox ready (policy in the binding, credentials in place)
 ```
@@ -172,7 +172,7 @@ sequenceDiagram
         F->>E: SET_BINDING (new policy input, same identity fence)
         E->>E: DNS swap (atomic) + nft batch rebuild (in place, no Hook replay)
     else Credential update
-        U->>P: PUT /v1/sandboxfleets/{sandboxId}/egress/credential-vault
+        U->>P: PUT /v1/sandboxes/{sandboxId}/egress/credential-vault
         P->>E: forward (UID header → subject)
         E->>E: vault rebind in memory, new flows pick up new credentials
     end
@@ -184,7 +184,7 @@ Unload is declarative: sandbox deletion → Fastlet sends `REMOVE_BINDING` → e
 
 ### Profile Separation
 
-The two profiles are mutually exclusive deployment forms. `sidecar`: a service inside the sandbox network domain owning the public contract (18080, `/policy`, `/credential-vault`) — unchanged. `fleet` (`OPENSANDBOX_EGRESS_PROFILE=fleet`): a host-domain control-plane component — subject lifecycle and policy from the Fastlet's action protocol, credentials pushed by the server over the proxy route.
+The two profiles are mutually exclusive deployment forms. `sidecar`: a service inside the sandbox network domain owning the public contract (18080, `/policy`, `/credential-vault`) — unchanged. `fast-sandbox` (`OPENSANDBOX_EGRESS_PROFILE=fast-sandbox`): a host-domain control-plane component — subject lifecycle and policy from the Fastlet's action protocol, credentials pushed by the server over the proxy route.
 
 ### Security Boundaries
 
@@ -209,7 +209,7 @@ The two profiles are mutually exclusive deployment forms. `sidecar`: a service i
 | MITM | shared mitmdump, vault by client IP | per-subject ports |
 | Lifecycle authority | Fastlet action dispatcher (`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`, `sandbox.fast.io/actions/v1`) | execd session registry, same protocol pattern (TBD, detailed separately) |
 | Credentials | proxy-route vault endpoints (OSEP-0012 model) | proxy-route vault endpoints |
-| Endpoint | `/_fastlet/v1/actions` (Fastlet, Pod loopback) + `/v1/sandboxfleets/{sandboxId}/egress/*` via `ResolveEndpoint` (proxy route, host delivery mode) | TBD (execd adapter to be detailed separately) |
+| Endpoint | `/_fastlet/v1/actions` (Fastlet, Pod loopback) + `/v1/sandboxes/{sandboxId}/egress/*` via `ResolveEndpoint` (proxy route, host delivery mode) | TBD (execd adapter to be detailed separately) |
 
 ### Scaling Constraints
 
@@ -237,7 +237,7 @@ The lifecycle/policy channel needs **zero** fast-sandbox work (the Actions proto
 1. **Host delivery mode** in the infra catalog (`InfraDeliveryMode`, e.g. `host-process`, alongside bind-mount/image-layer/guest-copy, `internal/catalog/runtime/catalog.go`): compiled into the Pool revision but excluded from the in-sandbox `sandbox-init` supervisor config; the daemon is provisioned by `FastletTemplate`; readiness probing targets the Pod-netns listener instead of the sandbox IP.
 2. **Host upstream in fastlet-proxy**: the proxy currently forwards to the sandbox `Access` address only (DirectIP/LocalForward). The egress route must forward to the Pod-netns listener (`127.0.0.1:18080`) instead.
 3. **UID propagation**: the proxy rewrites outbound paths to the suffix only, so it must inject `X-Fast-Sandbox-Uid` (outside `stripRouteHeaders`) — this is what answers "which subject" for credential pushes.
-4. **Route parsing**: `parseTarget` currently recognizes only `/v1/sandboxes/` (ports) and `/v2/sandboxes/` (components) prefixes; it gains a `/v1/sandboxfleets/{sandboxId}/egress/*` branch that resolves the sandbox route, verifies the credential, and targets egress — independent of the component `Components` map. The credential's target semantics in this branch must match what `ResolveEndpoint` issues for the egress target (component-target `egress`, or a dedicated sandboxfleets target — both sides must agree).
+4. **Route parsing**: `parseTarget` currently recognizes only `/v1/sandboxes/` (ports) and `/v2/sandboxes/` (components) prefixes; it gains a `/v1/sandboxes/{sandboxId}/egress/*` branch that resolves the sandbox route, verifies the credential, and targets egress — independent of the component `Components` map. The credential's target semantics in this branch must match what `ResolveEndpoint` issues for the egress target (component-target `egress`, or a dedicated egress target — both sides must agree).
 
 Deployment config: egress container in Pool `FastletTemplate` (Pod-netns privileges; no slot-store or netns-mount volumes are needed anymore).
 
@@ -249,9 +249,9 @@ fast-sandbox CRDs, RPC protocol, `SandboxSpec`, fastlet phases/admission/deletio
 
 ### OpenSandbox Server
 
-- Fleets mapping removes the phase-1a rejection of `networkPolicy`/`credentialProxy` (`services/fleets/create_mapping.py`): `networkPolicy` is mapped into the Create request's `action_bindings` (egress handler input); the returned sandbox carries the policy declaratively. Credential revisions are still pushed over the proxy route with idempotent retries.
+- Fast Sandbox mapping removes the phase-1a rejection of `networkPolicy`/`credentialProxy` (`services/fast_sandbox/create_mapping.py`): `networkPolicy` is mapped into the Create request's `action_bindings` (egress handler input); the returned sandbox carries the policy declaratively. Credential revisions are still pushed over the proxy route with idempotent retries.
 - Policy updates ride `UpdateSandbox` (complete ordered binding replacement) — no separate push; the Fastlet delivers the new `SET_BINDING`.
-- Endpoint reuse for the credential channel: `fastpath_client.resolve_endpoint(...)` for the egress target; the returned proxy route uses the `/v1/sandboxfleets/{sandboxId}/egress/*` prefix. Route-credential issuance and proxy verification unchanged.
+- Endpoint reuse for the credential channel: `fastpath_client.resolve_endpoint(...)` for the egress target; the returned proxy route uses the `/v1/sandboxes/{sandboxId}/egress/*` prefix. Route-credential issuance and proxy verification unchanged.
 - Egress readiness surfaced via the platform's `InfraComponentStatus` channel (optional, non-blocking).
 
 ## Test Plan
@@ -271,4 +271,4 @@ Alternatives considered: slot-store file observation (rejected — the store is 
 ## Infrastructure and Migration
 
 - fast-sandbox: no new repos, no API changes — the four internal additions above (credential channel only) plus deployment config. Cross-repo dependency: import `egress/pkg/...` as a Go module (replace directive) or extract `pkg/subject` plus engines into a shared module.
-- `sidecar` is the default profile; existing deployments upgrade with zero config change. `fleet` profile is opt-in (`OPENSANDBOX_EGRESS_PROFILE=fleet`); Fastlet Pods without the egress component behave exactly as today until an operator enables it. Rollout order: egress `fleet` profile behind a feature gate (the actions protocol needs no fast-sandbox code) → fast-sandbox proxy-route additions for the credential channel (inert) → server fleets mapping + orchestration.
+- `sidecar` is the default profile; existing deployments upgrade with zero config change. `fast-sandbox` profile is opt-in (`OPENSANDBOX_EGRESS_PROFILE=fast-sandbox`); Fastlet Pods without the egress component behave exactly as today until an operator enables it. Rollout order: egress `fast-sandbox` profile behind a feature gate (the actions protocol needs no fast-sandbox code) → fast-sandbox proxy-route additions for the credential channel (inert) → server Fast Sandbox mapping + orchestration.

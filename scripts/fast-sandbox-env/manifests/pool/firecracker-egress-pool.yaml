@@ -3,7 +3,7 @@
 #
 # The two defaults this environment exists for:
 #
-#   egress attached — the OpenSandbox egress sidecar (fleet profile,
+#   egress attached — the OpenSandbox egress sidecar (fast-sandbox profile,
 #   dns+nft mode) runs in every fastlet Pod netns. Network policy flows
 #   through the Sandbox Actions channel only: the pool declares egress as
 #   an actionHandlers entry (Pod-loopback targetHTTPPort 18080) and as a
@@ -59,15 +59,15 @@ spec:
         # IfNotPresent: the environment kind-loads the image into the
         # nodes; Always would force a docker.io pull per restart.
         imagePullPolicy: IfNotPresent
-        # Fleet profile is required: it serves the Sandbox Actions Handler
+        # Fast Sandbox profile is required: it serves the Sandbox Actions Handler
         # endpoints (/_fastlet/v1/actions[/status]) that the Fastlet uses.
         # Without it egress runs the sidecar profile (policy-file driven)
         # and exposes no actions surface.
         env:
         - name: OPENSANDBOX_EGRESS_PROFILE
-          value: "fleet"
+          value: "fast-sandbox"
         # dns+nft: DNS-based domain policy plus the per-subject nft rules
-        # (table opensandbox-fleet, subj_ chains). dns-only would neither
+        # (table opensandbox-fast-sandbox, subj_ chains). dns-only would neither
         # block IP-direct traffic nor create the subj_ chains.
         - name: OPENSANDBOX_EGRESS_MODE
           value: "dns+nft"

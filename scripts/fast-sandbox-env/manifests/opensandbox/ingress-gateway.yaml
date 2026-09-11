@@ -1,7 +1,7 @@
 # ingress-gateway.yaml — OpenSandbox ingress gateway (source-built) for the
 # fast-sandbox integration ecosystem.
 #
-# Fleets provider (Phase 1a): the gateway resolves f1.* route scopes issued
+# Fast Sandbox provider (Phase 1a): the gateway resolves f1.* route scopes issued
 # by the lifecycle server through FastPath v2 ResolveEndpoint
 # (--fastpath-endpoint), verifying the scope MAC with the shared
 # --secure-access-keys ring (the same key the server signs with in
@@ -13,7 +13,7 @@
 # carries no bindings.
 #
 # Tokens rendered by fast-sandbox-env.sh (opensandbox stage, into $WORK/gen):
-#   @INGRESS_IMAGE@  @SIGNING_KEY@  @FASTPATH_ENDPOINT@  @FLEETS_NAMESPACE@
+#   @INGRESS_IMAGE@  @SIGNING_KEY@  @FASTPATH_ENDPOINT@  @FSB_NAMESPACE@
 #   @GATEWAY_NODEPORT@ (bare: renders to an integer nodePort)
 # Quotes live in the template; only the bare token is substituted.
 apiVersion: v1
@@ -47,9 +47,9 @@ spec:
           image: "@INGRESS_IMAGE@"
           imagePullPolicy: IfNotPresent
           args:
-            - --namespace=@FLEETS_NAMESPACE@
+            - --namespace=@FSB_NAMESPACE@
             - --port=28888
-            - --provider-type=fsb
+            - --provider-type=fast-sandbox
             - --mode=header
             - --log-level=info
             - --fastpath-endpoint=@FASTPATH_ENDPOINT@

@@ -24,7 +24,7 @@ var (
 	// Port controls the HTTP listener port.
 	Port int
 
-	// ProviderType specifies the sandbox provider type (batchsandbox, agent-sandbox, fleets).
+	// ProviderType specifies the sandbox provider type (batchsandbox, agent-sandbox, fast-sandbox).
 	ProviderType string
 
 	// Mode specifies the sandbox service discovery mode (header or uri).
@@ -41,16 +41,16 @@ var (
 	RenewIntentMinIntervalSec int
 )
 
-// Secure access (signed routes) and FastPath (fleets) routing.
+// Secure access (signed routes) and FastPath (Fast Sandbox) routing.
 var (
 	// SecureAccessKeys holds the shared verification keys for signed ingress
-	// routes and fleets route scopes: "a=base64,b=base64".
+	// routes and Fast Sandbox route scopes: "a=base64,b=base64".
 	SecureAccessKeys string
 
-	// FastPathEndpoint is the FastPath v2 gRPC endpoint; non-empty enables fleets routing.
+	// FastPathEndpoint is the FastPath v2 gRPC endpoint; non-empty enables Fast Sandbox routing.
 	FastPathEndpoint string
 
-	// FastPathAccessMode selects the fleets data-plane mode (central-proxy or direct-fastlet-proxy).
+	// FastPathAccessMode selects the Fast Sandbox data-plane mode (central-proxy or direct-fastlet-proxy).
 	FastPathAccessMode string
 
 	// FastPathWaitTimeoutMillis bounds one FastPath ResolveEndpoint RPC per ingress request.

@@ -134,28 +134,30 @@ _tls_shadow_enabled = os.environ.get(
     "OPENSANDBOX_EGRESS_MITMPROXY_SHADOW", ""
 ).strip().lower() in {"1", "true", "on"}
 
-# Fleet profile: one shared mitmdump serving N sandboxes; the active vault is
+# Fast Sandbox profile: one shared mitmdump serving N sandboxes; the active vault is
 # selected by the client's source IP (preserved by the interception DNAT), so
 # the immutable snapshot cache is keyed per client IP. Every flow performs a
 # conditional snapshot-tag check; the full secret-bearing snapshot is transferred
 # only when its opaque tag changes. The sidecar profile keeps one shared cache.
 # The per-IP cache is bounded because spoofed source IPs could otherwise grow
 # it without limit.
-_fleet_mode_enabled = False
+_fast_sandbox_mode_enabled = False
 _vault_cache_by_ip: dict[str, ActiveVault] = {}
 _VAULT_CACHE_MAX_IPS = 4096
 
 
-def _set_fleet_mode(enabled: bool) -> None:
-    global _fleet_mode_enabled
-    _fleet_mode_enabled = enabled
+def _set_fast_sandbox_mode(enabled: bool) -> None:
+    global _fast_sandbox_mode_enabled
+    _fast_sandbox_mode_enabled = enabled
 
 
-def _set_fleet_mode_from_env() -> None:
-    _set_fleet_mode(os.environ.get("OPENSANDBOX_EGRESS_PROFILE", "").strip().lower() == "fleet")
+def _set_fast_sandbox_mode_from_env() -> None:
+    _set_fast_sandbox_mode(
+        os.environ.get("OPENSANDBOX_EGRESS_PROFILE", "").strip().lower() == "fast-sandbox"
+    )
 
 
-_set_fleet_mode_from_env()
+_set_fast_sandbox_mode_from_env()
 
 
 class UnixSocketHTTPConnection(http_client.HTTPConnection):
@@ -208,7 +210,7 @@ def tls_clienthello(data: ClientHelloData) -> None:
 
 
 def _load_active_vault(client_ip: str | None = None) -> ActiveVault | None:
-    if _fleet_mode_enabled:
+    if _fast_sandbox_mode_enabled:
         return _load_active_vault_for_ip(client_ip)
     return _load_active_vault_shared()
 
@@ -228,7 +230,7 @@ def _load_active_vault_shared() -> ActiveVault | None:
 
 def _load_active_vault_for_ip(client_ip: str | None) -> ActiveVault | None:
     if not client_ip:
-        raise ActiveVaultLookupError("fleet vault lookup requires a client IP")
+        raise ActiveVaultLookupError("fast-sandbox vault lookup requires a client IP")
     if client_ip not in _vault_cache_by_ip and len(_vault_cache_by_ip) >= _VAULT_CACHE_MAX_IPS:
         _vault_cache_by_ip.clear()
     cached = _vault_cache_by_ip.get(client_ip)
@@ -254,7 +256,7 @@ def _fetch_active_vault(
     )
     path = ACTIVE_VAULT_PATH
     if client_ip:
-        # fleet profile: one shared socket, dispatch inside — the handler
+        # fast-sandbox profile: one shared socket, dispatch inside — the handler
         # resolves clientIp -> subject -> that subject's vault snapshot
         path = f"{ACTIVE_VAULT_PATH}?clientIp={quote(client_ip)}"
     connection = UnixSocketHTTPConnection(socket_path, timeout=0.25)
@@ -1020,8 +1022,8 @@ def _observe_tls_shadow(
         outcome = project(
             sni, None if vault is None else vault.bindings, lookup_failed=lookup_failed
         )
-        if _fleet_mode_enabled and vault is None and not lookup_failed:
-            # Fleet 404 also means unknown source identity, not just no vault.
+        if _fast_sandbox_mode_enabled and vault is None and not lookup_failed:
+            # Fast Sandbox 404 also means unknown source identity, not just no vault.
             outcome = "unknown_subject_or_vault"
         # Fixed vocabulary only: no hostname, revision, subject, path, or secret.
         ctx.log.warn("credential proxy: tls-shadow " + outcome)

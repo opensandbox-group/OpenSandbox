@@ -68,7 +68,7 @@ const (
 	NftOpStaticApply = "static_apply"
 	NftOpDynamicAdd  = "dynamic_add"
 	NftOpRemove      = "remove"
-	// Fleet-profile operations (OSEP-0022).
+	// Fast Sandbox-profile operations (OSEP-0022).
 	NftOpReset     = "reset"
 	NftOpDenyFirst = "deny_first"
 )

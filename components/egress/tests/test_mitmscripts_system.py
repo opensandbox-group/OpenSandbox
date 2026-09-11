@@ -288,7 +288,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertEqual(("request", "GET", system.ACTIVE_VAULT_PATH), calls[1])
         self.assertEqual(("close", None, None), calls[-1])
 
-    def test_fleet_mode_active_vault_cache_keyed_by_client_ip(self) -> None:
+    def test_fast_sandbox_mode_active_vault_cache_keyed_by_client_ip(self) -> None:
         system = _load_system_module()
         requests: list[tuple[str, dict[str, str]]] = []
 
@@ -319,10 +319,10 @@ class SystemAddonRedactionTest(unittest.TestCase):
 
         old_profile = os.environ.get("OPENSANDBOX_EGRESS_PROFILE")
         old_connection = system.UnixSocketHTTPConnection
-        os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fleet"
+        os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fast-sandbox"
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache_by_ip = {}
-        system._set_fleet_mode_from_env()
+        system._set_fast_sandbox_mode_from_env()
         try:
             first = system._load_active_vault("10.0.0.5")
             second = system._load_active_vault("10.0.0.5")
@@ -348,7 +348,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
                 os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
             else:
                 os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
-            system._set_fleet_mode_from_env()
+            system._set_fast_sandbox_mode_from_env()
 
     def test_sidecar_mode_uses_shared_cache(self) -> None:
         system = _load_system_module()
@@ -385,7 +385,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache = None
         try:
-            system._set_fleet_mode_from_env()
+            system._set_fast_sandbox_mode_from_env()
             first = system._load_active_vault("10.0.0.5")
             second = system._load_active_vault("10.0.0.6")
             self.assertIs(first, second)
@@ -396,9 +396,9 @@ class SystemAddonRedactionTest(unittest.TestCase):
                 os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
             else:
                 os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
-            system._set_fleet_mode_from_env()
+            system._set_fast_sandbox_mode_from_env()
 
-    def test_fleet_mode_fetch_sends_client_ip_query(self) -> None:
+    def test_fast_sandbox_mode_fetch_sends_client_ip_query(self) -> None:
         system = _load_system_module()
         requests: list[str] = []
 
@@ -428,10 +428,10 @@ class SystemAddonRedactionTest(unittest.TestCase):
 
         old_profile = os.environ.get("OPENSANDBOX_EGRESS_PROFILE")
         old_connection = system.UnixSocketHTTPConnection
-        os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fleet"
+        os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fast-sandbox"
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache_by_ip = {}
-        system._set_fleet_mode_from_env()
+        system._set_fast_sandbox_mode_from_env()
         try:
             system._load_active_vault("10.10.0.5")
         finally:
@@ -440,9 +440,9 @@ class SystemAddonRedactionTest(unittest.TestCase):
                 os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
             else:
                 os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
-            system._set_fleet_mode_from_env()
+            system._set_fast_sandbox_mode_from_env()
 
-        # the fleet handler dispatches on clientIp; without it the request
+        # the fast-sandbox handler dispatches on clientIp; without it the request
         # is rejected with 400 and no credentials are ever injected
         self.assertEqual([f"{system.ACTIVE_VAULT_PATH}?clientIp=10.10.0.5"], requests)
 
@@ -478,7 +478,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
         old_connection = system.UnixSocketHTTPConnection
         os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
         system.UnixSocketHTTPConnection = FakeConnection
-        system._set_fleet_mode_from_env()
+        system._set_fast_sandbox_mode_from_env()
         try:
             system._load_active_vault("10.10.0.5")
         finally:
@@ -487,11 +487,11 @@ class SystemAddonRedactionTest(unittest.TestCase):
                 os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
             else:
                 os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
-            system._set_fleet_mode_from_env()
+            system._set_fast_sandbox_mode_from_env()
 
         self.assertEqual([system.ACTIVE_VAULT_PATH], requests)
 
-    def test_fleet_vault_cache_is_bounded(self) -> None:
+    def test_fast_sandbox_vault_cache_is_bounded(self) -> None:
         system = _load_system_module()
         fetches: list[str] = []
 
@@ -521,10 +521,10 @@ class SystemAddonRedactionTest(unittest.TestCase):
 
         old_profile = os.environ.get("OPENSANDBOX_EGRESS_PROFILE")
         old_connection = system.UnixSocketHTTPConnection
-        os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fleet"
+        os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fast-sandbox"
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache_by_ip = {}
-        system._set_fleet_mode_from_env()
+        system._set_fast_sandbox_mode_from_env()
         try:
             # spoofed source IPs must not grow the cache without bound: past
             # the cap the whole cache is dropped and refills
@@ -540,7 +540,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
                 os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
             else:
                 os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
-            system._set_fleet_mode_from_env()
+            system._set_fast_sandbox_mode_from_env()
 
     def test_conditional_lookup_replaces_cache_only_for_new_snapshot_tag(self) -> None:
         system = _load_system_module()
@@ -584,9 +584,9 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertIsNone(system._load_active_vault())
         self.assertIsNone(system._vault_cache)
 
-    def test_fleet_not_found_clears_only_the_selected_client_cache(self) -> None:
+    def test_fast_sandbox_not_found_clears_only_the_selected_client_cache(self) -> None:
         system = _load_system_module()
-        system._set_fleet_mode(True)
+        system._set_fast_sandbox_mode(True)
         vault_a = system.ActiveVault(7, [], ["secret-a"], '"7"')
         vault_b = system.ActiveVault(11, [], ["secret-b"], '"11"')
         system._vault_cache_by_ip = {
@@ -625,7 +625,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
                 system.UnixSocketHTTPConnection = _scripted_vault_connection(
                     [step], calls
                 )
-                system._set_fleet_mode(False)
+                system._set_fast_sandbox_mode(False)
                 system._vault_cache = system.ActiveVault(
                     7, [], ["revoked-secret"], '"cached-7"'
                 )
@@ -1329,7 +1329,7 @@ class SystemAddonUnixSocketIntegrationTest(unittest.TestCase):
             old_profile = os.environ.get("OPENSANDBOX_EGRESS_PROFILE")
             os.environ[system.CREDENTIAL_PROXY_SOCKET_ENV] = socket_path
             os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
-            system._set_fleet_mode_from_env()
+            system._set_fast_sandbox_mode_from_env()
             system._vault_cache = None
             closed = False
             try:
@@ -1401,7 +1401,7 @@ class SystemAddonUnixSocketIntegrationTest(unittest.TestCase):
                     os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
                 else:
                     os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
-                system._set_fleet_mode_from_env()
+                system._set_fast_sandbox_mode_from_env()
 
 
 class SystemAddonSubstitutionTest(unittest.TestCase):

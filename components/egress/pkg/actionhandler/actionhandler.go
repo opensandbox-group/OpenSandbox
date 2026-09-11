@@ -20,7 +20,7 @@
 //
 // The package owns the wire model, parsing, and validation only. Lifecycle
 // semantics (deny-first registration, data-plane-ready activation) are wired
-// by the fleet control plane (package main).
+// by the fast-sandbox control plane (package main).
 //
 // Fail-closed rules:
 //   - An unknown apiVersion, operation, Hook name, or malformed envelope is a

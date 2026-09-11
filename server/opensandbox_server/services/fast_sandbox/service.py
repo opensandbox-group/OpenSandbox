@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FsbSandboxService: fast-sandbox (fsb) runtime backend.
+"""FastSandboxService: fast-sandbox (fsb) runtime backend.
 
 FastPath owns mutations and live runtime operations. Kubernetes LIST/WATCH
 provides the persisted Sandbox fields and eventually convergent observations.
@@ -51,12 +51,12 @@ from opensandbox_server.services.diagnostics import (
     unsupported_scope_error,
 )
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.fsb.create_mapping import (
+from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
     map_template_create_request,
 )
-from opensandbox_server.services.fsb.fastpath_client import (
+from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
     FastPathConflict,
     FastPathError,
@@ -65,13 +65,13 @@ from opensandbox_server.services.fsb.fastpath_client import (
     FastPathResourceExhausted,
     FastPathUnavailable,
 )
-from opensandbox_server.services.fsb.endpoint import build_endpoint
-from opensandbox_server.services.fsb.cr_reader import SandboxCRReader
-from opensandbox_server.services.fsb.cr_mapping import sandbox_from_cr
-from opensandbox_server.services.fsb.network_policy import normalized_policy, policy_status
-from opensandbox_server.services.templates.template_service import FsbTemplateService
-from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fsb.status_mapping import map_reason, map_state
+from opensandbox_server.services.fast_sandbox.endpoint import build_endpoint
+from opensandbox_server.services.fast_sandbox.cr_reader import SandboxCRReader
+from opensandbox_server.services.fast_sandbox.cr_mapping import sandbox_from_cr
+from opensandbox_server.services.fast_sandbox.network_policy import normalized_policy, policy_status
+from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
 from opensandbox_server.services.sandbox_service import SandboxService
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
@@ -83,7 +83,7 @@ from opensandbox_server.services.validators import (
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
 
 
-class FsbSandboxService(SandboxService, ExtensionService):
+class FastSandboxService(SandboxService, ExtensionService):
     """sandbox fsb runtime backed by the fast-sandbox FastPath v2 API."""
 
     def __init__(
@@ -91,7 +91,7 @@ class FsbSandboxService(SandboxService, ExtensionService):
         config: AppConfig,
         fastpath_client: Optional[FastPathClient] = None,
         k8s_client: Optional[K8sClient] = None,
-        template_service: Optional[FsbTemplateService] = None,
+        template_service: Optional[FastSandboxTemplateService] = None,
     ):
         self._app_config = config
         # The fsb backend shares the [kubernetes] block: CR reads and the
@@ -111,10 +111,10 @@ class FsbSandboxService(SandboxService, ExtensionService):
             self._template_service.close()
         self._fastpath.close()
 
-    def resolve_template_service(self) -> FsbTemplateService:
+    def resolve_template_service(self) -> FastSandboxTemplateService:
         """Lazily create the shared template service."""
         if self._template_service is None:
-            self._template_service = FsbTemplateService(self._app_config)
+            self._template_service = FastSandboxTemplateService(self._app_config)
             # Keep template rows converged even without /templates traffic
             # (template-mode create resolves against the synced row).
             self._template_service.start_background_sync()
@@ -122,7 +122,7 @@ class FsbSandboxService(SandboxService, ExtensionService):
 
     @staticmethod
     def generate_sandbox_id() -> str:
-        return f"flt-{SandboxService.generate_sandbox_id()}"
+        return f"fsb-{SandboxService.generate_sandbox_id()}"
 
     def set_tenant_provider(self, provider: object) -> None:
         """Inject the tenant provider (tenant -> fast-sandbox namespace mapping)."""
@@ -635,4 +635,4 @@ def _enum_name(enum_type, value: int) -> str:
         return str(value)
 
 
-__all__ = ["FsbSandboxService"]
+__all__ = ["FastSandboxService"]

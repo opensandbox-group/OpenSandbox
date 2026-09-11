@@ -37,7 +37,7 @@ SDK ──HTTP──> server (source-built, runtime.type=fsb)
               │ POST /sandboxes ──gRPC──> FastPath ──> fastlet ──> firecracker sandbox
               │                                                    (golden image + execd, egress attached)
               └─ GET endpoints/{port}: signed f1.* route (HMAC, key shared with ingress)
-SDK ──header──> ingress gateway (source-built, --provider-type=fsb)
+SDK ──header──> ingress gateway (source-built, --provider-type=fast-sandbox)
               │ ResolveEndpoint ──gRPC──> FastPath
               └─> fastlet-proxy ──> sandbox execd :44772
 ```
@@ -54,7 +54,7 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fsb)
 
 - **Pool with egress**: `firecracker-egress-pool` (firecracker runtime,
   `poolMin=2`) carries the OpenSandbox egress container in every fastlet
-  Pod netns — fleet profile, `dns+nft` mode — wired through the Sandbox
+  Pod netns — fast-sandbox profile, `dns+nft` mode — wired through the Sandbox
   Actions channel (`infraComponents` host-process entry +
   `actionHandlers` egress@18080 with the runtime-ready /
   data-plane-ready hooks).

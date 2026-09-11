@@ -56,7 +56,7 @@ func (s *wireFastPathService) ResolveEndpoint(_ context.Context, request *fastpa
 	return s.response, nil
 }
 
-func TestFleetsProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
+func TestFastSandboxProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
 	fixtureBytes, err := os.ReadFile("../fastpath/v2/testdata/resolve_endpoint.json")
 	require.NoError(t, err)
 	var fixture map[string]string
@@ -73,7 +73,7 @@ func TestFleetsProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
 	fastpathv2.RegisterFastPathServiceServer(server, &wireFastPathService{request: requestBytes, response: response})
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
-	provider, err := NewFleetsProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy")
+	provider, err := NewFastSandboxProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy")
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -86,7 +86,7 @@ func TestFleetsProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
 	require.Equal(t, time.Unix(2_000_000_060, 0), info.ExpiresAt)
 }
 
-func TestFleetsProviderMapsUnreadyPreconditionToRetryableError(t *testing.T) {
+func TestFastSandboxProviderMapsUnreadyPreconditionToRetryableError(t *testing.T) {
 	err := mapFastPathError(status.Error(codes.FailedPrecondition, "Sandbox interaction is not Ready"))
 	require.ErrorIs(t, err, ErrSandboxNotReady)
 }
@@ -101,10 +101,10 @@ func (f *fakeFastPathResolver) ResolveEndpoint(_ context.Context, request *fastp
 	}, nil
 }
 
-func TestFleetsProviderMapsTargetsAndCachesByNamespace(t *testing.T) {
+func TestFastSandboxProviderMapsTargetsAndCachesByNamespace(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0)
 	resolver := &fakeFastPathResolver{now: now}
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
 	provider.now = func() time.Time { return now }
 
 	for _, namespace := range []string{"tenant-a", "tenant-b"} {
@@ -125,10 +125,10 @@ func TestFleetsProviderMapsTargetsAndCachesByNamespace(t *testing.T) {
 	}
 }
 
-func TestFleetsProviderUsesRawPortAndRefreshesNearExpiry(t *testing.T) {
+func TestFastSandboxProviderUsesRawPortAndRefreshesNearExpiry(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0)
 	resolver := &fakeFastPathResolver{now: now}
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
 	provider.now = func() time.Time { return now }
 	target := EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080}
 
@@ -144,10 +144,10 @@ func TestFleetsProviderUsesRawPortAndRefreshesNearExpiry(t *testing.T) {
 	require.Len(t, resolver.requests, 2)
 }
 
-func TestFleetsProviderSweepRemovesExpiredEntries(t *testing.T) {
+func TestFastSandboxProviderSweepRemovesExpiredEntries(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0)
 	resolver := &fakeFastPathResolver{now: now}
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
 	provider.now = func() time.Time { return now }
 	oldTarget := EndpointTarget{Namespace: "tenant-a", SandboxID: "old", Port: 8080}
 	newTarget := EndpointTarget{Namespace: "tenant-a", SandboxID: "new", Port: 8080}
@@ -190,29 +190,29 @@ func TestWaitForFastPathReadyTimesOut(t *testing.T) {
 	require.ErrorIs(t, waitForFastPathReady(ctx, connection), context.DeadlineExceeded)
 }
 
-func TestFleetsProviderRejectsPhase1aEgressWithoutRPC(t *testing.T) {
+func TestFastSandboxProviderRejectsPhase1aEgressWithoutRPC(t *testing.T) {
 	resolver := &fakeFastPathResolver{now: time.Now()}
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
 	_, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: EgressPort})
 	require.ErrorIs(t, err, ErrTargetUnsupported)
 	require.Empty(t, resolver.requests)
 }
 
-func TestFleetsProviderRejectsMissingCredential(t *testing.T) {
+func TestFastSandboxProviderRejectsMissingCredential(t *testing.T) {
 	resolver := fastPathResolverFunc(func(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 		return &fastpathv2.ResolveEndpointResponse{
 			ProxyEndpoint:        "http://sandbox-proxy:8080/v2/sandbox",
 			ExpiresAtUnixSeconds: time.Now().Add(time.Minute).Unix(),
 		}, nil
 	})
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
 	_, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080})
 	require.EqualError(t, err, "FastPath returned an invalid route credential")
 	detailed := err.(interface{ InternalCause() error })
 	require.EqualError(t, detailed.InternalCause(), fmt.Sprintf("FastPath response is missing %s", FastSandboxCredential))
 }
 
-func TestFleetsProviderAcceptsCaseInsensitiveCredentialHeader(t *testing.T) {
+func TestFastSandboxProviderAcceptsCaseInsensitiveCredentialHeader(t *testing.T) {
 	resolver := fastPathResolverFunc(func(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 		return &fastpathv2.ResolveEndpointResponse{
 			ProxyEndpoint:        "http://fastlet-proxy:5780/v2/sandboxes/uid/components/execd",
@@ -220,13 +220,13 @@ func TestFleetsProviderAcceptsCaseInsensitiveCredentialHeader(t *testing.T) {
 			ExpiresAtUnixSeconds: time.Now().Add(time.Minute).Unix(),
 		}, nil
 	})
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
 	info, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: ExecdPort})
 	require.NoError(t, err)
 	require.Equal(t, "credential", info.UpstreamHeaders.Get(FastSandboxCredential))
 }
 
-func TestFleetsProviderRejectsDuplicateCredentialHeaders(t *testing.T) {
+func TestFastSandboxProviderRejectsDuplicateCredentialHeaders(t *testing.T) {
 	resolver := fastPathResolverFunc(func(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 		return &fastpathv2.ResolveEndpointResponse{
 			ProxyEndpoint: "http://fastlet-proxy:5780/v2/sandboxes/uid/components/execd",
@@ -237,12 +237,12 @@ func TestFleetsProviderRejectsDuplicateCredentialHeaders(t *testing.T) {
 			ExpiresAtUnixSeconds: time.Now().Add(time.Minute).Unix(),
 		}, nil
 	})
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
 	_, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: ExecdPort})
 	require.EqualError(t, err, "FastPath returned duplicate route credentials")
 }
 
-func TestFleetsProviderRejectsUnsupportedRequiredHeaders(t *testing.T) {
+func TestFastSandboxProviderRejectsUnsupportedRequiredHeaders(t *testing.T) {
 	for _, header := range []string{"Host", "Authorization"} {
 		t.Run(header, func(t *testing.T) {
 			resolver := fastPathResolverFunc(func(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
@@ -255,7 +255,7 @@ func TestFleetsProviderRejectsUnsupportedRequiredHeaders(t *testing.T) {
 					ExpiresAtUnixSeconds: time.Now().Add(time.Minute).Unix(),
 				}, nil
 			})
-			provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+			provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
 			_, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: ExecdPort})
 			require.EqualError(t, err, "FastPath returned unsupported required headers")
 			detailed := err.(interface{ InternalCause() error })
@@ -264,7 +264,7 @@ func TestFleetsProviderRejectsUnsupportedRequiredHeaders(t *testing.T) {
 	}
 }
 
-func TestFleetsProviderRejectsNearExpiryCredential(t *testing.T) {
+func TestFastSandboxProviderRejectsNearExpiryCredential(t *testing.T) {
 	resolver := fastPathResolverFunc(func(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 		return &fastpathv2.ResolveEndpointResponse{
 			ProxyEndpoint:        "http://fastlet-proxy:5780/v2/sandboxes/uid/components/execd",
@@ -272,7 +272,7 @@ func TestFleetsProviderRejectsNearExpiryCredential(t *testing.T) {
 			ExpiresAtUnixSeconds: time.Now().Add(3 * time.Second).Unix(),
 		}, nil
 	})
-	provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
 	_, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: ExecdPort})
 	require.EqualError(t, err, "FastPath returned an expired or near-expiry route credential")
 }
@@ -290,7 +290,7 @@ func TestMapFastPathErrorDoesNotExposeInternalDetails(t *testing.T) {
 	require.False(t, strings.Contains(err.Error(), internalDetail))
 }
 
-func TestFleetsProviderDoesNotExposeInvalidProxyEndpoint(t *testing.T) {
+func TestFastSandboxProviderDoesNotExposeInvalidProxyEndpoint(t *testing.T) {
 	for _, internalEndpoint := range []string{"http://10.0.3.17:5780/%zz", "/missing-authority"} {
 		t.Run(internalEndpoint, func(t *testing.T) {
 			resolver := fastPathResolverFunc(func(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
@@ -300,7 +300,7 @@ func TestFleetsProviderDoesNotExposeInvalidProxyEndpoint(t *testing.T) {
 					ExpiresAtUnixSeconds: time.Now().Add(time.Minute).Unix(),
 				}, nil
 			})
-			provider := NewFleetsProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+			provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
 			_, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: ExecdPort})
 			require.EqualError(t, err, "FastPath returned an invalid proxy endpoint")
 			detailed := err.(interface{ InternalCause() error })
@@ -310,8 +310,8 @@ func TestFleetsProviderDoesNotExposeInvalidProxyEndpoint(t *testing.T) {
 	}
 }
 
-func TestNewFleetsProviderRejectsUnknownAccessMode(t *testing.T) {
-	_, err := NewFleetsProvider("fastpath:9090", time.Second, "unknown")
+func TestNewFastSandboxProviderRejectsUnknownAccessMode(t *testing.T) {
+	_, err := NewFastSandboxProvider("fastpath:9090", time.Second, "unknown")
 	require.EqualError(t, err, `unsupported FastPath access mode "unknown"`)
 }
 

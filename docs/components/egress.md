@@ -45,7 +45,7 @@ The sidecar renews timed elements by ensuring each element exists, deleting it, 
 
 In sidecar `dns+nft` mode with a default-deny policy, the sidecar also revalidates previously observed allowed domains every 30 seconds. A cached IP receives another finite DNS-derived lease only when the applied policy still allows its domain and a fresh upstream A/AAAA lookup still returns that IP. Background lookups neither shorten a longer existing lease nor authorize newly discovered IPs that the client has never received. This lets clients such as OSSFS reconnect using cached addresses after the TCP reconnect grace period, without making an IP authorization permanent.
 
-Revalidation is best-effort and bounded to 128 domains, 64 observed IPs per domain, four concurrent lookups, five seconds per lookup and a 20-second batch deadline. Capacity pressure evicts the domain least recently observed in a client DNS response; background work does not count as client activity. Failed or truncated DNS responses do not extend leases. Negative answers and addresses absent from a successful revalidation stop domain-based renewal; existing TCP renewal and finite leases retain their previous behavior. Policy replacement clears domain tracking and invalidates in-flight results. Shutdown stops refresh work. A client DNS lookup is still required after eviction, policy replacement or an address change. DNS-only and fleet profiles do not enable this sidecar revalidation loop.
+Revalidation is best-effort and bounded to 128 domains, 64 observed IPs per domain, four concurrent lookups, five seconds per lookup and a 20-second batch deadline. Capacity pressure evicts the domain least recently observed in a client DNS response; background work does not count as client activity. Failed or truncated DNS responses do not extend leases. Negative answers and addresses absent from a successful revalidation stop domain-based renewal; existing TCP renewal and finite leases retain their previous behavior. Policy replacement clears domain tracking and invalidates in-flight results. Shutdown stops refresh work. A client DNS lookup is still required after eviction, policy replacement or an address change. DNS-only and fast-sandbox profiles do not enable this sidecar revalidation loop.
 
 ### Kubernetes Service Access Under `defaultAction: deny`
 
@@ -224,13 +224,13 @@ are not inferred.
 | `decrypt` | `binding_host` | SNI is covered by an HTTPS binding host selector; method/path do not affect this host-level projection |
 | `passthrough` | `no_binding_host` | Validated Vault has no HTTPS selector covering SNI |
 | `passthrough` | `no_vault` | Sidecar active-Vault API returned authoritative absence; not proof of a future startup empty-snapshot transaction |
-| `unavailable` | `unknown_subject_or_vault` | Fleet 404 cannot distinguish an unknown source identity from absent Vault state |
+| `unavailable` | `unknown_subject_or_vault` | Fast Sandbox 404 cannot distinguish an unknown source identity from absent Vault state |
 | `unavailable` | `lookup_failed` | The existing lookup failed; no cached result is used to guess |
 | `unavailable` | `missing_sni`, `invalid_sni` | No usable ASCII SNI in this observed request |
 | `unavailable` | `invalid_snapshot`, `observer_error` | Shadow projection could not interpret the sample |
 
 Only these fixed reasons and decisions plus existing shared attributes are
-exported. No hostname, path, credential, revision, or fleet subject ID is added.
+exported. No hostname, path, credential, revision, or fast-sandbox subject ID is added.
 The Python addon emits a fixed outcome through its existing stdout pipe; Go
 consumes it as a metric instead of forwarding it to the application log sink.
 Unknown outcomes are discarded. Operator addons and the child process remain
@@ -347,7 +347,7 @@ is never mistaken for an idle sidecar.
 
 Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
 
-## Fleet Profile (multi-sandbox control plane)
+## Fast Sandbox Profile (multi-sandbox control plane)
 
 > Experimental: design per [OSEP-0022](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0022-multi-sandbox-egress-control-plane.md);
 > subject lifecycle follows the fast-sandbox
@@ -355,7 +355,7 @@ Full metric inventory and attribute semantics: [egress OpenTelemetry reference](
 > Handler protocol (replacing the earlier slot-store observation).
 
 The default `sidecar` profile serves exactly one sandbox sharing one network
-namespace. The opt-in `fleet` profile (`OPENSANDBOX_EGRESS_PROFILE=fleet`)
+namespace. The opt-in `fast-sandbox` profile (`OPENSANDBOX_EGRESS_PROFILE=fast-sandbox`)
 serves N sandboxes sharing one host/network domain (fast-sandbox Fastlet
 Pod): a single egress process hosts one **subject** per sandbox, each with its
 own policy, credentials, and kernel rules. The sidecar profile and its API are
@@ -412,7 +412,7 @@ unchanged; both profiles are mutually exclusive deployment forms.
   > policy allow cannot override it. Only TCP is blocked: UDP/QUIC
   > (HTTP/3, DoH-over-UDP) is not intercepted by this mechanism.
 - **Telemetry**: OpenTelemetry metrics are exported exactly as in the sidecar
-  profile; nft updates are attributed per fleet operation (`deny_first`,
+  profile; nft updates are attributed per fast-sandbox operation (`deny_first`,
   `static_apply`, `dynamic_add`, `reset`, `remove`).
 - **Credentials**: memory-only, per subject; complete vault revisions are
   pushed over the proxy route (OSEP-0012 model). No Secret volume, no egress
@@ -424,7 +424,7 @@ unchanged; both profiles are mutually exclusive deployment forms.
   deny-first. The server re-pushes credential revisions.
 
 For how policy is applied, how outbound traffic flows through the nftables
-dispatch, and how the credential vault works in the fleet profile, see
+dispatch, and how the credential vault works in the fast-sandbox profile, see
 [policy, traffic flow, and credential vault](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/policy-traffic-vault-flow.md).
 
 ## Build & Run

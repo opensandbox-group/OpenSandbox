@@ -94,7 +94,7 @@ func TestStartActiveSocketServerRequestAwareDispatch(t *testing.T) {
 	socketPath := shortSocketPath(t)
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
 	_, cleanup, err := StartActiveSocketServerRequestAware(func(w http.ResponseWriter, r *http.Request) {
-		// the fleet handler dispatch: clientIp -> subject -> vault
+		// the fast-sandbox handler dispatch: clientIp -> subject -> vault
 		ip := r.URL.Query().Get("clientIp")
 		if ip == "" {
 			http.Error(w, "clientIp query parameter required", http.StatusBadRequest)

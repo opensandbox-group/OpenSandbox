@@ -67,7 +67,7 @@ class SandboxCRReader:
                 for obj in client.list_custom_objects(
                     GROUP, VERSION, namespace, PLURAL, ignore_not_found=False
                 )
-                if obj.get("metadata", {}).get("name", "").startswith("flt-")
+                if obj.get("metadata", {}).get("name", "").startswith("fsb-")
             ]
         except Exception as exc:
             raise self._read_error(exc) from exc

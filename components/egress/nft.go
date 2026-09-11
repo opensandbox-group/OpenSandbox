@@ -73,7 +73,7 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 
 // parseDoHBlocklist parses the comma-separated OPENSANDBOX_EGRESS_DOH_BLOCKLIST
 // value (IP or CIDR entries) into v4/v6 lists. Invalid entries are logged and
-// skipped. Shared by the sidecar and fleet profiles so both enforce the same
+// skipped. Shared by the sidecar and fast-sandbox profiles so both enforce the same
 // DoH-443 semantics.
 func parseDoHBlocklist(raw string) (v4, v6 []string) {
 	for _, p := range strings.Split(raw, ",") {

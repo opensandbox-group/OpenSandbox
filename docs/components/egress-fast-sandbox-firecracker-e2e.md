@@ -1,15 +1,15 @@
 ---
-title: "Fleet Firecracker E2E"
+title: "Fast Sandbox Firecracker E2E"
 description: "Real-KVM fast-sandbox credential-vault e2e: two firecracker VMs with per-subject policies and vaults, real CA trust install, and the measured CA-installation cost."
 ---
 
-# Fleet Firecracker E2E: Real-VM Credential Vault on fast-sandbox
+# Fast Sandbox Firecracker E2E: Real-VM Credential Vault on fast-sandbox
 
 > Status: **verified on real hardware**. The fast-sandbox terminal state:
 > egress in a containerized Pod netns (docker bridge), TWO real firecracker
 > microVMs with different policies/vaults, real CA delivery into the VM
 > rootfs, real system-trust install inside the guest, real TLS injection —
-> no `curl -k`. Runner: `tests/e2e-fleet-firecracker.sh` (root + KVM + docker).
+> no `curl -k`. Runner: `tests/e2e-fast-sandbox-firecracker.sh` (root + KVM + docker).
 
 ## Topology
 

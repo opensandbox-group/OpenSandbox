@@ -1,9 +1,9 @@
 ---
-title: "Fleet Profile: Shared MITM Data Plane"
-description: "Design and implementation of the fleet-profile shared mitmdump: per-subject Pod-netns DNAT interception, the authoritative INPUT enforcement chain, the subject-aware active vault API, and CA delivery."
+title: "Fast Sandbox Profile: Shared MITM Data Plane"
+description: "Design and implementation of the fast-sandbox-profile shared mitmdump: per-subject Pod-netns DNAT interception, the authoritative INPUT enforcement chain, the subject-aware active vault API, and CA delivery."
 ---
 
-# Fleet Profile: Shared MITM Data Plane — Design
+# Fast Sandbox Profile: Shared MITM Data Plane — Design
 
 > Status: **implemented** (control plane + data plane). The per-sandbox CA
 > delivery into the sandbox trust store is the remaining external dependency
@@ -12,7 +12,7 @@ description: "Design and implementation of the fleet-profile shared mitmdump: pe
 
 ## Goal
 
-In the fleet profile, N sandboxes share one Pod netns. HTTP(S) traffic of
+In the fast-sandbox profile, N sandboxes share one Pod netns. HTTP(S) traffic of
 every sandbox is transparently intercepted by a **single shared mitmdump**,
 and credentials are selected from the **subject's own vault** by the client's
 source IP (which NAT preserves). The sidecar profile and its
@@ -54,14 +54,14 @@ single-vault addon behavior are unchanged.
      sandbox saddr key (the sidecar's uid-owner exclusion is unnecessary).
 
   (The earlier per-sandbox netns OUTPUT mirror layer — `pkg/sandboxnft` — was
-  removed when the fleet profile moved to the fast-sandbox Sandbox Actions
+  removed when the fast-sandbox profile moved to the fast-sandbox Sandbox Actions
   protocol: the action envelope does not carry the sandbox netns path, and
   the Pod-netns layers are authoritative for both forwarded and intercepted
   traffic.)
 - **Enforcement of intercepted traffic (important)**: the DNAT delivers the
   intercepted 80/443 **locally** (INPUT path), so the Pod-netns **forward
   hook never sees it**. The authoritative enforcement for MITM traffic is a
-  dedicated **Pod-netns INPUT chain** (`opensandbox-fleet` table, installed
+  dedicated **Pod-netns INPUT chain** (`opensandbox-fast-sandbox` table, installed
   when MITM is enabled): it matches only `ct status dnat` packets on the
   mitmproxy port, dispatches per sandbox, and applies the same deny/allow/
   DNS-learned/DoH-443 policy to the conntrack **ORIGINAL** destination. A
@@ -70,7 +70,7 @@ single-vault addon behavior are unchanged.
   keeps the forward hook as its authoritative layer.
 - **Single interception target**: the shared mitmdump in the Pod netns,
   listening on `0.0.0.0:18081` (a 127.0.0.1 bind would never receive traffic
-  DNATed to the gateway veth address — same reason the fleet DNS proxy binds
+  DNATed to the gateway veth address — same reason the fast-sandbox DNS proxy binds
   `:15353`). The Pod-netns OUTPUT REDIRECT is deliberately NOT installed
   (sidecar's `SetupTransparentHTTP` would also intercept the Pod's own
   traffic).
@@ -84,7 +84,7 @@ table inet opensandbox_gateway_mitm
     ip saddr <sandboxIP> tcp dport {80,443} dnat to <gateway>:18081
 ```
 
-The table is rebuilt wholesale from the fleet server's in-memory subject map
+The table is rebuilt wholesale from the fast-sandbox server's in-memory subject map
 on every register/unload; nft batches are transactional, so a failed rebuild
 leaves the previous table live (fail closed at registration: the rebuild runs
 BEFORE the subject is marked registered).
@@ -126,8 +126,8 @@ If-None-Match: "<opaque-active-snapshot-tag>"
 
 ## Addon changes (`mitmscripts/system.py`)
 
-- `_load_active_vault(client_ip)` — in fleet mode (`OPENSANDBOX_EGRESS_PROFILE
-  =fleet`) the immutable cache is keyed by client IP; the sidecar path uses one
+- `_load_active_vault(client_ip)` — in fast-sandbox mode (`OPENSANDBOX_EGRESS_PROFILE
+  =fast-sandbox`) the immutable cache is keyed by client IP; the sidecar path uses one
   shared cache. Every new flow conditionally validates its cached opaque tag,
   and only a changed tag transfers the full secret-bearing snapshot.
 - Call sites pass `flow.client_conn.peername[0]` (defensive: missing peername
@@ -137,34 +137,34 @@ If-None-Match: "<opaque-active-snapshot-tag>"
 - Timeout/refusal, 5xx, malformed payload/ETag, and other lookup failures clear
   that cache entry and deny all intercepted traffic before upstream (buffered
   request: 503; streamed or unknown-length request: flow killed).
-- Env knob `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` unchanged; the fleet socket
+- Env knob `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` unchanged; the fast-sandbox socket
   path defaults to the same location (per-Pod, one egress process).
 
-## Assembly (`fleet.go` / `fleet_mitm.go`)
+## Assembly (`fastsandbox.go` / `fastsandbox_mitm.go`)
 
-- Gate: `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true` in fleet mode starts
+- Gate: `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true` in fast-sandbox mode starts
   the shared mitmdump via the existing `mitmTransparent` machinery, **minus**
   Pod-netns `SetupTransparentHTTP` (the DNAT pairs are per-subject instead),
   with `--listen-host 0.0.0.0`.
-- `mitmGate` (HealthGate) wired into the fleet healthz (mitm pending ⇒ 503),
+- `mitmGate` (HealthGate) wired into the fast-sandbox healthz (mitm pending ⇒ 503),
   matching sidecar semantics; vault `Ready()` gating stays sidecar-only.
 - `OnRegistered`/`OnSlotUpdated`/`OnUnloaded` mount/unmount the per-subject
-  DNAT entries through the fleet server's injected installer
+  DNAT entries through the fast-sandbox server's injected installer
   (`pkg/iptables.InstallMitmRedirects`).
 - The subject-aware active socket server starts with the shared mitmdump and
   shuts down with the profile context.
 
-## CA export (fleet)
+## CA export (fast-sandbox)
 
 - The CA is exported to a **dedicated subdir**:
   `/opt/opensandbox/mitm-ca/mitmproxy-ca-cert.pem`
-  (`mitmproxy.SyncRootCAFleet`) — the fastlet bind-mounts this directory
+  (`mitmproxy.SyncRootCAFastSandbox`) — the fastlet bind-mounts this directory
   read-only into every sandbox at creation (fast-sandbox issue #19). A
   directory-level mount keeps the export visible across egress's atomic
   rename-based CA rotation; the dedicated subdir (not the whole
   `/opt/opensandbox`) avoids shadowing the fastlet-placed execd binary and
   avoids a sandbox-shared-writable trust anchor.
-- `PurgeStaleExportedCA` clears both the sidecar path and the fleet subdir on
+- `PurgeStaleExportedCA` clears both the sidecar path and the fast-sandbox subdir on
   startup (stale-CA class of #1370).
 
 ## Fail-closed semantics
@@ -191,15 +191,15 @@ If-None-Match: "<opaque-active-snapshot-tag>"
 
 1. `pkg/iptables/gateway_mitm.go`: per-subject DNAT script builder + wholesale
    rebuild (fake-runner-tested via pure function tests).
-2. `fleet_server.go`: subject-aware active handler (`clientIp` → subject →
+2. `fastsandbox_server.go`: subject-aware active handler (`clientIp` → subject →
    snapshot), `SetMitm` wiring, DNAT entry lifecycle in the registration
    hooks, healthz gate.
-3. `fleet_mitm.go` / `fleet.go`: shared mitmdump assembly (no Pod rules),
+3. `fastsandbox_mitm.go` / `fastsandbox.go`: shared mitmdump assembly (no Pod rules),
    CA subdir export, active socket startup.
 4. `pkg/credentialvault`: request-aware socket-server variant (additive;
    sidecar handler untouched).
-5. `pkg/mitmproxy`: `Config.ListenHost` (fleet passes 0.0.0.0),
-   `SyncRootCAFleet` (subdir export, no system-trust install).
-6. `mitmscripts/system.py`: client-IP-keyed vault loading (fleet mode).
+5. `pkg/mitmproxy`: `Config.ListenHost` (fast-sandbox passes 0.0.0.0),
+   `SyncRootCAFastSandbox` (subdir export, no system-trust install).
+6. `mitmscripts/system.py`: client-IP-keyed vault loading (fast-sandbox mode).
 7. Tests: rule shapes, socket dispatch over unix sockets, registration
    fail-closed, healthz gate, addon cache semantics (52 Python tests).

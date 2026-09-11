@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package fleetnft
+package fastsandboxnft
 
 import (
 	"context"
@@ -86,29 +86,29 @@ func TestDenyFirstInstallFailClosedShape(t *testing.T) {
 	// master chain is fail-closed: ACCEPT policy with an unmarked-drop tail
 	// (the forward path never issues an explicit accept — bridge-netfilter
 	// semantics), plus the prerouting mark hook chain
-	require.Contains(t, script, "add chain inet opensandbox-fleet dispatch { type filter hook forward priority 0; policy accept; }")
-	require.Contains(t, script, "add chain inet opensandbox-fleet marking { type filter hook prerouting priority 0; }")
-	require.Contains(t, script, "delete table inet opensandbox-fleet")
-	require.Contains(t, script, "add rule inet opensandbox-fleet dispatch meta mark & 0x2 != 0x2 drop")
+	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox dispatch { type filter hook forward priority 0; policy accept; }")
+	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox marking { type filter hook prerouting priority 0; }")
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch meta mark & 0x2 != 0x2 drop")
 	// dispatch rule binds source IP + host veth (defense in depth)
 	require.Contains(t, script, "ip saddr 10.0.0.5 jump")
-	require.Contains(t, script, `add rule inet opensandbox-fleet dispatch ip saddr 10.0.0.5 jump subj_s_u_1`)
+	require.Contains(t, script, `add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.5 jump subj_s_u_1`)
 	// the prerouting mark jump reaches the subject's mark chain
-	require.Contains(t, script, `add rule inet opensandbox-fleet marking ip saddr 10.0.0.5 jump mark_s_u_1`)
+	require.Contains(t, script, `add rule inet opensandbox-fast-sandbox marking ip saddr 10.0.0.5 jump mark_s_u_1`)
 	// subject chains exist; deny-first = no mark rules, drop-only forward chain
 	require.Contains(t, script, "subj_s_u_1")
 	require.Contains(t, script, "mark_s_u_1")
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop")
 	assert.NotContains(t, script, "meta mark set", "deny-first must not mark anything")
 	// no allow elements exist yet
-	require.NotContains(t, script, "add element inet opensandbox-fleet subj_s_u_1_allow")
+	require.NotContains(t, script, "add element inet opensandbox-fast-sandbox subj_s_u_1_allow")
 
 	// second subject: table header must NOT be re-created (would kill subject 1)
 	s2 := subject.FromSandboxUID("u-2")
 	require.NoError(t, a.ApplyDenyFirst(ctx, s2, testSlot("u-2", "10.0.0.6")))
 	script2 := runner.last()
-	assert.NotContains(t, script2, "delete table inet opensandbox-fleet", "table must not be recreated")
-	require.Contains(t, script2, `add rule inet opensandbox-fleet dispatch ip saddr 10.0.0.6 jump subj_s_u_2`)
+	assert.NotContains(t, script2, "delete table inet opensandbox-fast-sandbox", "table must not be recreated")
+	require.Contains(t, script2, `add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.6 jump subj_s_u_2`)
 	require.Equal(t, 2, runner.count())
 }
 
@@ -129,12 +129,12 @@ func TestPolicySwapAtomic(t *testing.T) {
 
 	script := runner.last()
 	// swap = flush chain + flush static sets + re-add elements/rules, ONE transaction
-	require.Contains(t, script, "flush chain inet opensandbox-fleet subj_s_u_1")
-	require.Contains(t, script, "flush set inet opensandbox-fleet subj_s_u_1_allow_v4")
-	require.Contains(t, script, "add element inet opensandbox-fleet subj_s_u_1_allow_v4 { 10.0.0.0/24 }")
-	require.Contains(t, script, "add element inet opensandbox-fleet subj_s_u_1_deny_v4 { 1.2.3.4 }")
+	require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox subj_s_u_1")
+	require.Contains(t, script, "flush set inet opensandbox-fast-sandbox subj_s_u_1_allow_v4")
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox subj_s_u_1_allow_v4 { 10.0.0.0/24 }")
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox subj_s_u_1_deny_v4 { 1.2.3.4 }")
 	// dynamic sets survive the swap (never deleted)
-	assert.NotContains(t, script, "flush set inet opensandbox-fleet subj_s_u_1_dyn")
+	assert.NotContains(t, script, "flush set inet opensandbox-fast-sandbox subj_s_u_1_dyn")
 	require.Equal(t, 1, runner.count(), "policy swap must be a single transaction")
 }
 
@@ -205,7 +205,7 @@ func TestRemoveRebuildsTable(t *testing.T) {
 	// (subject 2 keeps its full policy, subject 1 is gone).
 	require.NoError(t, a.Remove(ctx, s1))
 	script := runner.last()
-	require.Contains(t, script, "delete table inet opensandbox-fleet")
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
 	require.Contains(t, script, "8.8.8.8")
 	assert.NotContains(t, script, "subj_s_u_1", "removed subject must not reappear in the rebuild")
 	assert.NotContains(t, script, "10.0.0.5", "removed subject's dispatch must not reappear")
@@ -213,13 +213,13 @@ func TestRemoveRebuildsTable(t *testing.T) {
 	// last subject removed: swap in the empty master drop chain (fail closed)
 	require.NoError(t, a.Remove(ctx, s2))
 	script = runner.last()
-	require.Contains(t, script, "add chain inet opensandbox-fleet dispatch { type filter hook forward priority 0; policy accept; }")
+	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox dispatch { type filter hook forward priority 0; policy accept; }")
 	assert.NotContains(t, script, "subj_s_u_2", "no subjects may remain after removing the last one")
 
 	// last subject removed: whole table deleted
 	require.NoError(t, a.Remove(ctx, s2))
 	script = runner.last()
-	require.Contains(t, script, "delete table inet opensandbox-fleet")
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
 }
 
 func TestDenyFirstResetsOnReRegistration(t *testing.T) {
@@ -241,18 +241,18 @@ func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	// rebind: controller re-observes the same subject -> force reset
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 	script := runner.last()
-	require.Contains(t, script, "flush chain inet opensandbox-fleet subj_s_u_1")
-	require.Contains(t, script, "flush set inet opensandbox-fleet subj_s_u_1_dyn_v4", "DNS leases must be wiped on rebind")
-	require.Contains(t, script, `add rule inet opensandbox-fleet dispatch ip saddr 10.0.0.5 jump subj_s_u_1`, "dispatch re-added")
+	require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox subj_s_u_1")
+	require.Contains(t, script, "flush set inet opensandbox-fast-sandbox subj_s_u_1_dyn_v4", "DNS leases must be wiped on rebind")
+	require.Contains(t, script, `add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.5 jump subj_s_u_1`, "dispatch re-added")
 	assert.NotContains(t, script, "8.8.8.8", "old policy must not survive a rebind")
 	assert.NotContains(t, script, "1.1.1.1", "old DNS lease must not survive a rebind")
-	assert.NotContains(t, script, "delete table inet opensandbox-fleet", "reset must not touch other subjects")
+	assert.NotContains(t, script, "delete table inet opensandbox-fast-sandbox", "reset must not touch other subjects")
 
 	// the applier's in-memory state is deny-first again: removal deletes the
 	// last subject, so the whole table goes
 	require.NoError(t, a.Remove(ctx, s))
 	script = runner.last()
-	require.Contains(t, script, "delete table inet opensandbox-fleet")
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
 }
 
 func TestApplyResetKeepsEmptyMasterDropChain(t *testing.T) {
@@ -266,8 +266,8 @@ func TestApplyResetKeepsEmptyMasterDropChain(t *testing.T) {
 	// Reset swaps in an EMPTY master drop chain — the fail-closed guarantee
 	// must not have a window where the drop hook is gone.
 	script := runner.last()
-	require.Contains(t, script, "delete table inet opensandbox-fleet")
-	require.Contains(t, script, "add chain inet opensandbox-fleet dispatch { type filter hook forward priority 0; policy accept; }")
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox dispatch { type filter hook forward priority 0; policy accept; }")
 	assert.NotContains(t, script, "subj_s_u_1", "reset must not carry subjects")
 	assert.NotContains(t, script, "10.0.0.5", "reset must not carry dispatch rules")
 
@@ -278,8 +278,8 @@ func TestApplyResetKeepsEmptyMasterDropChain(t *testing.T) {
 	runner.mu.Unlock()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 	assert.NotContains(t, runner.last(), "delete table", "table must not be recreated after reset")
-	assert.NotContains(t, runner.last(), "add chain inet opensandbox-fleet dispatch", "dispatch chain already exists after reset")
-	require.Contains(t, runner.last(), "add chain inet opensandbox-fleet subj_s_u_1")
+	assert.NotContains(t, runner.last(), "add chain inet opensandbox-fast-sandbox dispatch", "dispatch chain already exists after reset")
+	require.Contains(t, runner.last(), "add chain inet opensandbox-fast-sandbox subj_s_u_1")
 }
 
 func TestApplyDenyFirstReRegistersWithNewAttachment(t *testing.T) {
@@ -299,8 +299,8 @@ func TestApplyDenyFirstReRegistersWithNewAttachment(t *testing.T) {
 	att2.HostVeth = "veth-new"
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, att2))
 	script := runner.last()
-	require.Contains(t, script, "flush chain inet opensandbox-fleet subj_s_u_1")
-	require.Contains(t, script, `add rule inet opensandbox-fleet dispatch ip saddr 10.0.0.9 jump subj_s_u_1`)
+	require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox subj_s_u_1")
+	require.Contains(t, script, `add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.9 jump subj_s_u_1`)
 	assert.NotContains(t, script, "delete table", "rebind must not recreate the table")
 
 	// unknown subject rejected on deny-first? No: deny-first installs; only
@@ -330,35 +330,35 @@ func TestMarkBasedAllowShapes(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
 	script := runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fleet mark_s_u_1 ip daddr @subj_s_u_1_allow_v4 meta mark set 0x2")
-	require.Contains(t, script, "add rule inet opensandbox-fleet mark_s_u_1 ip daddr @subj_s_u_1_dyn_v4 meta mark set 0x2")
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox mark_s_u_1 ip daddr @subj_s_u_1_allow_v4 meta mark set 0x2")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox mark_s_u_1 ip daddr @subj_s_u_1_dyn_v4 meta mark set 0x2")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop")
 	assert.NotContains(t, script, "subj_s_u_1 ip daddr @subj_s_u_1_allow_v4 accept", "forward path must not accept explicitly")
-	assert.NotContains(t, script, "add rule inet opensandbox-fleet subj_s_u_1 accept")
-	assert.NotContains(t, script, "add rule inet opensandbox-fleet subj_s_u_1 drop")
+	assert.NotContains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 accept")
+	assert.NotContains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop")
 
 	// default-allow policy: unconditional mark; deny sets still drop
 	pol2, err := policy.ParsePolicy(`{"defaultAction":"allow","egress":[{"action":"deny","target":"9.9.9.9"}]}`)
 	require.NoError(t, err)
 	require.NoError(t, a.ApplyPolicy(ctx, s, pol2))
 	script = runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fleet mark_s_u_1 meta mark set 0x2")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox mark_s_u_1 meta mark set 0x2")
 	assert.NotContains(t, script, "ip daddr @subj_s_u_1_allow_v4 meta mark", "default-allow must not need set-based marks")
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop")
 
 	// deny-first reset: mark chain flushed, no mark rules, drop-only forward
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 	script = runner.last()
-	require.Contains(t, script, "flush chain inet opensandbox-fleet mark_s_u_1")
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1 drop")
+	require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox mark_s_u_1")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop")
 	assert.NotContains(t, script, "meta mark set", "deny-first must not mark anything")
 }
 
 func TestWriteDispatchRuleV6(t *testing.T) {
 	var b strings.Builder
 	writeDispatchRule(&b, subject.FromSandboxUID("u-1"), testSlot("u-1", "fd00::5"), 0)
-	require.Contains(t, b.String(), `add rule inet opensandbox-fleet dispatch ip6 saddr fd00::5 jump subj_s_u_1`)
-	require.Contains(t, b.String(), `add rule inet opensandbox-fleet marking ip6 saddr fd00::5 jump mark_s_u_1`)
+	require.Contains(t, b.String(), `add rule inet opensandbox-fast-sandbox dispatch ip6 saddr fd00::5 jump subj_s_u_1`)
+	require.Contains(t, b.String(), `add rule inet opensandbox-fast-sandbox marking ip6 saddr fd00::5 jump mark_s_u_1`)
 }
 
 // TestIifnameBindingInDispatchRule: the host-veth binding lives in the
@@ -371,16 +371,16 @@ func TestIifnameBindingInDispatchRule(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.Contains(t, runner.last(), `add rule inet opensandbox-fleet dispatch ip saddr 10.0.0.5 jump subj_s_u_1`)
+	require.Contains(t, runner.last(), `add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.5 jump subj_s_u_1`)
 
 	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
 	require.NoError(t, err)
 	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
-	require.NotContains(t, runner.last(), "add rule inet opensandbox-fleet dispatch", "swap must not duplicate the dispatch rule")
+	require.NotContains(t, runner.last(), "add rule inet opensandbox-fast-sandbox dispatch", "swap must not duplicate the dispatch rule")
 
 	// rebind re-adds the dispatch rule for the (possibly changed) slot
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.Contains(t, runner.last(), `add rule inet opensandbox-fleet dispatch ip saddr 10.0.0.5 jump subj_s_u_1`)
+	require.Contains(t, runner.last(), `add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.5 jump subj_s_u_1`)
 }
 
 // TestApplyDenyFirstMissingTableFallback: the first install on a fresh table
@@ -389,7 +389,7 @@ func TestIifnameBindingInDispatchRule(t *testing.T) {
 func TestApplyDenyFirstMissingTableFallback(t *testing.T) {
 	var attempts atomic.Int32
 	runner := &fakeRunner{fail: func(script string) error {
-		if strings.Contains(script, "delete table inet opensandbox-fleet") && attempts.Add(1) == 1 {
+		if strings.Contains(script, "delete table inet opensandbox-fast-sandbox") && attempts.Add(1) == 1 {
 			return fmt.Errorf("nft apply failed: No such file or directory; did you mean table")
 		}
 		return nil
@@ -401,7 +401,7 @@ func TestApplyDenyFirstMissingTableFallback(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 	require.Equal(t, int32(1), attempts.Load(), "one failed attempt with delete-table line, then fallback")
 	assert.NotContains(t, runner.last(), "delete table", "fallback script must not contain the delete-table line")
-	require.Contains(t, runner.last(), "add table inet opensandbox-fleet")
+	require.Contains(t, runner.last(), "add table inet opensandbox-fast-sandbox")
 }
 
 // TestOverlappingIntervalsNormalized: an always-deny host inside a policy
@@ -420,7 +420,7 @@ func TestOverlappingIntervalsNormalized(t *testing.T) {
 	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
 
 	script := runner.last()
-	require.Contains(t, script, "add element inet opensandbox-fleet subj_s_u_1_deny_v4 { 10.99.0.0/24 }")
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox subj_s_u_1_deny_v4 { 10.99.0.0/24 }")
 	assert.NotContains(t, script, "10.99.0.9", "strict subnet inside a CIDR must be normalized away")
 }
 
@@ -437,15 +437,15 @@ func TestDoHBlockRulesWithBlocklist(t *testing.T) {
 
 	script := runner.last()
 	// global interval sets + per-family drop rules in the master chain
-	require.Contains(t, script, "add set inet opensandbox-fleet doh_block_v4 { type ipv4_addr; flags interval; }")
-	require.Contains(t, script, "add set inet opensandbox-fleet doh_block_v6 { type ipv6_addr; flags interval; }")
-	require.Contains(t, script, "add rule inet opensandbox-fleet dispatch ip daddr @doh_block_v4 tcp dport 443 drop")
-	require.Contains(t, script, "add rule inet opensandbox-fleet dispatch ip6 daddr @doh_block_v6 tcp dport 443 drop")
+	require.Contains(t, script, "add set inet opensandbox-fast-sandbox doh_block_v4 { type ipv4_addr; flags interval; }")
+	require.Contains(t, script, "add set inet opensandbox-fast-sandbox doh_block_v6 { type ipv6_addr; flags interval; }")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch ip daddr @doh_block_v4 tcp dport 443 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch ip6 daddr @doh_block_v6 tcp dport 443 drop")
 	// overlapping 10.99.0.9 inside 10.99.0.0/24 is normalized away
-	require.Contains(t, script, "add element inet opensandbox-fleet doh_block_v4 { 10.99.0.0/24 }")
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox doh_block_v4 { 10.99.0.0/24 }")
 	assert.NotContains(t, script, "10.99.0.9", "strict subnet inside a doh blocklist CIDR must be normalized away")
 	// blocklist mode is NOT strict: no bare 443 drop
-	assert.NotContains(t, script, "add rule inet opensandbox-fleet dispatch tcp dport 443 drop")
+	assert.NotContains(t, script, "add rule inet opensandbox-fast-sandbox dispatch tcp dport 443 drop")
 }
 
 func TestDoHStrictModeDropsAll443(t *testing.T) {
@@ -456,7 +456,7 @@ func TestDoHStrictModeDropsAll443(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 
 	script := runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fleet dispatch tcp dport 443 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch tcp dport 443 drop")
 	assert.NotContains(t, script, "doh_block", "strict mode has no blocklist sets")
 }
 
@@ -481,9 +481,9 @@ func TestDoHRulesSurviveRebuild(t *testing.T) {
 	s := subject.FromSandboxUID("u-1")
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 	require.NoError(t, a.Remove(ctx, s))
-	require.Contains(t, runner.last(), "add set inet opensandbox-fleet doh_block_v4", "empty-table swap must keep DoH rules")
+	require.Contains(t, runner.last(), "add set inet opensandbox-fast-sandbox doh_block_v4", "empty-table swap must keep DoH rules")
 	require.NoError(t, a.ApplyReset(ctx))
-	require.Contains(t, runner.last(), "add rule inet opensandbox-fleet dispatch ip daddr @doh_block_v4 tcp dport 443 drop", "reset must keep DoH rules")
+	require.Contains(t, runner.last(), "add rule inet opensandbox-fast-sandbox dispatch ip daddr @doh_block_v4 tcp dport 443 drop", "reset must keep DoH rules")
 }
 
 // TestInputChainInstalledWithMITM: the Pod-netns INPUT enforcement chain is
@@ -498,17 +498,17 @@ func TestInputChainInstalledWithMITM(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 
 	script := runner.last()
-	require.Contains(t, script, "add chain inet opensandbox-fleet input { type filter hook input priority 0; policy accept; }")
-	require.Contains(t, script, "add chain inet opensandbox-fleet subj_s_u_1_in")
-	require.Contains(t, script, `add rule inet opensandbox-fleet input ip saddr 10.0.0.5 tcp dport 18081 ct status dnat jump subj_s_u_1_in`)
+	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox input { type filter hook input priority 0; policy accept; }")
+	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox subj_s_u_1_in")
+	require.Contains(t, script, `add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.5 tcp dport 18081 ct status dnat jump subj_s_u_1_in`)
 	// a direct (non-DNATed) connection to the mitm port must be dropped —
 	// default-allow sandboxes must not bypass the transparent interception
-	require.Contains(t, script, `add rule inet opensandbox-fleet input ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport 18081 drop`)
+	require.Contains(t, script, `add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport 18081 drop`)
 	// verdicts match the conntrack ORIGINAL destination (the DNATed dst is
 	// the local mitm port)
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1_in ct original ip daddr @subj_s_u_1_deny_v4 drop")
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept")
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1_in drop", "deny-first default in the input chain")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_deny_v4 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1_in drop", "deny-first default in the input chain")
 }
 
 // TestInputChainAbsentWithoutMITM: no MITM, no input chain — the forward
@@ -537,7 +537,7 @@ func TestInputChainDoHBlocklist(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 
 	script := runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fleet input ct status dnat ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop")
 }
 
 // TestInputChainPolicySwap: a policy swap rewrites the input-chain verdicts
@@ -553,7 +553,7 @@ func TestInputChainPolicySwap(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
 	script := runner.last()
-	require.Contains(t, script, "flush chain inet opensandbox-fleet subj_s_u_1_in")
-	require.Contains(t, script, "add rule inet opensandbox-fleet subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept")
-	assert.NotContains(t, script, "add rule inet opensandbox-fleet input ip saddr", "swap must not duplicate the input dispatch rule")
+	require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox subj_s_u_1_in")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept")
+	assert.NotContains(t, script, "add rule inet opensandbox-fast-sandbox input ip saddr", "swap must not duplicate the input dispatch rule")
 }

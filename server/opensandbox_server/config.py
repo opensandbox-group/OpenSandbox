@@ -694,7 +694,7 @@ class KubernetesRuntimeConfig(BaseModel):
         ),
     )
     # -- fsb (fast-sandbox) backend --------------------------------------
-    # Shared with the kubernetes runtime, which also serves fsb (flt-)
+    # Shared with the kubernetes runtime, which also serves fsb (fsb-)
     # sandboxes side by side; unused fields are harmless per provider.
     fastpath_endpoint: str = Field(
         default="fast-sandbox-fastpath.opensandbox.svc:9090",

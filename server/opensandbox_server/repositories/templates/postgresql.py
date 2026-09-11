@@ -25,10 +25,10 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from opensandbox_server.services.templates.template_models import (
-    FsbTemplateListQuery,
-    FsbTemplateListResult,
-    FsbTemplatePhase,
-    FsbTemplateRecord,
+    FastSandboxTemplateListQuery,
+    FastSandboxTemplateListResult,
+    FastSandboxTemplatePhase,
+    FastSandboxTemplateRecord,
 )
 
 _SCHEMA_LOCK_NAME = "opensandbox-server-fsb-template-schema"
@@ -50,7 +50,7 @@ _SELECT_COLUMNS = """
 """
 
 
-class PostgreSQLFsbTemplateRepository:
+class PostgreSQLFastSandboxTemplateRepository:
     """Connection-pooled PostgreSQL repository for fsb template rows."""
 
     def __init__(
@@ -80,7 +80,7 @@ class PostgreSQLFsbTemplateRepository:
             self._pool.close()
             raise
 
-    def create(self, record: FsbTemplateRecord) -> FsbTemplateRecord:
+    def create(self, record: FastSandboxTemplateRecord) -> FastSandboxTemplateRecord:
         with self._pool.connection() as conn:
             conn.execute(
                 """
@@ -99,7 +99,7 @@ class PostgreSQLFsbTemplateRepository:
             )
         return record
 
-    def get(self, template_id: str, namespace: str) -> FsbTemplateRecord | None:
+    def get(self, template_id: str, namespace: str) -> FastSandboxTemplateRecord | None:
         with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM templates"
@@ -108,7 +108,7 @@ class PostgreSQLFsbTemplateRepository:
             ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
-    def get_by_crd_name(self, namespace: str, crd_name: str) -> FsbTemplateRecord | None:
+    def get_by_crd_name(self, namespace: str, crd_name: str) -> FastSandboxTemplateRecord | None:
         with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM templates"
@@ -117,7 +117,7 @@ class PostgreSQLFsbTemplateRepository:
             ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
-    def list(self, query: FsbTemplateListQuery) -> FsbTemplateListResult:
+    def list(self, query: FastSandboxTemplateListQuery) -> FastSandboxTemplateListResult:
         clauses: list[sql.SQL] = [sql.SQL("namespace = %(namespace)s")]
         params: dict[str, Any] = {"namespace": query.namespace}
         if query.metadata:
@@ -143,7 +143,7 @@ class PostgreSQLFsbTemplateRepository:
                 ).format(where_clause),
                 {**params, "page_size": page_size, "offset": offset},
             ).fetchall()
-        return FsbTemplateListResult(
+        return FastSandboxTemplateListResult(
             items=[self._row_to_record(row) for row in rows],
             total_items=int(total_items),
         )
@@ -161,7 +161,7 @@ class PostgreSQLFsbTemplateRepository:
         template_id: str,
         namespace: str,
         *,
-        phase: FsbTemplatePhase,
+        phase: FastSandboxTemplatePhase,
         manifest_ref: str | None,
         message: str | None,
     ) -> bool:
@@ -241,7 +241,7 @@ class PostgreSQLFsbTemplateRepository:
             )
 
     @staticmethod
-    def _to_db_params(record: FsbTemplateRecord) -> dict[str, Any]:
+    def _to_db_params(record: FastSandboxTemplateRecord) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         return {
             "template_id": record.template_id,
@@ -260,16 +260,16 @@ class PostgreSQLFsbTemplateRepository:
         }
 
     @staticmethod
-    def _row_to_record(row: dict[str, Any]) -> FsbTemplateRecord:
+    def _row_to_record(row: dict[str, Any]) -> FastSandboxTemplateRecord:
         spec = dict(row["spec_json"])
         spec["format"] = row["format"]
-        return FsbTemplateRecord(
+        return FastSandboxTemplateRecord(
             template_id=row["template_id"],
             namespace=row["namespace"],
             crd_name=row["crd_name"],
             spec=spec,
             metadata=dict(row["metadata_json"]),
-            phase=FsbTemplatePhase(row["phase"]),
+            phase=FastSandboxTemplatePhase(row["phase"]),
             manifest_ref=row["manifest_ref"],
             message=row["message"],
             created_at=row["created_at"],
@@ -277,4 +277,4 @@ class PostgreSQLFsbTemplateRepository:
         )
 
 
-__all__ = ["PostgreSQLFsbTemplateRepository"]
+__all__ = ["PostgreSQLFastSandboxTemplateRepository"]

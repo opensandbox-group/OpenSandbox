@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FsbTemplateService: fsb template management.
+"""FastSandboxTemplateService: fsb template management.
 
 The server store is the source of truth for the public catalog; the
 fast-sandbox ``SandboxTemplate`` CRD is the execution projection. Reads
@@ -38,14 +38,14 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
 from opensandbox_server.repositories.templates import (
-    FsbTemplateRepository,
+    FastSandboxTemplateRepository,
     create_fsb_template_repository,
 )
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.templates.template_models import (
-    FsbTemplateListQuery,
-    FsbTemplatePhase,
-    FsbTemplateRecord,
+    FastSandboxTemplateListQuery,
+    FastSandboxTemplatePhase,
+    FastSandboxTemplateRecord,
 )
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.validators import ensure_metadata_labels
@@ -78,13 +78,13 @@ _TEMPLATE_NOT_FOUND = {
 }
 
 
-class FsbTemplateService:
+class FastSandboxTemplateService:
     """Template catalog + SandboxTemplate CRD orchestration for fsb."""
 
     def __init__(
         self,
         config: AppConfig,
-        repository: Optional[FsbTemplateRepository] = None,
+        repository: Optional[FastSandboxTemplateRepository] = None,
         k8s_client: Optional[K8sClient] = None,
     ):
         self._config = config
@@ -139,9 +139,9 @@ class FsbTemplateService:
             if record is None:
                 return  # not a server-managed template
             if event_type == "DELETED":
-                if record.phase in (FsbTemplatePhase.PENDING, FsbTemplatePhase.BUILDING):
+                if record.phase in (FastSandboxTemplatePhase.PENDING, FastSandboxTemplatePhase.BUILDING):
                     self._update_phase(
-                        record, FsbTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
+                        record, FastSandboxTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
                     )
                 return
             crd_status = obj.get("status") or {}
@@ -153,7 +153,7 @@ class FsbTemplateService:
             if (
                 phase is not record.phase
                 or manifest_ref != record.manifest_ref
-                or (phase is FsbTemplatePhase.FAILED and message != record.message)
+                or (phase is FastSandboxTemplatePhase.FAILED and message != record.message)
             ):
                 self._update_phase(record, phase, manifest_ref, message)
 
@@ -161,7 +161,7 @@ class FsbTemplateService:
 
     # -- wiring --------------------------------------------------------------
 
-    def _repo(self) -> FsbTemplateRepository:
+    def _repo(self) -> FastSandboxTemplateRepository:
         if self._repository is None:
             self._repository = create_fsb_template_repository(self._config)
         return self._repository
@@ -182,7 +182,7 @@ class FsbTemplateService:
 
     # -- lifecycle -------------------------------------------------------------
 
-    def create_template(self, request: CreateFsbTemplateRequest) -> FsbTemplateRecord:
+    def create_template(self, request: CreateFsbTemplateRequest) -> FastSandboxTemplateRecord:
         ensure_metadata_labels(request.metadata)
         if request.resource_limits is not None:
             unsupported = set(request.resource_limits.root) - TEMPLATE_RESOURCE_KEYS
@@ -214,13 +214,13 @@ class FsbTemplateService:
             "publish": request.publish.strip(),
             "format": request.format,
         }
-        record = FsbTemplateRecord(
+        record = FastSandboxTemplateRecord(
             template_id=template_id,
             namespace=namespace,
             crd_name=template_id,
             spec=spec,
             metadata=dict(request.metadata or {}),
-            phase=FsbTemplatePhase.PENDING,
+            phase=FastSandboxTemplatePhase.PENDING,
             created_at=now,
             updated_at=now,
         )
@@ -274,7 +274,7 @@ class FsbTemplateService:
         self._ensure_namespace_watch(namespace)
         return record
 
-    def get_template(self, template_id: str) -> FsbTemplateRecord:
+    def get_template(self, template_id: str) -> FastSandboxTemplateRecord:
         namespace = self._resolve_namespace()
         record = self._repo().get(template_id, namespace)
         if record is None:
@@ -287,10 +287,10 @@ class FsbTemplateService:
         metadata: Optional[dict[str, str]] = None,
         page: int = 1,
         page_size: int = 20,
-    ) -> tuple[list[FsbTemplateRecord], int]:
+    ) -> tuple[list[FastSandboxTemplateRecord], int]:
         namespace = self._resolve_namespace()
         result = self._repo().list(
-            FsbTemplateListQuery(
+            FastSandboxTemplateListQuery(
                 namespace=namespace,
                 metadata=metadata,
                 page=page,
@@ -338,14 +338,14 @@ class FsbTemplateService:
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
         record = self._sync_status(record)
-        if record.phase is not FsbTemplatePhase.SUCCEEDED:
+        if record.phase is not FastSandboxTemplatePhase.SUCCEEDED:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
         entrypoint = list(record.spec.get("entrypoint") or DEFAULT_ENTRYPOINT)
         return record.template_id, entrypoint
 
     # -- CRD mapping -----------------------------------------------------------
 
-    def _build_crd(self, record: FsbTemplateRecord) -> dict:
+    def _build_crd(self, record: FastSandboxTemplateRecord) -> dict:
         limits = record.spec.get("resourceLimits") or {}
         vcpu = str(limits.get("cpu") or DEFAULT_VCPU)
         memory = str(limits.get("memory") or DEFAULT_MEMORY)
@@ -396,14 +396,14 @@ class FsbTemplateService:
 
     # -- status sync -------------------------------------------------------------
 
-    def _sync_status(self, record: FsbTemplateRecord) -> FsbTemplateRecord:
+    def _sync_status(self, record: FastSandboxTemplateRecord) -> FastSandboxTemplateRecord:
         crd = self._read_crd(record.namespace, record.crd_name)
         if crd is None:
             # A build that never finished cannot finish once the CRD is gone;
             # a Succeeded row keeps its artifact reference.
-            if record.phase in (FsbTemplatePhase.PENDING, FsbTemplatePhase.BUILDING):
+            if record.phase in (FastSandboxTemplatePhase.PENDING, FastSandboxTemplatePhase.BUILDING):
                 self._update_phase(
-                    record, FsbTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
+                    record, FastSandboxTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
                 )
             return record
         crd_status = crd.get("status") or {}
@@ -415,12 +415,12 @@ class FsbTemplateService:
         if (
             phase is not record.phase
             or manifest_ref != record.manifest_ref
-            or (phase is FsbTemplatePhase.FAILED and message != record.message)
+            or (phase is FastSandboxTemplatePhase.FAILED and message != record.message)
         ):
             self._update_phase(record, phase, manifest_ref, message)
         return record
 
-    def _sync_status_bulk(self, namespace: str, records: list[FsbTemplateRecord]) -> None:
+    def _sync_status_bulk(self, namespace: str, records: list[FastSandboxTemplateRecord]) -> None:
         if not records:
             return
         try:
@@ -434,9 +434,9 @@ class FsbTemplateService:
         for record in records:
             crd = by_name.get(record.crd_name)
             if crd is None:
-                if record.phase in (FsbTemplatePhase.PENDING, FsbTemplatePhase.BUILDING):
+                if record.phase in (FastSandboxTemplatePhase.PENDING, FastSandboxTemplatePhase.BUILDING):
                     self._update_phase(
-                        record, FsbTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
+                        record, FastSandboxTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
                     )
                 continue
             crd_status = crd.get("status") or {}
@@ -448,14 +448,14 @@ class FsbTemplateService:
             if (
                 phase is not record.phase
                 or manifest_ref != record.manifest_ref
-                or (phase is FsbTemplatePhase.FAILED and message != record.message)
+                or (phase is FastSandboxTemplatePhase.FAILED and message != record.message)
             ):
                 self._update_phase(record, phase, manifest_ref, message)
 
     def _update_phase(
         self,
-        record: FsbTemplateRecord,
-        phase: FsbTemplatePhase,
+        record: FastSandboxTemplateRecord,
+        phase: FastSandboxTemplatePhase,
         manifest_ref: Optional[str],
         message: Optional[str],
     ) -> None:
@@ -490,9 +490,9 @@ class FsbTemplateService:
             ) from exc
 
 
-def _map_phase(value) -> Optional[FsbTemplatePhase]:
+def _map_phase(value) -> Optional[FastSandboxTemplatePhase]:
     try:
-        return FsbTemplatePhase(str(value))
+        return FastSandboxTemplatePhase(str(value))
     except ValueError:
         return None
 
@@ -504,7 +504,7 @@ def _failure_message(crd_status: dict) -> Optional[str]:
     return None
 
 
-def template_to_response(record: FsbTemplateRecord) -> FsbTemplate:
+def template_to_response(record: FastSandboxTemplateRecord) -> FsbTemplate:
     limits = record.spec.get("resourceLimits")
     readiness = record.spec.get("readiness")
     return FsbTemplate(
@@ -530,4 +530,4 @@ def total_pages(total_items: int, page_size: int) -> int:
     return math.ceil(total_items / page_size) if page_size > 0 else 0
 
 
-__all__ = ["FsbTemplateService", "template_to_response", "total_pages"]
+__all__ = ["FastSandboxTemplateService", "template_to_response", "total_pages"]

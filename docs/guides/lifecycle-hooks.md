@@ -78,7 +78,7 @@ An `@every` interval must be a whole number of seconds and at least one second. 
 
 ## Current availability
 
-Lifecycle hooks currently require the Kubernetes provider. They are rejected by the Docker provider and Fleets backend. A request cannot combine `lifecycle` with `poolRef`.
+Lifecycle hooks currently require the Kubernetes provider. They are rejected by the Docker provider and Fast Sandbox backend. A request cannot combine `lifecycle` with `poolRef`.
 
 The SDKs expose lifecycle fields on their sandbox creation APIs but do not enforce the timeout range. The Server is the authority for request validation. See the language-specific examples in the [SDK documentation](/sdks/).
 

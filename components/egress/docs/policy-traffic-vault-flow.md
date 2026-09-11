@@ -1,13 +1,13 @@
-# Egress Policy, Traffic Flow, and Credential Vault (Fleet Profile)
+# Egress Policy, Traffic Flow, and Credential Vault (Fast Sandbox Profile)
 
 This document shows how a sandbox's outbound network policy, its traffic flow,
-and the credential vault work in the **fleet profile**: one egress
+and the credential vault work in the **fast-sandbox profile**: one egress
 control plane serving N sandboxes that share one host/network domain
 (fast-sandbox Fastlet Pod). Each sandbox is a **subject** with its own policy,
 kernel rules, and credentials.
 
 The sidecar profile differs (single policy, `hook output`, iptables DNS
-REDIRECT on 15353); only the fleet model is drawn here.
+REDIRECT on 15353); only the fast-sandbox model is drawn here.
 
 ## 1. Subject lifecycle: fastlet action protocol → deny-first → active
 
@@ -60,7 +60,7 @@ sequenceDiagram
     participant F as Fastlet
     participant E as Egress listener<br/>(127.0.0.1:18080, loopback)
     participant R as Subject registry<br/>(memory)
-    participant N as nftables<br/>(table opensandbox-fleet)
+    participant N as nftables<br/>(table opensandbox-fast-sandbox)
     participant D as DNS proxy<br/>(gateway:53, shared)
     participant S as Server (OpenSandbox)
     participant P as fastlet-proxy
@@ -75,7 +75,7 @@ sequenceDiagram
     E->>N: atomic swap (subject chain + static sets, single nft -f)
     E->>D: per-query selector now returns this subject's policy
     Note over S,P: create-then-configure (server side)
-    S->>P: PUT /v1/sandboxfleets/{sid}/egress/credential-vault
+    S->>P: PUT /v1/sandboxes/{sid}/egress/credential-vault
     P->>E: forward (credential verified, X-Fast-Sandbox-Uid added)
     alt subject registered
         E->>E: apply vault revision (memory-only per subject)
@@ -88,7 +88,7 @@ sequenceDiagram
 ## 3. Data plane: outbound traffic flow
 
 The authoritative enforcement layer is the Pod netns `forward` hook
-(`table opensandbox-fleet`, master chain policy **accept** with an
+(`table opensandbox-fast-sandbox`, master chain policy **accept** with an
 unmarked-drop tail — the forward path never issues an explicit accept,
 because on the fast-sandbox Firecracker bridge topology
 (`bridge-nf-call-iptables=1`) an accept verdict returns the frame to the
@@ -148,7 +148,7 @@ tag changes even when delete-then-create resets the public revision to `1`, so
 recreation cannot accidentally validate a pre-delete snapshot. Consequently, the
 first flow after a successful create, patch, or delete acknowledgement observes
 that mutation without a timer or cache-expiry sleep. See
-[fleet-mitm-data-plane](../../../docs/components/egress-fleet-mitm-data-plane.md).
+[fast-sandbox-mitm-data-plane](../../../docs/components/egress-fast-sandbox-mitm-data-plane.md).
 
 `404` has one explicit meaning for the addon: there is no active vault for the
 selected subject, so any older cached snapshot is removed and the flow remains
@@ -172,7 +172,7 @@ sequenceDiagram
     participant M as mitmdump (shared)
     participant C as Sandbox client
 
-    S->>P: PUT /v1/sandboxfleets/{sid}/egress/credential-vault (full revision)
+    S->>P: PUT /v1/sandboxes/{sid}/egress/credential-vault (full revision)
     P->>E: forward (UID header -> subject)
     E->>V: atomically replace revision (memory-only)
     V-->>E: mutation response acknowledges active revision
@@ -217,7 +217,7 @@ sequenceDiagram
 |---|---|
 | Actions wire model + validation | `pkg/actionhandler` (envelope, operations, Hooks) |
 | Subject state machine | `pkg/subject` (`MemoryRegistry`, lifecycle hooks) |
-| Per-subject nft rules | `pkg/fleetnft` (dispatch rules, atomic swap, reset) |
-| Actions endpoints + lifecycle mapping | `fleet_actions.go` (SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING) |
-| Policy/vault HTTP surface | `fleet_server.go` (UID routing, pending cache, per-subject vault) |
+| Per-subject nft rules | `pkg/fastsandboxnft` (dispatch rules, atomic swap, reset) |
+| Actions endpoints + lifecycle mapping | `fastsandbox_actions.go` (SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING) |
+| Policy/vault HTTP surface | `fastsandbox_server.go` (UID routing, pending cache, per-subject vault) |
 | DNS per-query dispatch | `pkg/dnsproxy` `SetQueryPolicySelector` |

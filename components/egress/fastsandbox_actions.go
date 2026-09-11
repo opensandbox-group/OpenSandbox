@@ -72,7 +72,7 @@ func newHandlerInstanceID() string {
 // handleActionsStatus serves GET /_fastlet/v1/actions/status: the Handler
 // process incarnation probe. ready mirrors the healthz gate (false while the
 // MITM stack is not ready); instanceId is the replay trigger.
-func (s *fleetPolicyServer) handleActionsStatus(w http.ResponseWriter, r *http.Request) {
+func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -92,7 +92,7 @@ func (s *fleetPolicyServer) handleActionsStatus(w http.ResponseWriter, r *http.R
 // handleActions serves POST /_fastlet/v1/actions. HTTP 200 is success; any
 // other status is a failed attempt the Fastlet retries. Parse-level errors
 // are 400 (permanently invalid input); enforcement failures are 500 (retried).
-func (s *fleetPolicyServer) handleActions(w http.ResponseWriter, r *http.Request) {
+func (s *fastSandboxPolicyServer) handleActions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -118,7 +118,7 @@ func (s *fleetPolicyServer) handleActions(w http.ResponseWriter, r *http.Request
 }
 
 // dispatchAction executes one validated action and returns its HTTP status.
-func (s *fleetPolicyServer) dispatchAction(env *actionhandler.Envelope) (int, error) {
+func (s *fastSandboxPolicyServer) dispatchAction(env *actionhandler.Envelope) (int, error) {
 	switch env.Operation {
 	case actionhandler.OperationSetBinding:
 		return s.applySetBinding(env)
@@ -135,7 +135,7 @@ func (s *fleetPolicyServer) dispatchAction(env *actionhandler.Envelope) (int, er
 // applySetBinding registers the subject deny-first and stores the binding
 // input. The policy is parsed BEFORE any state mutation so a permanently
 // invalid input (400) can never leave the subject half-registered.
-func (s *fleetPolicyServer) applySetBinding(env *actionhandler.Envelope) (int, error) {
+func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (int, error) {
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	att := env.Network()
@@ -199,7 +199,7 @@ func (s *fleetPolicyServer) applySetBinding(env *actionhandler.Envelope) (int, e
 // a previous instance of the same UID must never consume the replacement
 // sandbox's pending policy or activate it before its own data plane is ready
 // (fail closed; the Fastlet retries with the current revision).
-func (s *fleetPolicyServer) applyLifecycleHook(env *actionhandler.Envelope) (int, error) {
+func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope) (int, error) {
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	regFence, ok := s.reg.Fence(subj)
@@ -242,7 +242,7 @@ func (s *fleetPolicyServer) applyLifecycleHook(env *actionhandler.Envelope) (int
 // The subject stays registered until enforcement removal succeeds: a
 // transient failure returns 500 and the retried REMOVE_BINDING resumes
 // cleanup instead of succeeding with stale rules left in the kernel.
-func (s *fleetPolicyServer) applyRemoveBinding(env *actionhandler.Envelope) (int, error) {
+func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope) (int, error) {
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	registeredFence, ok := s.reg.Fence(subj)

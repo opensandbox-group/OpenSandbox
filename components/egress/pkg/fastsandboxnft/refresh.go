@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package fleetnft
+package fastsandboxnft
 
 import (
 	"context"
@@ -112,7 +112,7 @@ func activeConntrackTCPState(state string) bool {
 // while TCP connections to them are active; the set timeout remains as the
 // grace period after the connection closes. sandboxMir, when non-nil, is
 // invoked per subject with the refreshed IPs so a mirror layer (e.g. a
-// per-sandbox netns enforcement) carries identical leases; the fleet profile
+// per-sandbox netns enforcement) carries identical leases; the fast-sandbox profile
 // passes nil (no mirror layer).
 //
 // Renewal is best-effort, per subject: a connection that starts and closes
@@ -170,7 +170,7 @@ func (a *Applier) refreshTick(ctx context.Context) {
 			st.prev = make(map[netip.Addr]struct{})
 		}
 		a.mu.Unlock()
-		log.Warnf("fleetnft: conntrack read failed, skipping refresh: %v", err)
+		log.Warnf("fastsandboxnft: conntrack read failed, skipping refresh: %v", err)
 		return
 	}
 	srcIdx := a.buildSrcIndexLocked()
@@ -194,7 +194,7 @@ func (a *Applier) refreshTick(ctx context.Context) {
 			}
 			a.mu.Unlock()
 			telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
-			log.Warnf("fleetnft: refresh dynamic sets failed: %v", err)
+			log.Warnf("fastsandboxnft: refresh dynamic sets failed: %v", err)
 			return
 		}
 		telemetry.RecordNftablesUpdate()
@@ -206,7 +206,7 @@ func (a *Applier) refreshTick(ctx context.Context) {
 			continue
 		}
 		if err := a.sandboxMir(ctx, p.s, p.ips); err != nil {
-			log.Warnf("fleetnft: sandbox mirror refresh for subject %s failed: %v", p.s, err)
+			log.Warnf("fastsandboxnft: sandbox mirror refresh for subject %s failed: %v", p.s, err)
 			a.markPendingRedelivery(p.s, p.ips)
 			continue
 		}

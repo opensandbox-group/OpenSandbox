@@ -32,28 +32,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const fleetsScopeVector = "f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AQ"
+const fsbScopeVector = "f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.gtJzW337dCO-kStxh2GPfA"
 
 func init() {
 	Logger = slogger.MustNew(slogger.Config{Level: "error"})
 }
 
-type fleetsProxyProvider struct {
+type fsbProxyProvider struct {
 	info        *sandbox.EndpointInfo
 	err         error
 	target      sandbox.EndpointTarget
 	invalidated sandbox.EndpointTarget
 }
 
-func (p *fleetsProxyProvider) Invalidate(target sandbox.EndpointTarget) {
+func (p *fsbProxyProvider) Invalidate(target sandbox.EndpointTarget) {
 	p.invalidated = target
 }
 
-func (p *fleetsProxyProvider) Start(context.Context) error { return nil }
+func (p *fsbProxyProvider) Start(context.Context) error { return nil }
 
-func (*fleetsProxyProvider) RequiresAuthenticatedRouteScope() {}
+func (*fsbProxyProvider) RequiresAuthenticatedRouteScope() {}
 
-func (p *fleetsProxyProvider) ResolveEndpoint(_ context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
+func (p *fsbProxyProvider) ResolveEndpoint(_ context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
 	p.target = target
 	if p.err != nil {
 		return nil, p.err
@@ -61,7 +61,7 @@ func (p *fleetsProxyProvider) ResolveEndpoint(_ context.Context, target sandbox.
 	return p.info, nil
 }
 
-func TestFleetsProxyPreservesPathQueryAndApplicationAuthorization(t *testing.T) {
+func TestFastSandboxProxyPreservesPathQueryAndApplicationAuthorization(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v2/sandboxes/uid/components/execd/api/health", r.URL.Path)
 		require.Equal(t, "watch=true", r.URL.RawQuery)
@@ -71,7 +71,7 @@ func TestFleetsProxyPreservesPathQueryAndApplicationAuthorization(t *testing.T) 
 	}))
 	defer backend.Close()
 
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{
 		UpstreamURL: backend.URL + "/v2/sandboxes/uid/components/execd",
 		UpstreamHeaders: http.Header{
 			sandbox.FastSandboxCredential: []string{"issued-credential"},
@@ -87,7 +87,7 @@ func TestFleetsProxyPreservesPathQueryAndApplicationAuthorization(t *testing.T) 
 	)
 
 	request := httptest.NewRequest(http.MethodGet, "http://ingress/api/health?watch=true", nil)
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	request.Header.Set("Authorization", "Bearer application-token")
 	request.Header.Set(sandbox.FastSandboxCredential, "caller-spoof")
 	response := httptest.NewRecorder()
@@ -95,17 +95,17 @@ func TestFleetsProxyPreservesPathQueryAndApplicationAuthorization(t *testing.T) 
 
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, "ok", response.Body.String())
-	require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFleets, Namespace: "tenant-a", SandboxID: "sandbox-123", Port: sandbox.ExecdPort}, provider.target)
+	require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "sandbox-123", Port: sandbox.ExecdPort}, provider.target)
 }
 
-func TestFleetsProxyStripsCallerCredentialWhenProviderOmitsIt(t *testing.T) {
+func TestFastSandboxProxyStripsCallerCredentialWhenProviderOmitsIt(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Empty(t, r.Header.Get(sandbox.FastSandboxCredential))
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
 
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
 	p := NewProxy(
 		context.Background(),
 		provider,
@@ -115,7 +115,7 @@ func TestFleetsProxyStripsCallerCredentialWhenProviderOmitsIt(t *testing.T) {
 		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
 	)
 	request := httptest.NewRequest(http.MethodGet, "http://ingress/", nil)
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	request.Header.Set(sandbox.FastSandboxCredential, "caller-spoof")
 	response := httptest.NewRecorder()
 
@@ -124,23 +124,23 @@ func TestFleetsProxyStripsCallerCredentialWhenProviderOmitsIt(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, response.Code)
 }
 
-func TestCompositeProviderServesLegacyAndFleetsRoutes(t *testing.T) {
+func TestCompositeProviderServesLegacyAndFastSandboxRoutes(t *testing.T) {
 	legacyBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Test-Backend", "legacy")
 		w.Header().Set(sandbox.FastSandboxProxyError, "stale_route")
 	}))
 	defer legacyBackend.Close()
-	fleetsBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Test-Backend", "fleets")
+	fsbBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Test-Backend", "fsb")
 	}))
-	defer fleetsBackend.Close()
+	defer fsbBackend.Close()
 
 	legacyAddress := legacyBackend.Listener.Addr().(*net.TCPAddr)
 	legacy := staticEndpointProvider{byID: map[string]sandbox.EndpointInfo{
 		"legacy-sandbox": {Endpoint: legacyAddress.IP.String()},
 	}}
-	fleets := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: fleetsBackend.URL}}
-	provider := sandbox.NewCompositeProvider(legacy, fleets)
+	fsb := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: fsbBackend.URL}}
+	provider := sandbox.NewCompositeProvider(legacy, fsb)
 	ingress := httptest.NewServer(NewProxy(
 		context.Background(),
 		provider,
@@ -155,7 +155,7 @@ func TestCompositeProviderServesLegacyAndFleetsRoutes(t *testing.T) {
 	for _, test := range []struct {
 		route   string
 		backend string
-	}{{legacyRoute, "legacy"}, {fleetsScopeVector, "fleets"}, {legacyRoute, "legacy"}} {
+	}{{legacyRoute, "legacy"}, {fsbScopeVector, "fsb"}, {legacyRoute, "legacy"}} {
 		request, err := http.NewRequest(http.MethodGet, ingress.URL, nil)
 		require.NoError(t, err)
 		request.Header.Set(SandboxIngress, test.route)
@@ -165,74 +165,74 @@ func TestCompositeProviderServesLegacyAndFleetsRoutes(t *testing.T) {
 		require.Equal(t, test.backend, response.Header.Get("X-Test-Backend"))
 		require.NoError(t, response.Body.Close())
 	}
-	require.Equal(t, sandbox.RouteKindFleets, fleets.target.RouteKind)
+	require.Equal(t, sandbox.RouteKindFastSandbox, fsb.target.RouteKind)
 }
 
-func TestFleetsProxyPreservesEscapedSlashInHeaderPath(t *testing.T) {
+func TestFastSandboxProxyPreservesEscapedSlashInHeaderPath(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/route/a/b", r.URL.Path)
 		require.Equal(t, "/route/a%2Fb", r.URL.EscapedPath())
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL + "/route"}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL + "/route"}}
 	p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}})
 	request := httptest.NewRequest(http.MethodGet, "http://ingress/a%2Fb", nil)
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, request)
 	require.Equal(t, http.StatusNoContent, response.Code)
 }
 
-func TestFleetsProxyPreservesRawQueryHash(t *testing.T) {
+func TestFastSandboxProxyPreservesRawQueryHash(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "a=1#b=2", r.URL.RawQuery)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
 	p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}})
 	request := httptest.NewRequest(http.MethodGet, "http://ingress/path", nil)
 	request.URL.RawQuery = "a=1#b=2"
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, request)
 	require.Equal(t, http.StatusNoContent, response.Code)
 }
 
-func TestFleetsProxyURIScopeRemovesInternalPrefix(t *testing.T) {
+func TestFastSandboxProxyURIScopeRemovesInternalPrefix(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/route/user/path", r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL + "/route"}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL + "/route"}}
 	p := NewProxy(
 		context.Background(), provider, ModeURI, nil, nil,
 		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
 	)
-	request := httptest.NewRequest(http.MethodGet, "http://ingress/"+fleetsScopeVector+"/user/path", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://ingress/"+fsbScopeVector+"/user/path", nil)
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, request)
 	require.Equal(t, http.StatusNoContent, response.Code)
 }
 
-func TestFleetsProxyURIScopePreservesEscapedSlash(t *testing.T) {
+func TestFastSandboxProxyURIScopePreservesEscapedSlash(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/route/a/b", r.URL.Path)
 		require.Equal(t, "/route/a%2Fb", r.URL.EscapedPath())
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL + "/route"}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL + "/route"}}
 	p := NewProxy(context.Background(), provider, ModeURI, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}})
-	request := httptest.NewRequest(http.MethodGet, "http://ingress/"+fleetsScopeVector+"/a%2Fb", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://ingress/"+fsbScopeVector+"/a%2Fb", nil)
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, request)
 	require.Equal(t, http.StatusNoContent, response.Code)
 }
 
-func TestFleetsProxyMapsPendingAndUnsupported(t *testing.T) {
+func TestFastSandboxProxyMapsPendingAndUnsupported(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		err        error
@@ -242,13 +242,13 @@ func TestFleetsProxyMapsPendingAndUnsupported(t *testing.T) {
 		{name: "phase 1a egress", err: fmt.Errorf("%w: egress", sandbox.ErrTargetUnsupported), wantStatus: http.StatusNotImplemented},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			provider := &fleetsProxyProvider{err: test.err}
+			provider := &fsbProxyProvider{err: test.err}
 			p := NewProxy(
 				context.Background(), provider, ModeHeader, nil, nil,
 				&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
 			)
 			request := httptest.NewRequest(http.MethodGet, "http://ingress/", nil)
-			request.Header.Set(SandboxIngress, fleetsScopeVector)
+			request.Header.Set(SandboxIngress, fsbScopeVector)
 			response := httptest.NewRecorder()
 			p.ServeHTTP(response, request)
 			require.Equal(t, test.wantStatus, response.Code)
@@ -259,22 +259,22 @@ func TestFleetsProxyMapsPendingAndUnsupported(t *testing.T) {
 	}
 }
 
-func TestFleetsProxyRejectsTamperedScopeBeforeProviderLookup(t *testing.T) {
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{Endpoint: "127.0.0.1"}}
+func TestFastSandboxProxyRejectsTamperedScopeBeforeProviderLookup(t *testing.T) {
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{Endpoint: "127.0.0.1"}}
 	p := NewProxy(
 		context.Background(), provider, ModeHeader, nil, nil,
 		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
 	)
 	request := httptest.NewRequest(http.MethodGet, "http://ingress/", nil)
-	request.Header.Set(SandboxIngress, "f1.dGVuYW50LWI.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AQ")
+	request.Header.Set(SandboxIngress, "f1.dGVuYW50LWI.c2FuZGJveC0xMjM.44772.k.gtJzW337dCO-kStxh2GPfA")
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, request)
 	require.Equal(t, http.StatusUnauthorized, response.Code)
 	require.Equal(t, sandbox.EndpointTarget{}, provider.target)
 }
 
-func TestFleetsProxyRejectsLegacyUnsignedRoute(t *testing.T) {
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{Endpoint: "127.0.0.1"}}
+func TestFastSandboxProxyRejectsLegacyUnsignedRoute(t *testing.T) {
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{Endpoint: "127.0.0.1"}}
 	p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}})
 	request := httptest.NewRequest(http.MethodGet, "http://ingress/", nil)
 	request.Header.Set(SandboxIngress, "sandbox-123-44772")
@@ -284,7 +284,7 @@ func TestFleetsProxyRejectsLegacyUnsignedRoute(t *testing.T) {
 	require.Equal(t, sandbox.EndpointTarget{}, provider.target)
 }
 
-func TestFleetsProxyInvalidatesStaleRouteWithoutReplayingRequest(t *testing.T) {
+func TestFastSandboxProxyInvalidatesStaleRouteWithoutReplayingRequest(t *testing.T) {
 	requests := 0
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
@@ -298,10 +298,10 @@ func TestFleetsProxyInvalidatesStaleRouteWithoutReplayingRequest(t *testing.T) {
 		_, _ = w.Write([]byte("internal fastlet detail"))
 	}))
 	defer backend.Close()
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
 	p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}})
 	request := httptest.NewRequest(http.MethodPost, "http://ingress/mutate", strings.NewReader("body"))
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, request)
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
@@ -317,17 +317,17 @@ func TestFleetsProxyInvalidatesStaleRouteWithoutReplayingRequest(t *testing.T) {
 	require.Equal(t, provider.target, provider.invalidated)
 }
 
-func TestFleetsProxyIgnoresStaleMarkerOnSuccessfulResponse(t *testing.T) {
+func TestFastSandboxProxyIgnoresStaleMarkerOnSuccessfulResponse(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(sandbox.FastSandboxProxyError, "stale_route")
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer backend.Close()
 
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
 	p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}})
 	request := httptest.NewRequest(http.MethodGet, "http://ingress/", nil)
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	response := httptest.NewRecorder()
 
 	p.ServeHTTP(response, request)
@@ -337,13 +337,13 @@ func TestFleetsProxyIgnoresStaleMarkerOnSuccessfulResponse(t *testing.T) {
 	require.Equal(t, sandbox.EndpointTarget{}, provider.invalidated)
 }
 
-func TestFleetsProxyInvalidatesRouteOnUpstreamConnectionFailure(t *testing.T) {
+func TestFastSandboxProxyInvalidatesRouteOnUpstreamConnectionFailure(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	upstream := "http://" + listener.Addr().String()
 	require.NoError(t, listener.Close())
 
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: upstream}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: upstream}}
 	observations := make(chan connectivity.Observation, 1)
 	p := NewProxy(
 		context.Background(),
@@ -357,7 +357,7 @@ func TestFleetsProxyInvalidatesRouteOnUpstreamConnectionFailure(t *testing.T) {
 		})),
 	)
 	request := httptest.NewRequest(http.MethodPost, "http://ingress/mutate", strings.NewReader("body"))
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, request)
 	require.Equal(t, http.StatusBadGateway, response.Code)
@@ -367,7 +367,7 @@ func TestFleetsProxyInvalidatesRouteOnUpstreamConnectionFailure(t *testing.T) {
 	require.Equal(t, "http", observation.Protocol)
 }
 
-func TestFleetsProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T) {
+func TestFastSandboxProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/route/ws", r.URL.Path)
@@ -381,14 +381,14 @@ func TestFleetsProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T) {
 		require.NoError(t, conn.WriteMessage(messageType, message))
 	}))
 	defer backend.Close()
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{
 		UpstreamURL:     backend.URL + "/route",
 		UpstreamHeaders: http.Header{sandbox.FastSandboxCredential: []string{"issued-credential"}},
 	}}
 	ingress := httptest.NewServer(NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}))
 	defer ingress.Close()
 
-	headers := http.Header{SandboxIngress: []string{fleetsScopeVector}, "Authorization": []string{"Bearer application-token"}}
+	headers := http.Header{SandboxIngress: []string{fsbScopeVector}, "Authorization": []string{"Bearer application-token"}}
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws", headers)
 	require.NoError(t, err)
 	defer conn.Close()
@@ -398,17 +398,17 @@ func TestFleetsProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T) {
 	require.Equal(t, "hello", string(message))
 }
 
-func TestFleetsProxyWebSocketHandshakeInvalidatesStaleRoute(t *testing.T) {
+func TestFastSandboxProxyWebSocketHandshakeInvalidatesStaleRoute(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(sandbox.FastSandboxProxyError, "credential_rejected")
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer backend.Close()
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
 	ingress := httptest.NewServer(NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}))
 	defer ingress.Close()
 
-	headers := http.Header{SandboxIngress: []string{fleetsScopeVector}}
+	headers := http.Header{SandboxIngress: []string{fsbScopeVector}}
 	conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws", headers)
 	if conn != nil {
 		defer conn.Close()
@@ -420,17 +420,17 @@ func TestFleetsProxyWebSocketHandshakeInvalidatesStaleRoute(t *testing.T) {
 	require.Equal(t, provider.target, provider.invalidated)
 }
 
-func TestFleetsProxyWebSocketConnectionFailureInvalidatesRoute(t *testing.T) {
+func TestFastSandboxProxyWebSocketConnectionFailureInvalidatesRoute(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	upstream := "http://" + listener.Addr().String()
 	require.NoError(t, listener.Close())
 
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: upstream}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: upstream}}
 	ingress := httptest.NewServer(NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}))
 	defer ingress.Close()
 
-	headers := http.Header{SandboxIngress: []string{fleetsScopeVector}}
+	headers := http.Header{SandboxIngress: []string{fsbScopeVector}}
 	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws", headers)
 	if connection != nil {
 		defer connection.Close()
@@ -441,7 +441,7 @@ func TestFleetsProxyWebSocketConnectionFailureInvalidatesRoute(t *testing.T) {
 	require.Equal(t, provider.target, provider.invalidated)
 }
 
-func TestFleetsProxyStreamsSSE(t *testing.T) {
+func TestFastSandboxProxyStreamsSSE(t *testing.T) {
 	release := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -451,13 +451,13 @@ func TestFleetsProxyStreamsSSE(t *testing.T) {
 	}))
 	defer backend.Close()
 	defer close(release)
-	provider := &fleetsProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
 	ingress := httptest.NewServer(NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}))
 	defer ingress.Close()
 
 	request, err := http.NewRequest(http.MethodGet, ingress.URL+"/events", nil)
 	require.NoError(t, err)
-	request.Header.Set(SandboxIngress, fleetsScopeVector)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
 	response, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	defer response.Body.Close()

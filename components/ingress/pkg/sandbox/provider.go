@@ -24,7 +24,8 @@ type ProviderType string
 const (
 	ProviderTypeBatchSandbox ProviderType = "batchsandbox"
 	ProviderTypeAgentSandbox ProviderType = "agent-sandbox"
-	ProviderTypeFleets       ProviderType = "fleets"
+	// ProviderTypeFastSandbox selects FastPath-backed routing without a Kubernetes provider.
+	ProviderTypeFastSandbox ProviderType = "fast-sandbox"
 
 	// sandboxNameIndex indexes sandbox resources by metadata.name.
 	sandboxNameIndex = "sandbox-name"
@@ -55,8 +56,8 @@ const (
 	// RouteKindLegacy is the zero value so existing target construction keeps
 	// selecting the configured Kubernetes provider.
 	RouteKindLegacy RouteKind = iota
-	// RouteKindFleets selects FastPath-backed endpoint resolution.
-	RouteKindFleets
+	// RouteKindFastSandbox selects FastPath-backed endpoint resolution.
+	RouteKindFastSandbox
 )
 
 type EndpointTarget struct {
@@ -70,7 +71,7 @@ type EndpointTarget struct {
 // Implementations include BatchSandboxProvider, AgentSandboxProvider, etc.
 type Provider interface {
 	// ResolveEndpoint retrieves the complete upstream route for one target.
-	// Kubernetes providers answer from their informer cache. The fleets provider
+	// Kubernetes providers answer from their informer cache. The Fast Sandbox provider
 	// may perform a bounded FastPath RPC and cache the resulting short-lived route.
 	ResolveEndpoint(ctx context.Context, target EndpointTarget) (*EndpointInfo, error)
 

@@ -180,7 +180,7 @@ Kubernetes workloads are created by a **workload provider**. There is **no** `[b
 
 ### fsb (fast-sandbox) settings under `[kubernetes]`
 
-The fsb backend shares the `[kubernetes]` block; the kubernetes runtime also serves fsb (`flt-`) sandboxes side by side, so these fields are always available.
+The fsb backend shares the `[kubernetes]` block; the kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side, so these fields are always available.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -190,7 +190,7 @@ The fsb backend shares the `[kubernetes]` block; the kubernetes runtime also ser
 | `fastpath_resource_pool` | string | `"default-pool"` | Default fast-sandbox SandboxPool when `extensions.poolRef` is unset. |
 | `template_s3_publish_secret` | string | `"sandbox-oss-credentials"` | Secret (in the platform namespace) holding the object-store credentials referenced by server-created SandboxTemplates. |
 
-The fsb backend is always composed under `runtime.type = "kubernetes"`; its sandboxes are created via `templateId` (or `flt-` prefixed lifecycle operations) and use the `[kubernetes].namespace`.
+The fsb backend is always composed under `runtime.type = "kubernetes"`; its sandboxes are created via `templateId` (or `fsb-` prefixed lifecycle operations) and use the `[kubernetes].namespace`.
 
 ---
 

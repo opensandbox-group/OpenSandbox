@@ -32,15 +32,15 @@ from opensandbox_server.config import (
     RuntimeConfig,
     ServerConfig,
 )
-from opensandbox_server.repositories.templates.sqlite import SQLiteFsbTemplateRepository
+from opensandbox_server.repositories.templates.sqlite import SQLiteFastSandboxTemplateRepository
 from opensandbox_server.services.templates.template_models import (
-    FsbTemplateListQuery,
-    FsbTemplatePhase,
-    FsbTemplateRecord,
+    FastSandboxTemplateListQuery,
+    FastSandboxTemplatePhase,
+    FastSandboxTemplateRecord,
 )
-from opensandbox_server.services.templates.template_service import FsbTemplateService
+from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.k8s.client import K8sClient
-from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 
 
 def _config(namespace: str = "ns-1", runtime: str = "kubernetes") -> AppConfig:
@@ -123,7 +123,7 @@ class _FakeTemplateCRs:
 
 @pytest.fixture
 def repo(tmp_path):
-    repository = SQLiteFsbTemplateRepository(tmp_path / "templates.db")
+    repository = SQLiteFastSandboxTemplateRepository(tmp_path / "templates.db")
     yield repository
     repository.close()
 
@@ -138,7 +138,7 @@ def service(repo, crs):
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
     crs.install(k8s)
-    svc = FsbTemplateService(_config(), repository=repo, k8s_client=k8s)
+    svc = FastSandboxTemplateService(_config(), repository=repo, k8s_client=k8s)
     yield svc
     svc.close()
 
@@ -167,12 +167,12 @@ def test_repository_roundtrip_and_tenant_scoping(repo):
     assert repo.get("tpl-2", "ns-2").namespace == "ns-2"
 
     repo.update_status(
-        "tpl-1", "ns-1", phase=FsbTemplatePhase.SUCCEEDED, manifest_ref="s3://b/m", message=None
+        "tpl-1", "ns-1", phase=FastSandboxTemplatePhase.SUCCEEDED, manifest_ref="s3://b/m", message=None
     )
-    assert repo.get("tpl-1", "ns-1").phase is FsbTemplatePhase.SUCCEEDED
+    assert repo.get("tpl-1", "ns-1").phase is FastSandboxTemplatePhase.SUCCEEDED
     assert repo.get("tpl-1", "ns-1").manifest_ref == "s3://b/m"
 
-    result = repo.list(FsbTemplateListQuery(namespace="ns-1"))
+    result = repo.list(FastSandboxTemplateListQuery(namespace="ns-1"))
     assert result.total_items == 1
 
     repo.delete("tpl-1", "ns-1")
@@ -191,27 +191,27 @@ def test_repository_metadata_filter(repo):
     ):
         record = service_record(f"tpl-{index}", "ns-1", metadata=meta)
         repo.create(record)
-    result = repo.list(FsbTemplateListQuery(namespace="ns-1", metadata={"env": "prod"}))
+    result = repo.list(FastSandboxTemplateListQuery(namespace="ns-1", metadata={"env": "prod"}))
     assert result.total_items == 2
     result = repo.list(
-        FsbTemplateListQuery(namespace="ns-1", metadata={"env": "prod", "a": "b"})
+        FastSandboxTemplateListQuery(namespace="ns-1", metadata={"env": "prod", "a": "b"})
     )
     assert result.total_items == 1
     dotted = repo.list(
-        FsbTemplateListQuery(namespace="ns-1", metadata={"app.example.com/team": "core"})
+        FastSandboxTemplateListQuery(namespace="ns-1", metadata={"app.example.com/team": "core"})
     )
     assert dotted.total_items == 1
     assert dotted.items[0].template_id == "tpl-3"
 
 
 def service_record(template_id, namespace, metadata=None):
-    return FsbTemplateRecord(
+    return FastSandboxTemplateRecord(
         template_id=template_id,
         namespace=namespace,
         crd_name=template_id,
         spec={"image": "alpine:3.19", "publish": "s3://b/p", "format": "native"},
         metadata=metadata or {},
-        phase=FsbTemplatePhase.PENDING,
+        phase=FastSandboxTemplatePhase.PENDING,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -219,7 +219,7 @@ def service_record(template_id, namespace, metadata=None):
 
 def test_create_projects_crd_with_server_side_inputs(service, crs):
     record = service.create_template(_create_request())
-    assert record.phase is FsbTemplatePhase.PENDING
+    assert record.phase is FastSandboxTemplatePhase.PENDING
     assert len(crs.created) == 1
     crd = crs.created[0]
     assert crd["metadata"]["name"] == record.crd_name
@@ -277,16 +277,16 @@ def test_get_syncs_phase_from_crd(service, crs, repo):
         {"phase": "Succeeded", "manifestRef": "s3://sandbox-images/publish/<build>/manifest.json"},
     )
     synced = service.get_template(record.template_id)
-    assert synced.phase is FsbTemplatePhase.SUCCEEDED
+    assert synced.phase is FastSandboxTemplatePhase.SUCCEEDED
     assert synced.manifest_ref.startswith("s3://")
-    assert repo.get(record.template_id, "ns-1").phase is FsbTemplatePhase.SUCCEEDED
+    assert repo.get(record.template_id, "ns-1").phase is FastSandboxTemplatePhase.SUCCEEDED
 
 
 def test_get_marks_failed_when_crd_gone(service, crs, repo):
     record = service.create_template(_create_request())
     crs.crs.pop(("ns-1", record.crd_name))
     synced = service.get_template(record.template_id)
-    assert synced.phase is FsbTemplatePhase.FAILED
+    assert synced.phase is FastSandboxTemplatePhase.FAILED
     assert synced.manifest_ref is None
 
 
@@ -298,7 +298,7 @@ def test_failed_phase_carries_message(service, crs):
         {"phase": "Failed", "conditions": [{"type": "Failed", "message": "kernel panic"}]},
     )
     synced = service.get_template(record.template_id)
-    assert synced.phase is FsbTemplatePhase.FAILED
+    assert synced.phase is FastSandboxTemplatePhase.FAILED
     assert synced.message == "kernel panic"
 
 
@@ -309,7 +309,7 @@ def test_list_bulk_syncs_and_filters(service, crs):
     items, total = service.list_templates(metadata={"env": "prod"})
     assert total == 1
     assert items[0].template_id == first.template_id
-    assert items[0].phase is FsbTemplatePhase.SUCCEEDED
+    assert items[0].phase is FastSandboxTemplatePhase.SUCCEEDED
     items_all, total_all = service.list_templates()
     assert total_all == 2
     assert {item.template_id for item in items_all} == {first.template_id, second.template_id}
@@ -348,7 +348,7 @@ def test_watch_reactor_converges_rows_without_reads(service, crs, repo):
     handler("MODIFIED", crd)
 
     persisted = repo.get(record.template_id, "ns-1")
-    assert persisted.phase is FsbTemplatePhase.SUCCEEDED
+    assert persisted.phase is FastSandboxTemplatePhase.SUCCEEDED
     assert persisted.manifest_ref == "s3://b/m"
 
 
@@ -357,10 +357,10 @@ def test_watch_reactor_ignores_foreign_crds_and_deletes(service, crs, repo):
     handler = service._on_template_event("ns-1")
 
     handler("MODIFIED", {"metadata": {"name": "tpl-orphan"}, "status": {"phase": "Succeeded"}})
-    assert repo.get(record.template_id, "ns-1").phase is FsbTemplatePhase.PENDING
+    assert repo.get(record.template_id, "ns-1").phase is FastSandboxTemplatePhase.PENDING
 
     handler("DELETED", {"metadata": {"name": record.crd_name}})
-    assert repo.get(record.template_id, "ns-1").phase is FsbTemplatePhase.FAILED
+    assert repo.get(record.template_id, "ns-1").phase is FastSandboxTemplatePhase.FAILED
 
 
 def test_resolve_artifact_requires_succeeded(service, crs):
@@ -437,9 +437,9 @@ def test_routes_501_for_non_kubernetes_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(
         templates_api,
         "_service",
-        FsbTemplateService(
+        FastSandboxTemplateService(
             _config(runtime="kubernetes"),
-            repository=SQLiteFsbTemplateRepository(tmp_path / "templates.db"),
+            repository=SQLiteFastSandboxTemplateRepository(tmp_path / "templates.db"),
         ),
     )
     with TestClient(app) as test_client:
@@ -491,7 +491,7 @@ class _StubFastPath:
 def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
     import asyncio
 
-    from opensandbox_server.services.fsb.service import FsbSandboxService
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
     record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
@@ -499,7 +499,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
     stub = _StubFastPath()
-    sandbox_service = FsbSandboxService(
+    sandbox_service = FastSandboxService(
         _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
     )
     try:
@@ -513,7 +513,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
     assert stub.last_create.image == record.template_id
     assert list(stub.last_create.command) == ["python", "app.py"]
     assert stub.last_create.pool_ref == "default-pool"
-    assert response.id.startswith("flt-")
+    assert response.id.startswith("fsb-")
     assert response.entrypoint == ["python", "app.py"]
 
 
@@ -522,11 +522,11 @@ def test_template_mode_create_rejects_unknown_template(service):
 
     from fastapi import HTTPException
 
-    from opensandbox_server.services.fsb.service import FsbSandboxService
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
-    sandbox_service = FsbSandboxService(
+    sandbox_service = FastSandboxService(
         _config(), fastpath_client=_StubFastPath(), k8s_client=k8s, template_service=service
     )
     try:
@@ -545,14 +545,14 @@ def test_composite_routes_template_id_create_to_fsb(service, crs):
 
     from opensandbox_server.api.schema import CreateSandboxResponse, SandboxStatus
     from opensandbox_server.services.composite_service import CompositeSandboxService
-    from opensandbox_server.services.fsb.service import FsbSandboxService
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
     record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
-    fsb = FsbSandboxService(
+    fsb = FastSandboxService(
         _config(runtime="kubernetes"),
         fastpath_client=_StubFastPath(),
         k8s_client=k8s,

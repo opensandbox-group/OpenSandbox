@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Gateway MITM redirect (fleet profile): the shared mitmdump listens on the
+// Gateway MITM redirect (fast-sandbox profile): the shared mitmdump listens on the
 // Pod netns (0.0.0.0:18081, like the shared DNS proxy on :15353 — a
 // 127.0.0.1 bind would never receive traffic DNATed to the gateway veth
 // address). Per-sandbox interception is one prerouting DNAT rule keyed by the
@@ -29,7 +29,7 @@
 // gateway-dst RETURN keeps sandbox->management-plane traffic out of the
 // proxy. NOTE: DNATed traffic is delivered locally, so the Pod forward hook
 // never sees it — the authoritative enforcement for intercepted traffic is
-// the Pod-netns INPUT chain in pkg/fleetnft (ct-status-DNAT matching on the
+// the Pod-netns INPUT chain in pkg/fastsandboxnft (ct-status-DNAT matching on the
 // conntrack original destination). The table is rebuilt wholesale from the
 // in-memory entry list; nft batches are transactional, so a failed rebuild
 // leaves the previous table live and registration stays fail-closed.
@@ -101,7 +101,7 @@ func mitmDportList(dports []int) string {
 }
 
 // InstallMitmRedirects rebuilds the per-sandbox interception table from the
-// authoritative entry list (the fleet server's in-memory subjects). Failures
+// authoritative entry list (the fast-sandbox server's in-memory subjects). Failures
 // are transactional: the previous table stays live. A missing table on first
 // install is retried without the delete line.
 func InstallMitmRedirects(entries []MitmRedirectEntry, port int, dports []int) error {
