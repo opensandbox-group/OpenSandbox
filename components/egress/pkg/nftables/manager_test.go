@@ -222,12 +222,15 @@ func TestDomainRefresh_OnlyRenewsObservedAndConfirmedIPs(t *testing.T) {
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, manager.ApplyStatic(ctx, allowed))
+	now := time.Unix(1_000, 0)
+	manager.tracker.now = func() time.Time { return now }
 	first := ResolvedIP{Addr: netip.MustParseAddr("192.0.2.1"), TTL: time.Minute}
 	rotated := ResolvedIP{Addr: netip.MustParseAddr("192.0.2.2"), TTL: time.Minute}
 	newAddress := ResolvedIP{Addr: netip.MustParseAddr("192.0.2.3"), TTL: time.Minute}
 	ipv6 := ResolvedIP{Addr: netip.MustParseAddr("2001:db8::1"), TTL: time.Minute}
 	require.NoError(t, manager.AddResolvedDomain(ctx, "EXAMPLE.COM.", []ResolvedIP{first, rotated}))
 	require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", []ResolvedIP{ipv6}))
+	now = now.Add(domainRefreshLead)
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
 		return []ResolvedIP{first, ipv6, newAddress}, nil
 	})
@@ -237,11 +240,13 @@ func TestDomainRefresh_OnlyRenewsObservedAndConfirmedIPs(t *testing.T) {
 	require.NotContains(t, scripts[3], rotated.Addr.String())
 	require.NotContains(t, scripts[3], newAddress.Addr.String())
 
+	now = now.Add(domainRefreshLead)
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
 		return nil, fmt.Errorf("upstream unavailable")
 	})
 	require.Len(t, scripts, 4, "failed DNS must not extend a lease")
 	require.Len(t, manager.domains, 1, "transient errors may be retried")
+	now = now.Add(time.Minute)
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
 		return []ResolvedIP{rotated, newAddress}, nil
 	})
@@ -249,6 +254,7 @@ func TestDomainRefresh_OnlyRenewsObservedAndConfirmedIPs(t *testing.T) {
 	require.Empty(t, manager.domains)
 
 	require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", []ResolvedIP{first}))
+	now = now.Add(domainRefreshLead)
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) { return nil, nil })
 	require.Len(t, scripts, 5, "negative answers must not extend a lease")
 	require.Empty(t, manager.domains)
@@ -264,15 +270,25 @@ func TestDomainRefresh_PreservesLongerTCPGracePeriod(t *testing.T) {
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, manager.ApplyStatic(ctx, allowed))
+	now := time.Unix(1_000, 0)
+	manager.tracker.now = func() time.Time { return now }
 	ips := []ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1")}}
 	require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", ips))
 	require.NoError(t, manager.tracker.refreshActiveConnections(ctx, []tcpConnection{{remote: ips[0].Addr, state: "ESTABLISHED"}}, manager))
 	require.NoError(t, manager.tracker.refreshActiveConnections(ctx, nil, manager))
-	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) { return ips, nil })
+	lookups := 0
+	lookup := func(context.Context, string) ([]ResolvedIP, error) {
+		lookups++
+		return nil, nil
+	}
+	manager.refreshDomains(ctx, lookup)
+	require.Zero(t, lookups, "a fresh TCP lease must not trigger a DNS query")
 	require.Len(t, scripts, 4, "background DNS must not shorten the final TCP lease")
 	require.Contains(t, scripts[3], "192.0.2.1 timeout 360s")
 	require.Len(t, manager.domains, 1)
-	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) { return nil, nil })
+	now = now.Add(dynSetTimeoutS*time.Second - domainRefreshLead)
+	manager.refreshDomains(ctx, lookup)
+	require.Equal(t, 1, lookups)
 	require.Empty(t, manager.domains)
 	require.Len(t, scripts, 4, "negative DNS stops domain refresh without revoking TCP grace")
 }
@@ -290,8 +306,11 @@ func TestDomainRefresh_PolicyReplacementDiscardsInflightResult(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			require.NoError(t, manager.ApplyStatic(ctx, allowed))
+			now := time.Unix(1_000, 0)
+			manager.tracker.now = func() time.Time { return now }
 			ips := []ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: time.Minute}}
 			require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", ips))
+			now = now.Add(domainRefreshLead)
 			started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			go func() {
 				defer close(done)
@@ -399,6 +418,65 @@ func TestDomainRefresh_BoundsWorkersAndStopsOnCancellation(t *testing.T) {
 		t.Fatal("refresh did not stop after cancellation")
 	}
 	require.Empty(t, started, "cancelled batch must not start queued lookups")
+}
+
+func TestDomainRefresh_SkipsFreshLeasesAndBacksOffFailures(t *testing.T) {
+	manager := NewManagerWithRunner(func(context.Context, string) ([]byte, error) { return nil, nil })
+	allowed, err := policy.ParsePolicy(`{"egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	ctx := context.Background()
+	require.NoError(t, manager.ApplyStatic(ctx, allowed))
+	now := time.Unix(1_000, 0)
+	manager.tracker.now = func() time.Time { return now }
+	ips := []ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 5 * time.Minute}}
+	require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", ips))
+
+	lookups := 0
+	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
+		lookups++
+		return nil, fmt.Errorf("upstream unavailable")
+	})
+	require.Zero(t, lookups, "a domain whose lease is not near expiry must not be queried")
+
+	now = now.Add(clampTTL(ips[0].TTL) - domainRefreshLead)
+	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
+		lookups++
+		return nil, fmt.Errorf("upstream unavailable")
+	})
+	require.Equal(t, 1, lookups, "a domain near lease expiry must be queried")
+	entry := manager.domains["example.com"]
+	require.NotNil(t, entry)
+	require.Equal(t, 1, entry.failures)
+	require.Equal(t, now.Add(domainRefreshInterval), entry.retryAt, "the first failure must retry at the base interval")
+
+	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
+		lookups++
+		return nil, fmt.Errorf("upstream unavailable")
+	})
+	require.Equal(t, 1, lookups, "a backed-off domain must not be re-queried")
+
+	now = now.Add(time.Minute)
+	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
+		lookups++
+		return ips, nil
+	})
+	require.Equal(t, 2, lookups, "backoff expiry must re-query")
+	entry = manager.domains["example.com"]
+	require.NotNil(t, entry)
+	require.Zero(t, entry.failures)
+	require.True(t, entry.retryAt.IsZero(), "success must clear the backoff")
+
+	// Little lease left: the retry delay must be clamped so one retry stays
+	// possible before the earliest lease expires (less one lookup timeout).
+	now = now.Add(clampTTL(ips[0].TTL) - 30*time.Second)
+	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
+		lookups++
+		return nil, fmt.Errorf("upstream unavailable")
+	})
+	require.Equal(t, 3, lookups)
+	entry = manager.domains["example.com"]
+	require.Equal(t, 1, entry.failures)
+	require.Equal(t, now.Add(25*time.Second), entry.retryAt, "retry must stay possible before the lease lapses")
 }
 
 func TestApplyStatic_NormalizesOverlappingAllow(t *testing.T) {
