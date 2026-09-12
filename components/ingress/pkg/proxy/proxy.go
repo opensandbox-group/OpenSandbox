@@ -258,11 +258,10 @@ func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error)
 //
 // The ingress does not natively accept RFC 8441 HTTP/2 Extended CONNECT
 // WebSocket upgrades — coder/websocket v1.8.15 only supports the HTTP/1.1
-// handshake shape (see accept.go:184-201). Operators terminating h2 at an
-// L7 frontend must configure that frontend to translate h2 into h1 Upgrade
-// (nginx-ingress ≥ 1.13.10 does this by default) or downgrade to h1
-// end-to-end (HAProxy tls-alpn: http/1.1). See the "L7 Frontend
-// Configuration for WebSocket" section of docs/components/ingress.md.
+// handshake shape (see accept.go:184-201). The L7 must ensure that the
+// ingress-facing WebSocket request uses the HTTP/1.1 Upgrade handshake;
+// translation and per-WebSocket fallback behavior are product-specific.
+// See "L7 Frontend Configuration for WebSocket" in docs/components/ingress.md.
 func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
