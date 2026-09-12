@@ -25,13 +25,25 @@ import (
 type Option func(*proxyOptions)
 
 type proxyOptions struct {
-	connectObserver connectivity.Observer
+	connectObserver           connectivity.Observer
+	webSocketMessageSizeLimit int64
 }
 
 // WithConnectObserver observes HTTP and WebSocket TCP connection attempts.
 func WithConnectObserver(observer connectivity.Observer) Option {
 	return func(options *proxyOptions) {
 		options.connectObserver = observer
+	}
+}
+
+// WithWebSocketMessageSizeLimit sets the maximum size, in bytes, of one
+// WebSocket message in either relay direction. Non-positive values are ignored
+// so callers cannot accidentally disable the safety limit.
+func WithWebSocketMessageSizeLimit(limit int64) Option {
+	return func(options *proxyOptions) {
+		if limit > 0 {
+			options.webSocketMessageSizeLimit = limit
+		}
 	}
 }
 

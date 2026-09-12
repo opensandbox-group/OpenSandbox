@@ -34,10 +34,9 @@ const (
 	// that operator-facing behavior is unchanged.
 	backendHandshakeTimeout = 45 * time.Second
 
-	// unlimitedMessageSize disables coder/websocket's default 32 KiB read
-	// limit, matching gorilla's historical behavior. Terminals and Jupyter
-	// kernels can send single frames well above 32 KiB.
-	unlimitedMessageSize = -1
+	// defaultWebSocketMessageSizeLimit permits large terminal and Jupyter
+	// messages while bounding the allocation made by websocket.Conn.Read.
+	defaultWebSocketMessageSizeLimit int64 = 64 << 20
 )
 
 // WebSocketProxy reverse-proxies an HTTP/1.1 WebSocket upgrade (RFC 6455) to
@@ -64,6 +63,9 @@ type WebSocketProxy struct {
 	// wire in an observed client (see newObservedWebSocketHTTPClient) so
 	// connectivity metrics keep working across the library swap.
 	httpClient *http.Client
+
+	// messageSizeLimit bounds one complete message in either direction.
+	messageSizeLimit int64
 }
 
 // NewWebSocketProxy returns a new WebSocket reverse proxy that rewrites the
@@ -77,7 +79,11 @@ func NewWebSocketProxy(target *url.URL, responseObserver func(*http.Response)) *
 		u.RawQuery = r.URL.RawQuery
 		return &u
 	}
-	return &WebSocketProxy{backend: backend, responseObserver: responseObserver}
+	return &WebSocketProxy{
+		backend:          backend,
+		responseObserver: responseObserver,
+		messageSizeLimit: defaultWebSocketMessageSizeLimit,
+	}
 }
 
 // ServeHTTP dials the backend, upgrades the client, and copies WebSocket
@@ -125,7 +131,11 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = backendConn.CloseNow() }()
-	backendConn.SetReadLimit(unlimitedMessageSize)
+	messageSizeLimit := w.messageSizeLimit
+	if messageSizeLimit <= 0 {
+		messageSizeLimit = defaultWebSocketMessageSizeLimit
+	}
+	backendConn.SetReadLimit(messageSizeLimit)
 
 	// Forward Set-Cookie from the backend handshake response. gorilla's proxy
 	// used to explicitly copy this header, and some backends (code-server for
@@ -154,7 +164,7 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = clientConn.CloseNow() }()
-	clientConn.SetReadLimit(unlimitedMessageSize)
+	clientConn.SetReadLimit(messageSizeLimit)
 
 	relayFrames(r.Context(), clientConn, backendConn)
 }
@@ -294,6 +304,8 @@ func copyMessages(ctx context.Context, src, dst *websocket.Conn) error {
 			// connection down without inventing a status code.
 			if closeErr := new(websocket.CloseError); errors.As(readErr, closeErr) {
 				_ = dst.Close(closeErr.Code, closeErr.Reason)
+			} else if errors.Is(readErr, websocket.ErrMessageTooBig) {
+				_ = dst.Close(websocket.StatusMessageTooBig, "message exceeds proxy limit")
 			}
 			return readErr
 		}

@@ -54,24 +54,26 @@ type Proxy struct {
 	secure *signature.Verifier
 	scope  *routescope.Verifier
 
-	httpTransport   http.RoundTripper
-	websocketClient *http.Client
+	httpTransport             http.RoundTripper
+	websocketClient           *http.Client
+	websocketMessageSizeLimit int64
 }
 
 func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, renewIntentPublisher renewintent.Publisher, secure *signature.Verifier, scope *routescope.Verifier, opts ...Option) *Proxy {
-	options := proxyOptions{}
+	options := proxyOptions{webSocketMessageSizeLimit: defaultWebSocketMessageSizeLimit}
 	for _, opt := range opts {
 		opt(&options)
 	}
 
 	return &Proxy{
-		sandboxProvider:      sandboxProvider,
-		mode:                 mode,
-		renewIntentPublisher: renewIntentPublisher,
-		secure:               secure,
-		scope:                scope,
-		httpTransport:        newObservedHTTPTransport(options.connectObserver),
-		websocketClient:      newObservedWebSocketHTTPClient(options.connectObserver),
+		sandboxProvider:           sandboxProvider,
+		mode:                      mode,
+		renewIntentPublisher:      renewIntentPublisher,
+		secure:                    secure,
+		scope:                     scope,
+		httpTransport:             newObservedHTTPTransport(options.connectObserver),
+		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
+		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
 }
 
@@ -193,6 +195,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 		websocketProxy := NewWebSocketProxy(r.URL, p.upstreamResponseObserver(target)) //nolint:bodyclose // Failed handshake bodies are closed by copyResponse.
 		websocketProxy.errorObserver = p.upstreamErrorObserver(target)
 		websocketProxy.httpClient = p.websocketClient
+		websocketProxy.messageSizeLimit = p.websocketMessageSizeLimit
 		websocketProxy.ServeHTTP(w, r)
 	} else {
 		if r.URL.Scheme == "" {
@@ -253,8 +256,8 @@ func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error)
 // isWebSocketRequest reports whether r is an HTTP/1.1 WebSocket upgrade
 // (RFC 6455). The Upgrade header must equal "websocket" and any Connection
 // header must carry an "upgrade" token, both matched case-insensitively;
-// some L7 proxies emit "Connection: keep-alive, Upgrade" which the strict
-// equality check gorilla used to have would have missed.
+// some L7 proxies emit "Connection: keep-alive, Upgrade" which the previous
+// strict equality check in this package would have missed.
 //
 // The ingress does not natively accept RFC 8441 HTTP/2 Extended CONNECT
 // WebSocket upgrades — coder/websocket v1.8.15 only supports the HTTP/1.1

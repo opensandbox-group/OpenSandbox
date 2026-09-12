@@ -16,6 +16,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -80,7 +81,7 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 				return
 			}
 			defer func() { _ = conn.CloseNow() }()
-			conn.SetReadLimit(unlimitedMessageSize)
+			conn.SetReadLimit(defaultWebSocketMessageSizeLimit)
 
 			msgType, msg, readErr := conn.Read(context.Background())
 			if readErr != nil {
@@ -147,7 +148,7 @@ func webSocketProxyWithURIMode(t *testing.T) {
 				return
 			}
 			defer func() { _ = conn.CloseNow() }()
-			conn.SetReadLimit(unlimitedMessageSize)
+			conn.SetReadLimit(defaultWebSocketMessageSizeLimit)
 
 			msgType, msg, readErr := conn.Read(context.Background())
 			if readErr != nil {
@@ -188,11 +189,11 @@ func webSocketProxyWithURIMode(t *testing.T) {
 // This helper intentionally does not reset the package-level Logger. Sister
 // tests already initialize it; overwriting the pointer here would race with a
 // proxy goroutine still reading it as the previous test's servers wind down.
-func startProxyForBehaviorTest(t *testing.T, backendMux *http.ServeMux) (proxyURL string, backendPort int) {
+func startProxyForBehaviorTest(t *testing.T, backendMux *http.ServeMux, opts ...Option) (proxyURL string, backendPort int) {
 	t.Helper()
 
 	provider := &mockProvider{endpoints: map[string]string{"test-sandbox": "127.0.0.1"}}
-	proxy := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil)
+	proxy := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil, opts...)
 
 	proxyPort, err := findAvailablePort()
 	require.NoError(t, err)
@@ -320,15 +321,85 @@ func Test_WebSocketProxy_CloseCodePreserved(t *testing.T) {
 
 	_, _, readErr := conn.Read(context.Background())
 	require.Error(t, readErr)
-	assert.Equal(t, websocket.StatusPolicyViolation, websocket.CloseStatus(readErr),
+	var closeErr websocket.CloseError
+	require.ErrorAs(t, readErr, &closeErr)
+	assert.Equal(t, websocket.StatusPolicyViolation, closeErr.Code,
 		"proxy must forward the backend close code (1008) rather than substituting 1000")
+	assert.Equal(t, "policy trip", closeErr.Reason,
+		"proxy must forward the backend close reason unchanged")
+}
+
+func Test_WebSocketProxy_ClientCloseCodePreserved(t *testing.T) {
+	type closeResult struct {
+		code   websocket.StatusCode
+		reason string
+	}
+	backendClose := make(chan closeResult, 1)
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_, _, readErr := conn.Read(r.Context())
+		var closeErr websocket.CloseError
+		if errors.As(readErr, &closeErr) {
+			backendClose <- closeResult{code: closeErr.Code, reason: closeErr.Reason}
+			return
+		}
+		backendClose <- closeResult{}
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+	h := http.Header{SandboxIngress: []string{"test-sandbox-" + strconv.Itoa(backendPort)}}
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+
+	const applicationClose websocket.StatusCode = 4001
+	require.NoError(t, conn.Close(applicationClose, "session expired"))
+
+	select {
+	case got := <-backendClose:
+		assert.Equal(t, applicationClose, got.code)
+		assert.Equal(t, "session expired", got.reason)
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend did not observe the client close")
+	}
+}
+
+func Test_WebSocketProxy_AbruptClientDisconnectUnblocksBackend(t *testing.T) {
+	backendRead := make(chan error, 1)
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_, _, readErr := conn.Read(r.Context())
+		backendRead <- readErr
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+	h := http.Header{SandboxIngress: []string{"test-sandbox-" + strconv.Itoa(backendPort)}}
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+	require.NoError(t, conn.CloseNow())
+
+	select {
+	case readErr := <-backendRead:
+		require.Error(t, readErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend read remained blocked after abrupt client disconnect")
+	}
 }
 
 // Test_WebSocketProxy_LargeMessage asserts that WebSocket messages above
 // coder/websocket's default 32 KiB read limit still traverse the proxy. The
 // gorilla-era proxy carried no such limit, and terminals or Jupyter kernels
-// routinely emit larger single frames; SetReadLimit(-1) on both connections
-// restores the historical behavior.
+// routinely emit larger single frames. The new bounded default must remain
+// comfortably above coder/websocket's 32 KiB default.
 func Test_WebSocketProxy_LargeMessage(t *testing.T) {
 	const payloadSize = 128 * 1024
 
@@ -370,6 +441,60 @@ func Test_WebSocketProxy_LargeMessage(t *testing.T) {
 	assert.Equal(t, websocket.MessageBinary, msgType)
 	assert.Equal(t, len(payload), len(echoed))
 	assert.Equal(t, payload, echoed)
+}
+
+func Test_WebSocketProxy_MessageSizeLimit(t *testing.T) {
+	const limit = 1024
+
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_, _, _ = conn.Read(r.Context())
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux, WithWebSocketMessageSizeLimit(limit))
+	h := http.Header{SandboxIngress: []string{"test-sandbox-" + strconv.Itoa(backendPort)}}
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
+
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageBinary, make([]byte, limit+1)))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, readErr := conn.Read(ctx)
+	require.Error(t, readErr)
+	assert.Equal(t, websocket.StatusMessageTooBig, websocket.CloseStatus(readErr))
+}
+
+func Test_WebSocketProxy_BackendMessageSizeLimit(t *testing.T) {
+	const limit = 1024
+
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_ = conn.Write(r.Context(), websocket.MessageBinary, make([]byte, limit+1))
+		_, _, _ = conn.Read(r.Context())
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux, WithWebSocketMessageSizeLimit(limit))
+	h := http.Header{SandboxIngress: []string{"test-sandbox-" + strconv.Itoa(backendPort)}}
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, readErr := conn.Read(ctx)
+	require.Error(t, readErr)
+	assert.Equal(t, websocket.StatusMessageTooBig, websocket.CloseStatus(readErr))
 }
 
 // Test_WebSocketProxy_BackendHandshakeRedirectNotFollowed asserts that a

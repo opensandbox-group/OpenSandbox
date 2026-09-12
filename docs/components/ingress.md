@@ -143,9 +143,9 @@ curl -k --http2 -sv --max-time 2 \
 - Application close codes (for example, `1008 policy violation`,
   `4001+ application codes`) are propagated to the peer without being
   rewritten to `1000`.
-- There is no message size cap in the proxy; the underlying
-  `coder/websocket` limit is explicitly disabled to match the historical
-  gorilla behavior.
+- A single WebSocket message is limited to 64 MiB in either direction. This
+  accommodates terminal and Jupyter traffic above `coder/websocket`'s 32 KiB
+  default without retaining the previous unbounded allocation risk.
 
 ## Network Readiness Observation
 
