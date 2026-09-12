@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from datetime import timedelta
 
 import httpx
@@ -374,3 +375,56 @@ async def test_run_rejects_unsupported_command_types(command) -> None:
 
     with pytest.raises(InvalidArgumentException, match="shell text or an argv list"):
         await adapter.run(command)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("late_output", [False, True])
+async def test_foreground_drains_terminal_response_and_closes_stream(
+    failure: bool, late_output: bool
+) -> None:
+    """Handle immediate EOF from fixed execd and trailing output from older execd."""
+    terminal = (
+        {"type": "error", "error": {"ename": "CommandExecError", "evalue": "7", "traceback": []}}
+        if failure else
+        {"type": "execution_complete", "execution_time": 5}
+    )
+    output = [
+        {"type": "stdout", "text": "last stdout"},
+        {"type": "stderr", "text": "last stderr"},
+    ]
+    events = [terminal, *output] if late_output else [*output, terminal]
+
+    class Stream(httpx.AsyncByteStream):
+        closed = False
+        exhausted = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for timestamp, event in enumerate(events, start=1):
+                frame = f"data: {json.dumps({'timestamp': timestamp, **event})}\n\n".encode()
+                # Split frames across reads to exercise incremental SSE decoding.
+                yield frame[:7]
+                yield frame[7:]
+            self.exhausted = True
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = Stream()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"}, stream=stream
+        )
+    )
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    execution = await adapter.run("echo test")
+
+    assert [item.text for item in execution.logs.stdout] == ["last stdout"]
+    assert [item.text for item in execution.logs.stderr] == ["last stderr"]
+    assert execution.exit_code == (7 if failure else 0)
+    assert (execution.complete is None) == failure
+    assert stream.exhausted
+    assert stream.closed

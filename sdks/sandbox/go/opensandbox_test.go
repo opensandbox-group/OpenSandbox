@@ -2667,3 +2667,90 @@ func TestCreateSandbox_WithVolumes(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "CreateSandbox with Volumes")
 }
+
+func TestRunCommandBackgroundStopsAtComplete(t *testing.T) {
+	for _, callbackFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(callbackFails), func(t *testing.T) {
+			closed := make(chan struct{})
+			release := make(chan struct{})
+			defer close(release)
+			_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				fmt.Fprint(w, "data: {\"type\":\"execution_complete\"}\n\n")
+				w.(http.Flusher).Flush()
+				select { // No EOF: the client must close the response.
+				case <-r.Context().Done():
+					close(closed)
+				case <-release:
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			callbackErr := fmt.Errorf("callback failed")
+			calls := 0
+			err := client.RunCommand(ctx, RunCommandRequest{Command: "sleep 30", Background: true}, func(StreamEvent) error {
+				calls++
+				if callbackFails {
+					return callbackErr
+				}
+				return nil
+			})
+			if callbackFails {
+				require.ErrorIs(t, err, callbackErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, 1, calls)
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("response was not closed")
+			}
+		})
+	}
+}
+
+func TestRunCommandForegroundDrainsTerminalStream(t *testing.T) {
+	for _, failure := range []bool{false, true} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("failure=%v/late=%v", failure, late), func(t *testing.T) {
+				terminal := `{"type":"execution_complete"}`
+				if failure {
+					terminal = `{"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}`
+				}
+				output := []string{`{"type":"stdout","text":"tail"}`, `{"type":"stderr","text":"error-tail"}`}
+				frames := append(append([]string{}, output...), terminal)
+				if late {
+					frames = append([]string{terminal}, output...)
+				}
+				_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+					for _, frame := range frames {
+						fmt.Fprint(w, "data: "+frame[:7])
+						w.(http.Flusher).Flush()
+						fmt.Fprint(w, frame[7:]+"\n\n")
+						w.(http.Flusher).Flush()
+					}
+				})
+				var got []string
+				err := client.RunCommand(context.Background(), RunCommandRequest{Command: "echo test"}, func(event StreamEvent) error {
+					got = append(got, event.Data)
+					return nil
+				})
+				require.NoError(t, err)
+				require.Equal(t, frames, got)
+			})
+		}
+	}
+}
+
+func TestSandboxBackgroundResultAcknowledgesStartup(t *testing.T) {
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "{\"type\":\"init\",\"text\":\"background-id\"}\n\n{\"type\":\"execution_complete\"}\n\n")
+	})
+	sandbox := &Sandbox{execd: client}
+	result, err := sandbox.RunCommandWithOpts(context.Background(), RunCommandRequest{Command: "sleep 30", Background: true}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "background-id", result.ID)
+	require.NotNil(t, result.Complete)
+	require.True(t, result.ExitCode == nil, "startup does not establish a process exit code")
+}
