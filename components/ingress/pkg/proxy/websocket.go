@@ -120,7 +120,8 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// one the sandbox route resolved to.
 	handshakeClient := clientWithoutRedirects(w.httpClient)
 
-	backendConn, backendResp, dialErr := websocket.Dial(dialCtx, backendURL.String(), &websocket.DialOptions{
+	// coder/websocket owns the response body; Dial documents that callers must not close it.
+	backendConn, backendResp, dialErr := websocket.Dial(dialCtx, backendURL.String(), &websocket.DialOptions{ //nolint:bodyclose
 		HTTPClient:   handshakeClient,
 		HTTPHeader:   requestHeader,
 		Host:         r.Host,
