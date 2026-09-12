@@ -57,7 +57,7 @@ func TestObservedHTTPTransportRecordsTCPConnect(t *testing.T) {
 	}
 }
 
-func TestObservedWebSocketDialerRecordsTCPConnect(t *testing.T) {
+func TestObservedWebSocketHTTPClientRecordsTCPConnect(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -74,10 +74,14 @@ func TestObservedWebSocketDialerRecordsTCPConnect(t *testing.T) {
 	}()
 
 	observations := make(chan connectivity.Observation, 1)
-	dialer := newObservedWebSocketDialer(connectivity.ObserverFunc(func(observation connectivity.Observation) {
+	client := newObservedWebSocketHTTPClient(connectivity.ObserverFunc(func(observation connectivity.Observation) {
 		observations <- observation
 	}))
-	conn, err := dialer.NetDialContext(context.Background(), "tcp", listener.Addr().String())
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport = %T, want *http.Transport", client.Transport)
+	}
+	conn, err := transport.DialContext(context.Background(), "tcp", listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +95,7 @@ func TestProxyConfiguresBothObservedDialers(t *testing.T) {
 	observer := connectivity.ObserverFunc(func(connectivity.Observation) {})
 	proxy := NewProxy(context.Background(), nil, ModeHeader, nil, nil, nil, WithConnectObserver(observer))
 
-	if proxy.httpTransport == nil || proxy.websocketDialer == nil {
+	if proxy.httpTransport == nil || proxy.websocketClient == nil {
 		t.Fatalf("observed transports were not configured: %+v", proxy)
 	}
 }

@@ -19,14 +19,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_WebSocketProxy(t *testing.T) {
@@ -39,7 +42,6 @@ func Test_WebSocketProxy(t *testing.T) {
 }
 
 func webSocketProxyWithHeaderMode(t *testing.T) {
-	// Create mock provider
 	provider := &mockProvider{
 		endpoints: map[string]string{
 			"test-sandbox": "127.0.0.1",
@@ -53,8 +55,8 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)
 	proxyPort, err := findAvailablePort()
+	require.NoError(t, err)
 	proxyURL := "ws://127.0.0.1:" + strconv.Itoa(proxyPort)
-	assert.Nil(t, err)
 
 	go func() {
 		assert.NoError(t, http.ListenAndServe(":"+strconv.Itoa(proxyPort), mux))
@@ -63,75 +65,52 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	backendPort, err := findAvailablePort()
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
-	// backend echo server
 	go func() {
 		mux2 := http.NewServeMux()
 		mux2.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-			t.Logf("r.URL.Path: %s", r.URL.Path)
-			t.Logf("r.URL.RawPath: %s", r.URL.RawPath)
-			t.Logf("r.Host: %s", r.Host)
-			// Don't upgrade if original host header isn't preserved
+			// Backend must see the original virtual-host header, otherwise
+			// vhost routing at the sandbox side breaks.
 			assert.True(t, strings.HasPrefix(r.Host, "127.0.0.1"))
 
-			conn, err := defaultUpgrader.Upgrade(w, r, nil)
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 			if err != nil {
 				log.Println(err)
 				return
 			}
+			defer func() { _ = conn.CloseNow() }()
+			conn.SetReadLimit(unlimitedMessageSize)
 
-			messageType, p, err := conn.ReadMessage()
-			if err != nil {
+			msgType, msg, readErr := conn.Read(context.Background())
+			if readErr != nil {
 				return
 			}
-
-			if err = conn.WriteMessage(messageType, p); err != nil {
-				return
-			}
+			_ = conn.Write(context.Background(), msgType, msg)
 		})
-
-		err := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2)
-		if err != nil {
+		if err := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2); err != nil {
 			t.Error("ListenAndServe: ", err)
-			return
 		}
 	}()
 
 	time.Sleep(time.Millisecond * 100)
 
-	// frontend server, dial now our proxy, which will reverse proxy our
-	// message to the backend websocket server.
 	h := http.Header{}
 	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
-	conn, _, err := websocket.DefaultDialer.Dial(proxyURL+"/ws", h)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
 
-	// write a message and send it to the backend server
 	msg := "hello kite"
-	err = conn.WriteMessage(websocket.TextMessage, []byte(msg))
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, []byte(msg)))
 
-	messageType, p, err := conn.ReadMessage()
-	if err != nil {
-		t.Error(err)
-	}
-
-	if messageType != websocket.TextMessage {
-		t.Error("incoming message type is not Text")
-	}
-
-	if msg != string(p) {
-		t.Errorf("expecting: %s, got: %s", msg, string(p))
-	}
+	msgType, got, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, websocket.MessageText, msgType)
+	assert.Equal(t, msg, string(got))
 }
 
 func webSocketProxyWithURIMode(t *testing.T) {
-	// Create mock provider
 	provider := &mockProvider{
 		endpoints: map[string]string{
 			"test-sandbox": "127.0.0.1",
@@ -145,8 +124,8 @@ func webSocketProxyWithURIMode(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)
 	proxyPort, err := findAvailablePort()
+	require.NoError(t, err)
 	proxyURL := "ws://127.0.0.1:" + strconv.Itoa(proxyPort)
-	assert.Nil(t, err)
 
 	go func() {
 		assert.NoError(t, http.ListenAndServe(":"+strconv.Itoa(proxyPort), mux))
@@ -155,69 +134,330 @@ func webSocketProxyWithURIMode(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	backendPort, err := findAvailablePort()
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
-	// backend echo server
 	go func() {
 		mux2 := http.NewServeMux()
 		mux2.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-			t.Logf("r.URL.Path: %s", r.URL.Path)
-			t.Logf("r.URL.RawPath: %s", r.URL.RawPath)
-			t.Logf("r.Host: %s", r.Host)
-			// Don't upgrade if original host header isn't preserved
 			assert.True(t, strings.HasPrefix(r.Host, "127.0.0.1"))
 
-			conn, err := defaultUpgrader.Upgrade(w, r, nil)
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 			if err != nil {
 				log.Println(err)
 				return
 			}
+			defer func() { _ = conn.CloseNow() }()
+			conn.SetReadLimit(unlimitedMessageSize)
 
-			messageType, p, err := conn.ReadMessage()
-			if err != nil {
+			msgType, msg, readErr := conn.Read(context.Background())
+			if readErr != nil {
 				return
 			}
-
-			if err = conn.WriteMessage(messageType, p); err != nil {
-				return
-			}
+			_ = conn.Write(context.Background(), msgType, msg)
 		})
-
-		err := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2)
-		if err != nil {
+		if err := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2); err != nil {
 			t.Error("ListenAndServe: ", err)
-			return
 		}
 	}()
 
 	time.Sleep(time.Millisecond * 100)
 
-	// frontend server, dial now our proxy, which will reverse proxy our
-	// message to the backend websocket server.
 	h := http.Header{}
 	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
-	conn, _, err := websocket.DefaultDialer.Dial(proxyURL+fmt.Sprintf("/test-sandbox/%v", backendPort)+"/ws", h)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn, _, err := websocket.Dial(
+		context.Background(),
+		proxyURL+fmt.Sprintf("/test-sandbox/%v", backendPort)+"/ws",
+		&websocket.DialOptions{HTTPHeader: h},
+	)
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
 
-	// write a message and send it to the backend server
 	msg := "hello kite"
-	err = conn.WriteMessage(websocket.TextMessage, []byte(msg))
-	if err != nil {
-		t.Error(err)
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, []byte(msg)))
+
+	msgType, got, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, websocket.MessageText, msgType)
+	assert.Equal(t, msg, string(got))
+}
+
+// startProxyForBehaviorTest wires a proxy in front of an in-process backend
+// exposed on a free port. It returns the proxy URL and the backend port so the
+// test can shape the sandbox route header.
+//
+// This helper intentionally does not reset the package-level Logger. Sister
+// tests already initialize it; overwriting the pointer here would race with a
+// proxy goroutine still reading it as the previous test's servers wind down.
+func startProxyForBehaviorTest(t *testing.T, backendMux *http.ServeMux) (proxyURL string, backendPort int) {
+	t.Helper()
+
+	provider := &mockProvider{endpoints: map[string]string{"test-sandbox": "127.0.0.1"}}
+	proxy := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil)
+
+	proxyPort, err := findAvailablePort()
+	require.NoError(t, err)
+	backendPort, err = findAvailablePort()
+	require.NoError(t, err)
+
+	backendSrv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", backendPort), Handler: backendMux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = backendSrv.ListenAndServe() }()
+	t.Cleanup(func() { _ = backendSrv.Close() })
+
+	proxyMux := http.NewServeMux()
+	proxyMux.Handle("/", proxy)
+	proxySrv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", proxyPort), Handler: proxyMux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = proxySrv.ListenAndServe() }()
+	t.Cleanup(func() { _ = proxySrv.Close() })
+
+	// Poll the proxy listener rather than sleeping: fast when the OS wires
+	// the socket immediately, still bounded when a slow scheduler delays it.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/status.ok", proxyPort)); err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
-	messageType, p, err := conn.ReadMessage()
-	if err != nil {
-		t.Error(err)
+	return "ws://127.0.0.1:" + strconv.Itoa(proxyPort), backendPort
+}
+
+// Test_WebSocketProxy_Subprotocol asserts that the client's Sec-WebSocket-
+// Protocol offer is forwarded to the backend and the backend's selection is
+// echoed back to the client. Gorilla's proxy handled this implicitly; the
+// coder/websocket migration required explicit wiring in DialOptions and
+// AcceptOptions and this test guards the wiring from silent regression.
+func Test_WebSocketProxy_Subprotocol(t *testing.T) {
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+			Subprotocols:       []string{"graphql-ws"},
+		})
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_, _, _ = conn.Read(r.Context())
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	h := http.Header{}
+	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{
+		HTTPHeader:   h,
+		Subprotocols: []string{"graphql-ws", "graphql-transport-ws"},
+	})
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
+
+	assert.Equal(t, "graphql-ws", conn.Subprotocol(),
+		"backend selected graphql-ws; proxy must echo it to the client")
+}
+
+// Test_WebSocketProxy_SetCookieForwarded asserts that Set-Cookie headers the
+// backend sets during the WebSocket handshake reach the client. code-server
+// refreshes session cookies at upgrade time and dropping them silently breaks
+// sticky-session logins on some deployments.
+func Test_WebSocketProxy_SetCookieForwarded(t *testing.T) {
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "abc123", Path: "/"})
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_, _, _ = conn.Read(r.Context())
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	h := http.Header{}
+	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	conn, resp, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
+	require.NotNil(t, resp)
+
+	found := false
+	for _, c := range resp.Cookies() {
+		if c.Name == "session" && c.Value == "abc123" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "Set-Cookie from backend handshake must reach the client; got %v", resp.Cookies())
+}
+
+// Test_WebSocketProxy_CloseCodePreserved asserts that an application close
+// code from the backend (1008 policy violation in this test) is propagated to
+// the client verbatim rather than being masked as 1000. Gorilla had a subtle
+// bug that occasionally rewrote codes; coder/websocket + our copyMessages
+// implementation should preserve them.
+func Test_WebSocketProxy_CloseCodePreserved(t *testing.T) {
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		_, _, _ = conn.Read(r.Context())
+		_ = conn.Close(websocket.StatusPolicyViolation, "policy trip")
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	h := http.Header{}
+	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
+
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, []byte("ping")))
+
+	_, _, readErr := conn.Read(context.Background())
+	require.Error(t, readErr)
+	assert.Equal(t, websocket.StatusPolicyViolation, websocket.CloseStatus(readErr),
+		"proxy must forward the backend close code (1008) rather than substituting 1000")
+}
+
+// Test_WebSocketProxy_LargeMessage asserts that WebSocket messages above
+// coder/websocket's default 32 KiB read limit still traverse the proxy. The
+// gorilla-era proxy carried no such limit, and terminals or Jupyter kernels
+// routinely emit larger single frames; SetReadLimit(-1) on both connections
+// restores the historical behavior.
+func Test_WebSocketProxy_LargeMessage(t *testing.T) {
+	const payloadSize = 128 * 1024
+
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		conn.SetReadLimit(-1)
+		msgType, msg, readErr := conn.Read(r.Context())
+		if readErr != nil {
+			t.Errorf("backend read: %v", readErr)
+			return
+		}
+		_ = conn.Write(r.Context(), msgType, msg)
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	h := http.Header{}
+	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	conn, _, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
+	conn.SetReadLimit(-1)
+
+	payload := make([]byte, payloadSize)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageBinary, payload))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	msgType, echoed, err := conn.Read(ctx)
+	require.NoError(t, err, "large message must survive the proxy — 32 KiB cap regression will surface as StatusMessageTooBig")
+	assert.Equal(t, websocket.MessageBinary, msgType)
+	assert.Equal(t, len(payload), len(echoed))
+	assert.Equal(t, payload, echoed)
+}
+
+// Test_WebSocketProxy_BackendHandshakeRedirectNotFollowed asserts that a
+// backend returning a 3xx during the WebSocket handshake is surfaced to the
+// caller as-is instead of being followed. coder/websocket.Dial's default
+// http.Client follows redirects; gorilla's Dialer never did. Following the
+// redirect at the ingress layer would route WebSocket handshake traffic to
+// a target the sandbox route did not resolve, hiding the real backend
+// response from operators and potentially leaking Authorization headers to
+// an unrelated endpoint.
+func Test_WebSocketProxy_BackendHandshakeRedirectNotFollowed(t *testing.T) {
+	var loginHits int32
+	loginMux := http.NewServeMux()
+	loginMux.HandleFunc("/login", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&loginHits, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>login page</html>"))
+	})
+	loginBackend := httptest.NewServer(loginMux)
+	t.Cleanup(loginBackend.Close)
+
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, _ *http.Request) {
+		// Simulate a session-expired auth guard that would normally redirect
+		// browsers to a login page. A WebSocket client cannot meaningfully
+		// follow this — the redirect target is HTML, not WS.
+		w.Header().Set("Location", loginBackend.URL+"/login")
+		w.WriteHeader(http.StatusFound)
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	// The test client must also refuse to follow redirects — otherwise it
+	// would follow the 302 that the ingress correctly forwarded, hit the
+	// login endpoint from *its own* HTTP stack, and produce false-positive
+	// loginHits that has nothing to do with the ingress under test.
+	noFollowClient := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
-	if messageType != websocket.TextMessage {
-		t.Error("incoming message type is not Text")
+	h := http.Header{}
+	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	conn, resp, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{
+		HTTPHeader: h,
+		HTTPClient: noFollowClient,
+	})
+	require.Error(t, err)
+	if conn != nil {
+		_ = conn.CloseNow()
 	}
+	require.NotNil(t, resp, "backend redirect response must reach the client, not be silently followed")
+	assert.Equal(t, http.StatusFound, resp.StatusCode,
+		"the original 302 from the backend must be surfaced; a 200 here would mean the proxy followed the redirect")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&loginHits),
+		"the redirect target must not be contacted by the ingress")
+}
 
-	if msg != string(p) {
-		t.Errorf("expecting: %s, got: %s", msg, string(p))
+// Test_WebSocketProxy_BackendHandshake4xxPassthrough asserts that a backend
+// rejecting the WebSocket handshake with 4xx (401 auth required, 403
+// forbidden, 404 missing endpoint, ...) is surfaced to the client verbatim.
+// #1117 review flagged the gorilla-era proxy for occasionally rewriting such
+// responses as 502/503; handleBackendDialError uses copyResponse to preserve
+// the backend response so callers can distinguish auth failures from ingress
+// outages.
+func Test_WebSocketProxy_BackendHandshake4xxPassthrough(t *testing.T) {
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", "Bearer realm=\"test\"")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"missing_token"}`))
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	h := http.Header{}
+	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	conn, resp, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	// Dial must fail (handshake never completed), and the error carrier
+	// (resp) must reflect what the backend actually sent.
+	require.Error(t, err)
+	if conn != nil {
+		_ = conn.CloseNow()
 	}
+	require.NotNil(t, resp, "proxy must surface the backend handshake response so callers can diagnose auth failures")
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"backend 401 must reach the client instead of being rewritten as 502/503")
+	assert.Equal(t, "Bearer realm=\"test\"", resp.Header.Get("WWW-Authenticate"),
+		"auth challenge header from the backend must be forwarded")
 }

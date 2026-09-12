@@ -28,7 +28,7 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 )
 
@@ -368,17 +368,16 @@ func TestFastSandboxProxyInvalidatesRouteOnUpstreamConnectionFailure(t *testing.
 }
 
 func TestFastSandboxProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/route/ws", r.URL.Path)
 		require.Equal(t, "issued-credential", r.Header.Get(sandbox.FastSandboxCredential))
 		require.Equal(t, "Bearer application-token", r.Header.Get("Authorization"))
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		require.NoError(t, err)
-		defer conn.Close()
-		messageType, message, err := conn.ReadMessage()
-		require.NoError(t, err)
-		require.NoError(t, conn.WriteMessage(messageType, message))
+		defer func() { _ = conn.CloseNow() }()
+		msgType, msg, readErr := conn.Read(context.Background())
+		require.NoError(t, readErr)
+		require.NoError(t, conn.Write(context.Background(), msgType, msg))
 	}))
 	defer backend.Close()
 	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{
@@ -389,11 +388,15 @@ func TestFastSandboxProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T
 	defer ingress.Close()
 
 	headers := http.Header{SandboxIngress: []string{fsbScopeVector}, "Authorization": []string{"Bearer application-token"}}
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws", headers)
+	conn, _, err := websocket.Dial(
+		context.Background(),
+		"ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws",
+		&websocket.DialOptions{HTTPHeader: headers},
+	)
 	require.NoError(t, err)
-	defer conn.Close()
-	require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte("hello")))
-	_, message, err := conn.ReadMessage()
+	defer func() { _ = conn.CloseNow() }()
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, []byte("hello")))
+	_, message, err := conn.Read(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(message))
 }
@@ -409,9 +412,13 @@ func TestFastSandboxProxyWebSocketHandshakeInvalidatesStaleRoute(t *testing.T) {
 	defer ingress.Close()
 
 	headers := http.Header{SandboxIngress: []string{fsbScopeVector}}
-	conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws", headers)
+	conn, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws",
+		&websocket.DialOptions{HTTPHeader: headers},
+	)
 	if conn != nil {
-		defer conn.Close()
+		defer func() { _ = conn.CloseNow() }()
 	}
 	require.Error(t, err)
 	require.NotNil(t, response)
@@ -431,9 +438,13 @@ func TestFastSandboxProxyWebSocketConnectionFailureInvalidatesRoute(t *testing.T
 	defer ingress.Close()
 
 	headers := http.Header{SandboxIngress: []string{fsbScopeVector}}
-	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws", headers)
+	connection, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+strings.TrimPrefix(ingress.URL, "http")+"/ws",
+		&websocket.DialOptions{HTTPHeader: headers},
+	)
 	if connection != nil {
-		defer connection.Close()
+		defer func() { _ = connection.CloseNow() }()
 	}
 	require.Error(t, err)
 	require.NotNil(t, response)

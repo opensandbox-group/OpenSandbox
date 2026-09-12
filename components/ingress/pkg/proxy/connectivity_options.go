@@ -18,8 +18,6 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/gorilla/websocket"
-
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
 )
 
@@ -56,13 +54,26 @@ func newObservedHTTPTransport(observer connectivity.Observer) http.RoundTripper 
 	return transport
 }
 
-func newObservedWebSocketDialer(observer connectivity.Observer) *websocket.Dialer {
+// newObservedWebSocketHTTPClient returns the *http.Client that coder/websocket
+// uses to dial backends. Its Transport's DialContext is wrapped so each TCP
+// connection attempt is recorded by the connectivity observer under the
+// "websocket" protocol label, matching the metrics dimensions the gorilla-based
+// implementation used to emit.
+func newObservedWebSocketHTTPClient(observer connectivity.Observer) *http.Client {
 	if observer == nil {
 		return nil
 	}
 
-	dialer := *websocket.DefaultDialer
-	baseDialer := &net.Dialer{}
-	dialer.NetDialContext = connectivity.WrapDialContext(baseDialer.DialContext, observer, "websocket")
-	return &dialer
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil
+	}
+	transport := baseTransport.Clone()
+	baseDialContext := transport.DialContext
+	if baseDialContext == nil {
+		baseDialer := &net.Dialer{}
+		baseDialContext = baseDialer.DialContext
+	}
+	transport.DialContext = connectivity.WrapDialContext(baseDialContext, observer, "websocket")
+	return &http.Client{Transport: transport}
 }

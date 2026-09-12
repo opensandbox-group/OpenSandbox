@@ -43,20 +43,68 @@ func (stubNoSecureProvider) Start(context.Context) error { return nil }
 func TestIsWebSocketRequest(t *testing.T) {
 	proxy := &Proxy{}
 
-	// Valid websocket request
+	// The canonical HTTP/1.1 upgrade shape.
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	assert.True(t, proxy.isWebSocketRequest(req))
 
-	// Missing upgrade headers
+	// Some L7 proxies (Envoy, older HAProxy) merge the client's
+	// "Connection: Upgrade" with their own "keep-alive" hop, producing a
+	// token list. RFC 7230 §6.1 allows this and gorilla's strict equality
+	// missed it; the new matcher must accept it.
+	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "keep-alive, Upgrade")
+	assert.True(t, proxy.isWebSocketRequest(req))
+
+	// Case-insensitive token matching for both Upgrade and Connection.
+	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "WebSocket")
+	req.Header.Set("Connection", "upgrade")
+	assert.True(t, proxy.isWebSocketRequest(req))
+
+	// No upgrade headers → plain HTTP request.
 	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
 	assert.False(t, proxy.isWebSocketRequest(req))
 
-	// Wrong method
+	// GET with Upgrade but wrong Connection token → still HTTP.
+	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "keep-alive")
+	assert.False(t, proxy.isWebSocketRequest(req))
+
+	// POST with upgrade headers is not a WebSocket handshake.
 	req = httptest.NewRequest(http.MethodPost, "/ws", nil)
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
+	assert.False(t, proxy.isWebSocketRequest(req))
+}
+
+// TestIsWebSocketRequestRejectsH2ExtendedConnect documents the ingress's
+// current inability to accept RFC 8441 HTTP/2 WebSocket upgrades. coder/
+// websocket v1.8.15 (accept.go:184-201) requires Method==GET and Upgrade/
+// Connection headers, so an h2 CONNECT + :protocol=websocket request cannot
+// complete the WebSocket handshake even if we routed it as a WebSocket
+// request. Operators must configure the L7 frontend to translate h2 into h1
+// or downgrade to h1 (see docs/components/ingress.md).
+func TestIsWebSocketRequestRejectsH2ExtendedConnect(t *testing.T) {
+	proxy := &Proxy{}
+
+	// h2 Extended CONNECT with :protocol=websocket → NOT a WebSocket
+	// upgrade path for this ingress. We reject at isWebSocketRequest so the
+	// request flows through the plain HTTP reverse proxy and either the L7
+	// misconfiguration is surfaced as a normal HTTP response or the backend
+	// rejects the request itself.
+	req := httptest.NewRequest(http.MethodConnect, "/", nil)
+	req.ProtoMajor = 2
+	req.Header.Set(":protocol", "websocket")
+	assert.False(t, proxy.isWebSocketRequest(req))
+
+	// h2 CONNECT without :protocol (a plain RFC 7230 CONNECT tunnel) also
+	// remains outside the WebSocket path.
+	req = httptest.NewRequest(http.MethodConnect, "example.com:443", nil)
+	req.ProtoMajor = 2
 	assert.False(t, proxy.isWebSocketRequest(req))
 }
 

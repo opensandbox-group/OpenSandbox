@@ -26,7 +26,6 @@ import (
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
-	"github.com/gorilla/websocket"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
@@ -56,7 +55,7 @@ type Proxy struct {
 	scope  *routescope.Verifier
 
 	httpTransport   http.RoundTripper
-	websocketDialer *websocket.Dialer
+	websocketClient *http.Client
 }
 
 func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, renewIntentPublisher renewintent.Publisher, secure *signature.Verifier, scope *routescope.Verifier, opts ...Option) *Proxy {
@@ -72,7 +71,7 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		secure:               secure,
 		scope:                scope,
 		httpTransport:        newObservedHTTPTransport(options.connectObserver),
-		websocketDialer:      newObservedWebSocketDialer(options.connectObserver),
+		websocketClient:      newObservedWebSocketHTTPClient(options.connectObserver),
 	}
 }
 
@@ -193,7 +192,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 		}
 		websocketProxy := NewWebSocketProxy(r.URL, p.upstreamResponseObserver(target)) //nolint:bodyclose // Failed handshake bodies are closed by copyResponse.
 		websocketProxy.errorObserver = p.upstreamErrorObserver(target)
-		websocketProxy.dialer = p.websocketDialer
+		websocketProxy.httpClient = p.websocketClient
 		websocketProxy.ServeHTTP(w, r)
 	} else {
 		if r.URL.Scheme == "" {
@@ -251,17 +250,42 @@ func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error)
 	}
 }
 
+// isWebSocketRequest reports whether r is an HTTP/1.1 WebSocket upgrade
+// (RFC 6455). The Upgrade header must equal "websocket" and any Connection
+// header must carry an "upgrade" token, both matched case-insensitively;
+// some L7 proxies emit "Connection: keep-alive, Upgrade" which the strict
+// equality check gorilla used to have would have missed.
+//
+// The ingress does not natively accept RFC 8441 HTTP/2 Extended CONNECT
+// WebSocket upgrades — coder/websocket v1.8.15 only supports the HTTP/1.1
+// handshake shape (see accept.go:184-201). Operators terminating h2 at an
+// L7 frontend must configure that frontend to translate h2 into h1 Upgrade
+// (nginx-ingress ≥ 1.13.10 does this by default) or downgrade to h1
+// end-to-end (HAProxy tls-alpn: http/1.1). See the "L7 Frontend
+// Configuration for WebSocket" section of docs/components/ingress.md.
 func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
-	if r.Header.Get("Upgrade") != "websocket" {
+	if !strings.EqualFold(r.Header.Get(HopByHopUpgrade), "websocket") {
 		return false
 	}
-	if r.Header.Get("Connection") != "Upgrade" {
-		return false
+	return connectionHasToken(r, "upgrade")
+}
+
+// connectionHasToken reports whether any Connection header value in r contains
+// the given token, matched case-insensitively after comma splitting. This
+// accepts "Connection: keep-alive, Upgrade" and other token-list forms allowed
+// by RFC 7230 §6.1.
+func connectionHasToken(r *http.Request, token string) bool {
+	for _, v := range r.Header.Values(HopByHopConnection) {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), token) {
+				return true
+			}
+		}
 	}
-	return true
+	return false
 }
 
 func (p *Proxy) resolveRealHost(host *sandboxHost, requestURL *url.URL) (*url.URL, int, error) {

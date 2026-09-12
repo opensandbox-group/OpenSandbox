@@ -27,6 +27,140 @@ go run main.go \
 ```
 Endpoints: `/` (proxy), `/status.ok` (health), `/status.ok/network-readiness` (shadow network assessment).
 
+## L7 Frontend Configuration for WebSocket
+
+The ingress terminates HTTP/1.1 on the wire and does not terminate TLS —
+TLS is expected to end at the L7 proxy in front (HAProxy, nginx, Envoy,
+cloud load balancer). Because browsers and modern L7 proxies default to
+advertising HTTP/2 in ALPN, and RFC 7540 §8.1.2.2 forbids the classic
+`Upgrade: websocket` / `Connection: Upgrade` handshake on HTTP/2, the L7
+must either translate WebSocket upgrades to HTTP/1.1 before forwarding, or
+downgrade the whole connection to HTTP/1.1. Otherwise the L7 strips the
+upgrade header, the ingress receives a bare `GET`, and the browser reports
+`WebSocket close 1006` or `workbench failed to connect` — the failure mode
+tracked in [issue #1105](https://github.com/opensandbox-group/OpenSandbox/issues/1105).
+
+The ingress does not natively accept RFC 8441 HTTP/2 Extended CONNECT
+WebSocket upgrades. `isWebSocketRequest` filters out any non-`GET` method
+before the WebSocket path, so `CONNECT` + `:protocol=websocket` requests
+are routed through the plain HTTP reverse proxy and typically fail at the
+backend with an implementation-defined error. This limitation is inherent
+to the underlying [coder/websocket](https://github.com/coder/websocket)
+library — h2 support is tracked upstream in
+[coder/websocket#4](https://github.com/coder/websocket/issues/4).
+
+| Option | What the L7 does | Recommended for |
+| ------ | ---------------- | --------------- |
+| **Translate** | Convert h2 WebSocket upgrades into HTTP/1.1 `Upgrade: websocket` before forwarding to the ingress | Production, most deployments |
+| **Downgrade** | Only advertise HTTP/1.1 to browsers (no h2 ALPN) | Simple setups, older L7s |
+
+### Option 1: Translate (recommended)
+
+The L7 proxy accepts h2 from the browser and converts WebSocket upgrades
+into HTTP/1.1 `Upgrade` requests toward the ingress. The ingress sees a
+standard h1 handshake and handles it normally.
+
+- **nginx-ingress ≥ 1.13.10** performs this translation by default.
+- **HAProxy 3.x** supports it via the `proto h1` backend directive combined
+  with frontend options — consult the HAProxy 3.x release notes for the
+  currently recommended syntax; earlier configurations rely on
+  `option h2-workaround-bogus-websocket-clients`.
+
+### Option 2: Downgrade to HTTP/1.1
+
+Turn off h2 in the L7 proxy's browser-facing ALPN list. Browsers connect
+over HTTP/1.1 and follow the classic RFC 6455 handshake end-to-end.
+
+HAProxy example:
+
+```haproxy
+frontend main
+    bind :443 ssl crt /etc/haproxy/certs/ alpn http/1.1
+    # ↑ Remove "h2," from the alpn list to force HTTP/1.1
+```
+
+For `haproxytech/kubernetes-ingress`, set the following in the controller
+ConfigMap:
+
+```yaml
+data:
+  tls-alpn: "http/1.1"
+```
+
+Trade-off: browsers lose HTTP/2 multiplexing and header compression on the
+browser leg, but the configuration is minimal and there is no version
+dependency on the L7 proxy.
+
+### h2c passthrough is not supported
+
+Some HAProxy configurations forward RFC 8441 h2 Extended CONNECT to the
+backend unchanged (`server ingress-svc <addr> proto h2`). The ingress does
+not accept this shape: the CONNECT request never enters the WebSocket
+handler, and the plain HTTP proxy path cannot complete a WebSocket
+handshake either. Use Option 1 or Option 2, or open an issue describing
+your topology so this ingress can be considered for h2 support.
+
+### Diagnostics
+
+If a browser or SDK reports `WebSocket close 1006`, first confirm that
+HTTP/1.1 WebSocket to the ingress works. This is both the actual
+acceptance test and the fastest way to isolate whether the failure is at
+the L7 or at the ingress.
+
+```bash
+curl --http1.1 -sv \
+    -H 'Connection: Upgrade' \
+    -H 'Upgrade: websocket' \
+    -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+    "https://${sandbox_id}-${port}.example.com/some/ws/path" 2>&1 | \
+    grep -E '^< HTTP|^< Sec-WebSocket-Accept'
+
+# Expected output:
+# < HTTP/1.1 101 Switching Protocols
+# < Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+```
+
+If this returns `200` with an HTML body, either the ingress or an L7 hop
+lost the `Upgrade` header. Do **not** try to craft an HTTP/2 WebSocket
+handshake with curl — RFC 7540 §8.1.2.2 forbids `Connection: Upgrade` and
+`Upgrade: websocket` on h2 streams, and RFC 8441 uses `:method=CONNECT` +
+`:protocol=websocket` returning 2xx (not 101). A curl invocation like
+`curl --http2 -H 'Upgrade: websocket'` sends headers that the L7 strips
+before forwarding and does not measure what you think it measures.
+
+To confirm which protocol the L7 negotiated with the client (independent of
+the WebSocket outcome), inspect only the ALPN line:
+
+```bash
+curl -k --http2 -sv --max-time 2 \
+    "https://${sandbox_id}-${port}.example.com/" 2>&1 | \
+    grep -E '^\* ALPN'
+```
+
+- `ALPN, server accepted: http/1.1` — Option 2 is active.
+- `ALPN, server accepted: h2` — Option 1 must be in effect for WebSocket
+  traffic to work; verify end-to-end with a real browser or WebSocket
+  client rather than trying to reconstruct the handshake with curl.
+
+### Related to WebSocket forwarding behavior
+
+- The ingress recognizes case-insensitive `Connection` header tokens and
+  accepts `Connection: keep-alive, Upgrade` in addition to
+  `Connection: Upgrade`.
+- Backend redirect (3xx) and error (4xx/5xx) responses during the
+  handshake are surfaced to the caller verbatim; the ingress does not
+  follow redirects, so a stale `Location: /login` never leaks
+  Authorization headers to an unrelated endpoint.
+- Client-selected WebSocket subprotocols and backend `Set-Cookie` headers
+  are forwarded across the handshake.
+- Application close codes (for example, `1008 policy violation`,
+  `4001+ application codes`) are propagated to the peer without being
+  rewritten to `1000`.
+- There is no message size cap in the proxy; the underlying
+  `coder/websocket` limit is explicitly disabled to match the historical
+  gorilla behavior.
+
 ## Network Readiness Observation
 
 Ingress observes the TCP connections that its HTTP transport and WebSocket
