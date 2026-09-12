@@ -21,12 +21,14 @@ This is the sync counterpart of :mod:`opensandbox.services.command`.
 """
 
 from datetime import timedelta
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from opensandbox.models.execd import (
     CommandLogs,
     CommandStatus,
     Execution,
+    ExecutionInstance,
+    ExecutionOperation,
     RunCommandOpts,
 )
 from opensandbox.models.execd_sync import ExecutionHandlersSync
@@ -145,3 +147,45 @@ class CommandsSync(Protocol):
     def delete_session(self, session_id: str) -> None:
         """Delete a bash session and release resources."""
         ...
+
+
+@runtime_checkable
+class ExecutionOperationsSync(Protocol):
+    """Optional creation recovery capability, separate from legacy commands."""
+
+    def get_execution_instance(self) -> ExecutionInstance:
+        """Obtain controller scope and server time before generating an identity."""
+        ...
+
+    def get_execution_operation(
+        self, kind: str, operation_id: str
+    ) -> ExecutionOperation:
+        """Look up creation only; an unknown execution outcome is not success."""
+        ...
+
+    def create_command_operation(
+        self,
+        operation_id: str,
+        command: str,
+        *,
+        opts: RunCommandOpts | None = None,
+    ) -> ExecutionOperation:
+        """Use a persisted identity and immutable options. Does not stream output."""
+        ...
+
+    def create_pty_operation(
+        self,
+        operation_id: str,
+        *,
+        cwd: str = "",
+        command: str = "",
+    ) -> ExecutionOperation:
+        """Create a dormant session or recover its original handle."""
+        ...
+
+
+def get_execution_operations(commands: CommandsSync) -> ExecutionOperationsSync:
+    """Get opt-in recovery methods or reject an unsupported third-party adapter."""
+    if not isinstance(commands, ExecutionOperationsSync):
+        raise TypeError("Command adapter does not support execution creation recovery")
+    return commands

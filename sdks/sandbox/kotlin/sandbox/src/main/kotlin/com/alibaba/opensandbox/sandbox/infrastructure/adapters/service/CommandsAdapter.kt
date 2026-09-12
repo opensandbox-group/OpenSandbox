@@ -21,15 +21,21 @@ import com.alibaba.opensandbox.sandbox.api.execd.CommandApi
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ResponseType
+import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Serializer
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Success
+import com.alibaba.opensandbox.sandbox.api.models.execd.CreateCommandOperationRequest
+import com.alibaba.opensandbox.sandbox.api.models.execd.CreatePTYOperationRequest
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionInstance
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionOperation
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -49,7 +55,11 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.slf4j.LoggerFactory
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
 import com.alibaba.opensandbox.sandbox.api.models.execd.CreateSessionRequest as CreateSessionRequestApi
+import com.alibaba.opensandbox.sandbox.api.models.execd.ExecutionOperation as ApiExecutionOperation
 import com.alibaba.opensandbox.sandbox.api.models.execd.RunInSessionRequest as RunInSessionRequestApi
 
 /**
@@ -67,6 +77,11 @@ internal class CommandsAdapter(
 
     private val commandJson = Json(jsonParser) { explicitNulls = false }
     private val logger = LoggerFactory.getLogger(CommandsAdapter::class.java)
+    private val instanceLock = Any()
+    private var cachedInstance: ExecutionInstance? = null
+    private var instanceFetchedAt = 0L
+    private var instanceGeneration = 0L
+    private var instancePending: CompletableFuture<ExecutionInstance>? = null
     private val execdBaseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
     private val execdApiClient =
         httpClientProvider.httpClient.newBuilder()
@@ -83,6 +98,130 @@ internal class CommandsAdapter(
             execdBaseUrl,
             execdApiClient,
         )
+
+    private fun ApiExecutionOperation.toOperation(): ExecutionOperation = ExecutionOperation(id, kind.value, state.value, expiresAt)
+
+    override fun getExecutionInstance(): ExecutionInstance {
+        var owner = false
+        val pending: CompletableFuture<ExecutionInstance>
+        val generation: Long
+        val started: Long
+        synchronized(instanceLock) {
+            cachedInstance?.let {
+                if (System.nanoTime() - instanceFetchedAt < TimeUnit.MINUTES.toNanos(1)) return it.copy()
+            }
+            pending = instancePending ?: CompletableFuture<ExecutionInstance>().also {
+                instancePending = it
+                owner = true
+            }
+            generation = instanceGeneration
+            started = System.nanoTime()
+        }
+        if (owner) {
+            try {
+                val instance = commandApi.getExecutionInstance()
+                val result = ExecutionInstance(instance.instanceId, instance.issuedAt, instance.retentionSeconds, instance.capacity)
+                synchronized(instanceLock) {
+                    if (generation == instanceGeneration) {
+                        cachedInstance = result
+                        instanceFetchedAt = started
+                    }
+                }
+                pending.complete(result)
+            } catch (e: Exception) {
+                pending.completeExceptionally(e.toSandboxException())
+            } finally {
+                synchronized(instanceLock) {
+                    if (instancePending === pending) instancePending = null
+                }
+            }
+        }
+        try {
+            return pending.get().copy()
+        } catch (e: ExecutionException) {
+            throw (e.cause as? RuntimeException ?: e.toSandboxException())
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e.toSandboxException()
+        }
+    }
+
+    private fun operationException(error: Exception): SandboxException {
+        val converted = error.toSandboxException()
+        if (converted.error.code in setOf("operation_instance_mismatch", "operation_expired")) {
+            synchronized(instanceLock) {
+                cachedInstance = null
+                instancePending = null
+                instanceGeneration++
+            }
+        }
+        return converted
+    }
+
+    override fun getExecutionOperation(
+        kind: String,
+        operationId: String,
+    ): ExecutionOperation {
+        try {
+            return commandApi.getExecutionOperation(CommandApi.KindGetExecutionOperation.valueOf(kind), operationId).toOperation()
+        } catch (e: Exception) {
+            throw operationException(e)
+        }
+    }
+
+    override fun createCommandOperation(
+        operationId: String,
+        request: RunCommandRequest,
+    ): ExecutionOperation {
+        if (operationId.isBlank()) throw InvalidArgumentException("operationId is required")
+        try {
+            val original = request.toApiRunCommandRequest()
+            val body =
+                CreateCommandOperationRequest(
+                    operationId = operationId,
+                    command = original.command,
+                    argv = original.argv,
+                    cwd = original.cwd,
+                    background = original.background,
+                    timeout = original.timeout,
+                    uid = original.uid,
+                    gid = original.gid,
+                    envs = original.envs,
+                )
+            // As with /command, omit the unused command/argv alternative.
+            // The generated client's default serializer emits explicit nulls.
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl$RUN_COMMAND_PATH/operations")
+                    .post(commandJson.encodeToString(body).toRequestBody("application/json".toMediaType()))
+                    .build()
+            return execdApiClient.newCall(httpRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw response.toSandboxApiException { status, _ -> "Failed to create command operation. Status code: $status" }
+                }
+                Serializer.kotlinxSerializationJson.decodeFromString<ApiExecutionOperation>(
+                    response.body?.string() ?: throw IllegalStateException("Missing execution operation"),
+                ).toOperation()
+            }
+        } catch (e: Exception) {
+            throw operationException(e)
+        }
+    }
+
+    override fun createPTYOperation(
+        operationId: String,
+        cwd: String,
+        command: String,
+    ): ExecutionOperation {
+        if (operationId.isBlank()) throw InvalidArgumentException("operationId is required")
+        try {
+            return commandApi.createPTYOperation(
+                CreatePTYOperationRequest(operationId = operationId, cwd = cwd, command = command),
+            ).toOperation()
+        } catch (e: Exception) {
+            throw operationException(e)
+        }
+    }
 
     override fun run(request: RunCommandRequest): Execution {
         if (request.argv == null && request.command.isEmpty()) {

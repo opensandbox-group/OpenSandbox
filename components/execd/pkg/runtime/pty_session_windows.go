@@ -74,6 +74,11 @@ func (c *Controller) GetPTYSessionStatus(id string) (bool, int64, error) { //nol
 	return false, 0, errPTYSessionNotSupported
 }
 
+// GetPTYSessionState is not supported on Windows.
+func (c *Controller) GetPTYSessionState(_ string) (PTYSessionState, error) {
+	return PTYSessionState{}, errPTYSessionNotSupported
+}
+
 // Method stubs so the controller layer can call them without build-tag guards.
 
 func (s *ptySession) LockWS() bool                                 { return false }
@@ -99,3 +104,9 @@ func (s *ptySession) ReadOutput(_ int64) ([]byte, int64, <-chan struct{}) {
 }
 func (s *ptySession) SendSignal(_ string)         {}
 func (s *ptySession) ResizePTY(_, _ uint16) error { return nil }
+
+func (c *Controller) expireOperationPTY(string) bool { return true }
+
+func (c *Controller) createPTYSession(id, cwd, command string, _ bool) (PTYSession, error) {
+	return c.CreatePTYSession(id, cwd, command)
+}

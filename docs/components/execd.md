@@ -236,6 +236,7 @@ override it.
 | `--port` | `44772` | HTTP listen port. |
 | `--log-level` | `6` | Log level (0=Emergency, 7=Debug). |
 | `--access-token` | `""` | Optional shared API access token. |
+| `--operation-capacity` | `4096` | Positive limit for retained command/PTY creation records; see [creation recovery](/guides/execution-creation-recovery). |
 | `--graceful-shutdown-timeout` | `1s` | SSE tail-drain wait window before closing. |
 | `--jupyter-idle-poll-interval` | `100ms` | Poll interval after Jupyter reports idle. |
 | `--isolation-config` | `""` | Path to the isolation TOML config (see below). |
@@ -248,6 +249,7 @@ override it.
 | `JUPYTER_HOST` | Same as `--jupyter-host` (overridden by explicit flag). |
 | `JUPYTER_TOKEN` | Same as `--jupyter-token` (overridden by explicit flag). |
 | `EXECD_ACCESS_TOKEN` | Same as `--access-token` (overridden by explicit flag). |
+| `EXECD_OPERATION_CAPACITY` | Same as `--operation-capacity` (overridden by explicit flag). |
 | `EXECD_API_GRACE_SHUTDOWN` | Same as `--graceful-shutdown-timeout`. |
 | `EXECD_JUPYTER_IDLE_POLL_INTERVAL` | Same as `--jupyter-idle-poll-interval`. |
 | `EXECD_ISOLATION_CONFIG` | Same as `--isolation-config`. |
@@ -498,3 +500,7 @@ Set `EXECD_CLONE3_COMPAT` in sandbox env to force fallback behavior:
 ## License
 
 `execd` is part of OpenSandbox. See the [LICENSE](https://github.com/opensandbox-group/OpenSandbox/blob/main/LICENSE).
+
+## Experimental caller-bound creation
+
+See [Recovering execution creation](/guides/execution-creation-recovery) for the local proposal, command and PTY APIs, bounded retention, SDK entry points, and controller restart boundary.

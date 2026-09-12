@@ -21,7 +21,8 @@ Models for code execution, results, and output handling.
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -348,3 +349,25 @@ class CommandLogs(BaseModel):
         default=None,
         description="Latest tail cursor for incremental reads",
     )
+
+
+class ExecutionInstance(BaseModel):
+    """One execd lifetime. Persist a generated ID before the first create call."""
+
+    instance_id: str
+    issued_at: int
+    retention_seconds: int
+    capacity: int
+
+    def new_operation_id(self) -> str:
+        """Never call this to replace an identity during recovery."""
+        return f"{self.instance_id}.{self.issued_at}.{uuid4().hex}"
+
+
+class ExecutionOperation(BaseModel):
+    """Creation acknowledgement; created does not mean script success."""
+
+    id: str
+    kind: Literal["command", "pty"]
+    state: Literal["creating", "created", "failed"]
+    expires_at: datetime

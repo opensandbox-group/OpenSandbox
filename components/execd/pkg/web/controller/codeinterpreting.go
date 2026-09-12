@@ -61,7 +61,7 @@ type codeExecutionRunner interface {
 	CreatePTYSession(id, cwd, command string) (runtime.PTYSession, error)
 	GetPTYSession(id string) runtime.PTYSession
 	DeletePTYSession(id string) error
-	GetPTYSessionStatus(id string) (bool, int64, error)
+	GetPTYSessionState(id string) (runtime.PTYSessionState, error)
 }
 
 func NewCodeInterpretingController(ctx *gin.Context) *CodeInterpretingController {

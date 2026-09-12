@@ -35,6 +35,7 @@ var kernelWaitingBackoff = wait.Backoff{
 
 // Controller manages code execution across runtimes.
 type Controller struct {
+	operations              creationRegistry
 	baseURL                 string
 	token                   string
 	mu                      sync.RWMutex
@@ -56,6 +57,7 @@ type jupyterKernel struct {
 }
 
 type commandKernel struct {
+	callerBound  bool
 	pid          int
 	stdoutPath   string
 	stderrPath   string

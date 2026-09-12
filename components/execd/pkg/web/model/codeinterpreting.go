@@ -50,10 +50,11 @@ type CodeContextRequest struct {
 
 // RunCommandRequest selects shell text or native executable arguments.
 type RunCommandRequest struct {
-	Command    string   `json:"command,omitempty"`
-	Argv       []string `json:"argv,omitempty"`
-	Cwd        string   `json:"cwd,omitempty"`
-	Background bool     `json:"background,omitempty"`
+	OperationID string   `json:"operation_id,omitempty"`
+	Command     string   `json:"command,omitempty"`
+	Argv        []string `json:"argv,omitempty"`
+	Cwd         string   `json:"cwd,omitempty"`
+	Background  bool     `json:"background,omitempty"`
 	// TimeoutMs caps execution duration; 0 uses server default.
 	TimeoutMs int64 `json:"timeout,omitempty" validate:"omitempty,gte=1"`
 
@@ -94,6 +95,15 @@ func (r *RunCommandRequest) UnmarshalJSON(data []byte) error {
 }
 
 func (r *RunCommandRequest) Validate() error {
+	if err := r.ValidateCreation(); err != nil {
+		return err
+	}
+	return runtime.ValidateCommandWorkingDir(r.Cwd, r.Envs)
+}
+
+// ValidateCreation checks immutable request semantics. Filesystem-dependent
+// validation belongs to the winning creation, never to a recovery attempt.
+func (r *RunCommandRequest) ValidateCreation() error {
 	if (r.Command != "") == (r.Argv != nil) {
 		return errors.New("exactly one of command or argv is required")
 	}
@@ -114,7 +124,7 @@ func (r *RunCommandRequest) Validate() error {
 	if r.Gid != nil && r.Uid == nil {
 		return errors.New("uid is required when gid is provided")
 	}
-	return runtime.ValidateCommandWorkingDir(r.Cwd, r.Envs)
+	return nil
 }
 
 type ServerStreamEventType string

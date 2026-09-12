@@ -71,3 +71,34 @@ func TestInitFlagsCliOverridesEnvAccessToken(t *testing.T) {
 
 	require.Equal(t, "cli-token", ServerAccessToken)
 }
+
+func TestOperationCapacityFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     string
+		args    []string
+		want    int
+		invalid bool
+	}{
+		{name: "default", want: 4096},
+		{name: "environment", env: "12000", want: 12000},
+		{name: "cli overrides environment", env: "12000", args: []string{"--operation-capacity=24000"}, want: 24000},
+		{name: "zero environment", env: "0", invalid: true},
+		{name: "invalid environment", env: "not-a-number", invalid: true},
+		{name: "negative cli", args: []string{"--operation-capacity=-1"}, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousArgs, previousFlags, previousCapacity := os.Args, flag.CommandLine, OperationCapacity
+			t.Cleanup(func() { os.Args, flag.CommandLine, OperationCapacity = previousArgs, previousFlags, previousCapacity })
+			flag.CommandLine = flag.NewFlagSet("execd-capacity-test", flag.ContinueOnError)
+			os.Args = append([]string{"execd-capacity-test"}, tc.args...)
+			t.Setenv(operationCapacityEnv, tc.env)
+			if tc.invalid {
+				require.Panics(t, InitFlags)
+				return
+			}
+			InitFlags()
+			require.Equal(t, tc.want, OperationCapacity)
+		})
+	}
+}

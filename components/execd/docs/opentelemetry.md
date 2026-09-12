@@ -12,6 +12,10 @@ This page lists the OpenTelemetry metrics currently implemented in execd.
 |---|---|---|---|---|
 | `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP request latency. |
 | `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command execution duration. |
+| `execd.operation.requests` | Counter | `1` | `kind`, `action`, `result` | Runtime creation/recovery outcomes; no identities or request content. |
+| `execd.operation.records` | Gauge | `1` | `kind`, `state` | Retained creation records, including successful and failed records. |
+| `execd.operation.capacity` | Gauge | `1` | shared attributes | Configured registry capacity. |
+| `execd.operation.creating.oldest_age` | Gauge | `s` | shared attributes | Age of the oldest unresolved creation; does not authorize retry. |
 | `execd.filesystem.operations.duration` | Histogram | `ms` | `operation`, `result` | Filesystem operation duration. |
 | `execd.system.process.count` | Observable Gauge | - | - | Current process count. |
 | `execd.system.cpu.usage` | Observable Gauge | `%` | - | System CPU usage percent (gopsutil). |

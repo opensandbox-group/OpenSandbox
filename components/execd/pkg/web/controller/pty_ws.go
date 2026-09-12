@@ -136,21 +136,8 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	pipeMode := ctx.Query("pty") == "0"
 	since := queryInt64(ctx.Query("since"), 0)
 
-	// 4. Start the shell if not already running.
-	if !session.IsRunning() {
-		var startErr error
-		if pipeMode {
-			startErr = session.StartPipe()
-		} else {
-			startErr = session.StartPTY()
-		}
-		if startErr != nil {
-			log.Warn("pty start failed for session %s: %v", id, startErr)
-			writeErrFrame(conn, model.WSErrCodeStartFailed, startErr.Error())
-			_ = conn.Close()
-			session.UnlockWS()
-			return
-		}
+	if !preparePTYProcess(session, conn, id, pipeMode) {
+		return
 	}
 
 	// 5+6. Atomically snapshot replay buffer and attach live pipe — eliminates the
@@ -747,4 +734,40 @@ func queryInt64(s string, defaultVal int64) int64 {
 		return defaultVal
 	}
 	return n
+}
+
+func isCallerBoundPTY(session runtime.PTYSession) bool {
+	bound, ok := session.(interface{ CreationBound() bool })
+	return ok && bound.CreationBound()
+}
+
+func writePTYStartError(conn *websocket.Conn, id string, err error, callerBound bool) {
+	if callerBound {
+		writeErrFrame(conn, model.WSErrCodeStartFailed, "caller-bound session launch failed; no automatic reattempt")
+		return
+	}
+	log.Warn("pty start failed for session %s: %v", id, err)
+	writeErrFrame(conn, model.WSErrCodeStartFailed, err.Error())
+}
+
+// preparePTYProcess preserves the session's existing process on caller-bound
+// reconnects. A failed start releases the WS lock before any pumps are installed.
+func preparePTYProcess(session runtime.PTYSession, conn *websocket.Conn, id string, pipeMode bool) bool {
+	callerBound := isCallerBoundPTY(session)
+	if session.IsRunning() || (callerBound && session.Done() != nil) {
+		return true
+	}
+	var err error
+	if pipeMode {
+		err = session.StartPipe()
+	} else {
+		err = session.StartPTY()
+	}
+	if err == nil {
+		return true
+	}
+	writePTYStartError(conn, id, err, callerBound)
+	_ = conn.Close()
+	session.UnlockWS()
+	return false
 }

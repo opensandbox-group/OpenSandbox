@@ -215,6 +215,129 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/execution/instance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get execution creation recovery scope
+         * @description Returns the current execd controller identity and server timestamp. Persist a caller-generated operation ID before creation. Never refresh its instance or timestamp during recovery. Cache-Control: no-store.
+         */
+        get: operations["getExecutionInstance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/execution/operation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recover an execution creation by operation identity
+         * @description Private lookup within one authenticated sandbox/controller and kind. State describes creation, not script completion. No command, environment, output, fingerprint or caller identity is returned. Cache-Control: no-store. Old-instance IDs never authorize a new creation.
+         */
+        get: operations["getExecutionOperation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/pty": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a PTY session
+         * @description Creates a dormant PTY session; the first connection to /pty/{sessionId}/ws starts the process. For caller-bound recovery use POST /pty/operations.
+         */
+        post: operations["createPTYSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/command/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create or recover a caller-bound command
+         * @description Create a command using an identity persisted before first send. Returns JSON creation acknowledgement only, not SSE or script completion. Equal identity and typed request returns the original handle; conflicting inputs return 409. The controller owns creation after claim, regardless of request cancellation. Foreground/background are execution modes; foreground output is not replayed. Unknown fields are rejected. Body limit is 1 MiB. See ExecutionOperationID for scope, capacity, expiry and restart boundaries.
+         */
+        post: operations["createCommandOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/pty/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create or recover a caller-bound PTY session
+         * @description Creates or recovers the same dormant PTY session using a persisted operation_id. The first WebSocket connection launches the process; a caller-bound session permits one launch attempt and reuses existing replay/takeover/terminal frames. This POST does not start a shell. Unknown fields are rejected. Body limit is 1 MiB.
+         */
+        post: operations["createPTYOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/pty/{sessionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        /** Get PTY session status */
+        get: operations["getPTYSessionStatus"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete PTY session
+         * @description Terminates and removes the session. A retained operation identity still refers to the original handle and cannot recreate it.
+         */
+        delete: operations["deletePTYSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/command": {
         parameters: {
             query?: never;
@@ -941,6 +1064,61 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        CreateCommandOperationRequest: components["schemas"]["RunCommandRequest"] & {
+            /** Format: int64 */
+            timeout?: number;
+            operation_id: components["schemas"]["ExecutionOperationID"];
+        };
+        CreatePTYOperationRequest: components["schemas"]["CreatePTYSessionRequest"] & {
+            operation_id: components["schemas"]["ExecutionOperationID"];
+        };
+        /** @description Optional caller identity: <instance_id>.<issued_at Unix seconds>.<8-128 character random token>. Obtain instance_id and issued_at from GET /execution/instance, generate token and persist the entire ID before sending. Scope is the authenticated execd controller and kind; clients sharing its configured token share one principal. Recovery lasts 24 hours from issued_at, extended while creating or active. Default capacity is 4096 records/controller, configurable at startup with --operation-capacity or EXECD_OPERATION_CAPACITY and advertised by instance discovery; new claims fail closed at capacity. Expired terminal/dormant records are removed; old expired IDs return 410 instead of recreating. Controller restart or another sandbox returns 409 operation_instance_mismatch: outcome unknown. Memory and OS process creation are not a transaction. No cross-execd-restart reconciliation, exactly-once completion, or business-side-effect guarantee. Never regenerate any identity component during retry. Use an opaque random token, never a secret or business payload. */
+        ExecutionOperationID: string;
+        ExecutionInstance: {
+            instance_id: string;
+            /** Format: int64 */
+            issued_at: number;
+            /**
+             * Format: int64
+             * @example 86400
+             */
+            retention_seconds: number;
+            /** @example 4096 */
+            capacity: number;
+        };
+        ExecutionOperation: {
+            /** @description Reserved command or PTY handle; may not yet be observable while creating. */
+            id: string;
+            /** @enum {string} */
+            kind: "command" | "pty";
+            /**
+             * @description Creation only. created does not imply the command completed or succeeded; failed is retained and never reattempted with this identity.
+             * @enum {string}
+             */
+            state: "creating" | "created" | "failed";
+            /**
+             * Format: date-time
+             * @description End of the minimum recovery window, extended while creating or active.
+             */
+            expires_at: string;
+        };
+        CreatePTYSessionRequest: {
+            cwd?: string;
+            command?: string;
+        };
+        CreatePTYSessionResponse: {
+            session_id: string;
+        };
+        PTYSessionStatusResponse: {
+            session_id: string;
+            running: boolean;
+            /** Format: int64 */
+            output_offset: number;
+            /** @description Whether a process launch was attempted. False means a dormant session. Omitted by older servers; absence does not mean false. */
+            launch_attempted?: boolean;
+            /** @description Whether the latest accepted launch attempt failed before starting a process. A nonzero process exit is not a launch failure. Caller-bound sessions cannot reattempt launch; their operation remains created because the session exists. Omitted by older servers. */
+            launch_failed?: boolean;
+        };
         /** @description Request to create a bash session (optional body; empty treated as defaults) */
         CreateSessionRequest: {
             /**
@@ -1904,6 +2082,381 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
+        };
+    };
+    getExecutionInstance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current controller scope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionInstance"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getExecutionOperation: {
+        parameters: {
+            query: {
+                kind: "command" | "pty";
+            };
+            header: {
+                "X-EXECD-OPERATION-ID": components["schemas"]["ExecutionOperationID"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Creation outcome: created or failed; not execution completion */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperation"];
+                };
+            };
+            /** @description Creation in progress; query or repeat the same immutable request */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperation"];
+                };
+            };
+            /** @description Invalid identity or request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not found in this authenticated controller and kind */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description operation_conflict or operation_instance_mismatch; never refresh identity to retry an unknown outcome */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description operation_expired; execution outcome unknown, no new process created */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description operation_capacity_exceeded; creation refused; unexpired and active entries are not evicted */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    createPTYSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CreatePTYSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatePTYSessionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            /** @description PTY unavailable on this platform */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    createCommandOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateCommandOperationRequest"];
+            };
+        };
+        responses: {
+            /** @description Creation outcome, not execution completion */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperation"];
+                };
+            };
+            /** @description Creation in progress; query or repeat the same immutable request */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description operation_conflict or operation_instance_mismatch; never refresh identity to retry an unknown outcome */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description operation_expired; execution outcome unknown, no new process created */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            500: components["responses"]["InternalServerError"];
+            /** @description operation_capacity_exceeded; creation refused; unexpired and active entries are not evicted */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    createPTYOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePTYOperationRequest"];
+            };
+        };
+        responses: {
+            /** @description Creation outcome: created or failed; not execution completion */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperation"];
+                };
+            };
+            /** @description Creation in progress; query or repeat the same immutable request */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperation"];
+                };
+            };
+            /** @description Invalid identity or request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description operation_conflict or operation_instance_mismatch; never refresh identity to retry an unknown outcome */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description operation_expired; execution outcome unknown, no new process created */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description PTY unavailable on this platform */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description operation_capacity_exceeded; creation refused; unexpired and active entries are not evicted */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getPTYSessionStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description PTY session status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PTYSessionStatusResponse"];
+                };
+            };
+            /** @description Session not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description PTY unavailable on this platform */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    deletePTYSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Session not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description PTY unavailable on this platform */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     runCommand: {

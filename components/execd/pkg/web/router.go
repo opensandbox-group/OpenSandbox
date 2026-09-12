@@ -70,8 +70,12 @@ func NewRouter(accessToken string) *gin.Engine {
 		session.DELETE("/:sessionId", withCode(func(c *controller.CodeInterpretingController) { c.DeleteSession() }))
 	}
 
+	r.GET("/execution/instance", withCode(func(c *controller.CodeInterpretingController) { c.GetOperationInstance() }))
+	r.GET("/execution/operation", withCode(func(c *controller.CodeInterpretingController) { c.GetOperation() }))
+
 	command := r.Group("/command")
 	{
+		command.POST("/operations", withCode(func(c *controller.CodeInterpretingController) { c.CreateCommandOperation() }))
 		command.POST("", withCode(func(c *controller.CodeInterpretingController) { c.RunCommand() }))
 		command.DELETE("", withCode(func(c *controller.CodeInterpretingController) { c.InterruptCommand() }))
 		command.GET("/status/:id", withCode(func(c *controller.CodeInterpretingController) { c.GetCommandStatus() }))
@@ -86,6 +90,7 @@ func NewRouter(accessToken string) *gin.Engine {
 
 	pty := r.Group("/pty")
 	{
+		pty.POST("/operations", withPTY(func(c *controller.PTYController) { c.CreatePTYOperation() }))
 		pty.POST("", withPTY(func(c *controller.PTYController) { c.CreatePTYSession() }))
 		pty.GET("/:sessionId", withPTY(func(c *controller.PTYController) { c.GetPTYSessionStatus() }))
 		pty.DELETE("/:sessionId", withPTY(func(c *controller.PTYController) { c.DeletePTYSession() }))
@@ -152,6 +157,9 @@ func withIsolated(fn func(*controller.IsolatedSessionController)) gin.HandlerFun
 
 func accessTokenMiddleware(token string) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		if ctx.Request.URL.Path == "/execution/instance" || ctx.Request.URL.Path == "/execution/operation" || ctx.Request.URL.Path == "/command" || ctx.Request.URL.Path == "/pty" || ctx.Request.URL.Path == "/command/operations" || ctx.Request.URL.Path == "/pty/operations" {
+			ctx.Header("Cache-Control", "no-store")
+		}
 		if token == "" {
 			ctx.Next()
 			return
@@ -159,12 +167,20 @@ func accessTokenMiddleware(token string) gin.HandlerFunc {
 
 		requestedToken := ctx.GetHeader(model.ApiAccessTokenHeader)
 		if requestedToken == "" || requestedToken != token {
+			switch ctx.Request.URL.Path {
+			case "/execution/instance", "/execution/operation", "/command/operations", "/pty/operations":
+				ctx.AbortWithStatusJSON(http.StatusUnauthorized, model.ErrorResponse{
+					Code: model.ErrorCode("UNAUTHORIZED"), Message: "Invalid or missing execd access token",
+				})
+				return
+			}
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, map[string]any{
 				"error": "Unauthorized: invalid or missing header " + model.ApiAccessTokenHeader,
 			})
 			return
 		}
 
+		ctx.Set("operationPrincipal", token)
 		ctx.Next()
 	}
 }

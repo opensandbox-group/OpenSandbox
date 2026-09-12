@@ -89,6 +89,8 @@ def sync_detailed(
 
      Returns the current status of a command (foreground or background) by command ID.
     Includes running flag, exit code, error (if any), and start/finish timestamps.
+    Completed command metadata is retained for at least 24 hours and then removed
+    by an hourly cleanup. Running commands are never removed by retention cleanup.
 
     Args:
         id (str):
@@ -121,6 +123,8 @@ def sync(
 
      Returns the current status of a command (foreground or background) by command ID.
     Includes running flag, exit code, error (if any), and start/finish timestamps.
+    Completed command metadata is retained for at least 24 hours and then removed
+    by an hourly cleanup. Running commands are never removed by retention cleanup.
 
     Args:
         id (str):
@@ -148,6 +152,8 @@ async def asyncio_detailed(
 
      Returns the current status of a command (foreground or background) by command ID.
     Includes running flag, exit code, error (if any), and start/finish timestamps.
+    Completed command metadata is retained for at least 24 hours and then removed
+    by an hourly cleanup. Running commands are never removed by retention cleanup.
 
     Args:
         id (str):
@@ -178,6 +184,8 @@ async def asyncio(
 
      Returns the current status of a command (foreground or background) by command ID.
     Includes running flag, exit code, error (if any), and start/finish timestamps.
+    Completed command metadata is retained for at least 24 hours and then removed
+    by an hourly cleanup. Running commands are never removed by retention cleanup.
 
     Args:
         id (str):

@@ -114,3 +114,23 @@ export interface SandboxMetrics {
 }
 
 export type PingResponse = Record<string, unknown>;
+/** Recovery scope for one execd lifetime. Persist the complete identity before creating. */
+export interface ExecutionInstance {
+  instance_id: string;
+  issued_at: number;
+  retention_seconds: number;
+  capacity: number;
+}
+
+/** Creation only: created does not imply script completion or successful business effects. */
+export interface ExecutionOperation {
+  id: string;
+  kind: "command" | "pty";
+  state: "creating" | "created" | "failed";
+  expires_at: string;
+}
+
+/** Generate once before first send. Never refresh scope or timestamp during recovery. */
+export function newOperationId(instance: ExecutionInstance): string {
+  return `${instance.instance_id}.${instance.issued_at}.${globalThis.crypto.randomUUID().replaceAll("-", "")}`;
+}

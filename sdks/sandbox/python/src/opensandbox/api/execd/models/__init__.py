@@ -24,17 +24,26 @@ from .chmod_files_body import ChmodFilesBody
 from .code_context import CodeContext
 from .code_context_request import CodeContextRequest
 from .command_status_response import CommandStatusResponse
+from .create_command_operation_request import CreateCommandOperationRequest
 from .create_isolated_session_request import CreateIsolatedSessionRequest
 from .create_isolated_session_request_profile import CreateIsolatedSessionRequestProfile
 from .create_isolated_session_request_uid_mode import CreateIsolatedSessionRequestUidMode
+from .create_pty_operation_request import CreatePTYOperationRequest
+from .create_pty_session_request import CreatePTYSessionRequest
+from .create_pty_session_response import CreatePTYSessionResponse
 from .create_session_request import CreateSessionRequest
 from .create_session_response import CreateSessionResponse
 from .env_passthrough_spec import EnvPassthroughSpec
 from .env_passthrough_spec_mode import EnvPassthroughSpecMode
 from .error_response import ErrorResponse
+from .execution_instance import ExecutionInstance
+from .execution_operation import ExecutionOperation
+from .execution_operation_kind import ExecutionOperationKind
+from .execution_operation_state import ExecutionOperationState
 from .file_info import FileInfo
 from .file_info_type import FileInfoType
 from .file_metadata import FileMetadata
+from .get_execution_operation_kind import GetExecutionOperationKind
 from .get_files_info_response_200 import GetFilesInfoResponse200
 from .hardening_layer_state import HardeningLayerState
 from .hardening_layer_state_state import HardeningLayerStateState
@@ -57,6 +66,7 @@ from .list_isolated_sessions_response import ListIsolatedSessionsResponse
 from .make_dirs_body import MakeDirsBody
 from .metrics import Metrics
 from .permission import Permission
+from .pty_session_status_response import PTYSessionStatusResponse
 from .rename_file_item import RenameFileItem
 from .replace_content_body import ReplaceContentBody
 from .replace_content_response_200 import ReplaceContentResponse200
@@ -85,17 +95,26 @@ __all__ = (
     "CodeContext",
     "CodeContextRequest",
     "CommandStatusResponse",
+    "CreateCommandOperationRequest",
     "CreateIsolatedSessionRequest",
     "CreateIsolatedSessionRequestProfile",
     "CreateIsolatedSessionRequestUidMode",
+    "CreatePTYOperationRequest",
+    "CreatePTYSessionRequest",
+    "CreatePTYSessionResponse",
     "CreateSessionRequest",
     "CreateSessionResponse",
     "EnvPassthroughSpec",
     "EnvPassthroughSpecMode",
     "ErrorResponse",
+    "ExecutionInstance",
+    "ExecutionOperation",
+    "ExecutionOperationKind",
+    "ExecutionOperationState",
     "FileInfo",
     "FileInfoType",
     "FileMetadata",
+    "GetExecutionOperationKind",
     "GetFilesInfoResponse200",
     "HardeningLayerState",
     "HardeningLayerStateState",
@@ -118,6 +137,7 @@ __all__ = (
     "MakeDirsBody",
     "Metrics",
     "Permission",
+    "PTYSessionStatusResponse",
     "RenameFileItem",
     "ReplaceContentBody",
     "ReplaceContentResponse200",

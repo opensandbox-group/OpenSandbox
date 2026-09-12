@@ -55,6 +55,9 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 
 func registerExecdMetrics() error {
 	meter := otel.Meter("opensandbox/execd")
+	if err := registerOperationMetrics(meter); err != nil {
+		return err
+	}
 
 	var err error
 	httpRequestDuration, err = meter.Float64Histogram(
