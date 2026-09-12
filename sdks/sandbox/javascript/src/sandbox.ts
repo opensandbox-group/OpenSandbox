@@ -49,7 +49,7 @@ import type {
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
-import { ReadinessBudget } from "./internal/readiness.js";
+import { ReadinessBudget, validatePollingInterval } from "./internal/readiness.js";
 
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
@@ -358,6 +358,9 @@ export class Sandbox {
     if ((opts.image == null) === (opts.snapshotId == null)) {
       throw new Error("Exactly one of image or snapshotId must be provided");
     }
+    if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
+      validatePollingInterval(opts.healthCheckPollingInterval);
+    }
 
     // Validate volumes before allocating transport resources.
     if (opts.volumes) {
@@ -547,6 +550,8 @@ export class Sandbox {
 
   static async connect(opts: SandboxConnectOptions): Promise<Sandbox> {
     throwIfAborted(opts.signal);
+    const interval = opts.healthCheckPollingInterval ?? DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS;
+    validatePollingInterval(interval);
     const baseConnectionConfig =
       opts.connectionConfig instanceof ConnectionConfig
         ? opts.connectionConfig
@@ -567,7 +572,6 @@ export class Sandbox {
     }
 
     const budget = new ReadinessBudget(opts.readyTimeoutSeconds ?? DEFAULT_READY_TIMEOUT_SECONDS, opts.signal);
-    const interval = opts.healthCheckPollingInterval ?? DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS;
     try {
       const endpoint = await budget.endpoint(signal => sandboxes.getSandboxEndpoint(
         opts.sandboxId, DEFAULT_EXECD_PORT, connectionConfig.useServerProxy, signal,
@@ -656,6 +660,9 @@ export class Sandbox {
       healthCheckPollingInterval?: number;
     } = {}
   ): Promise<Sandbox> {
+    if (opts.healthCheckPollingInterval !== undefined) {
+      validatePollingInterval(opts.healthCheckPollingInterval);
+    }
     await this.sandboxes.resumeSandbox(this.id);
     return await Sandbox.connect({
       sandboxId: this.id,
@@ -671,6 +678,9 @@ export class Sandbox {
    * Resume a paused sandbox by id, then connect to its execd endpoint.
    */
   static async resume(opts: SandboxConnectOptions): Promise<Sandbox> {
+    if (opts.healthCheckPollingInterval !== undefined) {
+      validatePollingInterval(opts.healthCheckPollingInterval);
+    }
     const baseConnectionConfig =
       opts.connectionConfig instanceof ConnectionConfig
         ? opts.connectionConfig
@@ -785,6 +795,7 @@ export class Sandbox {
     healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
     signal?: AbortSignal;
   }): Promise<void> {
+    validatePollingInterval(opts.pollingIntervalMillis);
     const budget = new ReadinessBudget(opts.readyTimeoutSeconds, opts.signal);
     await this.checkReadiness(budget, opts.pollingIntervalMillis, opts.healthCheck);
   }

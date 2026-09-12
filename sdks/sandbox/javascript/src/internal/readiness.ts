@@ -12,7 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { SandboxApiException, SandboxReadyTimeoutException } from "../core/exceptions.js";
+import {
+  InvalidArgumentException,
+  SandboxApiException,
+  SandboxReadyTimeoutException,
+} from "../core/exceptions.js";
+
+export function validatePollingInterval(interval: number): void {
+  // setTimeout() runs a negative delay immediately, which would hammer the
+  // endpoint until the deadline. The Python SDK rejects the same values.
+  if (interval < 0) {
+    throw new InvalidArgumentException({
+      message: `Ready polling interval must not be negative, got: ${interval}`,
+    });
+  }
+}
 
 export class ReadinessBudget {
   private readonly deadline: number;
