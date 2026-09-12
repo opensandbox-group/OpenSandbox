@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
@@ -68,9 +67,10 @@ func (c *CodeInterpretingController) RunCommand() {
 	runCodeRequest := c.buildExecuteCommandRequest(request)
 	eventsHandler, stopSSE := c.setServerEventsHandler(ctx)
 
-	// completeCh is closed when OnExecuteComplete fires, meaning the final SSE
-	// event has been written and flushed. We only wait for this callback as a
-	// safety check and then return immediately to avoid fixed tail latency.
+	// completeCh is closed when OnExecuteComplete or OnExecuteError fires,
+	// meaning the final SSE event has been written and flushed. Match the
+	// completion semantics used by RunCode/RunInSession so chunked HTTP/1.1
+	// responses terminate cleanly without fixed tail latency.
 	completeCh := make(chan struct{})
 	var completeOnce sync.Once
 	signalComplete := func() {
@@ -113,12 +113,6 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	waitForExecutionComplete(ctx, completeCh)
-
-	// Keep the SSE connection alive briefly so clients can read all
-	// buffered events and downstream components (e.g. egress sidecar)
-	// have time to synchronise state changes that were triggered
-	// during command execution.
-	time.Sleep(flag.ApiGracefulShutdownTimeout)
 }
 
 // InterruptCommand stops a running shell command session.
