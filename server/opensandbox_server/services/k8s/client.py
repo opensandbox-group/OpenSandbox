@@ -296,6 +296,34 @@ class K8sClient:
                 informer.stop()
             self._informers.clear()
 
+    def list_custom_objects_all_namespaces(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        label_selector: str = "",
+    ) -> List[Dict[str, Any]]:
+        """List custom resources across all namespaces, returning the items list.
+
+        Direct API call only (cluster-scoped informers are not maintained).
+        Used as a fallback to locate a sandbox when no namespace is known.
+        """
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            resp = self.get_custom_objects_api().list_cluster_custom_object(
+                group=group,
+                version=version,
+                plural=plural,
+                label_selector=label_selector,
+                _request_timeout=(10, 30),
+            )
+            return resp.get("items", [])
+        except ApiException as e:
+            if e.status == 404:
+                return []
+            raise
+
     def delete_custom_object(
         self,
         group: str,

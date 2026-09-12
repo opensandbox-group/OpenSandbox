@@ -136,6 +136,22 @@ class WorkloadProvider(ABC):
         """
         pass
     
+    def list_workloads_all_namespaces(self, label_selector: str) -> List[Any]:
+        """
+        List workloads matching label selector across all namespaces.
+
+        Used by the cross-namespace sandbox lookup fallback. Providers
+        without cluster-wide read access may keep this default; the
+        fallback then simply finds nothing.
+
+        Args:
+            label_selector: Label selector query
+
+        Returns:
+            List of workload objects
+        """
+        return []
+    
     @abstractmethod
     def update_expiration(self, sandbox_id: str, namespace: str, expires_at: datetime) -> None:
         """
