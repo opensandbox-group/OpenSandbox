@@ -31,7 +31,10 @@ from opensandbox.exceptions import (
     SandboxInternalException,
 )
 from opensandbox.internal.lifecycle_metrics import report_sandbox_create_metric
-from opensandbox.internal.readiness import ReadinessBudget
+from opensandbox.internal.readiness import (
+    ReadinessBudget,
+    validate_polling_interval,
+)
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
@@ -521,6 +524,8 @@ class SandboxSync:
             raise InvalidArgumentException(
                 "Exactly one of image or snapshot_id must be specified"
             )
+        if not skip_health_check:
+            validate_polling_interval(health_check_polling_interval)
 
         config = (
             connection_config or ConnectionConfigSync()
@@ -738,6 +743,7 @@ class SandboxSync:
             raise InvalidArgumentException("Sandbox ID must be specified")
 
         sandbox_id = str(sandbox_id)
+        validate_polling_interval(health_check_polling_interval)
 
         config = (
             connection_config or ConnectionConfigSync()

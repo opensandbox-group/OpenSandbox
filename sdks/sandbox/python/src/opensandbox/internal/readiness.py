@@ -22,7 +22,11 @@ from typing import Any, TypeVar
 
 import httpx
 
-from opensandbox.exceptions import SandboxApiException, SandboxReadyTimeoutException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxApiException,
+    SandboxReadyTimeoutException,
+)
 from opensandbox.transport._deadline_sync import DEADLINE_EXTENSION
 
 T = TypeVar("T")
@@ -56,8 +60,18 @@ def is_readiness_auth_error(error: Exception) -> bool:
     return isinstance(error, SandboxApiException) and error.status_code in (401, 403)
 
 
+def validate_polling_interval(interval: timedelta) -> None:
+    # asyncio.sleep() returns immediately for negative delays (hammering the
+    # health endpoint until the deadline) while time.sleep() raises ValueError.
+    if interval < timedelta(0):
+        raise InvalidArgumentException(
+            f"Ready polling interval must not be negative, got: {interval}"
+        )
+
+
 class ReadinessBudget:
     def __init__(self, timeout: timedelta, interval: timedelta) -> None:
+        validate_polling_interval(interval)
         self.timeout = timeout
         self.context: str | None = None
         self.attempts = 0
