@@ -40,14 +40,20 @@ from opensandbox.adapters.converter.response_handler import (
     extract_request_id,
     handle_api_error,
 )
+from opensandbox.adapters.download_response import (
+    create_read_bytes_response,
+    iter_async_response_bytes,
+)
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
+    AsyncReadBytesStream,
     ContentReplaceEntry,
     ContentReplaceResult,
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -71,6 +77,8 @@ def _rewind_seekable_stream(stream: IOBase) -> None:
     if not stream.seekable():
         return
     stream.seek(0)
+
+
 class _DownloadRequest(TypedDict):
     url: str
     params: dict[str, str]
@@ -161,6 +169,21 @@ class FilesystemAdapter(Filesystem):
         offset: int | None = None,
         limit: int | None = None,
     ) -> bytes:
+        """Read file content as bytes."""
+        return (
+            await self.read_bytes_detailed(
+                path, range_header=range_header, offset=offset, limit=limit
+            )
+        ).body
+
+    async def read_bytes_detailed(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[bytes]:
         """Read file content as bytes with support for range and line-based requests.
 
         Args:
@@ -180,7 +203,9 @@ class FilesystemAdapter(Filesystem):
         """
         logger.debug(f"Reading file as bytes: {path}")
         try:
-            request_data = self._build_download_request(path, range_header, offset=offset, limit=limit)
+            request_data = self._build_download_request(
+                path, range_header, offset=offset, limit=limit
+            )
             client = await self._get_httpx_client()
 
             response = await client.get(
@@ -189,24 +214,46 @@ class FilesystemAdapter(Filesystem):
                 params=request_data["params"],
             )
             response.raise_for_status()
-            return response.content
+            return create_read_bytes_response(response, response.content)
         except Exception as e:
             logger.error(f"Failed to read file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def read_bytes_stream(
-            self,
-            path: str,
-            *,
-            chunk_size: int = 64 * 1024,
-            range_header: str | None = None,
-            offset: int | None = None,
-            limit: int | None = None,
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> AsyncIterator[bytes]:
+        """Stream file content as byte chunks."""
+        return (
+            await self.read_bytes_stream_detailed(
+                path,
+                chunk_size=chunk_size,
+                range_header=range_header,
+                offset=offset,
+                limit=limit,
+            )
+        ).body
+
+    async def read_bytes_stream_detailed(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[AsyncReadBytesStream]:
         """Stream file content as bytes chunks via HTTP (true streaming)."""
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
         try:
-            request_data = self._build_download_request(path, range_header, offset=offset, limit=limit)
+            request_data = self._build_download_request(
+                path, range_header, offset=offset, limit=limit
+            )
             client = await self._get_httpx_client()
 
             url = request_data["url"]
@@ -233,7 +280,9 @@ class FilesystemAdapter(Filesystem):
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-            return response.aiter_bytes(chunk_size=chunk_size)
+            return create_read_bytes_response(
+                response, iter_async_response_bytes(response, chunk_size)
+            )
         except Exception as e:
             logger.error(f"Failed to stream file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

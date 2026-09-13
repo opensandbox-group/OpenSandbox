@@ -228,6 +228,7 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `UploadFile(ctx, file, opts)` | Upload a file to the sandbox |
 | `UploadFiles(ctx, entries)` | Upload multiple files to the sandbox |
 | `DownloadFile(ctx, remotePath, rangeHeader)` | Download a file from the sandbox |
+| `DownloadFileResponse(ctx, remotePath, rangeHeader)` | Download a file with HTTP status and range metadata |
 
 **Directory Operations:**
 | Method | Description |

@@ -30,6 +30,8 @@ from opensandbox.models.filesystem import (
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
+    ReadBytesStream,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -106,6 +108,15 @@ class FilesystemSync(Protocol):
         """
         ...
 
+    def read_bytes_detailed(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[bytes]: ...
+
     def read_bytes_stream(
         self,
         path: str,
@@ -130,6 +141,16 @@ class FilesystemSync(Protocol):
             SandboxException: If the operation fails.
         """
         ...
+
+    def read_bytes_stream_detailed(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[ReadBytesStream]: ...
 
     def write_files(self, entries: list[WriteEntry]) -> None:
         """

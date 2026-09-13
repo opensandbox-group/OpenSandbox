@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // ExecdClient provides access to the OpenSandbox Execd API for code execution,
@@ -417,10 +418,110 @@ type DownloadFileOptions struct {
 	Limit int
 }
 
+// ByteRange is a parsed Content-Range response header. Start and End are
+// inclusive byte offsets. Total is -1 when the complete file size is unknown.
+type ByteRange struct {
+	// Start is the inclusive first byte offset, or -1 if parsing failed.
+	Start int64
+	// End is the inclusive last byte offset, or -1 if parsing failed.
+	End int64
+	// Total is the complete file size, or -1 if unknown or parsing failed.
+	Total int64
+	// Raw is the original Content-Range header value.
+	Raw string
+}
+
+// DownloadFileResponse contains a download body and its HTTP response
+// metadata. The caller must close Body.
+type DownloadFileResponse struct {
+	// Body contains the downloaded bytes and must be closed by the caller.
+	Body io.ReadCloser
+	// StatusCode is the complete HTTP response status code.
+	StatusCode int
+	// ContentType is the Content-Type response header.
+	ContentType string
+	// ContentDisposition is the Content-Disposition response header.
+	ContentDisposition string
+
+	// ContentLength is the size of the response body, or -1 when unknown.
+	// For partial responses it is the size of the returned byte range, not the
+	// complete file.
+	ContentLength int64
+
+	// TotalSize is the complete file size, or -1 when unknown.
+	TotalSize int64
+
+	// ContentRange is populated for a 206 response with a non-empty
+	// Content-Range header. If the header is malformed, Raw is preserved and
+	// the numeric fields are -1.
+	ContentRange *ByteRange
+}
+
+// IsPartial reports whether the server honored the Range request and returned
+// 206 Partial Content.
+func (r *DownloadFileResponse) IsPartial() bool {
+	return r != nil && r.StatusCode == http.StatusPartialContent
+}
+
+func parseContentRange(raw string) *ByteRange {
+	if raw == "" {
+		return nil
+	}
+
+	result := &ByteRange{Start: -1, End: -1, Total: -1, Raw: raw}
+	parts := strings.Fields(raw)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "bytes") {
+		return result
+	}
+
+	interval, totalText, ok := strings.Cut(parts[1], "/")
+	if !ok {
+		return result
+	}
+	startText, endText, ok := strings.Cut(interval, "-")
+	if !ok {
+		return result
+	}
+
+	start, err := strconv.ParseInt(startText, 10, 64)
+	if err != nil || start < 0 {
+		return result
+	}
+	end, err := strconv.ParseInt(endText, 10, 64)
+	if err != nil || end < start {
+		return result
+	}
+
+	total := int64(-1)
+	if totalText != "*" {
+		total, err = strconv.ParseInt(totalText, 10, 64)
+		if err != nil || total <= end {
+			return result
+		}
+	}
+
+	result.Start = start
+	result.End = end
+	result.Total = total
+	return result
+}
+
 // DownloadFile downloads a file from the sandbox. The caller must close the
 // returned io.ReadCloser. Pass rangeHeader (e.g. "bytes=0-1023") for partial
 // content, or empty string for the full file. Use opts for line-based reading.
+// Use DownloadFileResponse when response status or range metadata is needed.
 func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, rangeHeader string, opts ...DownloadFileOptions) (io.ReadCloser, error) {
+	resp, err := e.DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+// DownloadFileResponse downloads a file and returns both its body and response
+// metadata. Callers resuming a download should check IsPartial before appending
+// the body to an existing file.
+func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath string, rangeHeader string, opts ...DownloadFileOptions) (*DownloadFileResponse, error) {
 	params := url.Values{}
 	params.Set("path", remotePath)
 	if len(opts) > 0 {
@@ -465,7 +566,24 @@ func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, range
 	if err != nil {
 		return nil, err
 	}
-	return resp.Body, nil
+
+	result := &DownloadFileResponse{
+		Body:               resp.Body,
+		StatusCode:         resp.StatusCode,
+		ContentType:        resp.Header.Get("Content-Type"),
+		ContentDisposition: resp.Header.Get("Content-Disposition"),
+		ContentLength:      resp.ContentLength,
+		TotalSize:          -1,
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		result.ContentRange = parseContentRange(resp.Header.Get("Content-Range"))
+		if result.ContentRange != nil {
+			result.TotalSize = result.ContentRange.Total
+		}
+	} else {
+		result.TotalSize = result.ContentLength
+	}
+	return result, nil
 }
 
 // CreateDirectory creates a directory at the given path with the specified mode.
