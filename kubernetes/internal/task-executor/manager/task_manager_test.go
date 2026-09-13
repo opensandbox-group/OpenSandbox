@@ -31,6 +31,13 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
+func postStopFinished(task *types.Task) bool {
+	if task == nil {
+		return false
+	}
+	return statusHasPostStopFinished(task.Status)
+}
+
 type fakeExecutor struct {
 	mu      sync.Mutex
 	inspect map[string]*types.Status

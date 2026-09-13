@@ -29,7 +29,7 @@ import (
 )
 
 func TestInMemoryAllocationStore_GetAllocation_Empty(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	pool := &sandboxv1alpha1.Pool{
@@ -43,14 +43,14 @@ func TestInMemoryAllocationStore_GetAllocation_Empty(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_SetAndGetAllocation(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	pool := &sandboxv1alpha1.Pool{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
 	}
 
-	alloc := &PoolAllocation{
+	alloc := &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod1": "sandbox1",
 			"pod2": "sandbox2",
@@ -66,7 +66,7 @@ func TestInMemoryAllocationStore_SetAndGetAllocation(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_UpdateAllocation_AddPods(t *testing.T) {
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	store.UpdateAllocation(ctx, "default", "pool1", "sandbox1", []string{"pod1", "pod2"})
@@ -76,7 +76,7 @@ func TestInMemoryAllocationStore_UpdateAllocation_AddPods(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_UpdateAllocation_ReplacePods(t *testing.T) {
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	store.UpdateAllocation(ctx, "default", "pool1", "sandbox1", []string{"pod1", "pod2"})
@@ -92,7 +92,7 @@ func TestInMemoryAllocationStore_UpdateAllocation_ReplacePods(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_UpdateAllocation_MultipleSandboxes(t *testing.T) {
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	store.UpdateAllocation(ctx, "default", "pool1", "sandbox1", []string{"pod1", "pod2"})
@@ -105,7 +105,7 @@ func TestInMemoryAllocationStore_UpdateAllocation_MultipleSandboxes(t *testing.T
 }
 
 func TestInMemoryAllocationStore_UpdateAllocation_MultiplePools(t *testing.T) {
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	store.UpdateAllocation(ctx, "default", "pool1", "sandbox1", []string{"pod1", "pod2"})
@@ -119,16 +119,16 @@ func TestInMemoryAllocationStore_UpdateAllocation_MultiplePools(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_GetAllocation_IsolatedByPool(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	pool1 := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool1"}}
 	pool2 := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool2"}}
 
-	_ = store.SetAllocation(ctx, pool1, &PoolAllocation{
+	_ = store.SetAllocation(ctx, pool1, &poolAllocation{
 		PodAllocation: map[string]string{"pod1": "sandbox1"},
 	})
-	_ = store.SetAllocation(ctx, pool2, &PoolAllocation{
+	_ = store.SetAllocation(ctx, pool2, &poolAllocation{
 		PodAllocation: map[string]string{"pod2": "sandbox2"},
 	})
 
@@ -146,10 +146,10 @@ func TestInMemoryAllocationStore_Recover(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = sandboxv1alpha1.AddToScheme(scheme)
 
-	allocation1 := &SandboxAllocation{Pods: []string{"pod1", "pod2"}}
-	allocation2 := &SandboxAllocation{Pods: []string{"pod3", "pod4"}}
+	allocation1 := &sandboxAllocation{Pods: []string{"pod1", "pod2"}}
+	allocation2 := &sandboxAllocation{Pods: []string{"pod3", "pod4"}}
 	// released (alloc-released) means recycle is complete; Recover should exclude these pods.
-	released2 := &AllocationReleased{Pods: []string{"pod4"}}
+	released2 := &allocationReleased{Pods: []string{"pod4"}}
 
 	alloc1JSON, _ := json.Marshal(allocation1)
 	alloc2JSON, _ := json.Marshal(allocation2)
@@ -160,7 +160,7 @@ func TestInMemoryAllocationStore_Recover(t *testing.T) {
 			Name:      "sandbox1",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey: string(alloc1JSON),
+				annoAllocStatusKey: string(alloc1JSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -173,8 +173,8 @@ func TestInMemoryAllocationStore_Recover(t *testing.T) {
 			Name:      "sandbox2",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey:   string(alloc2JSON),
-				AnnoAllocReleasedKey: string(released2JSON),
+				annoAllocStatusKey:   string(alloc2JSON),
+				annoAllocReleasedKey: string(released2JSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -197,7 +197,7 @@ func TestInMemoryAllocationStore_Recover(t *testing.T) {
 		WithObjects(sandbox1, sandbox2, sandbox3).
 		Build()
 
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	err := store.Recover(ctx, client)
@@ -216,10 +216,10 @@ func TestInMemoryAllocationStore_Recover_ReleaseOnlyOwnPods(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = sandboxv1alpha1.AddToScheme(scheme)
 
-	allocation1 := &SandboxAllocation{Pods: []string{"pod1"}}
+	allocation1 := &sandboxAllocation{Pods: []string{"pod1"}}
 	// sandbox1 has completed recycling pod1 (alloc-released), so pod1 should be freed.
-	released1 := &AllocationReleased{Pods: []string{"pod1"}}
-	allocation2 := &SandboxAllocation{Pods: []string{"pod1"}}
+	released1 := &allocationReleased{Pods: []string{"pod1"}}
+	allocation2 := &sandboxAllocation{Pods: []string{"pod1"}}
 
 	alloc1JSON, _ := json.Marshal(allocation1)
 	released1JSON, _ := json.Marshal(released1)
@@ -230,8 +230,8 @@ func TestInMemoryAllocationStore_Recover_ReleaseOnlyOwnPods(t *testing.T) {
 			Name:      "sandbox1",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey:   string(alloc1JSON),
-				AnnoAllocReleasedKey: string(released1JSON),
+				annoAllocStatusKey:   string(alloc1JSON),
+				annoAllocReleasedKey: string(released1JSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -244,7 +244,7 @@ func TestInMemoryAllocationStore_Recover_ReleaseOnlyOwnPods(t *testing.T) {
 			Name:      "sandbox2",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey: string(alloc2JSON),
+				annoAllocStatusKey: string(alloc2JSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -257,7 +257,7 @@ func TestInMemoryAllocationStore_Recover_ReleaseOnlyOwnPods(t *testing.T) {
 		WithObjects(sandbox2, sandbox1).
 		Build()
 
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	err := store.Recover(ctx, client)
@@ -270,11 +270,11 @@ func TestInMemoryAllocationStore_Recover_ReleasePodReassignedMultipleTimes(t *te
 	scheme := runtime.NewScheme()
 	_ = sandboxv1alpha1.AddToScheme(scheme)
 
-	allocation1 := &SandboxAllocation{Pods: []string{"pod1"}}
-	released1 := &AllocationReleased{Pods: []string{"pod1"}}
-	allocation2 := &SandboxAllocation{Pods: []string{"pod1"}}
-	released2 := &AllocationReleased{Pods: []string{"pod1"}}
-	allocation3 := &SandboxAllocation{Pods: []string{"pod1"}}
+	allocation1 := &sandboxAllocation{Pods: []string{"pod1"}}
+	released1 := &allocationReleased{Pods: []string{"pod1"}}
+	allocation2 := &sandboxAllocation{Pods: []string{"pod1"}}
+	released2 := &allocationReleased{Pods: []string{"pod1"}}
+	allocation3 := &sandboxAllocation{Pods: []string{"pod1"}}
 
 	alloc1JSON, _ := json.Marshal(allocation1)
 	released1JSON, _ := json.Marshal(released1)
@@ -287,8 +287,8 @@ func TestInMemoryAllocationStore_Recover_ReleasePodReassignedMultipleTimes(t *te
 			Name:      "sandbox1",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey:   string(alloc1JSON),
-				AnnoAllocReleasedKey: string(released1JSON),
+				annoAllocStatusKey:   string(alloc1JSON),
+				annoAllocReleasedKey: string(released1JSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool1"},
@@ -299,8 +299,8 @@ func TestInMemoryAllocationStore_Recover_ReleasePodReassignedMultipleTimes(t *te
 			Name:      "sandbox2",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey:   string(alloc2JSON),
-				AnnoAllocReleasedKey: string(released2JSON),
+				annoAllocStatusKey:   string(alloc2JSON),
+				annoAllocReleasedKey: string(released2JSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool1"},
@@ -311,7 +311,7 @@ func TestInMemoryAllocationStore_Recover_ReleasePodReassignedMultipleTimes(t *te
 			Name:      "sandbox3",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey: string(alloc3JSON),
+				annoAllocStatusKey: string(alloc3JSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool1"},
@@ -322,7 +322,7 @@ func TestInMemoryAllocationStore_Recover_ReleasePodReassignedMultipleTimes(t *te
 		WithObjects(sandbox3, sandbox2, sandbox1).
 		Build()
 
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	err := store.Recover(ctx, client)
@@ -336,12 +336,12 @@ func TestInMemoryAllocationStore_Recover_ClearsExisting(t *testing.T) {
 	_ = sandboxv1alpha1.AddToScheme(scheme)
 
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	store.pools["default/pool1"] = &poolEntry{data: map[string]string{"old-pod": "old-sandbox"}}
 
-	allocation := &SandboxAllocation{Pods: []string{"new-pod"}}
+	allocation := &sandboxAllocation{Pods: []string{"new-pod"}}
 	allocJSON, _ := json.Marshal(allocation)
 
 	sandbox := &sandboxv1alpha1.BatchSandbox{
@@ -349,7 +349,7 @@ func TestInMemoryAllocationStore_Recover_ClearsExisting(t *testing.T) {
 			Name:      "sandbox1",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey: string(allocJSON),
+				annoAllocStatusKey: string(allocJSON),
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -371,7 +371,7 @@ func TestInMemoryAllocationStore_Recover_ClearsExisting(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_ThreadSafety(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -387,7 +387,7 @@ func TestInMemoryAllocationStore_ThreadSafety(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
-				alloc := &PoolAllocation{
+				alloc := &poolAllocation{
 					PodAllocation: map[string]string{
 						"pod": "sandbox",
 					},
@@ -402,14 +402,14 @@ func TestInMemoryAllocationStore_ThreadSafety(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_GetAllocation_ReturnsCopy(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	pool := &sandboxv1alpha1.Pool{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
 	}
 
-	alloc := &PoolAllocation{
+	alloc := &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod1": "sandbox1",
 		},
@@ -426,7 +426,7 @@ func TestInMemoryAllocationStore_GetAllocation_ReturnsCopy(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_SandboxDeleted_PodsReturnedToPool(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	pool := &sandboxv1alpha1.Pool{
@@ -434,7 +434,7 @@ func TestInMemoryAllocationStore_SandboxDeleted_PodsReturnedToPool(t *testing.T)
 	}
 
 	// Initial state: sandbox1 has pod1 and pod2 allocated
-	initialAlloc := &PoolAllocation{
+	initialAlloc := &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod1": "sandbox1",
 			"pod2": "sandbox1",
@@ -446,7 +446,7 @@ func TestInMemoryAllocationStore_SandboxDeleted_PodsReturnedToPool(t *testing.T)
 
 	// Simulate sandbox1 deletion by updating allocation without sandbox1's pods
 	// This is what Schedule does when GC detects deleted sandbox
-	updatedAlloc := &PoolAllocation{
+	updatedAlloc := &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod3": "sandbox2",
 		},
@@ -466,7 +466,7 @@ func TestInMemoryAllocationStore_SandboxDeleted_PodsReturnedToPool(t *testing.T)
 }
 
 func TestInMemoryAllocationStore_UpdateAllocation_EmptyPods_ReleaseAll(t *testing.T) {
-	store := NewInMemoryAllocationStore().(*InMemoryAllocationStore)
+	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
 	// Setup initial allocation
@@ -481,7 +481,7 @@ func TestInMemoryAllocationStore_UpdateAllocation_EmptyPods_ReleaseAll(t *testin
 }
 
 func TestInMemoryAllocationStore_SetAllocation_ReplaceAll(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	pool := &sandboxv1alpha1.Pool{
@@ -489,7 +489,7 @@ func TestInMemoryAllocationStore_SetAllocation_ReplaceAll(t *testing.T) {
 	}
 
 	// Set initial allocation with multiple sandboxes
-	_ = store.SetAllocation(ctx, pool, &PoolAllocation{
+	_ = store.SetAllocation(ctx, pool, &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod1": "sandbox1",
 			"pod2": "sandbox1",
@@ -499,7 +499,7 @@ func TestInMemoryAllocationStore_SetAllocation_ReplaceAll(t *testing.T) {
 	})
 
 	// Simulate GC: replace with allocation excluding deleted sandbox
-	_ = store.SetAllocation(ctx, pool, &PoolAllocation{
+	_ = store.SetAllocation(ctx, pool, &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod3": "sandbox2",
 			"pod4": "sandbox2",
@@ -517,7 +517,7 @@ func TestInMemoryAllocationStore_SetAllocation_ReplaceAll(t *testing.T) {
 // TestInMemoryAllocationStore_MultiNamespaceSamePoolName tests that pools with the same name
 // in different namespaces are properly isolated from each other.
 func TestInMemoryAllocationStore_MultiNamespaceSamePoolName(t *testing.T) {
-	store := NewInMemoryAllocationStore()
+	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
 	// Create two pools with the same name but in different namespaces
@@ -535,13 +535,13 @@ func TestInMemoryAllocationStore_MultiNamespaceSamePoolName(t *testing.T) {
 	}
 
 	// Set different allocations for each namespace
-	_ = store.SetAllocation(ctx, poolNs1, &PoolAllocation{
+	_ = store.SetAllocation(ctx, poolNs1, &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod1": "sandbox1-ns1",
 			"pod2": "sandbox1-ns1",
 		},
 	})
-	_ = store.SetAllocation(ctx, poolNs2, &PoolAllocation{
+	_ = store.SetAllocation(ctx, poolNs2, &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod3": "sandbox1-ns2",
 			"pod4": "sandbox1-ns2",
@@ -567,7 +567,7 @@ func TestInMemoryAllocationStore_MultiNamespaceSamePoolName(t *testing.T) {
 	assert.Empty(t, allocNs2.PodAllocation["pod2"], "namespace2 should not see namespace1's pods")
 
 	// Update allocation in namespace1 should not affect namespace2
-	_ = store.SetAllocation(ctx, poolNs1, &PoolAllocation{
+	_ = store.SetAllocation(ctx, poolNs1, &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod5": "sandbox2-ns1",
 		},

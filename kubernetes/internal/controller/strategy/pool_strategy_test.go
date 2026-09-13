@@ -70,9 +70,9 @@ func TestDefaultPoolStrategy_IsPooledMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			strategy := NewDefaultPoolStrategy(tt.batchSbx)
+			strategy := newDefaultPoolStrategy(tt.batchSbx)
 			if got := strategy.IsPooledMode(); got != tt.want {
-				t.Errorf("DefaultPoolStrategy.IsPooledMode() = %v, want %v", got, tt.want)
+				t.Errorf("defaultPoolStrategy.IsPooledMode() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -85,7 +85,7 @@ func TestNewPoolStrategy(t *testing.T) {
 		wantStrategy string
 	}{
 		{
-			name: "without resource-speedup label - returns DefaultPoolStrategy",
+			name: "without resource-speedup label - returns defaultPoolStrategy",
 			batchSbx: &sandboxv1alpha1.BatchSandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{},
@@ -94,7 +94,7 @@ func TestNewPoolStrategy(t *testing.T) {
 					Template: nil,
 				},
 			},
-			wantStrategy: "*strategy.DefaultPoolStrategy",
+			wantStrategy: "*strategy.defaultPoolStrategy",
 		},
 	}
 	for _, tt := range tests {
@@ -142,9 +142,9 @@ func TestDefaultPoolStrategy_AssignProfile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := NewDefaultPoolStrategy(tt.batchSbx)
+			s := newDefaultPoolStrategy(tt.batchSbx)
 			if got := s.AssignProfile(); got != tt.want {
-				t.Errorf("DefaultPoolStrategy.AssignProfile() = %v, want %v", got, tt.want)
+				t.Errorf("defaultPoolStrategy.AssignProfile() = %v, want %v", got, tt.want)
 			}
 		})
 	}

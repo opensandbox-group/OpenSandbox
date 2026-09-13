@@ -55,7 +55,7 @@ func TestDeleteRecycler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := NewDeleteRecycler()
+			d := newDeleteRecycler()
 			status, err := d.TryRecycle(context.Background(), &sandboxv1alpha1.Pool{}, tt.pod, &Spec{ID: "sbx1"})
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantState, status.State)

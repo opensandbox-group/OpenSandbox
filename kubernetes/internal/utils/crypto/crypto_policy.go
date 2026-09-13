@@ -140,16 +140,6 @@ func ensureCertPublicKeyMeetsNISTMinimums(cert *x509.Certificate) error {
 	return nil
 }
 
-func ensureCertMeetsNISTMinimums(cert *x509.Certificate) error {
-	if cert == nil {
-		return fmt.Errorf("certificate is nil")
-	}
-	if err := ensureCertPublicKeyMeetsNISTMinimums(cert); err != nil {
-		return err
-	}
-	return ensureCertSignatureHashMeetsNISTMinimums(cert)
-}
-
 func isSelfSignedCA(cert *x509.Certificate) bool {
 	return cert != nil && cert.IsCA &&
 		bytes.Equal(cert.RawSubject, cert.RawIssuer) &&

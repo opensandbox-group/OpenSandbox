@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEnsureCertMeetsNISTMinimums_RSA1024Rejected(t *testing.T) {
+func TestEnsureCertPublicKeyMeetsNISTMinimums_RSA1024Rejected(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 1024)
 	require.NoError(t, err)
 
@@ -41,7 +41,7 @@ func TestEnsureCertMeetsNISTMinimums_RSA1024Rejected(t *testing.T) {
 		SerialNumber:          big.NewInt(1),
 		BasicConstraintsValid: true,
 	}
-	require.Error(t, ensureCertMeetsNISTMinimums(cert))
+	require.Error(t, ensureCertPublicKeyMeetsNISTMinimums(cert))
 }
 
 func TestEnsureCertMeetsNISTMinimums_EC224Accepted(t *testing.T) {
@@ -54,10 +54,11 @@ func TestEnsureCertMeetsNISTMinimums_EC224Accepted(t *testing.T) {
 		SerialNumber:          big.NewInt(2),
 		BasicConstraintsValid: true,
 	}
-	require.NoError(t, ensureCertMeetsNISTMinimums(cert))
+	require.NoError(t, ensureCertPublicKeyMeetsNISTMinimums(cert))
+	require.NoError(t, ensureCertSignatureHashMeetsNISTMinimums(cert))
 }
 
-func TestEnsureCertMeetsNISTMinimums_SHA1Rejected(t *testing.T) {
+func TestEnsureCertSignatureHashMeetsNISTMinimums_SHA1Rejected(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
@@ -67,10 +68,10 @@ func TestEnsureCertMeetsNISTMinimums_SHA1Rejected(t *testing.T) {
 		SerialNumber:          big.NewInt(3),
 		BasicConstraintsValid: true,
 	}
-	require.Error(t, ensureCertMeetsNISTMinimums(cert))
+	require.Error(t, ensureCertSignatureHashMeetsNISTMinimums(cert))
 }
 
-func TestEnsureCertMeetsNISTMinimums_UnknownSignatureAlgorithmRejected(t *testing.T) {
+func TestEnsureCertSignatureHashMeetsNISTMinimums_UnknownSignatureAlgorithmRejected(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
@@ -80,7 +81,7 @@ func TestEnsureCertMeetsNISTMinimums_UnknownSignatureAlgorithmRejected(t *testin
 		SerialNumber:          big.NewInt(4),
 		BasicConstraintsValid: true,
 	}
-	require.Error(t, ensureCertMeetsNISTMinimums(cert))
+	require.Error(t, ensureCertSignatureHashMeetsNISTMinimums(cert))
 }
 
 func TestValidateCertificateKeyPair_RejectsWeakRSA(t *testing.T) {

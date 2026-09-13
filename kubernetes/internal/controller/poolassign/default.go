@@ -25,22 +25,22 @@ type defaultAssigner struct {
 	profile *Profile
 }
 
-func NewDefaultAssigner(profile *Profile) Assigner {
+func NewDefaultAssigner(profile *Profile) assigner {
 	return &defaultAssigner{profile: profile}
 }
 
 func (a *defaultAssigner) AssignPool(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pools []*sandboxv1alpha1.Pool) (string, error) {
-	predicates, err := NewPredicates(a.profile)
+	predicates, err := newPredicates(a.profile)
 	if err != nil {
 		return "", fmt.Errorf("failed to create predicates: %w", err)
 	}
-	scorers, err := NewScorers(a.profile)
+	scorers, err := newScorers(a.profile)
 	if err != nil {
 		return "", fmt.Errorf("failed to create scorers: %w", err)
 	}
 
 	var candidates []*sandboxv1alpha1.Pool
-	var rejections []PoolRejection
+	var rejections []poolRejection
 	for _, pool := range pools {
 		if rejection := a.collectRejections(ctx, sbx, pool, predicates); len(rejection.Reasons) > 0 {
 			rejection.PoolName = pool.Name
@@ -70,19 +70,19 @@ func (a *defaultAssigner) AssignPool(ctx context.Context, sbx *sandboxv1alpha1.B
 	return best.Name, nil
 }
 
-func (a *defaultAssigner) collectRejections(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []Predicate) PoolRejection {
-	var rejection PoolRejection
+func (a *defaultAssigner) collectRejections(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []predicate) poolRejection {
+	var rejection poolRejection
 	for _, p := range predicates {
-		if !p.Predicate(ctx, sbx, pool) {
+		if !p.predicate(ctx, sbx, pool) {
 			reason := "predicate failed"
-			if pr, ok := p.(PredicateWithReason); ok {
+			if pr, ok := p.(predicateWithReason); ok {
 				if detail := pr.Reason(ctx, sbx, pool); detail != "" {
 					reason = detail
 				}
 			}
 			rejection.Reasons = append(rejection.Reasons, reason)
 			failureCode := ""
-			if coded, ok := p.(PredicateWithFailureCode); ok {
+			if coded, ok := p.(predicateWithFailureCode); ok {
 				failureCode = coded.FailureCode()
 			}
 			rejection.FailureCodes = append(rejection.FailureCodes, failureCode)

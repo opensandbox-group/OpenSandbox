@@ -23,13 +23,12 @@ import (
 )
 
 const (
-
-	// StateRecycling RecycleStateRecycling indicates the pod is being recycled.
+	// StateRecycling indicates the pod is being recycled.
 	StateRecycling string = "Recycling"
-	// StateSucceeded RecycleStateSucceeded indicates the pod has been successfully recycled.
+	// StateSucceeded indicates the pod has been successfully recycled.
 	StateSucceeded string = "Succeeded"
-	// StateFailed RecycleStateFailed indicates the recycle operation failed.
-	StateFailed string = "Failed"
+	// stateFailed indicates the recycle operation failed.
+	stateFailed string = "Failed"
 )
 
 // Spec describes the sandbox being recycled.
@@ -49,9 +48,9 @@ type Status struct {
 
 // Handler handles pod recycling when pods are returned to the pool.
 // Different implementations provide different recycle strategies:
-// - NoopRecycler: do nothing, pod is immediately available
-// - DeleteRecycler: delete the pod
-// - RestartRecycler: restart containers in the pod
+// - noopRecycler: do nothing, pod is immediately available
+// - deleteRecycler: delete the pod
+// - restartRecycler: restart containers in the pod
 type Handler interface {
 	// TryRecycle initiates or drives forward the recycle operation for the pod.
 	// It is re-entrant: safe to call multiple times until Succeeded or Failed is returned.

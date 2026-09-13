@@ -25,9 +25,9 @@ import (
 const (
 	AnnotationCheckpointProvider    = "sandbox.opensandbox.io/checkpoint-provider"
 	AnnotationQEMUContainer         = "sandbox.opensandbox.io/qemu-container"
-	AnnotationQEMUQMPSocket         = "sandbox.opensandbox.io/qemu-qmp-socket"
-	AnnotationQEMULaunchManifest    = "sandbox.opensandbox.io/qemu-launch-manifest"
-	AnnotationQEMURequiredNodeClass = "sandbox.opensandbox.io/qemu-required-node-class"
+	annotationQEMUQMPSocket         = "sandbox.opensandbox.io/qemu-qmp-socket"
+	annotationQEMULaunchManifest    = "sandbox.opensandbox.io/qemu-launch-manifest"
+	annotationQEMURequiredNodeClass = "sandbox.opensandbox.io/qemu-required-node-class"
 	LabelQEMUNodeClass              = "sandbox.opensandbox.io/qemu-node-class"
 
 	ProviderRootfs = "rootfs"
@@ -68,9 +68,9 @@ func ContractFromPod(pod *corev1.Pod) (WorkloadContract, error) {
 
 	contract := &QEMUContract{
 		ContainerName:      strings.TrimSpace(pod.Annotations[AnnotationQEMUContainer]),
-		QMPSocketPath:      strings.TrimSpace(pod.Annotations[AnnotationQEMUQMPSocket]),
-		LaunchManifestPath: strings.TrimSpace(pod.Annotations[AnnotationQEMULaunchManifest]),
-		RequiredNodeClass:  strings.TrimSpace(pod.Annotations[AnnotationQEMURequiredNodeClass]),
+		QMPSocketPath:      strings.TrimSpace(pod.Annotations[annotationQEMUQMPSocket]),
+		LaunchManifestPath: strings.TrimSpace(pod.Annotations[annotationQEMULaunchManifest]),
+		RequiredNodeClass:  strings.TrimSpace(pod.Annotations[annotationQEMURequiredNodeClass]),
 	}
 	if contract.ContainerName == "" {
 		return WorkloadContract{}, fmt.Errorf("%s is required for qemu checkpoints", AnnotationQEMUContainer)
@@ -79,10 +79,10 @@ func ContractFromPod(pod *corev1.Pod) (WorkloadContract, error) {
 		return WorkloadContract{}, fmt.Errorf("qemu checkpoint container %q does not exist", contract.ContainerName)
 	}
 	contract.VolumeMountPaths = containerVolumePaths(pod, contract.ContainerName)
-	if err := validateAbsoluteContainerPath(AnnotationQEMUQMPSocket, contract.QMPSocketPath); err != nil {
+	if err := validateAbsoluteContainerPath(annotationQEMUQMPSocket, contract.QMPSocketPath); err != nil {
 		return WorkloadContract{}, err
 	}
-	if err := validateAbsoluteContainerPath(AnnotationQEMULaunchManifest, contract.LaunchManifestPath); err != nil {
+	if err := validateAbsoluteContainerPath(annotationQEMULaunchManifest, contract.LaunchManifestPath); err != nil {
 		return WorkloadContract{}, err
 	}
 

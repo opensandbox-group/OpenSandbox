@@ -62,7 +62,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("single pool passes all predicates", func(t *testing.T) {
-		assigner := NewDefaultAssigner(DefaultProfile())
+		assigner := NewDefaultAssigner(defaultProfile())
 		sbx := makeSBX("sbx-1", "nginx")
 		pools := []*sandboxv1alpha1.Pool{makePool("pool-1", "nginx", 10, 5)}
 
@@ -103,7 +103,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 	})
 
 	t.Run("all pools filtered out - error", func(t *testing.T) {
-		assigner := NewDefaultAssigner(DefaultProfile())
+		assigner := NewDefaultAssigner(defaultProfile())
 		sbx := makeSBX("sbx-1", "nginx")
 		pools := []*sandboxv1alpha1.Pool{makePool("pool-1", "redis", 10, 5)}
 
@@ -162,7 +162,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 	})
 
 	t.Run("empty pool list - error", func(t *testing.T) {
-		assigner := NewDefaultAssigner(DefaultProfile())
+		assigner := NewDefaultAssigner(defaultProfile())
 		sbx := makeSBX("sbx-1", "nginx")
 
 		_, err := assigner.AssignPool(ctx, sbx, nil)
@@ -172,7 +172,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 	})
 
 	t.Run("fully allocated pool filtered by capacity predicate", func(t *testing.T) {
-		assigner := NewDefaultAssigner(DefaultProfile())
+		assigner := NewDefaultAssigner(defaultProfile())
 		sbx := makeSBX("sbx-1", "nginx")
 		pools := []*sandboxv1alpha1.Pool{
 			makePool("pool-full", "nginx", 10, 10),
@@ -216,7 +216,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 	})
 
 	t.Run("all pools fully allocated - error", func(t *testing.T) {
-		assigner := NewDefaultAssigner(DefaultProfile())
+		assigner := NewDefaultAssigner(defaultProfile())
 		sbx := makeSBX("sbx-1", "nginx")
 		pools := []*sandboxv1alpha1.Pool{
 			makePool("pool-a", "nginx", 10, 10),
@@ -230,7 +230,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 	})
 
 	t.Run("scale-from-zero pool is eligible", func(t *testing.T) {
-		assigner := NewDefaultAssigner(DefaultProfile())
+		assigner := NewDefaultAssigner(defaultProfile())
 		sbx := makeSBX("sbx-1", "nginx")
 		zeroPool := &sandboxv1alpha1.Pool{
 			ObjectMeta: metav1.ObjectMeta{Name: "pool-zero"},
@@ -256,7 +256,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 	})
 
 	t.Run("capacity requires room for all desired replicas", func(t *testing.T) {
-		assigner := NewDefaultAssigner(DefaultProfile())
+		assigner := NewDefaultAssigner(defaultProfile())
 		sbx := makeSBX("sbx-1", "nginx")
 		sbx.Spec.Replicas = int32Ptr(2)
 		smallPool := &sandboxv1alpha1.Pool{
@@ -296,7 +296,7 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 
 func TestNoEligiblePoolErrorCapacityClassification(t *testing.T) {
 	ctx := context.Background()
-	assigner := NewDefaultAssigner(DefaultProfile())
+	assigner := NewDefaultAssigner(defaultProfile())
 	sbx := makeSBX("sbx-1", "nginx")
 
 	t.Run("all otherwise matching pools are full", func(t *testing.T) {

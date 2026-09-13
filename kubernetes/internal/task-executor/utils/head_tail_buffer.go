@@ -97,15 +97,6 @@ func (b *HeadTailBuffer) String() string {
 	return string(output)
 }
 
-// TruncateHeadTail bounds text without first copying the complete input.
-func TruncateHeadTail(value string, headBytes, tailBytes int, marker string) string {
-	validateHeadTailLimits(headBytes, tailBytes)
-	if len(value) <= headBytes+tailBytes {
-		return value
-	}
-	return value[:headBytes] + marker + value[len(value)-tailBytes:]
-}
-
 func validateHeadTailLimits(headBytes, tailBytes int) {
 	if headBytes < 0 || tailBytes < 0 {
 		panic("head and tail limits must not be negative")

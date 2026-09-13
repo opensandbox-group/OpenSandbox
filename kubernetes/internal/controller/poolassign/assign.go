@@ -22,34 +22,34 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
-type Predicate interface {
-	Predicate(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool
+type predicate interface {
+	predicate(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool
 }
 
-// PredicateWithReason extends Predicate with rejection diagnostics.
-type PredicateWithReason interface {
-	Predicate
+// predicateWithReason extends predicate with rejection diagnostics.
+type predicateWithReason interface {
+	predicate
 	Reason(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) string
 }
 
-// PredicateWithFailureCode exposes a stable identifier for a rejected predicate.
-type PredicateWithFailureCode interface {
-	Predicate
+// predicateWithFailureCode exposes a stable identifier for a rejected predicate.
+type predicateWithFailureCode interface {
+	predicate
 	FailureCode() string
 }
 
 const FailureCodeCapacityExhausted = "PoolCapacityExhausted"
 
-type Scorer interface {
+type scorer interface {
 	Score(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) float64
 }
 
-type Assigner interface {
+type assigner interface {
 	AssignPool(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pools []*sandboxv1alpha1.Pool) (string, error)
 }
 
-// PoolRejection records why a specific pool was rejected during assignment.
-type PoolRejection struct {
+// poolRejection records why a specific pool was rejected during assignment.
+type poolRejection struct {
 	PoolName     string
 	Reasons      []string
 	FailureCodes []string
@@ -59,7 +59,7 @@ type PoolRejection struct {
 type NoEligiblePoolError struct {
 	SandboxName string
 	TotalPools  int
-	Rejections  []PoolRejection
+	Rejections  []poolRejection
 }
 
 func (e *NoEligiblePoolError) Error() string {

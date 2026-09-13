@@ -18,8 +18,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -274,43 +272,4 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func TestWriteSnapshotResultWritesTerminationMessage(t *testing.T) {
-	original := terminationMessagePath
-	t.Cleanup(func() { terminationMessagePath = original })
-	terminationMessagePath = filepath.Join(t.TempDir(), "termination.log")
-
-	err := writeSnapshotResult(
-		[]ContainerSpec{
-			{Name: "main", URI: "registry.example.com/main:snap"},
-			{Name: "sidecar", URI: "registry.example.com/sidecar:snap"},
-		},
-		map[string]string{
-			"main":    "sha256:main",
-			"sidecar": "sha256:sidecar",
-		},
-	)
-	if err != nil {
-		t.Fatalf("writeSnapshotResult failed: %v", err)
-	}
-
-	data, err := os.ReadFile(terminationMessagePath)
-	if err != nil {
-		t.Fatalf("failed to read termination message: %v", err)
-	}
-
-	var result snapshot.Result
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("termination message is not valid JSON: %v", err)
-	}
-	if len(result.Containers) != 2 {
-		t.Fatalf("expected 2 container results, got %d", len(result.Containers))
-	}
-	if result.Containers[0].Name != "main" || result.Containers[0].Digest != "sha256:main" {
-		t.Fatalf("unexpected first result: %#v", result.Containers[0])
-	}
-	if result.Containers[1].Name != "sidecar" || result.Containers[1].Digest != "sha256:sidecar" {
-		t.Fatalf("unexpected second result: %#v", result.Containers[1])
-	}
 }

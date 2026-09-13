@@ -412,12 +412,12 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 
 func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, endpointIPs []string) error {
 	raw, _ := json.Marshal(endpointIPs)
-	if batchSbx.Annotations[AnnotationSandboxEndpoints] == string(raw) {
+	if batchSbx.Annotations[annotationSandboxEndpoints] == string(raw) {
 		return nil
 	}
 	// Skip writing empty endpoints when annotation doesn't exist yet (e.g. sandbox just created, no pods assigned).
 	// Still allow clearing endpoints when annotation was previously set (e.g. pause scenario).
-	_, annotationExists := batchSbx.Annotations[AnnotationSandboxEndpoints]
+	_, annotationExists := batchSbx.Annotations[annotationSandboxEndpoints]
 	if !annotationExists && string(raw) == "[]" {
 		return nil
 	}
@@ -425,7 +425,7 @@ func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context,
 	patchData, _ := json.Marshal(map[string]any{
 		"metadata": map[string]any{
 			"annotations": map[string]string{
-				AnnotationSandboxEndpoints: string(raw),
+				annotationSandboxEndpoints: string(raw),
 			},
 		},
 	})

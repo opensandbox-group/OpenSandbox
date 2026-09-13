@@ -57,13 +57,13 @@ func (e *commandError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Class, e.Desc)
 }
 
-// MigrationStatus is the subset of query-migrate used by checkpoint export.
-type MigrationStatus struct {
+// migrationStatus is the subset of query-migrate used by checkpoint export.
+type migrationStatus struct {
 	Status    string `json:"status"`
 	ErrorDesc string `json:"error-desc,omitempty"`
 }
 
-type RunState struct {
+type runState struct {
 	Status  string `json:"status"`
 	Running bool   `json:"running"`
 }
@@ -111,7 +111,7 @@ func Dial(ctx context.Context, socketPath string) (*Client, error) {
 		client.Close()
 		return nil, errors.New("QMP peer did not send a greeting")
 	}
-	if err := client.Execute(ctx, "qmp_capabilities", nil, nil, nil); err != nil {
+	if err := client.execute(ctx, "qmp_capabilities", nil, nil, nil); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("enable QMP capabilities: %w", err)
 	}
@@ -125,9 +125,9 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-// Execute runs one QMP command. When fd is non-nil it is attached to the JSON
+// execute runs one QMP command. When fd is non-nil it is attached to the JSON
 // command using SCM_RIGHTS, as required by QMP getfd.
-func (c *Client) Execute(ctx context.Context, command string, arguments any, fd *os.File, result any) error {
+func (c *Client) execute(ctx context.Context, command string, arguments any, fd *os.File, result any) error {
 	if err := c.setDeadline(ctx); err != nil {
 		return err
 	}
@@ -177,15 +177,15 @@ func (c *Client) Execute(ctx context.Context, command string, arguments any, fd 
 // Version returns the QEMU version reported by the connected process.
 func (c *Client) Version(ctx context.Context) (VersionInfo, error) {
 	var version VersionInfo
-	err := c.Execute(ctx, "query-version", nil, nil, &version)
+	err := c.execute(ctx, "query-version", nil, nil, &version)
 	return version, err
 }
 
 // Continue resumes a source VM that was left in postmigrate after a later
 // snapshot publication step failed.
 func (c *Client) Continue(ctx context.Context) error {
-	var state RunState
-	if err := c.Execute(ctx, "query-status", nil, nil, &state); err != nil {
+	var state runState
+	if err := c.execute(ctx, "query-status", nil, nil, &state); err != nil {
 		return err
 	}
 	if state.Running {
@@ -194,7 +194,7 @@ func (c *Client) Continue(ctx context.Context) error {
 	if state.Status != "postmigrate" && state.Status != "paused" && state.Status != "prelaunch" {
 		return fmt.Errorf("source QEMU cannot resume from state %q", state.Status)
 	}
-	return c.Execute(ctx, "cont", nil, nil, nil)
+	return c.execute(ctx, "cont", nil, nil, nil)
 }
 
 // ExportMigration sends outputFD to QEMU and waits until the migration stream
@@ -207,24 +207,24 @@ func (c *Client) ExportMigration(ctx context.Context, outputFD *os.File, pollInt
 		pollInterval = 100 * time.Millisecond
 	}
 
-	if err := c.Execute(ctx, "getfd", map[string]string{"fdname": migrationFDName}, outputFD, nil); err != nil {
+	if err := c.execute(ctx, "getfd", map[string]string{"fdname": migrationFDName}, outputFD, nil); err != nil {
 		return err
 	}
 	defer func() {
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = c.Execute(cleanupContext, "closefd", map[string]string{"fdname": migrationFDName}, nil, nil)
+		_ = c.execute(cleanupContext, "closefd", map[string]string{"fdname": migrationFDName}, nil, nil)
 	}()
 
-	if err := c.Execute(ctx, "migrate", map[string]string{"uri": "fd:" + migrationFDName}, nil, nil); err != nil {
+	if err := c.execute(ctx, "migrate", map[string]string{"uri": "fd:" + migrationFDName}, nil, nil); err != nil {
 		return err
 	}
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		var status MigrationStatus
-		if err := c.Execute(ctx, "query-migrate", nil, nil, &status); err != nil {
+		var status migrationStatus
+		if err := c.execute(ctx, "query-migrate", nil, nil, &status); err != nil {
 			c.cancelMigration()
 			return err
 		}
@@ -258,7 +258,7 @@ func (c *Client) ExportMigration(ctx context.Context, outputFD *os.File, pollInt
 func (c *Client) cancelMigration() {
 	cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = c.Execute(cleanupContext, "migrate_cancel", nil, nil, nil)
+	_ = c.execute(cleanupContext, "migrate_cancel", nil, nil, nil)
 }
 
 func (c *Client) setDeadline(ctx context.Context) error {

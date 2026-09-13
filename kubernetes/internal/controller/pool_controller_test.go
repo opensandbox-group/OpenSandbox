@@ -350,13 +350,13 @@ var _ = Describe("Pool update", func() {
 				for _, pod := range pods.Items {
 					if pod.Name == sbxAlloc.Pods[0] {
 						g.Expect(pod.DeletionTimestamp).To(BeNil())
-						g.Expect(pod.Labels[LabelPoolRevision]).To(Equal(oldRevision))
+						g.Expect(pod.Labels[labelPoolRevision]).To(Equal(oldRevision))
 						continue
 					}
 					if pod.DeletionTimestamp != nil {
 						continue
 					}
-					g.Expect(pod.Labels[LabelPoolRevision]).NotTo(Equal(oldRevision))
+					g.Expect(pod.Labels[labelPoolRevision]).NotTo(Equal(oldRevision))
 				}
 			}, timeout, interval).Should(Succeed())
 			Expect(k8sClient.Delete(ctx, sandbox)).To(Succeed())
@@ -481,12 +481,12 @@ var _ = Describe("Pool allocate", func() {
 			Expect(len(allocation.PodAllocation)).To(Equal(1))
 			Expect(allocation.PodAllocation[sbxAlloc.Pods[0]]).To(Equal(batchSandbox.Name))
 			// release
-			release := AllocationRelease{
+			release := allocationRelease{
 				Pods: sbxAlloc.Pods,
 			}
 			js, err := json.Marshal(release)
 			Expect(err).NotTo(HaveOccurred())
-			batchSandbox.Annotations[AnnoAllocReleaseKey] = string(js)
+			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			err = k8sClient.Update(ctx, batchSandbox)
 			Expect(err).NotTo(HaveOccurred())
 			// wait release
@@ -574,13 +574,13 @@ var _ = Describe("Pool allocate", func() {
 	})
 })
 
-func getSandboxAllocation(obj kclient.Object) (*SandboxAllocation, error) {
-	allocation := &SandboxAllocation{}
+func getSandboxAllocation(obj kclient.Object) (*sandboxAllocation, error) {
+	allocation := &sandboxAllocation{}
 	anno := obj.GetAnnotations()
 	if anno == nil {
 		return allocation, nil
 	}
-	str, ok := anno[AnnoAllocStatusKey]
+	str, ok := anno[annoAllocStatusKey]
 	if !ok {
 		return allocation, nil
 	}
@@ -591,8 +591,8 @@ func getSandboxAllocation(obj kclient.Object) (*SandboxAllocation, error) {
 	return allocation, nil
 }
 
-func getPoolAllocation(pool *sandboxv1alpha1.Pool) (*PoolAllocation, error) {
-	store := NewInMemoryAllocationStore()
+func getPoolAllocation(pool *sandboxv1alpha1.Pool) (*poolAllocation, error) {
+	store := newInMemoryAllocationStore()
 	if err := store.Recover(ctx, k8sClient); err != nil {
 		return nil, err
 	}
@@ -1099,7 +1099,7 @@ var _ = Describe("Pool recycle", func() {
 			}, timeout, interval).Should(Succeed())
 
 			By("releasing pods by updating the BatchSandbox alloc-release annotation")
-			release := AllocationRelease{
+			release := allocationRelease{
 				Pods: []string{allocatedPodName},
 			}
 			js, err := json.Marshal(release)
@@ -1108,7 +1108,7 @@ var _ = Describe("Pool recycle", func() {
 			if batchSandbox.Annotations == nil {
 				batchSandbox.Annotations = make(map[string]string)
 			}
-			batchSandbox.Annotations[AnnoAllocReleaseKey] = string(js)
+			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
 
 			By("verifying the pool allocation is cleared after Delete recycle")
@@ -1215,7 +1215,7 @@ var _ = Describe("Pool recycle", func() {
 			}, timeout, interval).Should(Succeed())
 
 			By("releasing pods by updating the BatchSandbox alloc-release annotation")
-			release := AllocationRelease{
+			release := allocationRelease{
 				Pods: []string{allocatedPodName},
 			}
 			js, err := json.Marshal(release)
@@ -1224,7 +1224,7 @@ var _ = Describe("Pool recycle", func() {
 			if batchSandbox.Annotations == nil {
 				batchSandbox.Annotations = make(map[string]string)
 			}
-			batchSandbox.Annotations[AnnoAllocReleaseKey] = string(js)
+			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
 
 			By("verifying the released pod is deleted (default RecycleStrategy = Delete)")
@@ -1327,7 +1327,7 @@ var _ = Describe("Pool recycle", func() {
 			}, timeout, interval).Should(Succeed())
 
 			By("releasing all pods")
-			release := AllocationRelease{
+			release := allocationRelease{
 				Pods: allocatedPodNames,
 			}
 			js, err := json.Marshal(release)
@@ -1336,7 +1336,7 @@ var _ = Describe("Pool recycle", func() {
 			if batchSandbox.Annotations == nil {
 				batchSandbox.Annotations = make(map[string]string)
 			}
-			batchSandbox.Annotations[AnnoAllocReleaseKey] = string(js)
+			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
 
 			By("verifying all released pods are deleted")
@@ -1441,7 +1441,7 @@ var _ = Describe("Pool recycle", func() {
 			}, timeout, interval).Should(Succeed())
 
 			By("releasing pods by updating the BatchSandbox alloc-release annotation")
-			release := AllocationRelease{
+			release := allocationRelease{
 				Pods: []string{allocatedPodName},
 			}
 			js, err := json.Marshal(release)
@@ -1450,7 +1450,7 @@ var _ = Describe("Pool recycle", func() {
 			if batchSandbox.Annotations == nil {
 				batchSandbox.Annotations = make(map[string]string)
 			}
-			batchSandbox.Annotations[AnnoAllocReleaseKey] = string(js)
+			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
 
 			By("verifying the pool allocation is cleared after Noop recycle")
@@ -1582,7 +1582,7 @@ var _ = Describe("Pool recycle", func() {
 			}, timeout, interval).Should(Succeed())
 
 			By("releasing pods by updating the BatchSandbox alloc-release annotation")
-			release := AllocationRelease{
+			release := allocationRelease{
 				Pods: []string{allocatedPodName},
 			}
 			js, err := json.Marshal(release)
@@ -1591,7 +1591,7 @@ var _ = Describe("Pool recycle", func() {
 			if batchSandbox.Annotations == nil {
 				batchSandbox.Annotations = make(map[string]string)
 			}
-			batchSandbox.Annotations[AnnoAllocReleaseKey] = string(js)
+			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
 
 			By("verifying the pool allocation is cleared after Restart recycle (retries exceeded → NeedDelete)")
@@ -1695,14 +1695,14 @@ var _ = Describe("Pool recycle", func() {
 			}, timeout, interval).Should(Succeed())
 
 			By("releasing the allocated pod")
-			release := AllocationRelease{Pods: []string{allocatedPodName}}
+			release := allocationRelease{Pods: []string{allocatedPodName}}
 			js, err := json.Marshal(release)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, bsbxNamespaceName, batchSandbox)).To(Succeed())
 			if batchSandbox.Annotations == nil {
 				batchSandbox.Annotations = make(map[string]string)
 			}
-			batchSandbox.Annotations[AnnoAllocReleaseKey] = string(js)
+			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
 
 			By("verifying pool allocation is cleared")

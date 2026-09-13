@@ -18,15 +18,15 @@ import (
 	"net/http"
 )
 
-func NewRouter(h *Handler) http.Handler {
+func NewRouter(h *handler) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /setTasks", h.SyncTasks)
-	mux.HandleFunc("GET /getTasks", h.ListTasks)
-	mux.HandleFunc("POST /tasks", h.CreateTask)
-	mux.HandleFunc("GET /tasks/{id}", h.GetTask)
-	mux.HandleFunc("DELETE /tasks/{id}", h.DeleteTask)
-	mux.HandleFunc("GET /health", h.Health)
+	mux.HandleFunc("POST /setTasks", h.syncTasks)
+	mux.HandleFunc("GET /getTasks", h.listTasks)
+	mux.HandleFunc("POST /tasks", h.createTask)
+	mux.HandleFunc("GET /tasks/{id}", h.getTask)
+	mux.HandleFunc("DELETE /tasks/{id}", h.deleteTask)
+	mux.HandleFunc("GET /health", h.health)
 
 	return mux
 }

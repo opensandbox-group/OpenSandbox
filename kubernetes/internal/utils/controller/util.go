@@ -19,7 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// GetControllerKey return key of CloneSet.
+// GetControllerKey returns the namespace/name key of the given object.
 func GetControllerKey(obj metav1.Object) string {
 	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
 }

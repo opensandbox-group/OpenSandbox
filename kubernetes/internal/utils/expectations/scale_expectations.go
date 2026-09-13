@@ -21,27 +21,27 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-// ScaleAction is the action of scale, like create and delete.
-type ScaleAction string
+// scaleAction is the action of scale, like create and delete.
+type scaleAction string
 
 const (
 	// Create action
-	Create ScaleAction = "create"
+	Create scaleAction = "create"
 	// Delete action
-	Delete ScaleAction = "delete"
+	Delete scaleAction = "delete"
 )
 
-// ScaleExpectations is an interface that allows users to set and wait on expectations of pods scale.
-type ScaleExpectations interface {
-	ExpectScale(controllerKey string, action ScaleAction, name string)
-	ObserveScale(controllerKey string, action ScaleAction, name string)
-	SatisfiedExpectations(controllerKey string) (bool, time.Duration, map[ScaleAction][]string)
+// scaleExpectations is an interface that allows users to set and wait on expectations of pods scale.
+type scaleExpectations interface {
+	ExpectScale(controllerKey string, action scaleAction, name string)
+	ObserveScale(controllerKey string, action scaleAction, name string)
+	SatisfiedExpectations(controllerKey string) (bool, time.Duration, map[scaleAction][]string)
 	DeleteExpectations(controllerKey string)
-	GetExpectations(controllerKey string) map[ScaleAction]sets.String
+	GetExpectations(controllerKey string) map[scaleAction]sets.String
 }
 
-// NewScaleExpectations returns a common ScaleExpectations.
-func NewScaleExpectations() ScaleExpectations {
+// NewScaleExpectations returns a common scaleExpectations.
+func NewScaleExpectations() scaleExpectations {
 	return &realScaleExpectations{
 		controllerCache: make(map[string]*realControllerScaleExpectations),
 	}
@@ -55,11 +55,11 @@ type realScaleExpectations struct {
 
 type realControllerScaleExpectations struct {
 	// item: name for this object
-	objsCache                 map[ScaleAction]sets.String
+	objsCache                 map[scaleAction]sets.String
 	firstUnsatisfiedTimestamp time.Time
 }
 
-func (r *realScaleExpectations) GetExpectations(controllerKey string) map[ScaleAction]sets.String {
+func (r *realScaleExpectations) GetExpectations(controllerKey string) map[scaleAction]sets.String {
 	r.Lock()
 	defer r.Unlock()
 
@@ -68,7 +68,7 @@ func (r *realScaleExpectations) GetExpectations(controllerKey string) map[ScaleA
 		return nil
 	}
 
-	res := make(map[ScaleAction]sets.String, len(expectations.objsCache))
+	res := make(map[scaleAction]sets.String, len(expectations.objsCache))
 	for k, v := range expectations.objsCache {
 		res[k] = sets.NewString(v.List()...)
 	}
@@ -76,14 +76,14 @@ func (r *realScaleExpectations) GetExpectations(controllerKey string) map[ScaleA
 	return res
 }
 
-func (r *realScaleExpectations) ExpectScale(controllerKey string, action ScaleAction, name string) {
+func (r *realScaleExpectations) ExpectScale(controllerKey string, action scaleAction, name string) {
 	r.Lock()
 	defer r.Unlock()
 
 	expectations := r.controllerCache[controllerKey]
 	if expectations == nil {
 		expectations = &realControllerScaleExpectations{
-			objsCache: make(map[ScaleAction]sets.String),
+			objsCache: make(map[scaleAction]sets.String),
 		}
 		r.controllerCache[controllerKey] = expectations
 	}
@@ -95,7 +95,7 @@ func (r *realScaleExpectations) ExpectScale(controllerKey string, action ScaleAc
 	}
 }
 
-func (r *realScaleExpectations) ObserveScale(controllerKey string, action ScaleAction, name string) {
+func (r *realScaleExpectations) ObserveScale(controllerKey string, action scaleAction, name string) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -118,7 +118,7 @@ func (r *realScaleExpectations) ObserveScale(controllerKey string, action ScaleA
 	delete(r.controllerCache, controllerKey)
 }
 
-func (r *realScaleExpectations) SatisfiedExpectations(controllerKey string) (bool, time.Duration, map[ScaleAction][]string) {
+func (r *realScaleExpectations) SatisfiedExpectations(controllerKey string) (bool, time.Duration, map[scaleAction][]string) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -132,7 +132,7 @@ func (r *realScaleExpectations) SatisfiedExpectations(controllerKey string) (boo
 			if expectations.firstUnsatisfiedTimestamp.IsZero() {
 				expectations.firstUnsatisfiedTimestamp = time.Now()
 			}
-			return false, time.Since(expectations.firstUnsatisfiedTimestamp), map[ScaleAction][]string{a: s.List()}
+			return false, time.Since(expectations.firstUnsatisfiedTimestamp), map[scaleAction][]string{a: s.List()}
 		}
 	}
 

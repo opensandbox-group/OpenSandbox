@@ -352,7 +352,7 @@ kubectl describe pod -n opensandbox-system -l control-plane=controller-manager
 kubectl logs -n opensandbox-system -l control-plane=controller-manager
 
 # Check RBAC permissions
-kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-opensandbox-controller-controller-manager create pods
+kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-manager create pods
 ```
 
 ### Image Pull Failure

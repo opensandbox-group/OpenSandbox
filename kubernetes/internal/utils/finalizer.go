@@ -24,14 +24,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-type FinalizerOpType string
+type finalizerOpType string
 
 const (
-	AddFinalizerOpType    FinalizerOpType = "Add"
-	RemoveFinalizerOpType FinalizerOpType = "Remove"
+	AddFinalizerOpType    finalizerOpType = "Add"
+	RemoveFinalizerOpType finalizerOpType = "Remove"
 )
 
-func UpdateFinalizer(c client.Client, object client.Object, op FinalizerOpType, finalizer string) error {
+func UpdateFinalizer(c client.Client, object client.Object, op finalizerOpType, finalizer string) error {
 	switch op {
 	case AddFinalizerOpType, RemoveFinalizerOpType:
 	default:

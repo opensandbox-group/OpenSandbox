@@ -17,12 +17,12 @@ package assign
 import "fmt"
 
 type weightedScorer struct {
-	Scorer
+	scorer
 	weight int64
 }
 
-type predicateCreator func(args map[string]interface{}) (Predicate, error)
-type scorerCreator func(args map[string]interface{}) (Scorer, error)
+type predicateCreator func(args map[string]interface{}) (predicate, error)
+type scorerCreator func(args map[string]interface{}) (scorer, error)
 
 var (
 	predicateRegistry = map[string]predicateCreator{}
@@ -37,8 +37,8 @@ func registerScorer(name string, creator scorerCreator) {
 	scorerRegistry[name] = creator
 }
 
-func NewPredicates(profile *Profile) ([]Predicate, error) {
-	var predicates []Predicate
+func newPredicates(profile *Profile) ([]predicate, error) {
+	var predicates []predicate
 	for _, name := range profile.Plugins.Predicate {
 		creator, ok := predicateRegistry[name]
 		if !ok {
@@ -53,7 +53,7 @@ func NewPredicates(profile *Profile) ([]Predicate, error) {
 	return predicates, nil
 }
 
-func NewScorers(profile *Profile) ([]weightedScorer, error) {
+func newScorers(profile *Profile) ([]weightedScorer, error) {
 	var scorers []weightedScorer
 	for _, spec := range profile.Plugins.Score {
 		creator, ok := scorerRegistry[spec.Name]
@@ -65,7 +65,7 @@ func NewScorers(profile *Profile) ([]weightedScorer, error) {
 			return nil, fmt.Errorf("scorer %q: %w", spec.Name, err)
 		}
 		scorers = append(scorers, weightedScorer{
-			Scorer: s,
+			scorer: s,
 			weight: spec.Weight,
 		})
 	}

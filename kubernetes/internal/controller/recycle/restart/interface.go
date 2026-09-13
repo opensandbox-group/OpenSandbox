@@ -53,10 +53,10 @@ type Spec struct {
 }
 
 const (
-	// AnnoRestartRecordKey is the annotation key for storing restart info on a Pod.
-	AnnoRestartRecordKey = "sandbox.opensandbox.io/restart-record"
-	// AnnoRestartConfigKey is the annotation key on a Pool object for restart configuration.
-	AnnoRestartConfigKey = "sandbox.opensandbox.io/restart-config"
+	// annoRestartRecordKey is the annotation key for storing restart info on a Pod.
+	annoRestartRecordKey = "sandbox.opensandbox.io/restart-record"
+	// annoRestartConfigKey is the annotation key on a Pool object for restart configuration.
+	annoRestartConfigKey = "sandbox.opensandbox.io/restart-config"
 )
 
 // Handler provides in-place container restart operations.

@@ -68,7 +68,7 @@ func TestProfileStore_LoadFromConfigMap(t *testing.T) {
 		assert.NoError(t, err)
 
 		p := store.GetProfile(DefaultProfileName)
-		assert.Equal(t, DefaultProfile(), p)
+		assert.Equal(t, defaultProfile(), p)
 	})
 
 	t.Run("invalid JSON falls back to default", func(t *testing.T) {
@@ -82,7 +82,7 @@ func TestProfileStore_LoadFromConfigMap(t *testing.T) {
 		assert.NoError(t, err)
 
 		p := store.GetProfile(DefaultProfileName)
-		assert.Equal(t, DefaultProfile(), p)
+		assert.Equal(t, defaultProfile(), p)
 	})
 
 	t.Run("empty string falls back to default", func(t *testing.T) {
@@ -96,7 +96,7 @@ func TestProfileStore_LoadFromConfigMap(t *testing.T) {
 		assert.NoError(t, err)
 
 		p := store.GetProfile(DefaultProfileName)
-		assert.Equal(t, DefaultProfile(), p)
+		assert.Equal(t, defaultProfile(), p)
 	})
 }
 
@@ -114,14 +114,14 @@ func TestProfileStore_GetProfile(t *testing.T) {
 		_ = store.LoadDefault()
 
 		p := store.GetProfile("nonexistent")
-		assert.Equal(t, DefaultProfile(), p)
+		assert.Equal(t, defaultProfile(), p)
 	})
 
 	t.Run("returns default when store is empty", func(t *testing.T) {
 		store := NewProfileStore()
 
 		p := store.GetProfile("anything")
-		assert.Equal(t, DefaultProfile(), p)
+		assert.Equal(t, defaultProfile(), p)
 	})
 }
 
@@ -131,7 +131,7 @@ func TestProfileStore_LoadDefault(t *testing.T) {
 	assert.NoError(t, err)
 
 	p := store.GetProfile(DefaultProfileName)
-	assert.Equal(t, DefaultProfile(), p)
+	assert.Equal(t, defaultProfile(), p)
 }
 
 func TestProfileStore_SetupWithManager_EmptyNamespace(t *testing.T) {
@@ -167,7 +167,7 @@ func TestProfileStore_WatchConfigMap(t *testing.T) {
 	}
 	data, _ := json.Marshal(profiles)
 	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: ProfileConfigMapName, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: profileConfigMapName, Namespace: ns},
 		Data:       map[string]string{"profiles": string(data)},
 	}
 

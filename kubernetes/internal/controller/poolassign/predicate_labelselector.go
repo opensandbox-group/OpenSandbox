@@ -27,7 +27,7 @@ type labelSelectorPredicate struct {
 	keys []string
 }
 
-func newLabelSelectorPredicate(args map[string]interface{}) (Predicate, error) {
+func newLabelSelectorPredicate(args map[string]interface{}) (predicate, error) {
 	return &labelSelectorPredicate{keys: extractStringSlice(args, "keys")}, nil
 }
 
@@ -55,7 +55,7 @@ func extractStringSlice(args map[string]interface{}, key string) []string {
 	return result
 }
 
-func (p *labelSelectorPredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *labelSelectorPredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	if len(p.keys) == 0 {
 		return true
 	}

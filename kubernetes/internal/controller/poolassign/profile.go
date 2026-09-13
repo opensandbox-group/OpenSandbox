@@ -37,7 +37,7 @@ type PluginConf struct {
 
 const DefaultProfileName = "default"
 
-func DefaultProfile() *Profile {
+func defaultProfile() *Profile {
 	return &Profile{
 		Name: DefaultProfileName,
 		Plugins: PluginsSpec{

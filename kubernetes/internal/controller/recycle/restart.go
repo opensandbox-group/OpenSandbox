@@ -23,21 +23,21 @@ import (
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/recycle/restart"
 )
 
-// RestartRecycler is a RecycleHandler that restarts containers in the pod.
-type RestartRecycler struct {
+// restartRecycler is a RecycleHandler that restarts containers in the pod.
+type restartRecycler struct {
 	handler restart.Handler
 }
 
-// NewRestartRecycler creates a new RestartRecycler with the given restart handler.
-func NewRestartRecycler(handler restart.Handler) *RestartRecycler {
-	return &RestartRecycler{handler: handler}
+// newRestartRecycler creates a new restartRecycler with the given restart handler.
+func newRestartRecycler(handler restart.Handler) *restartRecycler {
+	return &restartRecycler{handler: handler}
 }
 
 // TryRecycle initiates or drives forward the restart recycle operation.
 // It is re-entrant: delegates directly to RestartHandler.TryRestart.
 // A nil pod (already deleted) is considered succeeded since the pod is gone.
 // When restart fails (max retries exceeded), it falls back to deletion via NeedDelete.
-func (r *RestartRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.Pool, pod *corev1.Pod, spec *Spec) (*Status, error) {
+func (r *restartRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.Pool, pod *corev1.Pod, spec *Spec) (*Status, error) {
 	if pod == nil {
 		return &Status{
 			State:   StateSucceeded,
@@ -58,7 +58,7 @@ func (r *RestartRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.
 		}, nil
 	case restart.StateFailed:
 		return &Status{
-			State:      StateFailed,
+			State:      stateFailed,
 			Message:    status.Message,
 			NeedDelete: true,
 		}, nil

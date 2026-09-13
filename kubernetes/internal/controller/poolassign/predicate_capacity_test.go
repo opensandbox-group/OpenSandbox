@@ -111,9 +111,9 @@ func TestCapacityPredicate(t *testing.T) {
 				},
 				Status: sandboxv1alpha1.PoolStatus{Allocated: tt.allocated},
 			}
-			got := p.Predicate(ctx, sbx, pool)
+			got := p.predicate(ctx, sbx, pool)
 			if got != tt.expect {
-				t.Errorf("capacityPredicate.Predicate() = %v, want %v (poolMax=%d, allocated=%d, replicas=%v)",
+				t.Errorf("capacityPredicate.predicate() = %v, want %v (poolMax=%d, allocated=%d, replicas=%v)",
 					got, tt.expect, tt.poolMax, tt.allocated, tt.replicas)
 			}
 		})
@@ -126,7 +126,7 @@ func TestCapacityPredicateProvidesStableRejectionReason(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	withReason, ok := p.(PredicateWithReason)
+	withReason, ok := p.(predicateWithReason)
 	if !ok {
 		t.Fatal("capacity predicate must expose a stable rejection reason")
 	}

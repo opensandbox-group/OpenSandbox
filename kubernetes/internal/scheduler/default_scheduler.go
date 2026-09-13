@@ -141,8 +141,6 @@ const (
 
 	   released --> $end
 	*/
-	//statePending   = "pending", endpoint is empty means pending, otherwise means assigned
-	//stateAssigned  = "assigned"
 	stateReleasing = "releasing"
 	stateReleased  = "released"
 	stateUnknown   = "unknown"

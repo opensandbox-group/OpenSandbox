@@ -79,28 +79,23 @@ type imageConfig struct {
 	} `json:"history"`
 }
 
-// BuildResult describes the locally constructed registry manifest.
-type BuildResult struct {
-	ManifestDigest string
-}
-
 // Build creates an OCI image-layout archive whose image manifest uses Docker
 // schema2 media types. That combination is loadable by containerd/nerdctl and
 // accepted by registries that do not implement OCI artifact media types.
-func Build(archivePath, imageRef, loaderPath, manifestPath, payloadPath string) (BuildResult, error) {
+func Build(archivePath, imageRef, loaderPath, manifestPath, payloadPath string) error {
 	if imageRef == "" {
-		return BuildResult{}, fmt.Errorf("VM state image reference is required")
+		return fmt.Errorf("VM state image reference is required")
 	}
 	workDir, err := os.MkdirTemp(filepath.Dir(archivePath), ".opensandbox-vmstate-image-")
 	if err != nil {
-		return BuildResult{}, fmt.Errorf("create image build directory: %w", err)
+		return fmt.Errorf("create image build directory: %w", err)
 	}
 	defer os.RemoveAll(workDir)
 
 	layerPath := filepath.Join(workDir, "layer.tar.gz")
 	layerDescriptor, diffID, err := buildLayer(layerPath, loaderPath, manifestPath, payloadPath)
 	if err != nil {
-		return BuildResult{}, err
+		return err
 	}
 	now := time.Now().UTC()
 	config := imageConfig{Created: now, Architecture: runtime.GOARCH, OS: "linux"}
@@ -117,7 +112,7 @@ func Build(archivePath, imageRef, loaderPath, manifestPath, payloadPath string) 
 	}{Created: now, CreatedBy: "OpenSandbox QEMU VMState checkpoint"})
 	configData, err := json.Marshal(config)
 	if err != nil {
-		return BuildResult{}, fmt.Errorf("marshal VM state image config: %w", err)
+		return fmt.Errorf("marshal VM state image config: %w", err)
 	}
 	configDescriptor := bytesDescriptor(dockerConfigMediaType, configData)
 
@@ -129,7 +124,7 @@ func Build(archivePath, imageRef, loaderPath, manifestPath, payloadPath string) 
 	}
 	manifestData, err := json.Marshal(manifest)
 	if err != nil {
-		return BuildResult{}, fmt.Errorf("marshal VM state image manifest: %w", err)
+		return fmt.Errorf("marshal VM state image manifest: %w", err)
 	}
 	manifestDescriptor := bytesDescriptor(dockerManifestMediaType, manifestData)
 	manifestDescriptor.Annotations = map[string]string{
@@ -142,12 +137,12 @@ func Build(archivePath, imageRef, loaderPath, manifestPath, payloadPath string) 
 		Manifests:     []descriptor{manifestDescriptor},
 	})
 	if err != nil {
-		return BuildResult{}, fmt.Errorf("marshal VM state image index: %w", err)
+		return fmt.Errorf("marshal VM state image index: %w", err)
 	}
 
 	archive, err := os.Create(archivePath)
 	if err != nil {
-		return BuildResult{}, fmt.Errorf("create VM state image archive: %w", err)
+		return fmt.Errorf("create VM state image archive: %w", err)
 	}
 	archiveWriter := tar.NewWriter(archive)
 	writeErr := writeImageLayout(archiveWriter, indexData, configDescriptor, configData, manifestDescriptor, manifestData, layerDescriptor, layerPath)
@@ -158,9 +153,9 @@ func Build(archivePath, imageRef, loaderPath, manifestPath, payloadPath string) 
 		writeErr = closeErr
 	}
 	if writeErr != nil {
-		return BuildResult{}, fmt.Errorf("write VM state image archive: %w", writeErr)
+		return fmt.Errorf("write VM state image archive: %w", writeErr)
 	}
-	return BuildResult{ManifestDigest: manifestDescriptor.Digest}, nil
+	return nil
 }
 
 func buildLayer(path, loaderPath, manifestPath, payloadPath string) (descriptor, string, error) {

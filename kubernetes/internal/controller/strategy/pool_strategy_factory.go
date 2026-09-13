@@ -19,5 +19,5 @@ import (
 )
 
 func NewPoolStrategy(batchSbx *sandboxv1alpha1.BatchSandbox) PoolStrategy {
-	return NewDefaultPoolStrategy(batchSbx)
+	return newDefaultPoolStrategy(batchSbx)
 }

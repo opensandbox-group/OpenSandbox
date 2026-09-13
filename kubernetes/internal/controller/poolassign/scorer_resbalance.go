@@ -30,7 +30,7 @@ type resBalanceScorer struct {
 	strategy string
 }
 
-func newResBalanceScorer(args map[string]interface{}) (Scorer, error) {
+func newResBalanceScorer(args map[string]interface{}) (scorer, error) {
 	strategy := extractStrategy(args)
 	switch strategy {
 	case strategyMostAllocated, strategyLeastAllocated:

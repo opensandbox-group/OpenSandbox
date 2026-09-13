@@ -26,11 +26,11 @@ import (
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
 )
 
-type PoolUpdateStrategy interface {
-	Compute(ctx context.Context, updateRevision string, pods []*corev1.Pod, idlePods []string) *UpdateResult
+type poolUpdateStrategy interface {
+	Compute(ctx context.Context, updateRevision string, pods []*corev1.Pod, idlePods []string) *updateResult
 }
 
-func NewPoolUpdateStrategy(pool *sandboxv1alpha1.Pool) PoolUpdateStrategy {
+func newPoolUpdateStrategy(pool *sandboxv1alpha1.Pool) poolUpdateStrategy {
 	return &recreateUpdateStrategy{pool: pool}
 }
 
@@ -51,7 +51,7 @@ type recreateUpdateStrategy struct {
 	pool *sandboxv1alpha1.Pool
 }
 
-func (s *recreateUpdateStrategy) Compute(ctx context.Context, updateRevision string, pods []*corev1.Pod, idlePods []string) *UpdateResult {
+func (s *recreateUpdateStrategy) Compute(ctx context.Context, updateRevision string, pods []*corev1.Pod, idlePods []string) *updateResult {
 	log := logf.FromContext(ctx)
 	maxUnavailable := getUpdateMaxUnavailable(s.pool, int32(len(pods)))
 
@@ -84,7 +84,7 @@ func (s *recreateUpdateStrategy) Compute(ctx context.Context, updateRevision str
 	remainingIdlePods := make([]string, 0)
 
 	for _, pod := range idlePodList {
-		if pod.Labels[LabelPoolRevision] == updateRevision {
+		if pod.Labels[labelPoolRevision] == updateRevision {
 			remainingIdlePods = append(remainingIdlePods, pod.Name)
 			continue
 		}
@@ -105,7 +105,7 @@ func (s *recreateUpdateStrategy) Compute(ctx context.Context, updateRevision str
 			"maxUnavailable", maxUnavailable, "curUnavailable", curUnavailable,
 			"toDeleteCurrentRevisionPods", toDeleteCurRevPods, "supplyNew", supplyNew, "idlePods", len(remainingIdlePods))
 	}
-	return &UpdateResult{
+	return &updateResult{
 		IdlePods:             remainingIdlePods,
 		ToDeletePods:         toDeleteCurRevPods,
 		SupplyUpdateRevision: supplyNew,

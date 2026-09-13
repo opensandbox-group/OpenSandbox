@@ -18,6 +18,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
@@ -36,12 +38,9 @@ func TestBuildCreatesLoadableImageLayoutWithDockerManifest(t *testing.T) {
 	writeTestInput(t, payloadPath, []byte("compressed-memory"), 0644)
 	archivePath := filepath.Join(directory, "image.tar")
 
-	result, err := Build(archivePath, "registry.example/snapshots/vmstate:test", loaderPath, manifestPath, payloadPath)
+	err := Build(archivePath, "registry.example/snapshots/vmstate:test", loaderPath, manifestPath, payloadPath)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !strings.HasPrefix(result.ManifestDigest, "sha256:") {
-		t.Fatalf("unexpected manifest digest %q", result.ManifestDigest)
 	}
 
 	entries := readArchive(t, archivePath)
@@ -49,14 +48,22 @@ func TestBuildCreatesLoadableImageLayoutWithDockerManifest(t *testing.T) {
 	if err := json.Unmarshal(entries["index.json"], &index); err != nil {
 		t.Fatal(err)
 	}
-	if len(index.Manifests) != 1 || index.Manifests[0].Digest != result.ManifestDigest {
+	if len(index.Manifests) != 1 {
 		t.Fatalf("unexpected index: %#v", index)
+	}
+	manifestDigest := index.Manifests[0].Digest
+	if !strings.HasPrefix(manifestDigest, "sha256:") {
+		t.Fatalf("unexpected manifest digest %q", manifestDigest)
 	}
 	if index.Manifests[0].Annotations[annotationReferenceName] != "registry.example/snapshots/vmstate:test" {
 		t.Fatalf("image reference annotation is missing: %#v", index.Manifests[0].Annotations)
 	}
 
-	manifestData := entries[blobPath(result.ManifestDigest)]
+	manifestData := entries[blobPath(manifestDigest)]
+	sum := sha256.Sum256(manifestData)
+	if "sha256:"+hex.EncodeToString(sum[:]) != manifestDigest {
+		t.Fatalf("manifest blob does not match digest %q", manifestDigest)
+	}
 	var manifest imageManifest
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		t.Fatal(err)

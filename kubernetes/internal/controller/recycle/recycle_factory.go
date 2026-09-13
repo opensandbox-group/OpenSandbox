@@ -25,22 +25,22 @@ import (
 )
 
 // NewHandler creates the appropriate Handler based on the Pool's recycle strategy.
-// If no strategy is configured, DeleteRecycler is used as the default.
+// If no strategy is configured, deleteRecycler is used as the default.
 func NewHandler(c client.Client, restConfig *rest.Config, pool *sandboxv1alpha1.Pool) (Handler, error) {
 	if pool.Spec.RecycleStrategy == nil {
-		return NewDeleteRecycler(), nil
+		return newDeleteRecycler(), nil
 	}
 
 	switch pool.Spec.RecycleStrategy.Type {
 	case sandboxv1alpha1.RecycleTypeNoop:
-		return NewNoopRecycler(), nil
+		return newNoopRecycler(), nil
 	case sandboxv1alpha1.RecycleTypeRestart:
 		h, err := restart.NewDefaultRestartHandler(c, restConfig, restart.DefaultExecTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create restart handler: %w", err)
 		}
-		return NewRestartRecycler(h), nil
+		return newRestartRecycler(h), nil
 	default:
-		return NewDeleteRecycler(), nil
+		return newDeleteRecycler(), nil
 	}
 }

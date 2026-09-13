@@ -19,46 +19,45 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
 	pkgutils "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/utils"
 )
 
 const (
-	AnnoAllocStatusKey           = "sandbox.opensandbox.io/alloc-status"
-	AnnoAllocReleaseKey          = "sandbox.opensandbox.io/alloc-release"
-	AnnoAllocReleasedKey         = "sandbox.opensandbox.io/alloc-released"
-	LabelBatchSandboxPodIndexKey = "batch-sandbox.sandbox.opensandbox.io/pod-index"
-	LabelBatchSandboxNameKey     = "batch-sandbox.sandbox.opensandbox.io/name"
-	LabelPrivilegedNodeAccess    = "sandbox.opensandbox.io/privileged-node-access"
+	annoAllocStatusKey           = "sandbox.opensandbox.io/alloc-status"
+	annoAllocReleaseKey          = "sandbox.opensandbox.io/alloc-release"
+	annoAllocReleasedKey         = "sandbox.opensandbox.io/alloc-released"
+	labelBatchSandboxPodIndexKey = "batch-sandbox.sandbox.opensandbox.io/pod-index"
+	labelBatchSandboxNameKey     = "batch-sandbox.sandbox.opensandbox.io/name"
+	labelPrivilegedNodeAccess    = "sandbox.opensandbox.io/privileged-node-access"
 
-	FinalizerTaskCleanup    = "batch-sandbox.sandbox.opensandbox.io/task-cleanup"
-	FinalizerPoolAllocation = "pool.sandbox.opensandbox.io/pool-allocation"
+	finalizerTaskCleanup    = "batch-sandbox.sandbox.opensandbox.io/task-cleanup"
+	finalizerPoolAllocation = "pool.sandbox.opensandbox.io/pool-allocation"
 )
 
-// AnnotationSandboxEndpoints Use the exported constant from pkg/utils
-var AnnotationSandboxEndpoints = pkgutils.AnnotationEndpoints
+// annotationSandboxEndpoints Use the exported constant from pkg/utils
+var annotationSandboxEndpoints = pkgutils.AnnotationEndpoints
 
-type SandboxAllocation struct {
+type sandboxAllocation struct {
 	Pods       []string `json:"pods"`
 	PoolRef    string   `json:"poolRef"`
 	Generation int64    `json:"generation"`
 }
 
-type AllocationRelease struct {
+type allocationRelease struct {
 	Pods []string `json:"pods"`
 }
 
-type AllocationReleased struct {
+type allocationReleased struct {
 	Pods []string `json:"pods"`
 }
 
-type PoolAllocation struct {
+type poolAllocation struct {
 	PodAllocation map[string]string `json:"podAllocation"`
 }
 
-func parseSandboxAllocation(obj metav1.Object) (SandboxAllocation, error) {
-	ret := SandboxAllocation{}
-	if raw := obj.GetAnnotations()[AnnoAllocStatusKey]; raw != "" {
+func parseSandboxAllocation(obj metav1.Object) (sandboxAllocation, error) {
+	ret := sandboxAllocation{}
+	if raw := obj.GetAnnotations()[annoAllocStatusKey]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &ret); err != nil {
 			return ret, err
 		}
@@ -66,16 +65,9 @@ func parseSandboxAllocation(obj metav1.Object) (SandboxAllocation, error) {
 	return ret, nil
 }
 
-func setSandboxAllocation(obj metav1.Object, alloc SandboxAllocation) {
-	if obj.GetAnnotations() == nil {
-		obj.SetAnnotations(map[string]string{})
-	}
-	obj.GetAnnotations()[AnnoAllocStatusKey] = utils.DumpJSON(alloc)
-}
-
-func parseSandboxReleased(obj metav1.Object) (AllocationRelease, error) {
-	ret := AllocationRelease{}
-	if raw := obj.GetAnnotations()[AnnoAllocReleaseKey]; raw != "" {
+func parseSandboxReleased(obj metav1.Object) (allocationRelease, error) {
+	ret := allocationRelease{}
+	if raw := obj.GetAnnotations()[annoAllocReleaseKey]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &ret); err != nil {
 			return ret, err
 		}

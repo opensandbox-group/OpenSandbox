@@ -61,7 +61,7 @@ func TestParseConfig(t *testing.T) {
 		{
 			name: "ValidConfig",
 			annotations: map[string]string{
-				AnnoRestartConfigKey: `{"blacklist":["sidecar","init"],"retryInterval":"60s","maxRetries":5,"restartCommand":["/sbin/init"]}`,
+				annoRestartConfigKey: `{"blacklist":["sidecar","init"],"retryInterval":"60s","maxRetries":5,"restartCommand":["/sbin/init"]}`,
 			},
 			wantBlacklist: []string{"sidecar", "init"},
 			wantInterval:  "60s",
@@ -71,7 +71,7 @@ func TestParseConfig(t *testing.T) {
 		{
 			name: "PartialConfig_FallbackToDefaults",
 			annotations: map[string]string{
-				AnnoRestartConfigKey: `{"blacklist":["sidecar"]}`,
+				annoRestartConfigKey: `{"blacklist":["sidecar"]}`,
 			},
 			wantBlacklist: []string{"sidecar"},
 			wantInterval:  DefaultRetryInterval.String(),
@@ -81,7 +81,7 @@ func TestParseConfig(t *testing.T) {
 		{
 			name: "InvalidJSON_FallbackToDefaults",
 			annotations: map[string]string{
-				AnnoRestartConfigKey: `{invalid json}`,
+				annoRestartConfigKey: `{invalid json}`,
 			},
 			wantInterval: DefaultRetryInterval.String(),
 			wantRetries:  DefaultMaxRetries,
@@ -244,7 +244,7 @@ func TestLoadInfo(t *testing.T) {
 			name: "ValidAnnotation",
 			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Name: "pod1", Namespace: "default",
-				Annotations: map[string]string{AnnoRestartRecordKey: string(validRaw)},
+				Annotations: map[string]string{annoRestartRecordKey: string(validRaw)},
 			}},
 			wantID:     "sbx1",
 			wantMainID: "docker://abc123",
@@ -328,7 +328,7 @@ func TestTryRestart(t *testing.T) {
 		if pod.Annotations == nil {
 			pod.Annotations = map[string]string{}
 		}
-		pod.Annotations[AnnoRestartRecordKey] = string(raw)
+		pod.Annotations[annoRestartRecordKey] = string(raw)
 		return pod
 	}
 

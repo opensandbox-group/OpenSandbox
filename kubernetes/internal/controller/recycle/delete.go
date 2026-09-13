@@ -22,19 +22,19 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
-// DeleteRecycler is a RecycleHandler that marks pods for deletion.
+// deleteRecycler is a RecycleHandler that marks pods for deletion.
 // The actual deletion is handled by the pool controller's scale logic.
-type DeleteRecycler struct{}
+type deleteRecycler struct{}
 
-// NewDeleteRecycler creates a new DeleteRecycler.
-func NewDeleteRecycler() *DeleteRecycler {
-	return &DeleteRecycler{}
+// newDeleteRecycler creates a new deleteRecycler.
+func newDeleteRecycler() *deleteRecycler {
+	return &deleteRecycler{}
 }
 
 // TryRecycle drives the delete recycle state machine.
 // When the pod still exists, it returns Recycling with NeedDelete=true so the caller deletes the pod.
 // When the pod is gone (DeletionTimestamp set), it returns Succeeded.
-func (d *DeleteRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.Pool, pod *corev1.Pod, spec *Spec) (*Status, error) {
+func (d *deleteRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.Pool, pod *corev1.Pod, spec *Spec) (*Status, error) {
 	if pod == nil || pod.DeletionTimestamp != nil {
 		return &Status{
 			State:   StateSucceeded,

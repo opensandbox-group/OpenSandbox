@@ -154,7 +154,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 				g.Expect(bs.Status.Replicas).To(Equal(*bs.Spec.Replicas))
 
 				gotIPs := []string{}
-				if raw := bs.Annotations[AnnotationSandboxEndpoints]; raw != "" {
+				if raw := bs.Annotations[annotationSandboxEndpoints]; raw != "" {
 					json.Unmarshal([]byte(raw), &gotIPs)
 				}
 
@@ -346,7 +346,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 
 				// Verify each pod has the correct patched command
 				for _, pod := range pods {
-					indexLabel := pod.Labels[LabelBatchSandboxPodIndexKey]
+					indexLabel := pod.Labels[labelBatchSandboxPodIndexKey]
 					g.Expect(indexLabel).NotTo(BeEmpty())
 					idx, err := strconv.Atoi(indexLabel)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -437,7 +437,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 				if err := k8sClient.Get(ctx, typeNamespacedName, bs); err != nil {
 					return err
 				}
-				setSandboxAllocation(bs, SandboxAllocation{Pods: mockPods})
+				setSandboxAllocation(bs, sandboxAllocation{Pods: mockPods})
 				return k8sClient.Update(ctx, bs)
 			})).Should(Succeed())
 			By(fmt.Sprintf("Mock pool allocate Pod %v for BatchSandbox %s", mockPods, typeNamespacedName))
@@ -451,7 +451,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 				g.Expect(bs.Status.Replicas).To(Equal(*bs.Spec.Replicas))
 
 				gotIPs := []string{}
-				if raw := bs.Annotations[AnnotationSandboxEndpoints]; raw != "" {
+				if raw := bs.Annotations[annotationSandboxEndpoints]; raw != "" {
 					json.Unmarshal([]byte(raw), &gotIPs)
 				}
 
@@ -555,7 +555,7 @@ var _ = Describe("BatchSandbox Task Scheduler", func() {
 				if err := k8sClient.Get(ctx, typeNamespacedName, bs); err != nil {
 					return
 				}
-				g.Expect(controllerutil.ContainsFinalizer(bs, FinalizerTaskCleanup)).To(BeTrue())
+				g.Expect(controllerutil.ContainsFinalizer(bs, finalizerTaskCleanup)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -582,7 +582,7 @@ var _ = Describe("BatchSandbox Task Scheduler", func() {
 			Eventually(func(g Gomega) {
 				bs := &sandboxv1alpha1.BatchSandbox{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, bs)).To(Succeed())
-				g.Expect(controllerutil.ContainsFinalizer(bs, FinalizerTaskCleanup)).To(BeTrue())
+				g.Expect(controllerutil.ContainsFinalizer(bs, finalizerTaskCleanup)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 
 			By(fmt.Sprintf("try to Delete BatchSandbox %s", typeNamespacedName))
@@ -712,7 +712,7 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 			Name:      "allocated",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey: `{"pods":["pool-pod"]}`,
+				annoAllocStatusKey: `{"pods":["pool-pod"]}`,
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "shared-pool"},
@@ -722,8 +722,8 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 			Name:      "released",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey:  `{"pods":["pool-pod"]}`,
-				AnnoAllocReleaseKey: `{"pods":["pool-pod"]}`,
+				annoAllocStatusKey:  `{"pods":["pool-pod"]}`,
+				annoAllocReleaseKey: `{"pods":["pool-pod"]}`,
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "shared-pool"},
@@ -733,7 +733,7 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 			Name:      "other",
 			Namespace: "default",
 			Annotations: map[string]string{
-				AnnoAllocStatusKey: `{"pods":["other-pod"]}`,
+				annoAllocStatusKey: `{"pods":["other-pod"]}`,
 			},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "shared-pool"},
@@ -747,7 +747,7 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      "pool-pod",
 		Namespace: "default",
-		Labels:    map[string]string{LabelPoolName: "shared-pool"},
+		Labels:    map[string]string{labelPoolName: "shared-pool"},
 	}}
 
 	requests := reconciler.findBatchSandboxesForPooledPod(context.Background(), pod)
@@ -757,7 +757,7 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 		t.Fatalf("findBatchSandboxesForPooledPod() = %v, want %v", requests, want)
 	}
 
-	pod.Labels[LabelPoolName] = "unrelated-pool"
+	pod.Labels[labelPoolName] = "unrelated-pool"
 	if requests := reconciler.findBatchSandboxesForPooledPod(context.Background(), pod); len(requests) != 0 {
 		t.Fatalf("findBatchSandboxesForPooledPod() for unrelated pool = %v, want none", requests)
 	}
@@ -799,7 +799,7 @@ func TestBatchSandboxReconciler_reconcileTasks(t *testing.T) {
 			wantErr: false,
 			checker: func(r *BatchSandboxReconciler, batchSbx *sandboxv1alpha1.BatchSandbox) error {
 				key := types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String()
-				if requeueAfter := DurationStore.Pop(key); requeueAfter != 0 {
+				if requeueAfter := durationStore.Pop(key); requeueAfter != 0 {
 					return fmt.Errorf("completed task cleanup should not requeue, got %v", requeueAfter)
 				}
 				// Verify finalizer is removed by getting from client
@@ -807,7 +807,7 @@ func TestBatchSandboxReconciler_reconcileTasks(t *testing.T) {
 				if err := r.Client.Get(context.Background(), types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}, updated); err != nil {
 					return fmt.Errorf("failed to get updated batchsandbox: %w", err)
 				}
-				if controllerutil.ContainsFinalizer(updated, FinalizerTaskCleanup) {
+				if controllerutil.ContainsFinalizer(updated, finalizerTaskCleanup) {
 					return fmt.Errorf("finalizer should be removed after cleanup, finalizers: %v", updated.Finalizers)
 				}
 				return nil
@@ -830,7 +830,7 @@ func TestBatchSandboxReconciler_reconcileTasks(t *testing.T) {
 					Name:       "test-batch-cleanup",
 					Namespace:  "default",
 					UID:        types.UID("test-uid-cleanup"),
-					Finalizers: []string{FinalizerTaskCleanup},
+					Finalizers: []string{finalizerTaskCleanup},
 				},
 				Spec: sandboxv1alpha1.BatchSandboxSpec{
 					Replicas: ptr.To(int32(0)),
@@ -875,7 +875,7 @@ func Test_parseIndex(t *testing.T) {
 		{
 			name: "from label",
 			args: args{
-				pod: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{LabelBatchSandboxPodIndexKey: "1"},
+				pod: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelBatchSandboxPodIndexKey: "1"},
 					Name: "sbx-0"}},
 			},
 			want: 1,
@@ -929,7 +929,7 @@ func Test_calPodIndex(t *testing.T) {
 						Name:      "test-batch",
 						Namespace: "default",
 						Annotations: map[string]string{
-							AnnoAllocStatusKey: `{"pods":["pod-0","pod-1","pod-2"]}`,
+							annoAllocStatusKey: `{"pods":["pod-0","pod-1","pod-2"]}`,
 						},
 					},
 					Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -976,7 +976,7 @@ func Test_calPodIndex(t *testing.T) {
 						Name:      "test-batch",
 						Namespace: "default",
 						Annotations: map[string]string{
-							AnnoAllocStatusKey: `invalid-json`,
+							annoAllocStatusKey: `invalid-json`,
 						},
 					},
 					Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -996,7 +996,7 @@ func Test_calPodIndex(t *testing.T) {
 						Name:      "test-batch",
 						Namespace: "default",
 						Annotations: map[string]string{
-							AnnoAllocStatusKey: `{"pods":["pod-0","pod-1"]}`,
+							annoAllocStatusKey: `{"pods":["pod-0","pod-1"]}`,
 						},
 					},
 					Spec: sandboxv1alpha1.BatchSandboxSpec{
@@ -1030,15 +1030,15 @@ func Test_calPodIndex(t *testing.T) {
 				pods: []*corev1.Pod{
 					{ObjectMeta: metav1.ObjectMeta{
 						Name:   "test-batch-0",
-						Labels: map[string]string{LabelBatchSandboxPodIndexKey: "0"},
+						Labels: map[string]string{labelBatchSandboxPodIndexKey: "0"},
 					}},
 					{ObjectMeta: metav1.ObjectMeta{
 						Name:   "test-batch-1",
-						Labels: map[string]string{LabelBatchSandboxPodIndexKey: "1"},
+						Labels: map[string]string{labelBatchSandboxPodIndexKey: "1"},
 					}},
 					{ObjectMeta: metav1.ObjectMeta{
 						Name:   "test-batch-2",
-						Labels: map[string]string{LabelBatchSandboxPodIndexKey: "2"},
+						Labels: map[string]string{labelBatchSandboxPodIndexKey: "2"},
 					}},
 				},
 			},
@@ -1125,7 +1125,7 @@ func Test_calPodIndex(t *testing.T) {
 				pods: []*corev1.Pod{
 					{ObjectMeta: metav1.ObjectMeta{
 						Name:   "test-batch-0",
-						Labels: map[string]string{LabelBatchSandboxPodIndexKey: "5"},
+						Labels: map[string]string{labelBatchSandboxPodIndexKey: "5"},
 					}},
 					{ObjectMeta: metav1.ObjectMeta{Name: "test-batch-1"}},
 				},

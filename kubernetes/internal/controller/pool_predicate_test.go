@@ -25,8 +25,10 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
-// TestPoolBatchSandboxUpdateReplicas 验证副本数按值比较：不同地址的相同值不触发，
-// 数值变化触发，双方 nil 不触发，nil 与显式零值之间的两个方向均触发。
+// TestPoolBatchSandboxUpdateReplicas verifies replicas are compared by value:
+// equal values at different addresses do not trigger, value changes trigger,
+// nil on both sides does not trigger, and both directions between nil and an
+// explicit zero value trigger.
 func TestPoolBatchSandboxUpdateReplicas(t *testing.T) {
 	cases := []struct {
 		name                     string
@@ -54,8 +56,10 @@ func TestPoolBatchSandboxUpdateReplicas(t *testing.T) {
 	}
 }
 
-// TestPoolBatchSandboxUpdateFilters 验证深拷贝后无关更新仍被过滤：状态、普通注解和
-// 已处于删除状态的更新不触发；释放注解变化、首次进入删除状态仍触发；无池引用和错误类型被过滤。
+// TestPoolBatchSandboxUpdateFilters verifies unrelated updates are still
+// filtered after a deep copy: status, ordinary annotation, and already-deleting
+// updates do not trigger; release annotation changes and first transition into
+// deleting still trigger; missing pool reference and wrong types are filtered.
 func TestPoolBatchSandboxUpdateFilters(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -77,7 +81,7 @@ func TestPoolBatchSandboxUpdateFilters(t *testing.T) {
 		{
 			name: "release-annotation",
 			update: func(e *event.UpdateEvent) {
-				e.ObjectNew.SetAnnotations(map[string]string{AnnoAllocReleaseKey: `{"pods":["warm-pod"]}`})
+				e.ObjectNew.SetAnnotations(map[string]string{annoAllocReleaseKey: `{"pods":["warm-pod"]}`})
 			},
 			want: true,
 		},

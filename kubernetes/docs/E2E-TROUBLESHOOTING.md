@@ -275,6 +275,6 @@ kubectl get crd batchsandboxes.sandbox.opensandbox.io -o yaml
 kubectl get crd pools.sandbox.opensandbox.io -o yaml
 
 # Check controller RBAC permissions
-kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-opensandbox-controller-controller-manager create pods
-kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-opensandbox-controller-controller-manager update batchsandboxes
+kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-manager create pods
+kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-manager update batchsandboxes
 ```

@@ -105,10 +105,10 @@ func TestHandler_Health(t *testing.T) {
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
 
-	h.Health(w, req)
+	h.health(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("Health returned status %d", w.Code)
+		t.Errorf("health returned status %d", w.Code)
 	}
 }
 
@@ -128,10 +128,10 @@ func TestHandler_CreateTask(t *testing.T) {
 	req := httptest.NewRequest("POST", "/tasks", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 
-	h.CreateTask(w, req)
+	h.createTask(w, req)
 
 	if w.Code != http.StatusCreated {
-		t.Errorf("CreateTask returned status %d", w.Code)
+		t.Errorf("createTask returned status %d", w.Code)
 	}
 
 	if _, ok := mgr.tasks["test-task"]; !ok {
@@ -152,13 +152,13 @@ func TestHandler_GetTask(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("GetTask returned status %d", w.Code)
+		t.Errorf("getTask returned status %d", w.Code)
 	}
 
 	var resp api.Task
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp.Name != "test-task" {
-		t.Errorf("GetTask returned name %s", resp.Name)
+		t.Errorf("getTask returned name %s", resp.Name)
 	}
 }
 
@@ -175,7 +175,7 @@ func TestHandler_DeleteTask(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
-		t.Errorf("DeleteTask returned status %d", w.Code)
+		t.Errorf("deleteTask returned status %d", w.Code)
 	}
 
 	if _, ok := mgr.tasks["test-task"]; ok {
@@ -193,16 +193,16 @@ func TestHandler_ListTasks(t *testing.T) {
 	req := httptest.NewRequest("GET", "/getTasks", nil)
 	w := httptest.NewRecorder()
 
-	h.ListTasks(w, req)
+	h.listTasks(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("ListTasks returned status %d", w.Code)
+		t.Errorf("listTasks returned status %d", w.Code)
 	}
 
 	var resp []api.Task
 	json.NewDecoder(w.Body).Decode(&resp)
 	if len(resp) != 2 {
-		t.Errorf("ListTasks returned %d tasks, want 2", len(resp))
+		t.Errorf("listTasks returned %d tasks, want 2", len(resp))
 	}
 }
 
@@ -219,10 +219,10 @@ func TestHandler_SyncTasks(t *testing.T) {
 	req := httptest.NewRequest("POST", "/setTasks", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 
-	h.SyncTasks(w, req)
+	h.syncTasks(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("SyncTasks returned status %d", w.Code)
+		t.Errorf("syncTasks returned status %d", w.Code)
 	}
 
 	if _, ok := mgr.tasks["task-1"]; !ok {
@@ -241,9 +241,9 @@ func TestHandler_Errors(t *testing.T) {
 	body, _ := json.Marshal(task)
 	req := httptest.NewRequest("POST", "/tasks", bytes.NewReader(body))
 	w := httptest.NewRecorder()
-	h.CreateTask(w, req)
+	h.createTask(w, req)
 	if w.Code != http.StatusInternalServerError {
-		t.Errorf("CreateTask should fail with 500, got %d", w.Code)
+		t.Errorf("createTask should fail with 500, got %d", w.Code)
 	}
 }
 

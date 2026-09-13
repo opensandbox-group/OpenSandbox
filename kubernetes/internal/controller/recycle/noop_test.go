@@ -35,7 +35,7 @@ func TestNoopRecycler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n := NewNoopRecycler()
+			n := newNoopRecycler()
 			status, err := n.TryRecycle(context.Background(), &sandboxv1alpha1.Pool{}, tt.pod, &Spec{ID: "sbx1"})
 			assert.NoError(t, err)
 			assert.Equal(t, StateSucceeded, status.State)

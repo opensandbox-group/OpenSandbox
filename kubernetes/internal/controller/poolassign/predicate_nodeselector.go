@@ -28,11 +28,11 @@ import (
 
 type nodeSelectorPredicate struct{}
 
-func newNodeSelectorPredicate(_ map[string]interface{}) (Predicate, error) {
+func newNodeSelectorPredicate(_ map[string]interface{}) (predicate, error) {
 	return &nodeSelectorPredicate{}, nil
 }
 
-func (p *nodeSelectorPredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *nodeSelectorPredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	if sbx.Spec.Template == nil {
 		return true
 	}

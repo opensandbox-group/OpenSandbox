@@ -35,10 +35,10 @@ import (
 )
 
 const (
-	ExitFile   = "exit"
-	PidFile    = "pid"
-	StdoutFile = "stdout.log"
-	StderrFile = "stderr.log"
+	exitFile   = "exit"
+	pidFile    = "pid"
+	stdoutFile = "stdout.log"
+	stderrFile = "stderr.log"
 
 	lifecycleHookOutputHeadBytes = 8 * 1024
 	lifecycleHookOutputTailBytes = 8 * 1024
@@ -89,8 +89,8 @@ func (e *processExecutor) Start(ctx context.Context, task *types.Task) error {
 	if err != nil {
 		return fmt.Errorf("invalid task name: %w", err)
 	}
-	pidPath := filepath.Join(taskDir, PidFile)
-	exitPath := filepath.Join(taskDir, ExitFile)
+	pidPath := filepath.Join(taskDir, pidFile)
+	exitPath := filepath.Join(taskDir, exitFile)
 
 	var cmdList []string
 	if task.Process != nil {
@@ -155,8 +155,8 @@ func (e *processExecutor) executeCommand(task *types.Task, cmd *exec.Cmd, pidPat
 		return fmt.Errorf("invalid task name: %w", err)
 	}
 
-	stdoutPath := filepath.Join(taskDir, StdoutFile)
-	stderrPath := filepath.Join(taskDir, StderrFile)
+	stdoutPath := filepath.Join(taskDir, stdoutFile)
+	stderrPath := filepath.Join(taskDir, stderrFile)
 
 	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -252,8 +252,8 @@ func (e *processExecutor) Inspect(ctx context.Context, task *types.Task) (*types
 	if err != nil {
 		return nil, fmt.Errorf("invalid task name: %w", err)
 	}
-	exitPath := filepath.Join(taskDir, ExitFile)
-	pidPath := filepath.Join(taskDir, PidFile)
+	exitPath := filepath.Join(taskDir, exitFile)
+	pidPath := filepath.Join(taskDir, pidFile)
 
 	status := &types.Status{
 		State: types.TaskStateUnknown,
@@ -358,7 +358,7 @@ func (e *processExecutor) stopMainProcess(ctx context.Context, task *types.Task)
 	if err != nil {
 		return fmt.Errorf("invalid task name: %w", err)
 	}
-	exitPath := filepath.Join(taskDir, ExitFile)
+	exitPath := filepath.Join(taskDir, exitFile)
 	if _, err := os.ReadFile(exitPath); err == nil {
 		klog.V(1).InfoS("Skipping process signal because task already exited", "name", task.Name)
 		return nil
@@ -366,7 +366,7 @@ func (e *processExecutor) stopMainProcess(ctx context.Context, task *types.Task)
 		return fmt.Errorf("failed to inspect exit marker: %w", err)
 	}
 
-	pidPath := filepath.Join(taskDir, PidFile)
+	pidPath := filepath.Join(taskDir, pidFile)
 	pidData, err := os.ReadFile(pidPath)
 	if err != nil {
 		return nil

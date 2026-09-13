@@ -142,7 +142,7 @@ func TestSandboxSnapshotHandleCommitting_PersistsImageDigestsFromTerminationMess
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
-					Name: CommitJobContainerName,
+					Name: commitJobContainerName,
 					State: corev1.ContainerState{
 						Terminated: &corev1.ContainerStateTerminated{
 							ExitCode: 0,
@@ -258,7 +258,7 @@ func TestSandboxSnapshotHandleCommitting_CreatesUnpauseJobWhenCommitJobFailed(t 
 		},
 		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
-				Name: CommitJobContainerName,
+				Name: commitJobContainerName,
 				Env:  []corev1.EnvVar{{Name: "SOURCE_POD_UID", Value: "source-pod-uid"}},
 			}},
 		}}},
@@ -336,7 +336,7 @@ func TestSandboxSnapshotHandlePending_UsesSourcePodContainersWhenTemplateMissing
 			PoolRef: "test-pool",
 		},
 	}
-	setSandboxAllocation(bs, SandboxAllocation{Pods: []string{"pool-pod"}})
+	setSandboxAllocation(bs, sandboxAllocation{Pods: []string{"pool-pod"}})
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pool-pod",
@@ -420,7 +420,7 @@ func TestSandboxSnapshotHandlePending_PublicSnapshotUsesSnapshotIDTag(t *testing
 			Name:      "test-bs-0",
 			Namespace: "default",
 			Labels: map[string]string{
-				LabelBatchSandboxNameKey: "test-bs",
+				labelBatchSandboxNameKey: "test-bs",
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -524,7 +524,7 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 			Tolerations:        []corev1.Toleration{{Key: "snapshot", Operator: corev1.TolerationOpExists}},
 			Containers: []corev1.Container{
 				{
-					Name:    CommitJobContainerName,
+					Name:    commitJobContainerName,
 					Image:   "must-be-overridden",
 					Command: []string{"must-be-overridden"},
 					Resources: corev1.ResourceRequirements{
@@ -563,7 +563,7 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 	assert.Equal(t, resource.MustParse("250m"), container.Resources.Requests[corev1.ResourceCPU])
 	assert.Equal(t, r.imageCommitterImage(), container.Image)
 	assert.Equal(t, []string{"/usr/local/bin/image-committer"}, container.Command)
-	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "containerd-fifo", MountPath: ContainerdFIFODir})
+	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "containerd-fifo", MountPath: containerdFIFODir})
 	assert.Contains(t, job.Spec.Template.Spec.Tolerations, corev1.Toleration{Key: "snapshot", Operator: corev1.TolerationOpExists})
 	assert.Equal(t, "audit-sidecar", job.Spec.Template.Spec.Containers[1].Name)
 
@@ -576,7 +576,7 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 	}
 	require.NotNil(t, fifoVolume)
 	require.NotNil(t, fifoVolume.HostPath)
-	assert.Equal(t, ContainerdFIFODir, fifoVolume.HostPath.Path)
+	assert.Equal(t, containerdFIFODir, fifoVolume.HostPath.Path)
 	require.NotNil(t, fifoVolume.HostPath.Type)
 	assert.Equal(t, corev1.HostPathDirectoryOrCreate, *fifoVolume.HostPath.Type)
 

@@ -27,11 +27,11 @@ import (
 
 type resourcePredicate struct{}
 
-func newResourcePredicate(_ map[string]interface{}) (Predicate, error) {
+func newResourcePredicate(_ map[string]interface{}) (predicate, error) {
 	return &resourcePredicate{}, nil
 }
 
-func (p *resourcePredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *resourcePredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	if sbx.Spec.Template == nil {
 		return true
 	}

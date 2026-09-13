@@ -74,10 +74,10 @@ type restartConfig struct {
 func parseConfig(ctx context.Context, annotations map[string]string) restartConfig {
 	log := logf.FromContext(ctx)
 	var cfg restartConfig
-	if raw, ok := annotations[AnnoRestartConfigKey]; ok {
+	if raw, ok := annotations[annoRestartConfigKey]; ok {
 		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 			log.Error(err, "Failed to parse restart config annotation, falling back to defaults",
-				"annotation", AnnoRestartConfigKey, "value", raw)
+				"annotation", annoRestartConfigKey, "value", raw)
 		}
 	}
 	if cfg.MaxRetries <= 0 {
@@ -338,7 +338,7 @@ func (h *defaultRestartHandler) persistInfo(ctx context.Context, pod *corev1.Pod
 	patch, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
 			"annotations": map[string]string{
-				AnnoRestartRecordKey: string(raw),
+				annoRestartRecordKey: string(raw),
 			},
 		},
 	})
@@ -353,7 +353,7 @@ func (h *defaultRestartHandler) loadInfo(pod *corev1.Pod) (*restartInfo, error) 
 	if pod.Annotations == nil {
 		return nil, fmt.Errorf("pod %s/%s has no restart info annotation", pod.Namespace, pod.Name)
 	}
-	raw, ok := pod.Annotations[AnnoRestartRecordKey]
+	raw, ok := pod.Annotations[annoRestartRecordKey]
 	if !ok {
 		return nil, fmt.Errorf("pod %s/%s has no restart info annotation", pod.Namespace, pod.Name)
 	}

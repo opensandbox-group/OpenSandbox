@@ -24,25 +24,25 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
-// DefaultTaskSchedulingStrategy implements the default task scheduling strategy.
-type DefaultTaskSchedulingStrategy struct {
+// defaultTaskSchedulingStrategy implements the default task scheduling strategy.
+type defaultTaskSchedulingStrategy struct {
 	*sandboxv1alpha1.BatchSandbox
 }
 
-// NewDefaultTaskSchedulingStrategy creates a new default task scheduling strategy.
-func NewDefaultTaskSchedulingStrategy(batchSbx *sandboxv1alpha1.BatchSandbox) *DefaultTaskSchedulingStrategy {
-	return &DefaultTaskSchedulingStrategy{
+// newDefaultTaskSchedulingStrategy creates a new default task scheduling strategy.
+func newDefaultTaskSchedulingStrategy(batchSbx *sandboxv1alpha1.BatchSandbox) *defaultTaskSchedulingStrategy {
+	return &defaultTaskSchedulingStrategy{
 		BatchSandbox: batchSbx,
 	}
 }
 
 // NeedTaskScheduling determines whether task scheduling is needed based on TaskTemplate.
-func (s *DefaultTaskSchedulingStrategy) NeedTaskScheduling() bool {
+func (s *defaultTaskSchedulingStrategy) NeedTaskScheduling() bool {
 	return s.Spec.TaskTemplate != nil
 }
 
 // GenerateTaskSpecs generates task specifications for all replicas.
-func (s *DefaultTaskSchedulingStrategy) GenerateTaskSpecs() ([]*api.Task, error) {
+func (s *defaultTaskSchedulingStrategy) GenerateTaskSpecs() ([]*api.Task, error) {
 	ret := make([]*api.Task, *s.Spec.Replicas)
 	for idx := range int(*s.Spec.Replicas) {
 		task, err := s.getTaskSpec(idx)
@@ -56,7 +56,7 @@ func (s *DefaultTaskSchedulingStrategy) GenerateTaskSpecs() ([]*api.Task, error)
 
 // getTaskSpec generates a single task specification for the given index.
 // It applies ShardTaskPatches if available, otherwise uses the base TaskTemplate.
-func (s *DefaultTaskSchedulingStrategy) getTaskSpec(idx int) (*api.Task, error) {
+func (s *defaultTaskSchedulingStrategy) getTaskSpec(idx int) (*api.Task, error) {
 	task := &api.Task{
 		Name: fmt.Sprintf("%s-%d", s.Name, idx),
 	}

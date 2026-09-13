@@ -18,10 +18,10 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
-// TaskSchedulingStrategy defines the strategy interface for task scheduling.
+// taskSchedulingStrategy defines the strategy interface for task scheduling.
 // Different implementations can provide custom logic for determining whether
 // task scheduling is needed and how to generate task specifications.
-type TaskSchedulingStrategy interface {
+type taskSchedulingStrategy interface {
 	// NeedTaskScheduling determines whether the BatchSandbox requires task scheduling.
 	NeedTaskScheduling() bool
 

@@ -686,13 +686,6 @@ func postStopRequired(task *types.Task, status types.Status) bool {
 	return hasPostStopHook(task) && !statusHasPostStopFinished(status)
 }
 
-func postStopFinished(task *types.Task) bool {
-	if task == nil {
-		return false
-	}
-	return statusHasPostStopFinished(task.Status)
-}
-
 func statusHasPostStopFinished(status types.Status) bool {
 	for _, subStatus := range status.SubStatuses {
 		if isPostStopFinishedReason(subStatus.Reason) {

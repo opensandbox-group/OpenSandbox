@@ -97,37 +97,6 @@ func main() {
 	}
 }
 
-// ContainerSpec maps a source container to its target image.
-// Used by the legacy rootfs snapshot path and its tests.
-type ContainerSpec struct {
-	Name string
-	URI  string
-}
-
-// writeSnapshotResult writes the legacy rootfs snapshot result to the
-// Kubernetes termination message path.
-func writeSnapshotResult(containerSpecs []ContainerSpec, digests map[string]string) error {
-	result := snapshotcontract.Result{
-		Containers: make([]snapshotcontract.ContainerResult, 0, len(digests)),
-	}
-	for _, spec := range containerSpecs {
-		digest, ok := digests[spec.Name]
-		if !ok {
-			continue
-		}
-		result.Containers = append(result.Containers, snapshotcontract.ContainerResult{
-			Name:   spec.Name,
-			Image:  spec.URI,
-			Digest: digest,
-		})
-	}
-	data, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(terminationMessagePath, append(data, '\n'), 0o644)
-}
-
 // containerdSocket returns the containerd socket address from env or default.
 func containerdSocket() string {
 	if v := strings.TrimSpace(os.Getenv("CONTAINERD_SOCKET")); v != "" {

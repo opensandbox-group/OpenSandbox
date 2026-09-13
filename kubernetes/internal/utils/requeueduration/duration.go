@@ -25,8 +25,8 @@ type DurationStore struct {
 }
 
 func (dm *DurationStore) Push(key string, newDuration time.Duration) {
-	value, _ := dm.store.LoadOrStore(key, &Duration{})
-	requeueDuration, ok := value.(*Duration)
+	value, _ := dm.store.LoadOrStore(key, &duration{})
+	requeueDuration, ok := value.(*duration)
 	if !ok {
 		dm.store.Delete(key)
 		return
@@ -40,20 +40,20 @@ func (dm *DurationStore) Pop(key string) time.Duration {
 		return 0
 	}
 	defer dm.store.Delete(key)
-	requeueDuration, ok := value.(*Duration)
+	requeueDuration, ok := value.(*duration)
 	if !ok {
 		return 0
 	}
 	return requeueDuration.Get()
 }
 
-// Duration helps calculate the shortest non-zero duration to requeue
-type Duration struct {
+// duration helps calculate the shortest non-zero duration to requeue
+type duration struct {
 	sync.Mutex
 	duration time.Duration
 }
 
-func (rd *Duration) Update(newDuration time.Duration) {
+func (rd *duration) Update(newDuration time.Duration) {
 	rd.Lock()
 	defer rd.Unlock()
 	if newDuration > 0 {
@@ -63,7 +63,7 @@ func (rd *Duration) Update(newDuration time.Duration) {
 	}
 }
 
-func (rd *Duration) Get() time.Duration {
+func (rd *duration) Get() time.Duration {
 	rd.Lock()
 	defer rd.Unlock()
 	return rd.duration

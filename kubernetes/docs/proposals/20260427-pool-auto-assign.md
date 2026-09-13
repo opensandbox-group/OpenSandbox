@@ -3,7 +3,7 @@ title: Pool Auto-Assign for BatchSandbox
 authors:
   - "@Spground"
 creation-date: 2026-04-27
-status: provisional
+status: implemented
 ---
 
 # Pool Auto-Assign for BatchSandbox
@@ -118,7 +118,7 @@ The controller reads a ConfigMap in its namespace to obtain Profile configuratio
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: opensandbox-assign-profile
+  name: pool-assign-profiles
   namespace: system
 data:
   profiles: |
@@ -126,7 +126,7 @@ data:
       {
         "name": "default",
         "plugins": {
-          "predicate": ["image", "resource", "nodeselector"],
+          "predicate": ["capacity", "image", "resource", "nodeselector"],
           "score": [{"name": "resbalance", "weight": 100}]
         },
         "pluginConf": [
@@ -185,6 +185,7 @@ Built-in implementations:
 | Plugin Name | Description |
 |---|---|
 | `labelselector` | Checks whether the BatchSandbox's label keys match the Pool's label keys, based on a whitelist of keys configured in the ConfigMap |
+| `capacity` | Checks whether the Pool has remaining capacity: `pool.spec.capacitySpec.poolMax - pool.status.allocated` must be at least the BatchSandbox's desired replicas |
 | `resource` | Checks whether the BatchSandbox's resource requirements can be satisfied by the Pool's Pod resource spec (bin-packing) |
 | `nodeselector` | Checks whether the BatchSandbox template's nodeSelector/nodeAffinity matches the Pool's Pod labels |
 | `image` | Checks whether the BatchSandbox template's container image matches the Pool's Pod image |
@@ -215,13 +216,15 @@ The Pool with the highest score is selected. If scores are tied, the Pool with t
 
 **Profile Loading**
 
-The controller loads Profile configuration from the ConfigMap into memory at startup and watches the ConfigMap for changes to support hot-reloading. If the ConfigMap does not exist or the `profiles` field is empty, a built-in default profile is used (containing `image`, `resource`, `nodeselector` predicates and the `resbalance` scorer).
+The controller loads Profile configuration from the ConfigMap into memory at startup and watches the ConfigMap for changes to support hot-reloading. If the ConfigMap does not exist or the `profiles` field is empty, a built-in default profile is used (containing `capacity`, `image`, `resource`, `nodeselector` predicates and the `resbalance` scorer).
+
+Known limitation: the watcher only handles add and update events (`ProfileStore.buildEventHandler` in `internal/controller/poolassign/profile_loader.go`). Deleting the ConfigMap after a custom configuration has loaded does not restore the built-in default profile; the last-loaded custom profiles remain active until the controller restarts. To revert to defaults, update the ConfigMap with an empty `profiles` field instead of deleting it.
 
 **Affected Components**
 
 - `BatchSandboxReconciler`: checks `PoolRef == "*"` at the Reconcile entry point and invokes AssignPool
 - `internal/controller/strategy/pool_strategy_default.go`: `IsPooledMode()` must recognize `"*"` as Pool mode
-- New `internal/controller/assign/` package: contains the AssignPool logic, Predicate interface and built-in implementations, Scorer interface and built-in implementations, and Profile loading logic
+- New `internal/controller/poolassign/` package: contains the AssignPool logic, Predicate interface and built-in implementations, Scorer interface and built-in implementations, and Profile loading logic
 
 **PoolRef Write-Back**
 
@@ -233,7 +236,7 @@ After AssignPool completes, the controller updates the BatchSandbox's `PoolRef` 
 |---|---|
 | **Concurrency**: multiple BatchSandboxes selecting the same Pool may lead to insufficient Pool resources | AssignPool only selects and writes back a Pool name; actual resource allocation is handled by the existing Allocator flow, which already has concurrency control. If resources are insufficient during allocation, the PoolReconciler triggers scale-up |
 | **PoolRef write-back failure**: AssignPool selected a Pool but updating the BatchSandbox failed | Reconcile retries and re-executes AssignPool; the operation is idempotent |
-| **No eligible Pool**: all Pools are filtered out by predicates | Record a `PoolAssignFailed` condition in the BatchSandbox status; wait for Pool changes to re-trigger Reconcile |
+| **No eligible Pool**: all Pools are filtered out by predicates | Emit a `FailedPoolAssign` warning event on the BatchSandbox; when all otherwise-eligible Pools are at capacity, publish a pool-allocation-pending status and requeue after a retry interval |
 | **ConfigMap misconfiguration**: Profile configuration has invalid format or references non-existent plugins | Validate the ConfigMap at controller startup; log warnings for format errors and fall back to the built-in default profile |
 
 ## Alternatives
@@ -274,4 +277,5 @@ Do not implement auto-selection in the controller; instead, let the caller handl
 
 ## Implementation History
 
-- [ ] 2026-04-27: Draft proposal
+- [x] 2026-04-27: Draft proposal
+- [x] Implemented in `internal/controller/poolassign/` and wired into `BatchSandboxReconciler`

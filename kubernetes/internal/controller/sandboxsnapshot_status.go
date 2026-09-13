@@ -147,5 +147,5 @@ func (r *SandboxSnapshotReconciler) getCommitJobTimeout() time.Duration {
 	if r.CommitJobTimeout > 0 {
 		return r.CommitJobTimeout
 	}
-	return DefaultCommitJobTimeout
+	return defaultCommitJobTimeout
 }

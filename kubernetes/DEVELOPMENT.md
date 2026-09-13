@@ -296,7 +296,7 @@ make generate    # DeepCopy methods
 Generated paths:
 - `config/crd/bases/` — CRD YAML from `apis/` type annotations
 - `pkg/client/` — clientset, informer, lister (codegen)
-- `internal/controller/allocator_mock.go` — gomock mocks (regenerate with `mockgen`)
+- `internal/controller/allocator_mock_test.go` — gomock mocks (regenerate with `mockgen`)
 
 ## Testing
 

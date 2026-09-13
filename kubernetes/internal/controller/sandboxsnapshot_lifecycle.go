@@ -211,8 +211,8 @@ func (r *SandboxSnapshotReconciler) handleDeletion(ctx context.Context, snapshot
 		log.Info("Deleted unpause job", "job", unpauseJobName)
 	}
 
-	if controllerutil.ContainsFinalizer(snapshot, SandboxSnapshotFinalizer) {
-		if err := utils.UpdateFinalizer(r.Client, snapshot, utils.RemoveFinalizerOpType, SandboxSnapshotFinalizer); err != nil {
+	if controllerutil.ContainsFinalizer(snapshot, sandboxSnapshotFinalizer) {
+		if err := utils.UpdateFinalizer(r.Client, snapshot, utils.RemoveFinalizerOpType, sandboxSnapshotFinalizer); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -236,7 +236,7 @@ func (r *SandboxSnapshotReconciler) findPodForSandbox(ctx context.Context, bs *s
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{LabelBatchSandboxNameKey: bs.Name},
+		client.MatchingLabels{labelBatchSandboxNameKey: bs.Name},
 	); err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
@@ -369,7 +369,7 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 	fifoDirType := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "containerd-sock", MountPath: ContainerdSocketPath},
-		{Name: "containerd-fifo", MountPath: ContainerdFIFODir},
+		{Name: "containerd-fifo", MountPath: containerdFIFODir},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -381,7 +381,7 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 		{
 			Name: "containerd-fifo",
 			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: ContainerdFIFODir, Type: &fifoDirType},
+				HostPath: &corev1.HostPathVolumeSource{Path: containerdFIFODir, Type: &fifoDirType},
 			},
 		},
 	}
@@ -481,13 +481,13 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 			Name:      jobName,
 			Namespace: snapshot.Namespace,
 			Labels: map[string]string{
-				LabelSandboxSnapshotName:  snapshot.Name,
-				LabelPrivilegedNodeAccess: "true",
+				labelSandboxSnapshotName:  snapshot.Name,
+				labelPrivilegedNodeAccess: "true",
 			},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            ptrToInt32(DefaultCommitJobBackoffLimit),
-			TTLSecondsAfterFinished: ptrToInt32(int32(DefaultTTLSecondsAfterFinished)),
+			TTLSecondsAfterFinished: ptrToInt32(int32(defaultTTLSecondsAfterFinished)),
 			ActiveDeadlineSeconds:   ptrToInt64(int64(r.getCommitJobTimeout().Seconds())),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -496,7 +496,7 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 					ImagePullSecrets: r.imageCommitterPullSecrets(),
 					Containers: []corev1.Container{
 						{
-							Name:            CommitJobContainerName,
+							Name:            commitJobContainerName,
 							Image:           imageCommitterImage,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"/usr/local/bin/image-committer"},
@@ -539,11 +539,11 @@ func (r *SandboxSnapshotReconciler) applyImageCommitterPodTemplate(generated *co
 	generated.Annotations = mergeStringMaps(overlay.Annotations, generated.Annotations)
 
 	generatedContainer := generated.Spec.Containers[0]
-	commitContainer := corev1.Container{Name: CommitJobContainerName}
+	commitContainer := corev1.Container{Name: commitJobContainerName}
 	commitCount := 0
 	containers := make([]corev1.Container, 0, len(overlay.Spec.Containers)+1)
 	for _, container := range overlay.Spec.Containers {
-		if container.Name != CommitJobContainerName {
+		if container.Name != commitJobContainerName {
 			containers = append(containers, container)
 			continue
 		}
@@ -551,7 +551,7 @@ func (r *SandboxSnapshotReconciler) applyImageCommitterPodTemplate(generated *co
 		commitContainer = container
 	}
 	if commitCount > 1 {
-		return fmt.Errorf("image-committer Pod template contains multiple %q containers", CommitJobContainerName)
+		return fmt.Errorf("image-committer Pod template contains multiple %q containers", commitJobContainerName)
 	}
 
 	commitContainer.Name = generatedContainer.Name
@@ -725,7 +725,7 @@ func (r *SandboxSnapshotReconciler) ensureUnpauseJob(ctx context.Context, snapsh
 	// do secure container matching on unpause, consistent with the commit path.
 	if sourcePodUID != "" {
 		for i := range job.Spec.Template.Spec.Containers {
-			if job.Spec.Template.Spec.Containers[i].Name == CommitJobContainerName {
+			if job.Spec.Template.Spec.Containers[i].Name == commitJobContainerName {
 				job.Spec.Template.Spec.Containers[i].Env = append(
 					job.Spec.Template.Spec.Containers[i].Env,
 					corev1.EnvVar{Name: "SOURCE_POD_UID", Value: sourcePodUID},
@@ -769,13 +769,13 @@ func (r *SandboxSnapshotReconciler) buildUnpauseJob(snapshot *sandboxv1alpha1.Sa
 			Name:      r.getUnpauseJobName(snapshot),
 			Namespace: snapshot.Namespace,
 			Labels: map[string]string{
-				LabelSandboxSnapshotName:  snapshot.Name,
-				LabelPrivilegedNodeAccess: "true",
+				labelSandboxSnapshotName:  snapshot.Name,
+				labelPrivilegedNodeAccess: "true",
 			},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            ptrToInt32(0),
-			TTLSecondsAfterFinished: ptrToInt32(int32(DefaultTTLSecondsAfterFinished)),
+			TTLSecondsAfterFinished: ptrToInt32(int32(defaultTTLSecondsAfterFinished)),
 			ActiveDeadlineSeconds:   ptrToInt64(int64(r.getCommitJobTimeout().Seconds())),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -784,7 +784,7 @@ func (r *SandboxSnapshotReconciler) buildUnpauseJob(snapshot *sandboxv1alpha1.Sa
 					ImagePullSecrets: r.imageCommitterPullSecrets(),
 					Containers: []corev1.Container{
 						{
-							Name:            CommitJobContainerName,
+							Name:            commitJobContainerName,
 							Image:           r.imageCommitterImage(),
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"/usr/local/bin/image-committer"},
@@ -902,7 +902,7 @@ func snapshotResultFromPod(pod *corev1.Pod) (*commitJobResult, bool, error) {
 		return nil, false, nil
 	}
 	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name != CommitJobContainerName || status.State.Terminated == nil {
+		if status.Name != commitJobContainerName || status.State.Terminated == nil {
 			continue
 		}
 		if status.State.Terminated.ExitCode != 0 {
@@ -926,7 +926,7 @@ func imageCommitterEnvValue(job *batchv1.Job, name string) string {
 		return ""
 	}
 	for _, container := range job.Spec.Template.Spec.Containers {
-		if container.Name != CommitJobContainerName {
+		if container.Name != commitJobContainerName {
 			continue
 		}
 		for _, env := range container.Env {

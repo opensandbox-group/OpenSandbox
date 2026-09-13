@@ -153,8 +153,8 @@ func TestPickPodsToDeleteLeastUsefulFirst(t *testing.T) {
 }
 
 func TestScalePoolPendingPodsCoverDesiredCapacity(t *testing.T) {
-	PoolScaleExpectations = expectations.NewScaleExpectations()
-	t.Cleanup(func() { PoolScaleExpectations = expectations.NewScaleExpectations() })
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
 
 	now := time.Now()
 	pods := []*corev1.Pod{
@@ -191,8 +191,8 @@ func TestScalePoolPendingPodsCoverDesiredCapacity(t *testing.T) {
 }
 
 func TestScalePoolCountsTerminatingPodsAgainstPoolMax(t *testing.T) {
-	PoolScaleExpectations = expectations.NewScaleExpectations()
-	t.Cleanup(func() { PoolScaleExpectations = expectations.NewScaleExpectations() })
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
 
 	now := time.Now()
 	active := []*corev1.Pod{
@@ -231,8 +231,8 @@ func TestScalePoolLimitsDeleteBatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			PoolScaleExpectations = expectations.NewScaleExpectations()
-			t.Cleanup(func() { PoolScaleExpectations = expectations.NewScaleExpectations() })
+			poolScaleExpectations = expectations.NewScaleExpectations()
+			t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
 
 			now := time.Now()
 			pods := make([]*corev1.Pod, 0, 10)
@@ -254,7 +254,7 @@ func TestScalePoolLimitsDeleteBatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			deleteExpectations := PoolScaleExpectations.GetExpectations(controllerutils.GetControllerKey(pool))[expectations.Delete]
+			deleteExpectations := poolScaleExpectations.GetExpectations(controllerutils.GetControllerKey(pool))[expectations.Delete]
 			if deleteExpectations.Len() != tt.wantDeleted {
 				t.Fatalf("delete expectations = %d, want %d", deleteExpectations.Len(), tt.wantDeleted)
 			}
@@ -263,20 +263,20 @@ func TestScalePoolLimitsDeleteBatch(t *testing.T) {
 }
 
 func TestObserveDeletedPodsCompletesDeleteBatch(t *testing.T) {
-	PoolScaleExpectations = expectations.NewScaleExpectations()
-	t.Cleanup(func() { PoolScaleExpectations = expectations.NewScaleExpectations() })
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
 	controllerKey := "default/pool"
-	PoolScaleExpectations.ExpectScale(controllerKey, expectations.Delete, "gone")
-	PoolScaleExpectations.ExpectScale(controllerKey, expectations.Delete, "terminating")
+	poolScaleExpectations.ExpectScale(controllerKey, expectations.Delete, "gone")
+	poolScaleExpectations.ExpectScale(controllerKey, expectations.Delete, "terminating")
 
 	observeDeletedPods(controllerKey, map[string]struct{}{"terminating": {}})
-	dirty := PoolScaleExpectations.GetExpectations(controllerKey)[expectations.Delete]
+	dirty := poolScaleExpectations.GetExpectations(controllerKey)[expectations.Delete]
 	if dirty.Has("gone") || !dirty.Has("terminating") {
 		t.Fatalf("unexpected remaining delete expectations: %v", dirty.List())
 	}
 
 	observeDeletedPods(controllerKey, map[string]struct{}{})
-	if satisfied, _, _ := PoolScaleExpectations.SatisfiedExpectations(controllerKey); !satisfied {
+	if satisfied, _, _ := poolScaleExpectations.SatisfiedExpectations(controllerKey); !satisfied {
 		t.Fatal("expected delete batch to be satisfied after all pods disappear")
 	}
 }
@@ -290,8 +290,8 @@ func (c *deleteFailingClient) Delete(context.Context, client.Object, ...client.D
 }
 
 func TestScalePoolRollsBackExpectationOnDeleteFailure(t *testing.T) {
-	PoolScaleExpectations = expectations.NewScaleExpectations()
-	t.Cleanup(func() { PoolScaleExpectations = expectations.NewScaleExpectations() })
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
 
 	pod := stabilityTestPod("pod", false, time.Now())
 	r := stabilityTestReconciler(t, pod)
@@ -304,16 +304,16 @@ func TestScalePoolRollsBackExpectationOnDeleteFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected delete error")
 	}
-	if satisfied, _, dirty := PoolScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(pool)); !satisfied {
+	if satisfied, _, dirty := poolScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(pool)); !satisfied {
 		t.Fatalf("delete failure left stale expectation: %v", dirty)
 	}
 }
 
 func TestScalePoolUnsatisfiedExpectationIsNotAnError(t *testing.T) {
-	PoolScaleExpectations = expectations.NewScaleExpectations()
-	t.Cleanup(func() { PoolScaleExpectations = expectations.NewScaleExpectations() })
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
 	pool := stabilityTestPool(intstr.FromInt(1))
-	PoolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Delete, "terminating")
+	poolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Delete, "terminating")
 
 	r := stabilityTestReconciler(t)
 	pending, err := r.scalePool(context.Background(), pool, &scaleArgs{})
@@ -326,19 +326,19 @@ type stabilityAllocator struct {
 	*stubAllocator
 }
 
-func (a *stabilityAllocator) Schedule(context.Context, *AllocSpec) (*algorithm.AllocAction, error) {
+func (a *stabilityAllocator) Schedule(context.Context, *allocSpec) (*algorithm.AllocAction, error) {
 	return &algorithm.AllocAction{}, nil
 }
 
 func TestReconcilePoolUpdatesStatusWhileScaleIsPending(t *testing.T) {
-	PoolScaleExpectations = expectations.NewScaleExpectations()
-	t.Cleanup(func() { PoolScaleExpectations = expectations.NewScaleExpectations() })
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
 
 	pool := stabilityTestPool(intstr.FromInt(1))
 	pool.Generation = 7
 	r := stabilityTestReconciler(t, pool)
 	r.Allocator = &stabilityAllocator{stubAllocator: &stubAllocator{podAllocation: map[string]string{}}}
-	PoolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Delete, "terminating")
+	poolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Delete, "terminating")
 
 	result, err := r.reconcilePool(context.Background(), pool, nil, nil, 1)
 	if err != nil {

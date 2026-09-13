@@ -32,22 +32,3 @@ func TestHeadTailBuffer(t *testing.T) {
 		t.Fatalf("String() = %q, want %q", got, want)
 	}
 }
-
-func TestTruncateHeadTail(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-		want  string
-	}{
-		{name: "within limit", value: "abcdefgh", want: "abcdefgh"},
-		{name: "over limit", value: "abcdefghijkl", want: "abcd<truncated>ijkl"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := TruncateHeadTail(tt.value, 4, 4, "<truncated>"); got != tt.want {
-				t.Fatalf("TruncateHeadTail() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}

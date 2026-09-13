@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-const ProfileConfigMapName = "pool-assign-profiles"
+const profileConfigMapName = "pool-assign-profiles"
 
 var log = logf.Log.WithName("profile-store")
 
@@ -78,7 +78,7 @@ func (s *ProfileStore) setupInformer(kubeClient kubernetes.Interface) (sharedInf
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 30*time.Second,
 		informers.WithNamespace(s.namespace),
 		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", ProfileConfigMapName).String()
+			opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", profileConfigMapName).String()
 		}),
 	)
 	informer := factory.Core().V1().ConfigMaps().Informer()
@@ -155,13 +155,13 @@ func (s *ProfileStore) GetProfile(name string) *Profile {
 	if p, ok := s.profiles[name]; ok {
 		return p
 	}
-	return DefaultProfile()
+	return defaultProfile()
 }
 
 func (s *ProfileStore) LoadDefault() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	d := DefaultProfile()
+	d := defaultProfile()
 	s.profiles = map[string]*Profile{d.Name: d}
 	return nil
 }

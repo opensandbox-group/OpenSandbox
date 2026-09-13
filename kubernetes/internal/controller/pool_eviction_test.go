@@ -35,7 +35,7 @@ type stubAllocator struct {
 	podAllocation map[string]string
 }
 
-func (a *stubAllocator) Schedule(_ context.Context, _ *AllocSpec) (*algorithm.AllocAction, error) {
+func (a *stubAllocator) Schedule(_ context.Context, _ *allocSpec) (*algorithm.AllocAction, error) {
 	return nil, nil
 }
 func (a *stubAllocator) GetPoolAllocation(_ context.Context, _ *sandboxv1alpha1.Pool) (map[string]string, error) {

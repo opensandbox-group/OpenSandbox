@@ -111,7 +111,6 @@ func (s *fileStore) Update(ctx context.Context, task *types.Task) error {
 		return fmt.Errorf("invalid task name: %w", err)
 	}
 
-	// Check if task exists
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		return fmt.Errorf("task %s does not exist", task.Name)
 	}
@@ -138,7 +137,6 @@ func (s *fileStore) Get(ctx context.Context, name string) (*types.Task, error) {
 		return nil, fmt.Errorf("invalid task name: %w", err)
 	}
 
-	// Check if task exists
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("task %s not found", name)
 	}
@@ -195,7 +193,6 @@ func (s *fileStore) Delete(ctx context.Context, name string) error {
 		return fmt.Errorf("invalid task name: %w", err)
 	}
 
-	// Check if task exists
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		klog.InfoS("task already deleted", "name", name)
 		return nil

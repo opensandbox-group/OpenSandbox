@@ -102,10 +102,10 @@ func sourcePodTemplateForPause(pod *corev1.Pod) *corev1.PodTemplateSpec {
 		return nil
 	}
 	labels := copyPodTemplateMap(pod.Labels)
-	delete(labels, LabelPoolName)
-	delete(labels, LabelPoolRevision)
-	delete(labels, LabelBatchSandboxNameKey)
-	delete(labels, LabelBatchSandboxPodIndexKey)
+	delete(labels, labelPoolName)
+	delete(labels, labelPoolRevision)
+	delete(labels, labelBatchSandboxNameKey)
+	delete(labels, labelBatchSandboxPodIndexKey)
 
 	spec := *pod.Spec.DeepCopy()
 	spec.NodeName = ""
@@ -162,7 +162,7 @@ func (r *BatchSandboxReconciler) hasReadyResumePod(ctx context.Context, bs *sand
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(bs.Namespace),
-		client.MatchingLabels{LabelBatchSandboxNameKey: bs.Name},
+		client.MatchingLabels{labelBatchSandboxNameKey: bs.Name},
 	); err != nil {
 		return false, err
 	}
@@ -456,9 +456,9 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 			patch := client.MergeFrom(latest.DeepCopy())
 			latest.Spec.Template = pooledTemplate.DeepCopy()
 			latest.Spec.PoolRef = ""
-			controllerutil.RemoveFinalizer(latest, FinalizerPoolAllocation)
+			controllerutil.RemoveFinalizer(latest, finalizerPoolAllocation)
 			if latest.Annotations != nil {
-				delete(latest.Annotations, AnnoAllocReleaseKey)
+				delete(latest.Annotations, annoAllocReleaseKey)
 			}
 			return r.Patch(ctx, latest, patch)
 		}); err != nil {
@@ -466,15 +466,15 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 		}
 		bs.Spec.Template = pooledTemplate.DeepCopy()
 		bs.Spec.PoolRef = ""
-		controllerutil.RemoveFinalizer(bs, FinalizerPoolAllocation)
+		controllerutil.RemoveFinalizer(bs, finalizerPoolAllocation)
 		if bs.Annotations != nil {
-			delete(bs.Annotations, AnnoAllocReleaseKey)
+			delete(bs.Annotations, annoAllocReleaseKey)
 		}
 		log.Info("Detached pooled BatchSandbox after pause", "sourcePod", pods[0].Name)
 	}
 
 	controllerKey := controllerutils.GetControllerKey(bs)
-	BatchSandboxScaleExpectations.DeleteExpectations(controllerKey)
+	batchSandboxScaleExpectations.DeleteExpectations(controllerKey)
 	log.Info("Cleared scale expectations before pod deletion", "controllerKey", controllerKey)
 
 	if !wasPooled {
@@ -605,7 +605,7 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 
 		if latest.Spec.PoolRef != "" {
 			latest.Spec.PoolRef = ""
-			controllerutil.RemoveFinalizer(latest, FinalizerPoolAllocation)
+			controllerutil.RemoveFinalizer(latest, finalizerPoolAllocation)
 		}
 
 		if err := r.Patch(ctx, latest, patch); err != nil {
@@ -797,25 +797,6 @@ func setContainerEnv(container *corev1.Container, name, value string) {
 		}
 	}
 	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
-}
-
-func (r *BatchSandboxReconciler) ackPauseGeneration(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) error {
-	var latest *sandboxv1alpha1.BatchSandbox
-	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		latest = &sandboxv1alpha1.BatchSandbox{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, latest); err != nil {
-			return err
-		}
-		latest.Status.PauseObservedGeneration = latest.Generation
-		applyBatchSandboxPhaseConditions(&latest.Status)
-		return r.Status().Update(ctx, latest)
-	}); err != nil {
-		return err
-	}
-	r.StatusRVExpectation.Expect(latest)
-	bs.Status.PauseObservedGeneration = bs.Generation
-	applyBatchSandboxPhaseConditions(&bs.Status)
-	return nil
 }
 
 func (r *BatchSandboxReconciler) ackPauseWithPhase(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox, phase sandboxv1alpha1.BatchSandboxPhase, _ string) error {

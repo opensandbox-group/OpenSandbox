@@ -33,7 +33,6 @@ import (
 )
 
 func main() {
-	// Load configuration
 	cfg := config.NewConfig()
 	cfg.LoadFromEnv()
 	cfg.LoadFromFlags()
@@ -43,7 +42,6 @@ func main() {
 	}
 	klog.InfoS("task-executor starting", "dataDir", cfg.DataDir, "listenAddr", cfg.ListenAddr, "sidecarMode", cfg.EnableSidecarMode)
 
-	// Initialize TaskStore
 	taskStore, err := store.NewFileStore(cfg.DataDir)
 	if err != nil {
 		klog.ErrorS(err, "failed to create task store")
@@ -51,29 +49,24 @@ func main() {
 	}
 	klog.InfoS("task store initialized", "dataDir", cfg.DataDir)
 
-	// Initialize Executor
 	exec, err := runtime.NewExecutor(cfg)
 	if err != nil {
 		klog.ErrorS(err, "failed to create executor")
 		os.Exit(1)
 	}
 
-	// Initialize TaskManager
 	taskManager, err := manager.NewTaskManager(cfg, taskStore, exec)
 	if err != nil {
 		klog.ErrorS(err, "failed to create task manager")
 		os.Exit(1)
 	}
 
-	// Start TaskManager
 	taskManager.Start(context.Background())
 	klog.InfoS("task manager started")
 
-	// Initialize HTTP Handler and Router
 	handler := server.NewHandler(taskManager, cfg)
 	router := server.NewRouter(handler)
 
-	// Create HTTP Server
 	svr := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      router,
@@ -81,7 +74,6 @@ func main() {
 		WriteTimeout: cfg.WriteTimeout,
 	}
 
-	// Start HTTP server in goroutine
 	go func() {
 		klog.InfoS("HTTP server listening", "address", cfg.ListenAddr)
 		if err := svr.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -90,25 +82,21 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	klog.InfoS("shutting down task-executor gracefully...")
 
-	// Shutdown context with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// 1. Stop HTTP server first
 	if err := svr.Shutdown(shutdownCtx); err != nil {
 		klog.ErrorS(err, "HTTP server shutdown error")
 	} else {
 		klog.InfoS("HTTP server stopped")
 	}
 
-	// 2. Stop TaskManager
 	taskManager.Stop()
 	klog.InfoS("task manager stopped")
 

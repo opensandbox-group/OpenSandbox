@@ -14,31 +14,31 @@ import (
 	client "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// MockAllocationStore is a mock of AllocationStore interface.
-type MockAllocationStore struct {
+// MockallocationStore is a mock of allocationStore interface.
+type MockallocationStore struct {
 	ctrl     *gomock.Controller
-	recorder *MockAllocationStoreMockRecorder
+	recorder *MockallocationStoreMockRecorder
 }
 
-// MockAllocationStoreMockRecorder is the mock recorder for MockAllocationStore.
-type MockAllocationStoreMockRecorder struct {
-	mock *MockAllocationStore
+// MockallocationStoreMockRecorder is the mock recorder for MockallocationStore.
+type MockallocationStoreMockRecorder struct {
+	mock *MockallocationStore
 }
 
-// NewMockAllocationStore creates a new mock instance.
-func NewMockAllocationStore(ctrl *gomock.Controller) *MockAllocationStore {
-	mock := &MockAllocationStore{ctrl: ctrl}
-	mock.recorder = &MockAllocationStoreMockRecorder{mock}
+// NewMockallocationStore creates a new mock instance.
+func NewMockallocationStore(ctrl *gomock.Controller) *MockallocationStore {
+	mock := &MockallocationStore{ctrl: ctrl}
+	mock.recorder = &MockallocationStoreMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockAllocationStore) EXPECT() *MockAllocationStoreMockRecorder {
+func (m *MockallocationStore) EXPECT() *MockallocationStoreMockRecorder {
 	return m.recorder
 }
 
 // ClearAllocation mocks base method.
-func (m *MockAllocationStore) ClearAllocation(ctx context.Context, ns, poolName string) error {
+func (m *MockallocationStore) ClearAllocation(ctx context.Context, ns, poolName string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ClearAllocation", ctx, ns, poolName)
 	ret0, _ := ret[0].(error)
@@ -46,28 +46,28 @@ func (m *MockAllocationStore) ClearAllocation(ctx context.Context, ns, poolName 
 }
 
 // ClearAllocation indicates an expected call of ClearAllocation.
-func (mr *MockAllocationStoreMockRecorder) ClearAllocation(ctx, ns, poolName interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) ClearAllocation(ctx, ns, poolName interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearAllocation", reflect.TypeOf((*MockAllocationStore)(nil).ClearAllocation), ctx, ns, poolName)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearAllocation", reflect.TypeOf((*MockallocationStore)(nil).ClearAllocation), ctx, ns, poolName)
 }
 
 // GetAllocation mocks base method.
-func (m *MockAllocationStore) GetAllocation(ctx context.Context, pool *v1alpha1.Pool) (*PoolAllocation, error) {
+func (m *MockallocationStore) GetAllocation(ctx context.Context, pool *v1alpha1.Pool) (*poolAllocation, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetAllocation", ctx, pool)
-	ret0, _ := ret[0].(*PoolAllocation)
+	ret0, _ := ret[0].(*poolAllocation)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetAllocation indicates an expected call of GetAllocation.
-func (mr *MockAllocationStoreMockRecorder) GetAllocation(ctx, pool interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) GetAllocation(ctx, pool interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllocation", reflect.TypeOf((*MockAllocationStore)(nil).GetAllocation), ctx, pool)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllocation", reflect.TypeOf((*MockallocationStore)(nil).GetAllocation), ctx, pool)
 }
 
 // Recover mocks base method.
-func (m *MockAllocationStore) Recover(ctx context.Context, c client.Client) error {
+func (m *MockallocationStore) Recover(ctx context.Context, c client.Client) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Recover", ctx, c)
 	ret0, _ := ret[0].(error)
@@ -75,37 +75,37 @@ func (m *MockAllocationStore) Recover(ctx context.Context, c client.Client) erro
 }
 
 // Recover indicates an expected call of Recover.
-func (mr *MockAllocationStoreMockRecorder) Recover(ctx, c interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) Recover(ctx, c interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Recover", reflect.TypeOf((*MockAllocationStore)(nil).Recover), ctx, c)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Recover", reflect.TypeOf((*MockallocationStore)(nil).Recover), ctx, c)
 }
 
 // ReleaseAllocation mocks base method.
-func (m *MockAllocationStore) ReleaseAllocation(ctx context.Context, ns, poolName string, pods []string) {
+func (m *MockallocationStore) ReleaseAllocation(ctx context.Context, ns, poolName string, pods []string) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "ReleaseAllocation", ctx, ns, poolName, pods)
 }
 
 // ReleaseAllocation indicates an expected call of ReleaseAllocation.
-func (mr *MockAllocationStoreMockRecorder) ReleaseAllocation(ctx, ns, poolName, pods interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) ReleaseAllocation(ctx, ns, poolName, pods interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReleaseAllocation", reflect.TypeOf((*MockAllocationStore)(nil).ReleaseAllocation), ctx, ns, poolName, pods)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReleaseAllocation", reflect.TypeOf((*MockallocationStore)(nil).ReleaseAllocation), ctx, ns, poolName, pods)
 }
 
 // ReleaseSandboxAllocation mocks base method.
-func (m *MockAllocationStore) ReleaseSandboxAllocation(ctx context.Context, ns, poolName, sandboxName string) {
+func (m *MockallocationStore) ReleaseSandboxAllocation(ctx context.Context, ns, poolName, sandboxName string) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "ReleaseSandboxAllocation", ctx, ns, poolName, sandboxName)
 }
 
 // ReleaseSandboxAllocation indicates an expected call of ReleaseSandboxAllocation.
-func (mr *MockAllocationStoreMockRecorder) ReleaseSandboxAllocation(ctx, ns, poolName, sandboxName interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) ReleaseSandboxAllocation(ctx, ns, poolName, sandboxName interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReleaseSandboxAllocation", reflect.TypeOf((*MockAllocationStore)(nil).ReleaseSandboxAllocation), ctx, ns, poolName, sandboxName)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReleaseSandboxAllocation", reflect.TypeOf((*MockallocationStore)(nil).ReleaseSandboxAllocation), ctx, ns, poolName, sandboxName)
 }
 
 // SetAllocation mocks base method.
-func (m *MockAllocationStore) SetAllocation(ctx context.Context, pool *v1alpha1.Pool, allocation *PoolAllocation) error {
+func (m *MockallocationStore) SetAllocation(ctx context.Context, pool *v1alpha1.Pool, allocation *poolAllocation) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetAllocation", ctx, pool, allocation)
 	ret0, _ := ret[0].(error)
@@ -113,93 +113,93 @@ func (m *MockAllocationStore) SetAllocation(ctx context.Context, pool *v1alpha1.
 }
 
 // SetAllocation indicates an expected call of SetAllocation.
-func (mr *MockAllocationStoreMockRecorder) SetAllocation(ctx, pool, allocation interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) SetAllocation(ctx, pool, allocation interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetAllocation", reflect.TypeOf((*MockAllocationStore)(nil).SetAllocation), ctx, pool, allocation)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetAllocation", reflect.TypeOf((*MockallocationStore)(nil).SetAllocation), ctx, pool, allocation)
 }
 
 // UpdateAllocation mocks base method.
-func (m *MockAllocationStore) UpdateAllocation(ctx context.Context, ns, poolName, sandboxName string, pods []string) {
+func (m *MockallocationStore) UpdateAllocation(ctx context.Context, ns, poolName, sandboxName string, pods []string) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "UpdateAllocation", ctx, ns, poolName, sandboxName, pods)
 }
 
 // UpdateAllocation indicates an expected call of UpdateAllocation.
-func (mr *MockAllocationStoreMockRecorder) UpdateAllocation(ctx, ns, poolName, sandboxName, pods interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) UpdateAllocation(ctx, ns, poolName, sandboxName, pods interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateAllocation", reflect.TypeOf((*MockAllocationStore)(nil).UpdateAllocation), ctx, ns, poolName, sandboxName, pods)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateAllocation", reflect.TypeOf((*MockallocationStore)(nil).UpdateAllocation), ctx, ns, poolName, sandboxName, pods)
 }
 
-// MockAllocationSyncer is a mock of AllocationSyncer interface.
-type MockAllocationSyncer struct {
+// MockallocationSyncer is a mock of allocationSyncer interface.
+type MockallocationSyncer struct {
 	ctrl     *gomock.Controller
-	recorder *MockAllocationSyncerMockRecorder
+	recorder *MockallocationSyncerMockRecorder
 }
 
-// MockAllocationSyncerMockRecorder is the mock recorder for MockAllocationSyncer.
-type MockAllocationSyncerMockRecorder struct {
-	mock *MockAllocationSyncer
+// MockallocationSyncerMockRecorder is the mock recorder for MockallocationSyncer.
+type MockallocationSyncerMockRecorder struct {
+	mock *MockallocationSyncer
 }
 
-// NewMockAllocationSyncer creates a new mock instance.
-func NewMockAllocationSyncer(ctrl *gomock.Controller) *MockAllocationSyncer {
-	mock := &MockAllocationSyncer{ctrl: ctrl}
-	mock.recorder = &MockAllocationSyncerMockRecorder{mock}
+// NewMockallocationSyncer creates a new mock instance.
+func NewMockallocationSyncer(ctrl *gomock.Controller) *MockallocationSyncer {
+	mock := &MockallocationSyncer{ctrl: ctrl}
+	mock.recorder = &MockallocationSyncerMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockAllocationSyncer) EXPECT() *MockAllocationSyncerMockRecorder {
+func (m *MockallocationSyncer) EXPECT() *MockallocationSyncerMockRecorder {
 	return m.recorder
 }
 
 // GetAllocation mocks base method.
-func (m *MockAllocationSyncer) GetAllocation(ctx context.Context, sandbox *v1alpha1.BatchSandbox) (*SandboxAllocation, error) {
+func (m *MockallocationSyncer) GetAllocation(ctx context.Context, sandbox *v1alpha1.BatchSandbox) (*sandboxAllocation, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetAllocation", ctx, sandbox)
-	ret0, _ := ret[0].(*SandboxAllocation)
+	ret0, _ := ret[0].(*sandboxAllocation)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetAllocation indicates an expected call of GetAllocation.
-func (mr *MockAllocationSyncerMockRecorder) GetAllocation(ctx, sandbox interface{}) *gomock.Call {
+func (mr *MockallocationSyncerMockRecorder) GetAllocation(ctx, sandbox interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllocation", reflect.TypeOf((*MockAllocationSyncer)(nil).GetAllocation), ctx, sandbox)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllocation", reflect.TypeOf((*MockallocationSyncer)(nil).GetAllocation), ctx, sandbox)
 }
 
 // GetRelease mocks base method.
-func (m *MockAllocationSyncer) GetRelease(ctx context.Context, sandbox *v1alpha1.BatchSandbox) (*AllocationRelease, error) {
+func (m *MockallocationSyncer) GetRelease(ctx context.Context, sandbox *v1alpha1.BatchSandbox) (*allocationRelease, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetRelease", ctx, sandbox)
-	ret0, _ := ret[0].(*AllocationRelease)
+	ret0, _ := ret[0].(*allocationRelease)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetRelease indicates an expected call of GetRelease.
-func (mr *MockAllocationSyncerMockRecorder) GetRelease(ctx, sandbox interface{}) *gomock.Call {
+func (mr *MockallocationSyncerMockRecorder) GetRelease(ctx, sandbox interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRelease", reflect.TypeOf((*MockAllocationSyncer)(nil).GetRelease), ctx, sandbox)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRelease", reflect.TypeOf((*MockallocationSyncer)(nil).GetRelease), ctx, sandbox)
 }
 
 // GetReleased mocks base method.
-func (m *MockAllocationSyncer) GetReleased(ctx context.Context, sandbox *v1alpha1.BatchSandbox) (*AllocationReleased, error) {
+func (m *MockallocationSyncer) GetReleased(ctx context.Context, sandbox *v1alpha1.BatchSandbox) (*allocationReleased, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetReleased", ctx, sandbox)
-	ret0, _ := ret[0].(*AllocationReleased)
+	ret0, _ := ret[0].(*allocationReleased)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetReleased indicates an expected call of GetReleased.
-func (mr *MockAllocationSyncerMockRecorder) GetReleased(ctx, sandbox interface{}) *gomock.Call {
+func (mr *MockallocationSyncerMockRecorder) GetReleased(ctx, sandbox interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetReleased", reflect.TypeOf((*MockAllocationSyncer)(nil).GetReleased), ctx, sandbox)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetReleased", reflect.TypeOf((*MockallocationSyncer)(nil).GetReleased), ctx, sandbox)
 }
 
 // SetAllocation mocks base method.
-func (m *MockAllocationSyncer) SetAllocation(ctx context.Context, sandbox *v1alpha1.BatchSandbox, allocation *SandboxAllocation) error {
+func (m *MockallocationSyncer) SetAllocation(ctx context.Context, sandbox *v1alpha1.BatchSandbox, allocation *sandboxAllocation) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetAllocation", ctx, sandbox, allocation)
 	ret0, _ := ret[0].(error)
@@ -207,13 +207,13 @@ func (m *MockAllocationSyncer) SetAllocation(ctx context.Context, sandbox *v1alp
 }
 
 // SetAllocation indicates an expected call of SetAllocation.
-func (mr *MockAllocationSyncerMockRecorder) SetAllocation(ctx, sandbox, allocation interface{}) *gomock.Call {
+func (mr *MockallocationSyncerMockRecorder) SetAllocation(ctx, sandbox, allocation interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetAllocation", reflect.TypeOf((*MockAllocationSyncer)(nil).SetAllocation), ctx, sandbox, allocation)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetAllocation", reflect.TypeOf((*MockallocationSyncer)(nil).SetAllocation), ctx, sandbox, allocation)
 }
 
 // SetReleased mocks base method.
-func (m *MockAllocationSyncer) SetReleased(ctx context.Context, sandbox *v1alpha1.BatchSandbox, released *AllocationReleased) error {
+func (m *MockallocationSyncer) SetReleased(ctx context.Context, sandbox *v1alpha1.BatchSandbox, released *allocationReleased) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetReleased", ctx, sandbox, released)
 	ret0, _ := ret[0].(error)
@@ -221,9 +221,9 @@ func (m *MockAllocationSyncer) SetReleased(ctx context.Context, sandbox *v1alpha
 }
 
 // SetReleased indicates an expected call of SetReleased.
-func (mr *MockAllocationSyncerMockRecorder) SetReleased(ctx, sandbox, released interface{}) *gomock.Call {
+func (mr *MockallocationSyncerMockRecorder) SetReleased(ctx, sandbox, released interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetReleased", reflect.TypeOf((*MockAllocationSyncer)(nil).SetReleased), ctx, sandbox, released)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetReleased", reflect.TypeOf((*MockallocationSyncer)(nil).SetReleased), ctx, sandbox, released)
 }
 
 // MockAllocator is a mock of Allocator interface.
@@ -321,7 +321,7 @@ func (mr *MockAllocatorMockRecorder) ReleasePodsAllocation(ctx, ns, poolName, po
 }
 
 // Schedule mocks base method.
-func (m *MockAllocator) Schedule(ctx context.Context, spec *AllocSpec) (*algorithm.AllocAction, error) {
+func (m *MockAllocator) Schedule(ctx context.Context, spec *allocSpec) (*algorithm.AllocAction, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Schedule", ctx, spec)
 	ret0, _ := ret[0].(*algorithm.AllocAction)

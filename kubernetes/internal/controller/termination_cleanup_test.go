@@ -40,11 +40,11 @@ func TestReconcileTasksSkipsDeletingObjectAfterTaskCleanup(t *testing.T) {
 			Name:              "terminating-sandbox",
 			Namespace:         "default",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{FinalizerPoolAllocation},
+			Finalizers:        []string{finalizerPoolAllocation},
 		},
 	}
 	key := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}.String()
-	_ = DurationStore.Pop(key)
+	_ = durationStore.Pop(key)
 
 	r := &BatchSandboxReconciler{}
 	result, err := r.reconcileTasks(context.Background(), sandbox, nil)
@@ -54,7 +54,7 @@ func TestReconcileTasksSkipsDeletingObjectAfterTaskCleanup(t *testing.T) {
 	if result != nil {
 		t.Fatalf("reconcileTasks() result = %#v, want nil", result)
 	}
-	if requeueAfter := DurationStore.Pop(key); requeueAfter != 0 {
+	if requeueAfter := durationStore.Pop(key); requeueAfter != 0 {
 		t.Fatalf("reconcileTasks() requeueAfter = %v, want 0", requeueAfter)
 	}
 	if _, exists := r.taskSchedulers.Load(key); exists {
@@ -100,7 +100,7 @@ func TestFinalizeTerminatingSandboxesWithoutPendingAllocations(t *testing.T) {
 					Name:              "terminating-sandbox",
 					Namespace:         "default",
 					DeletionTimestamp: &now,
-					Finalizers:        []string{FinalizerPoolAllocation, "test.opensandbox.io/keep"},
+					Finalizers:        []string{finalizerPoolAllocation, "test.opensandbox.io/keep"},
 				},
 			}
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
@@ -117,7 +117,7 @@ func TestFinalizeTerminatingSandboxesWithoutPendingAllocations(t *testing.T) {
 			if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated); err != nil {
 				t.Fatalf("get sandbox: %v", err)
 			}
-			if got := controllerutil.ContainsFinalizer(updated, FinalizerPoolAllocation); got != tt.wantFinalizer {
+			if got := controllerutil.ContainsFinalizer(updated, finalizerPoolAllocation); got != tt.wantFinalizer {
 				t.Fatalf("pool finalizer present = %v, want %v", got, tt.wantFinalizer)
 			}
 			if !controllerutil.ContainsFinalizer(updated, "test.opensandbox.io/keep") {
@@ -140,7 +140,7 @@ func TestDoReleaseFinalizesWithoutResyncingHistoricalReleasedPods(t *testing.T) 
 			Name:              "sandbox-a",
 			Namespace:         "default",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{FinalizerPoolAllocation, "test.opensandbox.io/keep"},
+			Finalizers:        []string{finalizerPoolAllocation, "test.opensandbox.io/keep"},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool-1"},
 	}
@@ -162,7 +162,7 @@ func TestDoReleaseFinalizesWithoutResyncingHistoricalReleasedPods(t *testing.T) 
 	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated); err != nil {
 		t.Fatalf("get sandbox: %v", err)
 	}
-	if controllerutil.ContainsFinalizer(updated, FinalizerPoolAllocation) {
+	if controllerutil.ContainsFinalizer(updated, finalizerPoolAllocation) {
 		t.Fatal("pool finalizer was not removed")
 	}
 }
@@ -195,7 +195,7 @@ func TestCleanupTerminatingSandboxesForUnavailablePool(t *testing.T) {
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	err = fakeClient.Get(context.Background(), client.ObjectKeyFromObject(stranded), updated)
 	if err == nil {
-		if controllerutil.ContainsFinalizer(updated, FinalizerPoolAllocation) {
+		if controllerutil.ContainsFinalizer(updated, finalizerPoolAllocation) {
 			t.Fatal("stale pool finalizer was not removed")
 		}
 	} else if !apierrors.IsNotFound(err) {
@@ -322,7 +322,7 @@ func terminatingPoolSandbox(name, poolRef string, deletionTimestamp *metav1.Time
 			Name:              name,
 			Namespace:         "default",
 			DeletionTimestamp: deletionTimestamp,
-			Finalizers:        []string{FinalizerPoolAllocation},
+			Finalizers:        []string{finalizerPoolAllocation},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: poolRef},
 	}
@@ -334,7 +334,7 @@ func assertPoolFinalizerPresent(t *testing.T, c client.Client, sandbox *sandboxv
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated); err != nil {
 		t.Fatalf("get sandbox %s: %v", sandbox.Name, err)
 	}
-	if !controllerutil.ContainsFinalizer(updated, FinalizerPoolAllocation) {
+	if !controllerutil.ContainsFinalizer(updated, finalizerPoolAllocation) {
 		t.Fatalf("sandbox %s unexpectedly lost pool finalizer", sandbox.Name)
 	}
 }

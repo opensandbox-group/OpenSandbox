@@ -23,11 +23,11 @@ import (
 
 type capacityPredicate struct{}
 
-func newCapacityPredicate(_ map[string]interface{}) (Predicate, error) {
+func newCapacityPredicate(_ map[string]interface{}) (predicate, error) {
 	return &capacityPredicate{}, nil
 }
 
-func (p *capacityPredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *capacityPredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	desired := int32(1)
 	if sbx.Spec.Replicas != nil {
 		desired = *sbx.Spec.Replicas

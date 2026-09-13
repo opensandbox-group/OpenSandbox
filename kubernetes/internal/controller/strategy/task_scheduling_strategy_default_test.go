@@ -52,9 +52,9 @@ func TestDefaultTaskSchedulingStrategy_NeedTaskScheduling(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			strategy := NewDefaultTaskSchedulingStrategy(tt.batchSbx)
+			strategy := newDefaultTaskSchedulingStrategy(tt.batchSbx)
 			if got := strategy.NeedTaskScheduling(); got != tt.want {
-				t.Errorf("DefaultTaskSchedulingStrategy.NeedTaskScheduling() = %v, want %v", got, tt.want)
+				t.Errorf("defaultTaskSchedulingStrategy.NeedTaskScheduling() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -196,18 +196,18 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			strategy := NewDefaultTaskSchedulingStrategy(tt.args.batchSbx)
+			strategy := newDefaultTaskSchedulingStrategy(tt.args.batchSbx)
 			got, err := strategy.getTaskSpec(tt.args.idx)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("DefaultTaskSchedulingStrategy.getTaskSpec() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("defaultTaskSchedulingStrategy.getTaskSpec() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			if !tt.wantErr {
 				if got.Name != tt.want.Name {
-					t.Errorf("DefaultTaskSchedulingStrategy.getTaskSpec() name = %v, want %v", got.Name, tt.want.Name)
+					t.Errorf("defaultTaskSchedulingStrategy.getTaskSpec() name = %v, want %v", got.Name, tt.want.Name)
 				}
 				if !reflect.DeepEqual(got.Process, tt.want.Process) {
-					t.Errorf("DefaultTaskSchedulingStrategy.getTaskSpec() spec = %v, want %v", got.Process, tt.want.Process)
+					t.Errorf("defaultTaskSchedulingStrategy.getTaskSpec() spec = %v, want %v", got.Process, tt.want.Process)
 				}
 			}
 		})

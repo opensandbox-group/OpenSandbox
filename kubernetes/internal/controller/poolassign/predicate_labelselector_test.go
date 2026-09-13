@@ -142,9 +142,9 @@ func TestLabelSelectorPredicate(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			got := p.Predicate(ctx, tt.sbx, tt.pool)
+			got := p.predicate(ctx, tt.sbx, tt.pool)
 			if got != tt.expect {
-				t.Errorf("labelSelectorPredicate.Predicate() = %v, want %v", got, tt.expect)
+				t.Errorf("labelSelectorPredicate.predicate() = %v, want %v", got, tt.expect)
 			}
 		})
 	}

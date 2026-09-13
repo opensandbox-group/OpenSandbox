@@ -27,11 +27,11 @@ import (
 
 type imagePredicate struct{}
 
-func newImagePredicate(_ map[string]interface{}) (Predicate, error) {
+func newImagePredicate(_ map[string]interface{}) (predicate, error) {
 	return &imagePredicate{}, nil
 }
 
-func (p *imagePredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *imagePredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	if sbx.Spec.Template == nil {
 		return true
 	}

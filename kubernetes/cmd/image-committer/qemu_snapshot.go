@@ -108,7 +108,7 @@ func runQEMUSnapshot(request snapshot.Request, recovery *snapshotRecovery) error
 		}
 	}
 
-	if _, err := registryimage.Build(
+	if err := registryimage.Build(
 		capture.imageArchive,
 		request.VMStateImageURI,
 		vmStateLoaderPath,

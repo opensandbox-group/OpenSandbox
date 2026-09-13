@@ -22,18 +22,18 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
-// NoopRecycler is a RecycleHandler that does nothing.
+// noopRecycler is a RecycleHandler that does nothing.
 // The pod is immediately available for reallocation after being returned to the pool.
-type NoopRecycler struct{}
+type noopRecycler struct{}
 
-// NewNoopRecycler creates a new NoopRecycler.
-func NewNoopRecycler() *NoopRecycler {
-	return &NoopRecycler{}
+// newNoopRecycler creates a new noopRecycler.
+func newNoopRecycler() *noopRecycler {
+	return &noopRecycler{}
 }
 
 // TryRecycle does nothing and returns Succeeded status immediately.
 // A nil pod (already deleted) is also considered succeeded since there is nothing to do.
-func (n *NoopRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.Pool, pod *corev1.Pod, spec *Spec) (*Status, error) {
+func (n *noopRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.Pool, pod *corev1.Pod, spec *Spec) (*Status, error) {
 	return &Status{
 		State:   StateSucceeded,
 		Message: "noop recycler: no action needed",

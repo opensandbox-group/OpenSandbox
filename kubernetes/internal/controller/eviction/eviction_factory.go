@@ -22,10 +22,10 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
-const LabelEvictionHandler = "pool.opensandbox.io/eviction-handler"
+const labelEvictionHandler = "pool.opensandbox.io/eviction-handler"
 
-func NewEvictionHandler(_ context.Context, c client.Client, pool *sandboxv1alpha1.Pool) EvictionHandler {
-	switch pool.Labels[LabelEvictionHandler] {
+func NewEvictionHandler(_ context.Context, c client.Client, pool *sandboxv1alpha1.Pool) evictionHandler {
+	switch pool.Labels[labelEvictionHandler] {
 	default:
 		return newDefaultEvictionHandler(c)
 	}

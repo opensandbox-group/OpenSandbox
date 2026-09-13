@@ -67,8 +67,8 @@ const (
 )
 
 const (
-	LabelPoolName     = "sandbox.opensandbox.io/pool-name"
-	LabelPoolRevision = "sandbox.opensandbox.io/pool-revision"
+	labelPoolName     = "sandbox.opensandbox.io/pool-name"
+	labelPoolRevision = "sandbox.opensandbox.io/pool-revision"
 )
 
 const (
@@ -80,7 +80,7 @@ const (
 )
 
 var (
-	PoolScaleExpectations       = expectations.NewScaleExpectations()
+	poolScaleExpectations       = expectations.NewScaleExpectations()
 	syncSandboxAllocConcurrency int
 	recyclePodConcurrency       int
 )
@@ -125,7 +125,6 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 	defer func() {
 		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
-	// Fetch the Pool instance
 	pool := &sandboxv1alpha1.Pool{}
 	if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 		if errors.IsNotFound(err) {
@@ -140,7 +139,7 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 
 			// Pool resource is confirmed absent from the API server.
 			controllerKey := req.NamespacedName.String()
-			PoolScaleExpectations.DeleteExpectations(controllerKey)
+			poolScaleExpectations.DeleteExpectations(controllerKey)
 			r.Allocator.ClearPoolAllocation(ctx, req.Namespace, req.Name)
 			poolUnavailable, cleanupErr := r.cleanupTerminatingSandboxesForUnavailablePool(ctx, req.Namespace, req.Name, "")
 			if cleanupErr != nil {
@@ -152,7 +151,6 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 			log.Info("Pool resource not found, cleaned up scale expectations", "pool", controllerKey)
 			return ctrl.Result{}, nil
 		}
-		// Error reading the object - requeue the request
 		log.Error(err, "Failed to get Pool")
 		return ctrl.Result{}, err
 	}
@@ -167,7 +165,7 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		}
 
 		controllerKey := controllerutils.GetControllerKey(pool)
-		PoolScaleExpectations.DeleteExpectations(controllerKey)
+		poolScaleExpectations.DeleteExpectations(controllerKey)
 		r.Allocator.ClearPoolAllocation(ctx, req.Namespace, req.Name)
 		poolUnavailable, cleanupErr := r.cleanupTerminatingSandboxesForUnavailablePool(ctx, req.Namespace, req.Name, pool.UID)
 		if cleanupErr != nil {
@@ -180,7 +178,6 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		return ctrl.Result{}, nil
 	}
 
-	// List all pods of the pool
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList, &client.ListOptions{
 		Namespace:     pool.Namespace,
@@ -195,14 +192,13 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 	for i := range podList.Items {
 		pod := podList.Items[i]
 		podNames[pod.Name] = struct{}{}
-		PoolScaleExpectations.ObserveScale(controllerKey, expectations.Create, pod.Name)
+		poolScaleExpectations.ObserveScale(controllerKey, expectations.Create, pod.Name)
 		if pod.DeletionTimestamp.IsZero() {
 			pods = append(pods, &pod)
 		}
 	}
 	observeDeletedPods(controllerKey, podNames)
 
-	// List all batch sandboxes  ref to the pool
 	batchSandboxList := &sandboxv1alpha1.BatchSandboxList{}
 	if err := r.List(ctx, batchSandboxList, &client.ListOptions{
 		Namespace:     pool.Namespace,
@@ -224,9 +220,9 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 }
 
 func observeDeletedPods(controllerKey string, existingPodNames map[string]struct{}) {
-	for name := range PoolScaleExpectations.GetExpectations(controllerKey)[expectations.Delete] {
+	for name := range poolScaleExpectations.GetExpectations(controllerKey)[expectations.Delete] {
 		if _, exists := existingPodNames[name]; !exists {
-			PoolScaleExpectations.ObserveScale(controllerKey, expectations.Delete, name)
+			poolScaleExpectations.ObserveScale(controllerKey, expectations.Delete, name)
 		}
 	}
 }
@@ -270,7 +266,7 @@ func (r *PoolReconciler) cleanupTerminatingSandboxesForUnavailablePool(ctx conte
 	var errs []error
 	for i := range batchSandboxList.Items {
 		sandbox := &batchSandboxList.Items[i]
-		if sandbox.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(sandbox, FinalizerPoolAllocation) {
+		if sandbox.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(sandbox, finalizerPoolAllocation) {
 			continue
 		}
 		poolUnavailable, removed, err := r.removePoolAllocationFinalizerIfUnavailable(
@@ -317,7 +313,7 @@ func (r *PoolReconciler) removePoolAllocationFinalizerIfUnavailable(
 		}
 		if latestSandbox.Spec.PoolRef != poolKey.Name ||
 			latestSandbox.DeletionTimestamp.IsZero() ||
-			!controllerutil.ContainsFinalizer(latestSandbox, FinalizerPoolAllocation) {
+			!controllerutil.ContainsFinalizer(latestSandbox, finalizerPoolAllocation) {
 			return nil
 		}
 
@@ -328,7 +324,7 @@ func (r *PoolReconciler) removePoolAllocationFinalizerIfUnavailable(
 		}
 
 		base := latestSandbox.DeepCopy()
-		controllerutil.RemoveFinalizer(latestSandbox, FinalizerPoolAllocation)
+		controllerutil.RemoveFinalizer(latestSandbox, finalizerPoolAllocation)
 		if err := r.Patch(ctx, latestSandbox, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
@@ -424,7 +420,7 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 func (r *PoolReconciler) backfillLegacyPoolAllocation(ctx context.Context, pool *sandboxv1alpha1.Pool, sandbox *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, latestAllocation map[string]string) error {
 	if sandbox.Spec.PoolRef == "" || sandbox.Spec.PoolRef != pool.Name ||
 		!sandbox.DeletionTimestamp.IsZero() ||
-		!controllerutil.ContainsFinalizer(sandbox, FinalizerPoolAllocation) {
+		!controllerutil.ContainsFinalizer(sandbox, finalizerPoolAllocation) {
 		return nil
 	}
 
@@ -433,11 +429,11 @@ func (r *PoolReconciler) backfillLegacyPoolAllocation(ctx context.Context, pool 
 		return nil
 	}
 
-	releasePods, valid := validLegacyAllocationRelease(sandbox.GetAnnotations(), AnnoAllocReleaseKey)
+	releasePods, valid := validLegacyAllocationRelease(sandbox.GetAnnotations(), annoAllocReleaseKey)
 	if !valid {
 		return nil
 	}
-	releasedPods, valid := validLegacyAllocationRelease(sandbox.GetAnnotations(), AnnoAllocReleasedKey)
+	releasedPods, valid := validLegacyAllocationRelease(sandbox.GetAnnotations(), annoAllocReleasedKey)
 	if !valid {
 		return nil
 	}
@@ -447,7 +443,7 @@ func (r *PoolReconciler) backfillLegacyPoolAllocation(ctx context.Context, pool 
 
 	poolPods := make(map[string]struct{}, len(pods))
 	for _, pod := range pods {
-		if pod != nil && pod.DeletionTimestamp.IsZero() && pod.Labels[LabelPoolName] == pool.Name {
+		if pod != nil && pod.DeletionTimestamp.IsZero() && pod.Labels[labelPoolName] == pool.Name {
 			poolPods[pod.Name] = struct{}{}
 		}
 	}
@@ -468,7 +464,7 @@ func (r *PoolReconciler) backfillLegacyPoolAllocation(ctx context.Context, pool 
 	}
 	patchData, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
-			"annotations": map[string]string{AnnoAllocStatusKey: string(rawAllocation)},
+			"annotations": map[string]string{annoAllocStatusKey: string(rawAllocation)},
 		},
 	})
 	if err != nil {
@@ -482,33 +478,33 @@ func (r *PoolReconciler) backfillLegacyPoolAllocation(ctx context.Context, pool 
 
 // parseLegacySandboxAllocation accepts only the historical pods-only JSON
 // shape. Explicit or partial newer evidence is never rewritten by migration.
-func parseLegacySandboxAllocation(sandbox *sandboxv1alpha1.BatchSandbox) (SandboxAllocation, bool) {
-	raw, ok := sandbox.GetAnnotations()[AnnoAllocStatusKey]
+func parseLegacySandboxAllocation(sandbox *sandboxv1alpha1.BatchSandbox) (sandboxAllocation, bool) {
+	raw, ok := sandbox.GetAnnotations()[annoAllocStatusKey]
 	if !ok {
-		return SandboxAllocation{}, false
+		return sandboxAllocation{}, false
 	}
 	var payload map[string]stdjson.RawMessage
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
-		return SandboxAllocation{}, false
+		return sandboxAllocation{}, false
 	}
 	if _, exists := payload["poolRef"]; exists {
-		return SandboxAllocation{}, false
+		return sandboxAllocation{}, false
 	}
 	if _, exists := payload["generation"]; exists {
-		return SandboxAllocation{}, false
+		return sandboxAllocation{}, false
 	}
 	if len(payload) != 1 {
-		return SandboxAllocation{}, false
+		return sandboxAllocation{}, false
 	}
 	rawPods, ok := payload["pods"]
 	if !ok {
-		return SandboxAllocation{}, false
+		return sandboxAllocation{}, false
 	}
 	var pods []string
 	if err := json.Unmarshal(rawPods, &pods); err != nil || !validLegacyAllocationPods(pods) {
-		return SandboxAllocation{}, false
+		return sandboxAllocation{}, false
 	}
-	return SandboxAllocation{Pods: pods}, true
+	return sandboxAllocation{Pods: pods}, true
 }
 
 func validLegacyAllocationPods(pods []string) bool {
@@ -587,8 +583,8 @@ func shouldReconcilePoolForBatchSandboxUpdate(e event.UpdateEvent) bool {
 	if newObj.Spec.PoolRef == "" {
 		return false
 	}
-	oldVal := oldObj.Annotations[AnnoAllocReleaseKey]
-	newVal := newObj.Annotations[AnnoAllocReleaseKey]
+	oldVal := oldObj.Annotations[annoAllocReleaseKey]
+	newVal := newObj.Annotations[annoAllocReleaseKey]
 	if oldVal != newVal {
 		return true
 	}
@@ -607,7 +603,6 @@ func shouldReconcilePoolForBatchSandboxUpdate(e event.UpdateEvent) bool {
 }
 
 // SetupWithManager sets up the controller with the Manager.
-// Todo pod deletion expectations
 func (r *PoolReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
@@ -866,7 +861,7 @@ func (r *PoolReconciler) doRelease(ctx context.Context, pool *sandboxv1alpha1.Po
 	succeedMap, toDeletePods, err := r.doRecycle(ctx, pool, batchSandboxes, pods, toRelease)
 	if err != nil {
 		log.Error(err, "Some errors occurred during recycle")
-		r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedRecyclePod, "Failed to recycle some pods: %v", err)
+		r.Recorder.Eventf(pool, corev1.EventTypeWarning, eventReasonFailedRecyclePod, "Failed to recycle some pods: %v", err)
 	}
 
 	// Emit recycle success events.
@@ -875,7 +870,7 @@ func (r *PoolReconciler) doRelease(ctx context.Context, pool *sandboxv1alpha1.Po
 		allRecycled = append(allRecycled, recycledPods...)
 	}
 	if len(allRecycled) > 0 {
-		r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonPodRecycled, "Recycled %d pod(s): %v", len(allRecycled), allRecycled)
+		r.Recorder.Eventf(pool, corev1.EventTypeNormal, eventReasonPodRecycled, "Recycled %d pod(s): %v", len(allRecycled), allRecycled)
 	}
 
 	// 2. Compute latest released pods per sandbox (merge current + recycle-succeeded).
@@ -915,7 +910,7 @@ func (r *PoolReconciler) finalizeTerminatingSandboxes(ctx context.Context, batch
 	var errs []error
 	for _, sandbox := range batchSandboxes {
 		if sandbox.DeletionTimestamp.IsZero() ||
-			!controllerutil.ContainsFinalizer(sandbox, FinalizerPoolAllocation) {
+			!controllerutil.ContainsFinalizer(sandbox, finalizerPoolAllocation) {
 			continue
 		}
 
@@ -946,7 +941,7 @@ func (r *PoolReconciler) finalizeTerminatingSandboxes(ctx context.Context, batch
 			continue
 		}
 
-		if err := utils.UpdateFinalizer(r.Client, sandbox, utils.RemoveFinalizerOpType, FinalizerPoolAllocation); err != nil {
+		if err := utils.UpdateFinalizer(r.Client, sandbox, utils.RemoveFinalizerOpType, finalizerPoolAllocation); err != nil {
 			if errors.IsNotFound(err) {
 				continue
 			}
@@ -955,7 +950,7 @@ func (r *PoolReconciler) finalizeTerminatingSandboxes(ctx context.Context, batch
 			errs = append(errs, err)
 			continue
 		}
-		controllerutil.RemoveFinalizer(sandbox, FinalizerPoolAllocation)
+		controllerutil.RemoveFinalizer(sandbox, finalizerPoolAllocation)
 		log.Info("Finalized terminating sandbox with no pending pool allocations", "sandbox", sandbox.Name)
 	}
 	return gerrors.Join(errs...)
@@ -993,17 +988,17 @@ func (r *PoolReconciler) getLatestReleased(ctx context.Context, batchSandboxes [
 	return toSyncMap, orphanPods
 }
 
-func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alpha1.Pool, batchSandboxes []*sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod) (*ScheduleResult, error) {
+func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alpha1.Pool, batchSandboxes []*sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod) (*scheduleResult, error) {
 	log := logf.FromContext(ctx)
 	// 1. Compute scheduling actions.
-	spec := &AllocSpec{
+	spec := &allocSpec{
 		Sandboxes: batchSandboxes,
 		Pool:      pool,
 		Pods:      pods,
 	}
 	allocAction, err := r.Allocator.Schedule(ctx, spec)
 	if err != nil {
-		r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonAllocationFailed, "Failed to schedule sandboxes: %v", err)
+		r.Recorder.Eventf(pool, corev1.EventTypeWarning, eventReasonAllocationFailed, "Failed to schedule sandboxes: %v", err)
 		return nil, err
 	}
 	log.Info("Allocate action", "pool", pool.Name, "toAllocate", allocAction.ToAllocate, "toRelease", allocAction.ToRelease)
@@ -1024,10 +1019,10 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 		if len(allocPods) == 0 {
 			continue
 		}
-		r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonAllocationSucceeded,
+		r.Recorder.Eventf(pool, corev1.EventTypeNormal, eventReasonAllocationSucceeded,
 			"Allocated %d pod(s) to sandbox %s: %v", len(allocPods), sandboxName, allocPods)
 		if sbx, ok := sandboxByName[sandboxName]; ok {
-			r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventReasonScheduled,
+			r.Recorder.Eventf(sbx, corev1.EventTypeNormal, eventReasonScheduled,
 				"Successfully assigned %d pod(s) from pool %s: %v", len(allocPods), pool.Name, allocPods)
 		}
 	}
@@ -1049,7 +1044,7 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 			idlePods = append(idlePods, pod.Name)
 		}
 	}
-	result := &ScheduleResult{
+	result := &scheduleResult{
 		LatestAllocation: latestAllocation,
 		IdlePods:         idlePods,
 		ToDelete:         toDeletePods,
@@ -1060,17 +1055,17 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	return result, nil
 }
 
-func (r *PoolReconciler) updatePool(ctx context.Context, pool *sandboxv1alpha1.Pool, pods []*corev1.Pod, idlePods []string) (*UpdateResult, error) {
+func (r *PoolReconciler) updatePool(ctx context.Context, pool *sandboxv1alpha1.Pool, pods []*corev1.Pod, idlePods []string) (*updateResult, error) {
 	updateRevision, err := r.calculateRevision(pool)
 	if err != nil {
 		return nil, err
 	}
-	strategy := NewPoolUpdateStrategy(pool)
+	strategy := newPoolUpdateStrategy(pool)
 	result := strategy.Compute(ctx, updateRevision, pods, idlePods)
 	result.UpdateRevision = updateRevision
 
 	if len(result.ToDeletePods) > 0 {
-		r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonPodUpdated,
+		r.Recorder.Eventf(pool, corev1.EventTypeNormal, eventReasonPodUpdated,
 			"Rolling update: deleting %d pod(s) for revision %s: %v", len(result.ToDeletePods), updateRevision, result.ToDeletePods)
 	}
 
@@ -1087,7 +1082,7 @@ type scaleArgs struct {
 	toDeletePods   []string
 }
 
-type ScheduleResult struct {
+type scheduleResult struct {
 	// LatestAllocation is the most recent pod-to-sandbox allocation map.
 	LatestAllocation map[string]string
 	// IdlePods contains pods that are not currently allocated to any sandbox.
@@ -1099,7 +1094,7 @@ type ScheduleResult struct {
 	SupplyCnt int32
 }
 
-type UpdateResult struct {
+type updateResult struct {
 	UpdateRevision string
 	IdlePods       []string
 	ToDeletePods   []string
@@ -1111,11 +1106,11 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	log := logf.FromContext(ctx)
 	errs := make([]error, 0)
 	pods := args.pods
-	if satisfied, unsatisfiedDuration, dirtyPods := PoolScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(pool)); !satisfied {
+	if satisfied, unsatisfiedDuration, dirtyPods := poolScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(pool)); !satisfied {
 		if unsatisfiedDuration >= expectations.ExpectationTimeout {
 			log.Info("Pool scale expectations timed out, clearing stale expectations",
 				"unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
-			PoolScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(pool))
+			poolScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(pool))
 		} else {
 			log.Info("Pool scale is not ready, requeue", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
 			return true, nil
@@ -1178,17 +1173,17 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 		for _, pod := range podsToDelete {
 			log.Info("Deleting pool pod", "pool", pool.Name, "pod", pod.Name)
 			controllerKey := controllerutils.GetControllerKey(pool)
-			PoolScaleExpectations.ExpectScale(controllerKey, expectations.Delete, pod.Name)
+			poolScaleExpectations.ExpectScale(controllerKey, expectations.Delete, pod.Name)
 			if err := r.Delete(ctx, pod); err != nil {
-				PoolScaleExpectations.ObserveScale(controllerKey, expectations.Delete, pod.Name)
+				poolScaleExpectations.ObserveScale(controllerKey, expectations.Delete, pod.Name)
 				if errors.IsNotFound(err) {
 					continue
 				}
 				log.Error(err, "Failed to delete pool pod", "pod", pod.Name)
-				r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedDelete, "Failed to delete pool pod %s: %v", pod.Name, err)
+				r.Recorder.Eventf(pool, corev1.EventTypeWarning, eventReasonFailedDelete, "Failed to delete pool pod %s: %v", pod.Name, err)
 				errs = append(errs, err)
 			} else {
-				r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonSuccessfulDelete, "Deleted pool pod %s (scale-down)", pod.Name)
+				r.Recorder.Eventf(pool, corev1.EventTypeNormal, eventReasonSuccessfulDelete, "Deleted pool pod %s (scale-down)", pod.Name)
 			}
 		}
 	}
@@ -1209,7 +1204,7 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 	}
 	updatedCnt := int32(0)
 	for _, pod := range pods {
-		if pod.Labels[LabelPoolRevision] == updateRevision {
+		if pod.Labels[labelPoolRevision] == updateRevision {
 			updatedCnt++
 		}
 	}
@@ -1349,18 +1344,18 @@ func (r *PoolReconciler) createPoolPod(ctx context.Context, pool *sandboxv1alpha
 	pod.Namespace = pool.Namespace
 	pod.Name = ""
 	pod.GenerateName = pool.Name + "-"
-	pod.Labels[LabelPoolName] = pool.Name
-	pod.Labels[LabelPoolRevision] = updateRevision
+	pod.Labels[labelPoolName] = pool.Name
+	pod.Labels[labelPoolRevision] = updateRevision
 	if err := ctrl.SetControllerReference(pool, pod, r.Scheme); err != nil {
 		return err
 	}
 	if err := r.Create(ctx, pod); err != nil {
-		r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedCreate, "Failed to create pool pod: %v", err)
+		r.Recorder.Eventf(pool, corev1.EventTypeWarning, eventReasonFailedCreate, "Failed to create pool pod: %v", err)
 		return err
 	}
-	PoolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Create, pod.Name)
+	poolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Create, pod.Name)
 	log.Info("Created pool pod", "pool", pool.Name, "pod", pod.Name, "revision", updateRevision)
-	r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonSuccessfulCreate, "Created pool pod: %v", pod.Name)
+	r.Recorder.Eventf(pool, corev1.EventTypeNormal, eventReasonSuccessfulCreate, "Created pool pod: %v", pod.Name)
 	return nil
 }
 
@@ -1398,7 +1393,7 @@ func (r *PoolReconciler) handleEviction(ctx context.Context, pool *sandboxv1alph
 			log.Error(err, "Failed to evict pod", "pod", pod.Name)
 			evictionErrs = append(evictionErrs, fmt.Errorf("failed to evict pod %s: %w", pod.Name, err))
 		} else {
-			r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonPodEvicted, "Evicted idle pod: %s", pod.Name)
+			r.Recorder.Eventf(pool, corev1.EventTypeNormal, eventReasonPodEvicted, "Evicted idle pod: %s", pod.Name)
 		}
 	}
 

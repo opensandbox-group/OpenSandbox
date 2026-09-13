@@ -19,21 +19,21 @@ import (
 	poolassign "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/poolassign"
 )
 
-type DefaultPoolStrategy struct {
+type defaultPoolStrategy struct {
 	*sandboxv1alpha1.BatchSandbox
 }
 
-func NewDefaultPoolStrategy(batchSandbox *sandboxv1alpha1.BatchSandbox) *DefaultPoolStrategy {
-	return &DefaultPoolStrategy{
+func newDefaultPoolStrategy(batchSandbox *sandboxv1alpha1.BatchSandbox) *defaultPoolStrategy {
+	return &defaultPoolStrategy{
 		BatchSandbox: batchSandbox,
 	}
 }
 
-func (s *DefaultPoolStrategy) IsPooledMode() bool {
+func (s *defaultPoolStrategy) IsPooledMode() bool {
 	return s.Spec.PoolRef != ""
 }
 
-func (s *DefaultPoolStrategy) AssignProfile() string {
+func (s *defaultPoolStrategy) AssignProfile() string {
 	if s.Spec.PoolRef == "*" {
 		return poolassign.DefaultProfileName
 	}

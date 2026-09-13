@@ -30,31 +30,30 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
-// ErrorResponse represents a standard error response
-type ErrorResponse struct {
+type errorResponse struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
 
-type Handler struct {
+type handler struct {
 	manager manager.TaskManager
 	config  *config.Config
 }
 
-func NewHandler(mgr manager.TaskManager, cfg *config.Config) *Handler {
+func NewHandler(mgr manager.TaskManager, cfg *config.Config) *handler {
 	if mgr == nil {
 		klog.Warning("TaskManager is nil, handler may not work properly")
 	}
 	if cfg == nil {
 		klog.Warning("Config is nil, handler may not work properly")
 	}
-	return &Handler{
+	return &handler{
 		manager: mgr,
 		config:  cfg,
 	}
 }
 
-func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
+func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 	if h.manager == nil {
 		writeError(w, http.StatusInternalServerError, "task manager not initialized")
 		return
@@ -93,7 +92,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	klog.InfoS("task created via API", "name", apiTask.Name)
 }
 
-func (h *Handler) SyncTasks(w http.ResponseWriter, r *http.Request) {
+func (h *handler) syncTasks(w http.ResponseWriter, r *http.Request) {
 	if h.manager == nil {
 		writeError(w, http.StatusInternalServerError, "task manager not initialized")
 		return
@@ -136,13 +135,12 @@ func (h *Handler) SyncTasks(w http.ResponseWriter, r *http.Request) {
 	klog.V(1).InfoS("tasks synced via API", "count", len(response))
 }
 
-func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
+func (h *handler) getTask(w http.ResponseWriter, r *http.Request) {
 	if h.manager == nil {
 		writeError(w, http.StatusInternalServerError, "task manager not initialized")
 		return
 	}
 
-	// Extract task ID from path
 	taskID := r.PathValue("id")
 	if taskID == "" {
 		writeError(w, http.StatusBadRequest, "task id is required")
@@ -162,7 +160,7 @@ func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
+func (h *handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	if h.manager == nil {
 		writeError(w, http.StatusInternalServerError, "task manager not initialized")
 		return
@@ -186,7 +184,7 @@ func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 	response := map[string]string{
 		"status": "healthy",
 	}
@@ -194,13 +192,12 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
+func (h *handler) deleteTask(w http.ResponseWriter, r *http.Request) {
 	if h.manager == nil {
 		writeError(w, http.StatusInternalServerError, "task manager not initialized")
 		return
 	}
 
-	// Extract task ID from path
 	taskID := r.PathValue("id")
 	if taskID == "" {
 		writeError(w, http.StatusBadRequest, "task id is required")
@@ -221,13 +218,13 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 func writeError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(ErrorResponse{
+	json.NewEncoder(w).Encode(errorResponse{
 		Code:    http.StatusText(code),
 		Message: message,
 	})
 }
 
-func (h *Handler) convertAPIToInternalTask(apiTask *api.Task) *types.Task {
+func (h *handler) convertAPIToInternalTask(apiTask *api.Task) *types.Task {
 	if apiTask == nil {
 		return nil
 	}

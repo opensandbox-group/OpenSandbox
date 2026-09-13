@@ -40,7 +40,7 @@ func TestBackfillLegacyPoolAllocation(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      "pool-pod",
 		Namespace: "default",
-		Labels:    map[string]string{LabelPoolName: pool.Name},
+		Labels:    map[string]string{labelPoolName: pool.Name},
 	}}
 
 	t.Run("success stamps exact record and is idempotent", func(t *testing.T) {
@@ -52,7 +52,7 @@ func TestBackfillLegacyPoolAllocation(t *testing.T) {
 		}
 		updated := getBackfillSandbox(t, ctx, r, sandbox)
 		allocation := parseBackfillAllocation(t, updated)
-		want := SandboxAllocation{Pods: []string{"pool-pod"}, PoolRef: pool.Name, Generation: sandbox.Generation}
+		want := sandboxAllocation{Pods: []string{"pool-pod"}, PoolRef: pool.Name, Generation: sandbox.Generation}
 		if !reflect.DeepEqual(allocation, want) {
 			t.Fatalf("allocation = %#v, want %#v", allocation, want)
 		}
@@ -84,56 +84,56 @@ func TestBackfillLegacyPoolAllocation(t *testing.T) {
 		{
 			name: "release intersects allocation",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleaseKey] = `{"pods":["pool-pod"]}`
+				sandbox.Annotations[annoAllocReleaseKey] = `{"pods":["pool-pod"]}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "malformed release",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleaseKey] = `{`
+				sandbox.Annotations[annoAllocReleaseKey] = `{`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "release missing pods",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleaseKey] = `{}`
+				sandbox.Annotations[annoAllocReleaseKey] = `{}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "release null pods",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleaseKey] = `{"pods":null}`
+				sandbox.Annotations[annoAllocReleaseKey] = `{"pods":null}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "release duplicate pod",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleaseKey] = `{"pods":["released-pod","released-pod"]}`
+				sandbox.Annotations[annoAllocReleaseKey] = `{"pods":["released-pod","released-pod"]}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "malformed released",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleasedKey] = `{`
+				sandbox.Annotations[annoAllocReleasedKey] = `{`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "released missing pods",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleasedKey] = `{}`
+				sandbox.Annotations[annoAllocReleasedKey] = `{}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "released invalid pod",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocReleasedKey] = `{"pods":["INVALID_POD"]}`
+				sandbox.Annotations[annoAllocReleasedKey] = `{"pods":["INVALID_POD"]}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
@@ -156,28 +156,28 @@ func TestBackfillLegacyPoolAllocation(t *testing.T) {
 		{
 			name: "nonempty mismatched pool ref",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocStatusKey] = `{"pods":["pool-pod"],"poolRef":"other-pool","generation":1}`
+				sandbox.Annotations[annoAllocStatusKey] = `{"pods":["pool-pod"],"poolRef":"other-pool","generation":1}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "explicit empty pool ref is not legacy",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocStatusKey] = `{"pods":["pool-pod"],"poolRef":""}`
+				sandbox.Annotations[annoAllocStatusKey] = `{"pods":["pool-pod"],"poolRef":""}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "explicit generation is not legacy",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocStatusKey] = `{"pods":["pool-pod"],"generation":0}`
+				sandbox.Annotations[annoAllocStatusKey] = `{"pods":["pool-pod"],"generation":0}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
 		{
 			name: "extra allocation field is not legacy",
 			mutate: func(sandbox *sandboxv1alpha1.BatchSandbox) {
-				sandbox.Annotations[AnnoAllocStatusKey] = `{"pods":["pool-pod"],"unexpected":"value"}`
+				sandbox.Annotations[annoAllocStatusKey] = `{"pods":["pool-pod"],"unexpected":"value"}`
 			},
 			pods: []*corev1.Pod{pod},
 		},
@@ -199,7 +199,7 @@ func TestBackfillLegacyPoolAllocation(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(sandbox)
 			}
-			original := sandbox.Annotations[AnnoAllocStatusKey]
+			original := sandbox.Annotations[annoAllocStatusKey]
 			r := newBackfillTestReconciler(t, sandbox)
 
 			latestAllocation := tt.latestAllocation
@@ -210,7 +210,7 @@ func TestBackfillLegacyPoolAllocation(t *testing.T) {
 				t.Fatalf("backfillLegacyPoolAllocation() error = %v", err)
 			}
 			updated := getBackfillSandbox(t, ctx, r, sandbox)
-			if got := updated.Annotations[AnnoAllocStatusKey]; got != original {
+			if got := updated.Annotations[annoAllocStatusKey]; got != original {
 				t.Fatalf("alloc-status = %q, want unchanged %q", got, original)
 			}
 		})
@@ -229,12 +229,12 @@ func TestReconcilePoolRequeuesAfterBackfillPatchFailure(t *testing.T) {
 	allocatedPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      "pool-pod",
 		Namespace: "default",
-		Labels:    map[string]string{LabelPoolName: pool.Name},
+		Labels:    map[string]string{labelPoolName: pool.Name},
 	}}
 	idlePod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      "idle-pod",
 		Namespace: "default",
-		Labels:    map[string]string{LabelPoolName: pool.Name},
+		Labels:    map[string]string{labelPoolName: pool.Name},
 	}}
 
 	r := newBackfillTestReconciler(t, pool, sandbox, allocatedPod, idlePod)
@@ -276,8 +276,8 @@ func newLegacyAllocationSandbox(name, poolRef string) *sandboxv1alpha1.BatchSand
 			Name:        name,
 			Namespace:   "default",
 			Generation:  7,
-			Finalizers:  []string{FinalizerPoolAllocation},
-			Annotations: map[string]string{AnnoAllocStatusKey: `{"pods":["pool-pod"]}`},
+			Finalizers:  []string{finalizerPoolAllocation},
+			Annotations: map[string]string{annoAllocStatusKey: `{"pods":["pool-pod"]}`},
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: poolRef},
 	}
@@ -308,10 +308,10 @@ func getBackfillSandbox(t *testing.T, ctx context.Context, r *PoolReconciler, sa
 	return updated
 }
 
-func parseBackfillAllocation(t *testing.T, sandbox *sandboxv1alpha1.BatchSandbox) SandboxAllocation {
+func parseBackfillAllocation(t *testing.T, sandbox *sandboxv1alpha1.BatchSandbox) sandboxAllocation {
 	t.Helper()
-	allocation := SandboxAllocation{}
-	if err := json.Unmarshal([]byte(sandbox.Annotations[AnnoAllocStatusKey]), &allocation); err != nil {
+	allocation := sandboxAllocation{}
+	if err := json.Unmarshal([]byte(sandbox.Annotations[annoAllocStatusKey]), &allocation); err != nil {
 		t.Fatal(err)
 	}
 	return allocation
@@ -335,7 +335,7 @@ type backfillReconcileAllocator struct {
 	latestAllocation map[string]string
 }
 
-func (a *backfillReconcileAllocator) Schedule(context.Context, *AllocSpec) (*algorithm.AllocAction, error) {
+func (a *backfillReconcileAllocator) Schedule(context.Context, *allocSpec) (*algorithm.AllocAction, error) {
 	return &algorithm.AllocAction{}, nil
 }
 

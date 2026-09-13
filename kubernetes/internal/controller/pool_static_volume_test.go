@@ -84,7 +84,7 @@ func TestCreatePoolPodPreservesStaticPVC(t *testing.T) {
 			},
 		},
 	}
-	defer PoolScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(pool))
+	defer poolScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(pool))
 
 	r := &PoolReconciler{
 		Client:   fakeClient,

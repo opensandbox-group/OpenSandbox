@@ -108,7 +108,6 @@ var _ = BeforeSuite(func() {
 		Allocator:  NewDefaultAllocator(k8sManager.GetClient()),
 		RestConfig: cfg,
 	}).SetupWithManager(k8sManager, 128)).Should(Succeed())
-	// TODO more reconciler goes HERE
 
 	By("try to start manager")
 	mgrStopped = startTestManager(ctx, k8sManager)

@@ -314,7 +314,7 @@ func TestProcessExecutor_EnvInheritance(t *testing.T) {
 	assert.Equal(t, types.TaskStateSucceeded, status.State)
 
 	// 5. Verify Output
-	stdoutPath := filepath.Join(taskDir, StdoutFile)
+	stdoutPath := filepath.Join(taskDir, stdoutFile)
 	output, err := os.ReadFile(stdoutPath)
 	assert.Nil(t, err)
 	outputStr := string(output)
@@ -479,7 +479,7 @@ func TestProcessExecutor_PreStartHookFailure(t *testing.T) {
 	assert.Equal(t, types.ReasonPreStartHookFailed, startErr.Reason)
 
 	// Main process should not have started (no pid file)
-	pidPath := filepath.Join(taskDir, PidFile)
+	pidPath := filepath.Join(taskDir, pidFile)
 	_, err = os.ReadFile(pidPath)
 	assert.NotNil(t, err, "PID file should not exist when preStart hook fails")
 }
@@ -573,9 +573,9 @@ func TestProcessExecutor_StopSkipsStalePIDWhenExitMarkerExists(t *testing.T) {
 	taskDir, err := utils.SafeJoin(pExecutor.rootDir, task.Name)
 	assert.NoError(t, err)
 	assert.NoError(t, os.MkdirAll(taskDir, 0755))
-	assert.NoError(t, os.WriteFile(filepath.Join(taskDir, ExitFile), []byte("0"), 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(taskDir, exitFile), []byte("0"), 0644))
 	assert.NoError(t, os.WriteFile(
-		filepath.Join(taskDir, PidFile),
+		filepath.Join(taskDir, pidFile),
 		[]byte(strconv.Itoa(unrelated.Process.Pid)),
 		0644,
 	))

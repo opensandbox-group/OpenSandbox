@@ -152,7 +152,7 @@ func TestNewEvictionHandler(t *testing.T) {
 		pool := &sandboxv1alpha1.Pool{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "pool-2",
-				Labels: map[string]string{LabelEvictionHandler: "unknown-handler"},
+				Labels: map[string]string{labelEvictionHandler: "unknown-handler"},
 			},
 		}
 		h := NewEvictionHandler(ctx, c, pool)

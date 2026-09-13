@@ -20,7 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-type EvictionHandler interface {
+type evictionHandler interface {
 	NeedsEviction(pod *corev1.Pod) bool
 	Evict(ctx context.Context, pod *corev1.Pod) error
 }

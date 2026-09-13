@@ -27,7 +27,7 @@ type defaultEvictionHandler struct {
 	client client.Client
 }
 
-func newDefaultEvictionHandler(c client.Client) EvictionHandler {
+func newDefaultEvictionHandler(c client.Client) evictionHandler {
 	return &defaultEvictionHandler{client: c}
 }
 
