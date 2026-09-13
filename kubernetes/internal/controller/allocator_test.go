@@ -237,6 +237,35 @@ func TestSchedule(t *testing.T) {
 			},
 		},
 		{
+			// Regression test for issue #954: when a pod recorded in alloc-status is no longer
+			// present in the pool's live pod set (e.g. manual delete, node eviction, OOM kill),
+			// getSandboxRequest must exclude it from the effective-allocation count so that
+			// supplement > 0 and the pool schedules a replacement.
+			name: "allocated pod deleted externally - supplement triggers replacement",
+			spec: &AllocSpec{
+				// pool has one new ready pod; the previously-allocated pod1 is gone
+				Pods: []*corev1.Pod{
+					{ObjectMeta: metav1.ObjectMeta{Name: "pod2"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}},
+				},
+				Pool: &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool1"}},
+				Sandboxes: []*sandboxv1alpha1.BatchSandbox{
+					{ObjectMeta: metav1.ObjectMeta{Name: "sbx1"}, Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: &replica1}},
+				},
+			},
+			// pool store still shows pod1 allocated to sbx1 (not yet cleaned up)
+			poolAlloc:     &PoolAllocation{PodAllocation: map[string]string{"pod1": "sbx1"}},
+			// annotation still records pod1 as allocated
+			sandboxAllocs: map[string]*SandboxAllocation{"sbx1": {Pods: []string{"pod1"}}},
+			releases:      map[string]*AllocationRelease{"sbx1": {Pods: []string{}}},
+			released:      map[string]*AllocationReleased{"sbx1": {Pods: []string{}}},
+			// pod1 absent from live pod set → effectiveAllocated=0 → supplement=1 → pod2 allocated
+			wantAction: &algorithm.AllocAction{
+				ToAllocate:    map[string][]string{"sbx1": {"pod2"}},
+				ToRelease:     map[string][]string{},
+				PodSupplement: 0,
+			},
+		},
+		{
 			name: "orphan sandbox - pods in store but sandbox no longer in spec",
 			spec: &AllocSpec{
 				Pods: []*corev1.Pod{
