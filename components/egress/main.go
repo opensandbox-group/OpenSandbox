@@ -33,6 +33,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/startup"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
@@ -91,10 +92,44 @@ func main() {
 	allowIPs := allowIps()
 	mode := parseMode()
 	log.Infof("enforcement mode: %s", mode)
-	nftMgr := createNftManager(mode)
+
+	// The chained upstream proxy only takes effect with transparent mitmproxy;
+	// parse it here so nft can scope the infra exception and DNS can exempt the
+	// proxy hostname from sandbox policy without feeding the allow sets.
+	var upstreamSpec *mitmproxy.UpstreamProxySpec
+	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
+		spec, err := mitmproxy.UpstreamProxyFromEnv()
+		if err != nil {
+			log.Fatalf("invalid upstream proxy configuration: %v", err)
+		}
+		upstreamSpec = spec
+	}
+	nftMgr, err := createNftManager(mode, upstreamSpec)
+	if err != nil {
+		log.Fatalf("nftables options: %v", err)
+	}
 	proxy, err := dnsproxy.New(initialRules, "", alwaysDeny, alwaysAllow)
 	if err != nil {
 		log.Fatalf("failed to init dns proxy: %v", err)
+	}
+	if upstreamSpec != nil {
+		if _, err := netip.ParseAddr(upstreamSpec.Host); err != nil {
+			// Hostname endpoint: mitmdump resolves it through the dnsproxy, so
+			// exempt it from sandbox policy and feed answers to the uid-scoped
+			// nft set instead of the sandbox allow sets.
+			host := upstreamSpec.Host
+			proxy.SetInfraDomain(host, func(domain string, ips []nftables.ResolvedIP) {
+				if nftMgr == nil {
+					return
+				}
+				addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil {
+					log.Warnf("upstream proxy: nft update for %q failed: %v", domain, err)
+				}
+			})
+			log.Infof("upstream proxy: registered infra DNS domain %q (uid-scoped nft only)", host)
+		}
 	}
 	if err := proxy.Start(ctx); err != nil {
 		log.Fatalf("failed to start dns proxy: %v", err)

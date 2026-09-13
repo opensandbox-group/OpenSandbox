@@ -181,6 +181,8 @@ On extra ports, mitmproxy still decrypts and logs traffic normally, but the Cred
 mitmproxy can truncate the tail of large streamed bodies (e.g. LLM SSE events > ~1 MB) when the upstream serves over TLS HTTP/1.1 and closes the connection right after the body. See [Egress: SSE Truncation (mitmproxy)](/components/egress-mitmproxy-sse-truncation) for root cause, reproduction, and status.
 ::: 
 
+**Chained upstream proxy**: setting `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` to `http://host[:port]` or `https://host[:port]` on the egress container chains all mitmproxy-handled egress through that proxy via `CONNECT`, optionally with `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH` (a complete `Proxy-Authorization` header value). The upstream `CONNECT` authority is the SNI/Host-derived FQDN when known. This is fail closed: pass-through flows that cannot be chained (no-SNI, `ignore_hosts`/`tcp_hosts`/`udp_hosts` matches, UDP) are refused, and a malformed URL fails startup. Under `dns+nft` the proxy endpoint is reachable only to the mitmproxy process (a UID+IP+port-scoped nft exception); the proxy's address is never added to the sandbox allow sets, and a hostname endpoint resolves outside sandbox DNS policy without feeding the allow sets.
+
 ### Credential Vault
 
 The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer. Injection happens when request headers are read, so it applies to request bodies of any size, including large bodies that mitmproxy streams upstream.

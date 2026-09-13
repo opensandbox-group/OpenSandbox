@@ -59,6 +59,11 @@ type Proxy struct {
 
 	// When set, called synchronously for allowed A/AAAA answers (dns+nft: program nft before client connects).
 	onResolved func(domain string, ips []nftables.ResolvedIP)
+
+	// infraDomains maps normalized infra FQDNs to their resolved-IP callback.
+	// These names resolve without sandbox policy evaluation and bypass
+	// onResolved, so their IPs never land in the sandbox allow sets.
+	infraDomains map[string]func(domain string, ips []nftables.ResolvedIP)
 	// Optional: async fan-out for denied lookups (e.g. webhook).
 	blockedBroadcaster *events.Broadcaster
 
@@ -179,6 +184,16 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	domain := q.Name
 	host := normalizeDNSHost(domain)
 
+	// Infrastructure domains (e.g. a configured upstream CONNECT proxy) resolve
+	// outside the sandbox policy and never populate the sandbox allow sets —
+	// their answers go to the infra callback, which is UID-scoped in nft. An
+	// infra name stays resolvable even under a deny-all policy; reachability
+	// remains gated by the uid-scoped nft rule, not by DNS secrecy.
+	if cb := p.infraCallback(host); cb != nil {
+		p.forwardAndReply(w, r, domain, host, cb)
+		return
+	}
+
 	policyToEval := p.currentPolicy()
 	notifyResolved := p.onResolved
 	if sel := p.queryPolicySelector; sel != nil {
@@ -216,6 +231,13 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	p.forwardAndReply(w, r, domain, host, notifyResolved)
+}
+
+// forwardAndReply resolves r upstream and answers w; a successful answer feeds
+// notify (infra callback or the policy's resolved-IP callback) before the
+// reply is written, so nft programming lands before the client can dial.
+func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, notify func(string, []nftables.ResolvedIP)) {
 	start := time.Now()
 	resp, failure, err := p.forward(r)
 	elapsed := time.Since(start).Seconds()
@@ -232,7 +254,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if !p.shouldSkipOutboundLog(host) {
 		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
 	}
-	p.maybeNotifyResolvedWith(domain, resp, notifyResolved)
+	p.maybeNotifyResolvedWith(domain, resp, notify)
 	p.writeReply(w, r, resp, telemetry.DNSReplyStageAnswer)
 }
 
@@ -447,6 +469,30 @@ func (p *Proxy) CurrentPolicy() *policy.NetworkPolicy {
 	defer p.policyMu.RUnlock()
 
 	return p.userPolicy
+}
+
+// SetInfraDomain registers an infrastructure FQDN that resolves without
+// sandbox policy evaluation. Answers are reported to onResolved (UID-scoped
+// nft programming) instead of the sandbox dyn-allow sets. Register before
+// Start; onResolved may be nil when only reachability — not set updates — is
+// needed.
+func (p *Proxy) SetInfraDomain(domain string, onResolved func(domain string, ips []nftables.ResolvedIP)) {
+	host := normalizeDNSHost(domain)
+	if host == "" {
+		return
+	}
+	if p.infraDomains == nil {
+		p.infraDomains = make(map[string]func(string, []nftables.ResolvedIP))
+	}
+	p.infraDomains[host] = onResolved
+}
+
+// infraCallback returns the infra-domain callback for host, or nil.
+func (p *Proxy) infraCallback(host string) func(string, []nftables.ResolvedIP) {
+	if p.infraDomains == nil {
+		return nil
+	}
+	return p.infraDomains[host]
 }
 
 // SetOnResolved registers the dns+nft path (nil in dns-only). Invoked on the same goroutine as serveDNS, before WriteMsg.
