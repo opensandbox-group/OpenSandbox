@@ -122,16 +122,35 @@ class NetworkRule(BaseModel):
     action: Literal["allow", "deny"] = Field(
         description='Whether to allow or deny matching targets. One of "allow" or "deny".'
     )
-    target: str = Field(
-        description='FQDN or wildcard domain (e.g., "example.com", "*.example.com").'
+    target: str | None = Field(
+        default=None,
+        description=(
+            'FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP address, or CIDR. '
+            "May be omitted when `ports` is set; otherwise required."
+        ),
+    )
+    ports: list[int] | None = Field(
+        default=None,
+        max_length=256,
+        description=(
+            "Restricts this rule to specific TCP destination ports (1-65535). Omitted target "
+            "with ports set applies to all destinations; a domain target with ports is "
+            "rejected. TCP only, max 256 ports per rule."
+        ),
     )
 
     @field_validator("target")
     @classmethod
-    def target_must_not_be_empty(cls, v: str) -> str:
-        if not v.strip():
+    def target_must_not_be_blank_string(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
             raise ValueError("Network rule target cannot be blank")
         return v
+
+    @model_validator(mode="after")
+    def target_or_ports_required(self) -> "NetworkRule":
+        if self.target is None and not self.ports:
+            raise ValueError("Network rule requires target, ports, or both")
+        return self
 
 
 class NetworkPolicy(BaseModel):

@@ -107,10 +107,21 @@ public class NetworkRule
     public required NetworkRuleAction Action { get; set; }
 
     /// <summary>
-    /// Gets or sets the FQDN or wildcard domain (e.g., "example.com", "*.example.com").
+    /// Gets or sets the FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP
+    /// address, or CIDR. May be omitted when <see cref="Ports"/> is set; otherwise required.
     /// </summary>
     [JsonPropertyName("target")]
-    public required string Target { get; set; }
+    public string? Target { get; set; }
+
+    /// <summary>
+    /// Gets or sets TCP destination ports (1-65535, max 256) this rule is restricted to. When
+    /// <see cref="Target"/> is also omitted, the rule applies to these ports across all
+    /// IPv4/IPv6 destinations. A domain <see cref="Target"/> combined with ports is rejected by
+    /// the server/sidecar: domain rules are evaluated at the DNS layer, which has no port
+    /// dimension.
+    /// </summary>
+    [JsonPropertyName("ports")]
+    public List<int>? Ports { get; set; }
 }
 
 /// <summary>

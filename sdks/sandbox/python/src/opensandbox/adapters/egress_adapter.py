@@ -324,13 +324,18 @@ class EgressAdapter(Egress):
             from opensandbox.api.egress.models.network_rule_action import (
                 NetworkRuleAction,
             )
+            from opensandbox.api.egress.types import UNSET
 
             response_obj = await patch_policy.asyncio_detailed(
                 client=self._client,
                 body=[
                     ApiNetworkRule(
                         action=NetworkRuleAction(rule.action),
-                        target=rule.target,
+                        # The domain model allows target=None for a port-only rule;
+                        # the generated client instead uses its own UNSET sentinel
+                        # to mean "field omitted from the JSON body".
+                        target=rule.target if rule.target is not None else UNSET,
+                        ports=rule.ports if rule.ports else UNSET,
                     )
                     for rule in rules
                 ],

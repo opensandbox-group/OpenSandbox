@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Linq;
 using OpenSandbox.Core;
@@ -127,10 +128,23 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
         IReadOnlyList<NetworkRule> rules,
         CancellationToken cancellationToken = default)
     {
-        var normalizedRules = rules.Select(r => new Dictionary<string, object?>
+        // target/ports are omitted (not sent as null) when unset, matching the
+        // wire shape the sidecar/other SDKs produce for a port-only rule.
+        var normalizedRules = rules.Select(r =>
         {
-            ["action"] = r.Action == NetworkRuleAction.Allow ? "allow" : "deny",
-            ["target"] = r.Target
+            var normalized = new Dictionary<string, object?>
+            {
+                ["action"] = r.Action == NetworkRuleAction.Allow ? "allow" : "deny",
+            };
+            if (r.Target is not null)
+            {
+                normalized["target"] = r.Target;
+            }
+            if (r.Ports is { Count: > 0 })
+            {
+                normalized["ports"] = r.Ports;
+            }
+            return normalized;
         }).ToList();
 
         await _client.PatchAsync("/policy", normalizedRules, cancellationToken).ConfigureAwait(false);
@@ -165,11 +179,28 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
     private static NetworkRule ParseNetworkRule(JsonElement element)
     {
         var actionText = element.GetProperty("action").GetString();
-        var target = element.GetProperty("target").GetString();
+
+        // target is absent (not merely empty) for a port-only rule; GetProperty
+        // would throw KeyNotFoundException in that case, so use TryGetProperty.
+        string? target = null;
+        if (element.TryGetProperty("target", out var targetElement) &&
+            targetElement.ValueKind == JsonValueKind.String)
+        {
+            target = targetElement.GetString();
+        }
+
+        List<int>? ports = null;
+        if (element.TryGetProperty("ports", out var portsElement) &&
+            portsElement.ValueKind == JsonValueKind.Array)
+        {
+            ports = portsElement.EnumerateArray().Select(p => p.GetInt32()).ToList();
+        }
+
         return new NetworkRule
         {
             Action = ParseNetworkRuleAction(actionText),
-            Target = target ?? throw new SandboxApiException("Missing target in network rule")
+            Target = target,
+            Ports = ports
         };
     }
 

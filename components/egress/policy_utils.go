@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -111,12 +112,23 @@ func removeRulesByTarget(rules []policy.EgressRule, targets []string) (kept, rem
 	return kept, removed
 }
 
-// mergeKey: domain targets lowercased for dedupe; IP/CIDR left as-is.
+// mergeKey: domain targets lowercased for dedupe; IP/CIDR left as-is. Rules
+// with Ports also fold their sorted port list into the key: without this, two
+// port-only rules (empty Target) or two same-target rules scoped to different
+// ports would all collapse to one merge-key slot and silently evict each
+// other in mergeEgressRules, even though they are meant to coexist.
 func mergeKey(r policy.EgressRule) string {
-	if r.Target == "" {
-		return r.Target
+	key := strings.ToLower(r.Target)
+	if len(r.Ports) == 0 {
+		return key
 	}
-	return strings.ToLower(r.Target)
+	ports := append([]int(nil), r.Ports...)
+	sort.Ints(ports)
+	portStrs := make([]string, len(ports))
+	for i, port := range ports {
+		portStrs[i] = strconv.Itoa(port)
+	}
+	return key + "|ports=" + strings.Join(portStrs, ",")
 }
 
 func maxEgressRulesFromEnv() int {
