@@ -1853,6 +1853,169 @@ func TestBuildRuntimeView_MarksTerminalInitContainerFailure(t *testing.T) {
 	t.Fatal("expected PodFailed condition")
 }
 
+func TestBuildRuntimeView_MarksTerminatedMainContainerFailureWhilePodRunning(t *testing.T) {
+	// restartPolicy=Never multi-container pod: the main container (containers[0],
+	// by server convention the "sandbox" container) exits non-zero while an egress
+	// sidecar keeps the pod Running forever. The sandbox must fail instead of
+	// regressing to Pending (the pod phase will never become Failed).
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default"},
+		Status:     sandboxv1alpha1.BatchSandboxStatus{Phase: sandboxv1alpha1.BatchSandboxPhaseSucceed},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-0", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{
+				{Name: "sandbox"},
+				{Name: "egress"},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "sandbox",
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 1,
+						Reason:   "Error",
+						Message:  "main process crashed",
+					}},
+				},
+				{
+					Name:  "egress",
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				},
+			},
+		},
+	}
+
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	for i := range view.status.Conditions {
+		condition := view.status.Conditions[i]
+		if condition.Type != sandboxv1alpha1.BatchSandboxConditionPodFailed {
+			continue
+		}
+		assert.Equal(t, sandboxv1alpha1.ConditionTrue, condition.Status)
+		assert.Equal(t, "ContainerFailed", condition.Reason)
+		assert.Equal(
+			t,
+			"1/1 observed pods failed; primary reason=ContainerFailed; sample pod=sbx-0",
+			condition.Message,
+		)
+		return
+	}
+	t.Fatal("expected PodFailed condition")
+}
+
+func TestBuildRuntimeView_TerminatedMainContainerWithRestartablePolicyIsNotTerminal(t *testing.T) {
+	// With the default (Always) restart policy the kubelet restarts a terminated
+	// main container; a transient termination must not brick the sandbox in the
+	// sticky Failed phase. Same pod as above but restart policy left unset.
+	tests := []struct {
+		name          string
+		restartPolicy corev1.RestartPolicy
+	}{
+		{name: "unset defaults to Always", restartPolicy: ""},
+		{name: "Always", restartPolicy: corev1.RestartPolicyAlways},
+		{name: "OnFailure restarts on non-zero exit", restartPolicy: corev1.RestartPolicyOnFailure},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bs := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default"},
+				Status:     sandboxv1alpha1.BatchSandboxStatus{Phase: sandboxv1alpha1.BatchSandboxPhaseSucceed},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "sbx-0", Namespace: "default"},
+				Spec: corev1.PodSpec{
+					RestartPolicy: tt.restartPolicy,
+					Containers: []corev1.Container{
+						{Name: "sandbox"},
+						{Name: "egress"},
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "sandbox",
+							State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+								ExitCode: 1,
+								Reason:   "Error",
+							}},
+						},
+						{
+							Name:  "egress",
+							State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+						},
+					},
+				},
+			}
+
+			view := buildRuntimeView(bs, []*corev1.Pod{pod})
+
+			assert.NotEqual(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase,
+				"restartable policies must not treat the termination as terminal")
+			for i := range view.status.Conditions {
+				assert.NotEqual(t, sandboxv1alpha1.BatchSandboxConditionPodFailed, view.status.Conditions[i].Type)
+			}
+		})
+	}
+}
+
+func TestBuildRuntimeView_TerminatingPodIsNotMainContainerTerminalFailure(t *testing.T) {
+	// Deletion, eviction, or node drain signal-kills the main container while the
+	// pod still exists (deletionTimestamp set, sidecar winding down). The signal
+	// exit must not record a sticky terminal failure that would block the
+	// replacement of the deleted pod.
+	now := metav1.Now()
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default"},
+		Status:     sandboxv1alpha1.BatchSandboxStatus{Phase: sandboxv1alpha1.BatchSandboxPhaseSucceed},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sbx-0",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{
+				{Name: "sandbox"},
+				{Name: "egress"},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "sandbox",
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 137,
+						Reason:   "Error",
+					}},
+				},
+				{
+					Name:  "egress",
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				},
+			},
+		},
+	}
+
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
+
+	assert.NotEqual(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase,
+		"terminating pods must not turn into a sticky terminal failure")
+	for i := range view.status.Conditions {
+		assert.NotEqual(t, sandboxv1alpha1.BatchSandboxConditionPodFailed, view.status.Conditions[i].Type)
+	}
+}
+
 func TestBuildRuntimeView_InitialRetryablePodStatesRemainPending(t *testing.T) {
 	tests := []struct {
 		name string

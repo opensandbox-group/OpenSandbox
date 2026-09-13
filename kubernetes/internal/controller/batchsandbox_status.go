@@ -130,28 +130,62 @@ func getPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
 }
 
 func getTerminalPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
-	if pod.Status.Phase != corev1.PodFailed {
-		return "", "", false
-	}
-	for i := range pod.Status.InitContainerStatuses {
-		if reason, message, failed := terminatedContainerFailure(pod, &pod.Status.InitContainerStatuses[i], true); failed {
-			return reason, message, true
+	if pod.Status.Phase == corev1.PodFailed {
+		for i := range pod.Status.InitContainerStatuses {
+			if reason, message, failed := terminatedContainerFailure(pod, &pod.Status.InitContainerStatuses[i], true); failed {
+				return reason, message, true
+			}
 		}
-	}
-	for i := range pod.Status.ContainerStatuses {
-		if reason, message, failed := terminatedContainerFailure(pod, &pod.Status.ContainerStatuses[i], false); failed {
-			return reason, message, true
+		for i := range pod.Status.ContainerStatuses {
+			if reason, message, failed := terminatedContainerFailure(pod, &pod.Status.ContainerStatuses[i], false); failed {
+				return reason, message, true
+			}
 		}
+
+		message := fmt.Sprintf("Pod %s entered Failed phase", pod.Name)
+		if pod.Status.Reason != "" {
+			message += fmt.Sprintf(" (%s)", pod.Status.Reason)
+		}
+		if pod.Status.Message != "" {
+			message += ": " + pod.Status.Message
+		}
+		return terminalPodFailedReason, message, true
 	}
 
-	message := fmt.Sprintf("Pod %s entered Failed phase", pod.Name)
-	if pod.Status.Reason != "" {
-		message += fmt.Sprintf(" (%s)", pod.Status.Reason)
+	// A Running pod can be terminal even before Kubernetes flips its phase: when
+	// the restart policy is Never and the main container (the first regular
+	// container, matching the server-side convention) has already terminated with
+	// a non-zero exit code, no restart will bring the sandbox runtime back.
+	// This matters for multi-container pods (for example an egress sidecar keeps
+	// the pod Running) that would otherwise never reach the PodFailed phase.
+	if reason, message, failed := terminatedMainContainerFailure(pod); failed {
+		return reason, message, true
 	}
-	if pod.Status.Message != "" {
-		message += ": " + pod.Status.Message
+	return "", "", false
+}
+
+// terminatedMainContainerFailure reports whether the sandbox's main container
+// terminated with a non-zero exit code under a restart policy that will not
+// restart it (Never). RestartPolicyAlways and RestartPolicyOnFailure pods are
+// excluded because the kubelet restarts the container instead. Pods that are
+// already terminating are excluded too: deletion, eviction, or node drain may
+// signal-kill the main container, and the resulting non-zero exit must not turn
+// into a sticky terminal failure that blocks replacement of the deleted pod.
+func terminatedMainContainerFailure(pod *corev1.Pod) (string, string, bool) {
+	if pod.DeletionTimestamp != nil ||
+		pod.Spec.RestartPolicy != corev1.RestartPolicyNever ||
+		len(pod.Spec.Containers) == 0 {
+		return "", "", false
 	}
-	return terminalPodFailedReason, message, true
+	mainName := pod.Spec.Containers[0].Name
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name != mainName {
+			continue
+		}
+		return terminatedContainerFailure(pod, status, false)
+	}
+	return "", "", false
 }
 
 func terminatedContainerFailure(pod *corev1.Pod, status *corev1.ContainerStatus, initContainer bool) (string, string, bool) {
