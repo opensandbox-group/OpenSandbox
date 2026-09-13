@@ -240,3 +240,96 @@ async def test_cancel_during_endpoint_poll_sleep_stops_requests():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(endpoint_calls(calls, 44772)) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_create_cancels_sibling_endpoint_retry_on_permanent_failure(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from opensandbox.internal import readiness
+
+    calls = []
+    now = 0.0
+    monkeypatch.setattr(readiness, "time", SimpleNamespace(monotonic=lambda: now))
+
+    def handle(request):
+        nonlocal now
+        calls.append(request.url.path)
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        if request.method == "POST":
+            return httpx.Response(202, json=CREATE_RESPONSE)
+        if request.url.path.endswith("/44772"):
+            # Fail permanently only once the sibling retry loop is running, so
+            # the test exercises cancelling an active poller.
+            if len(endpoint_calls(calls, 18080)) >= 1:
+                return httpx.Response(403, json={"code": CODE, "message": "denied"})
+            return httpx.Response(404, json={"code": CODE, "message": "starting"})
+        now += 0.1  # each egress poll drains the fake readiness clock
+        return httpx.Response(404, json={"code": CODE, "message": "starting"})
+
+    with pytest.raises(SandboxApiException) as caught:
+        await Sandbox.create(
+            "python:3.11",
+            connection_config=ConnectionConfig(
+                domain="localhost:8080",
+                transport=httpx.MockTransport(handle),
+                disable_metrics=True,
+            ),
+            ready_timeout=timedelta(seconds=10),
+            health_check_polling_interval=timedelta(milliseconds=10),
+            skip_health_check=True,
+        )
+    assert caught.value.status_code == 403
+    # Let any leaked sibling coroutine betray itself before asserting.
+    await asyncio.sleep(0.2)
+    egress = endpoint_calls(calls, 18080)
+    # At 0.1s of fake time per poll, spinning to the 10s shared deadline
+    # would need ~100 egress requests; a cancelled loop stops after a couple.
+    assert 1 <= len(egress) <= 3
+    assert now < 10
+    # The sibling is joined before create() cleans up: no endpoint request is
+    # issued against the sandbox after its deletion.
+    assert calls.count("/v1/sandboxes/sbx-created") == 1
+    assert max(calls.index(path) for path in egress) < calls.index(
+        "/v1/sandboxes/sbx-created"
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_create_sibling_cancellation_preserves_original_error():
+    calls = []
+
+    def handle(request):
+        calls.append(request.url.path)
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        if request.method == "POST":
+            return httpx.Response(202, json=CREATE_RESPONSE)
+        if request.url.path.endswith("/44772"):
+            return httpx.Response(
+                403, json={"code": "ACCESS_DENIED", "message": "denied"}
+            )
+        return httpx.Response(404, json={"code": CODE, "message": "starting"})
+
+    with pytest.raises(SandboxApiException) as caught:
+        await Sandbox.create(
+            "python:3.11",
+            connection_config=ConnectionConfig(
+                domain="localhost:8080",
+                transport=httpx.MockTransport(handle),
+                disable_metrics=True,
+            ),
+            ready_timeout=timedelta(seconds=10),
+            health_check_polling_interval=timedelta(milliseconds=10),
+            skip_health_check=True,
+        )
+    # The permanent execd failure surfaces, not the sibling's CancelledError
+    # and not a readiness timeout from awaiting the retrying egress loop.
+    assert caught.value.status_code == 403
+    assert caught.value.error.code == "ACCESS_DENIED"
+    # The sibling was genuinely mid-retry when the failure surfaced.
+    assert endpoint_calls(calls, 18080)
+    assert calls.count("/v1/sandboxes/sbx-created") == 1

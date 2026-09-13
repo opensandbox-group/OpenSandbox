@@ -22,7 +22,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from opensandbox.adapters.factory import AdapterFactory
 from opensandbox.config import ConnectionConfig
@@ -63,6 +63,33 @@ from opensandbox.services import (
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+async def _gather_fail_fast(*awaitables: Awaitable[_T]) -> list[_T]:
+    """Await concurrent coroutines, cancelling the rest once one fails.
+
+    ``asyncio.gather`` propagates the first exception without cancelling the
+    sibling coroutines, so a permanently failing endpoint lookup (401/403 or a
+    non-retryable 404) would leave the sibling endpoint's retry loop polling
+    until the shared readiness deadline, issuing requests against a sandbox
+    that ``create`` is about to clean up. Cancel and await the remaining
+    tasks on the first failure (including cancellation of this task), then
+    let the original exception propagate. Python 3.10 compatible; no
+    ``asyncio.TaskGroup`` (3.11+).
+    """
+    tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        # return_exceptions suppresses the siblings' CancelledError (and any
+        # concurrent failure) so the original exception is the one re-raised.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 class Sandbox:
@@ -571,7 +598,7 @@ class Sandbox:
             sandbox_id = response.id
 
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
-            execd_endpoint, egress_endpoint = await asyncio.gather(
+            execd_endpoint, egress_endpoint = await _gather_fail_fast(
                 budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                     response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
                 )),
