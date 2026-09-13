@@ -195,6 +195,15 @@ osb command status <sandbox-id> <execution-id> -o json
 osb command logs <sandbox-id> <execution-id> -o json
 ```
 
+Arguments after `--` are executed directly as an argv list (no shell), so literal
+`$HOME`, quotes, and empty strings reach the process unchanged. Use
+`sh -c '<shell text>'` when you need pipelines, redirection, or environment
+prefixes:
+
+```bash
+osb command run <sandbox-id> -o raw -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""
+```
+
 Persistent shell session:
 
 ```bash

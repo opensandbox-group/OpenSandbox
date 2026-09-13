@@ -519,6 +519,15 @@ def test_execution_converter_to_api_run_command_request() -> None:
         with pytest.raises(InvalidArgumentException):
             ExecutionConverter.to_api_run_command_request(invalid, RunCommandOpts())
 
+    # Exact reproduction case from #1757: argv travels as-is (mutually
+    # exclusive with command), preserving the literal "$HOME", embedded
+    # space, single quote, and trailing empty string.
+    issue_argv = ["python3", "-c", "import sys; print(sys.argv[1:])", "a b", "$HOME", "x'y", ""]
+    issue_native = ExecutionConverter.to_api_run_command_request(
+        issue_argv, RunCommandOpts()
+    ).to_dict()
+    assert issue_native == {"argv": issue_argv}
+
 
 def test_run_command_opts_validates_gid_requires_uid() -> None:
     with pytest.raises(ValueError, match="uid is required when gid is provided"):

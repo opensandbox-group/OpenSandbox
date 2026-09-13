@@ -61,7 +61,10 @@ def _run_command(
     allowed = ("table", "json", "yaml") if background else ("raw",)
     fallback = "table" if background else "raw"
     prepare_output(obj, output_format, allowed=allowed, fallback=fallback)
-    cmd_str = " ".join(shlex.quote(arg) for arg in command)
+    # Click already split the payload into discrete arguments; pass them as a
+    # native argv list so literal values (empty strings, "$HOME", quotes,
+    # embedded spaces) reach the process without shell re-parsing (#1757).
+    argv = list(command)
     sandbox = obj.connect_sandbox(sandbox_id)
 
     try:
@@ -72,7 +75,7 @@ def _run_command(
         )
 
         if background:
-            execution = sandbox.commands.run(cmd_str, opts=opts)
+            execution = sandbox.commands.run(argv, opts=opts)
             obj.output.success_panel(
                 {
                     "execution_id": execution.id,
@@ -99,7 +102,7 @@ def _run_command(
             sys.stderr.flush()
 
         handlers = ExecutionHandlersSync(on_stdout=on_stdout, on_stderr=on_stderr)
-        execution = sandbox.commands.run(cmd_str, opts=opts, handlers=handlers)
+        execution = sandbox.commands.run(argv, opts=opts, handlers=handlers)
 
         # Ensure terminal prompt starts on a new line
         if last_text and not last_text.endswith("\n"):
@@ -123,8 +126,16 @@ def _handle_execution_error(obj: ClientContext, execution) -> None:
 
 @command_group.command(
     "run",
-    help="Run a command in a sandbox. Use `--` before the sandbox command payload.",
-    epilog="Separator rule: use `--` before the sandbox command payload.",
+    help=(
+        "Run a command in a sandbox. Use `--` before the sandbox command payload; "
+        "arguments are executed directly without a shell."
+    ),
+    epilog=(
+        "Separator rule: use `--` before the sandbox command payload.\n\n"
+        "Arguments after `--` are passed to the executable as-is (no shell), so "
+        "literal `$HOME`, quotes, and empty strings are preserved. Use "
+        "`sh -c '<shell text>'` for pipelines, redirection, or env prefixes."
+    ),
 )
 @click.argument("sandbox_id")
 @click.argument("command", nargs=-1, required=True)
@@ -146,7 +157,8 @@ def command_run(
     """Run a command in a sandbox.
 
     Default mode streams output directly. Add ``--background`` to return a
-    tracked execution object instead. Use ``--`` before the sandbox command payload.
+    tracked execution object instead. Use ``--`` before the sandbox command payload;
+    arguments are executed directly without a shell.
     """
     _run_command(
         obj,
