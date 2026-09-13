@@ -31,7 +31,12 @@ const (
 )
 
 var (
-	registerOnce sync.Once
+	registerMu sync.Mutex
+	// registeredCaches deduplicates registration per cache instance: a process may
+	// run several managers (production one plus envtest-based tests), and each
+	// cache needs its own informer indexes. A process-wide sync.Once would leave
+	// every later cache without indexes.
+	registeredCaches = map[cache.Cache]struct{}{}
 )
 
 var OwnerIndexFunc = func(obj client.Object) []string {
@@ -51,15 +56,18 @@ var PoolRefIndexFunc = func(obj client.Object) []string {
 }
 
 func RegisterFieldIndexes(c cache.Cache) error {
-	var err error
-	registerOnce.Do(func() {
-		// pod ownerReference
-		if err = c.IndexField(context.TODO(), &v1.Pod{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
-			return
-		}
-		if err = c.IndexField(context.TODO(), &sandboxv1alpha1.BatchSandbox{}, IndexNameForPoolRef, PoolRefIndexFunc); err != nil {
-			return
-		}
-	})
-	return err
+	registerMu.Lock()
+	defer registerMu.Unlock()
+	if _, ok := registeredCaches[c]; ok {
+		return nil
+	}
+	// pod ownerReference
+	if err := c.IndexField(context.TODO(), &v1.Pod{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+		return err
+	}
+	if err := c.IndexField(context.TODO(), &sandboxv1alpha1.BatchSandbox{}, IndexNameForPoolRef, PoolRefIndexFunc); err != nil {
+		return err
+	}
+	registeredCaches[c] = struct{}{}
+	return nil
 }

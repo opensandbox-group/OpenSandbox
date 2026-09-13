@@ -163,7 +163,7 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 	})
 
 	Context("Pause and Resume", func() {
-		It("should complete the full pause-resume flow via spec.pause trigger", func() {
+		DescribeTable("should complete the full pause-resume flow via spec.pause trigger", func(waitForDeletion bool) {
 			const sandboxName = "test-pause-resume"
 
 			// --- Step 1: Create BatchSandbox ---
@@ -227,6 +227,11 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				}
 			}
 			Expect(podName).NotTo(BeEmpty(), "Should find a pod owned by BatchSandbox")
+			cmd = exec.Command("kubectl", "get", "pod", podName, "-n", pauseResumeNamespace,
+				"-o", "jsonpath={.metadata.uid}")
+			oldUID, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(oldUID).NotTo(BeEmpty())
 
 			markerValue := fmt.Sprintf("pause-test-%d", time.Now().UnixNano())
 			By("writing marker file into container for rootfs verification")
@@ -243,7 +248,7 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("waiting for BatchSandbox phase to be Paused (snapshot ready, pods deleted)")
+			By("waiting for BatchSandbox phase to be Paused (snapshot ready, pod deletion requested)")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
 					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.phase}")
@@ -252,18 +257,21 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Paused"))
 			}, 3*time.Minute).Should(Succeed())
 
-			// Verify pods are deleted
-			By("verifying pods are deleted after pause")
-			cmd = exec.Command("kubectl", "get", "pods", "-n", pauseResumeNamespace,
-				"-l", "batchsandbox-name="+sandboxName, "-o", "name")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(BeEmpty(), "Pods should be deleted after pause")
+			if waitForDeletion {
+				By("waiting for pods to be deleted after pause")
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", "pods", "-n", pauseResumeNamespace,
+						"-l", "batch-sandbox.sandbox.opensandbox.io/name="+sandboxName, "-o", "name")
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(output).To(BeEmpty(), "Pods should eventually be deleted after pause")
+				}, time.Minute).Should(Succeed())
+			}
 
 			By("verifying the reserved internal SandboxSnapshot exists after pause")
 			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
 				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.phase}")
-			output, err = utils.Run(cmd)
+			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("Succeed"), "Internal pause snapshot should be ready after pause")
 
@@ -274,6 +282,17 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				"-p", `{"spec":{"pause":false}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
+
+			if !waitForDeletion {
+				By("proving resume was submitted while the old pod was still terminating")
+				cmd = exec.Command("kubectl", "get", "pod", podName, "-n", pauseResumeNamespace,
+					"-o", "jsonpath={.metadata.uid} {.metadata.deletionTimestamp}")
+				output, err = utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "Race coverage missing: old pod disappeared before confirmation")
+				fields := strings.Fields(output)
+				Expect(fields).To(HaveLen(2), "Race coverage missing: old pod must be terminating")
+				Expect(fields[0]).To(Equal(oldUID), "Race coverage missing: pod was already replaced")
+			}
 
 			By("waiting for resumed BatchSandbox to return to Succeed")
 			Eventually(func(g Gomega) {
@@ -323,6 +342,12 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				}
 			}
 			Expect(resumedPodName).NotTo(BeEmpty(), "Should find a pod owned by resumed BatchSandbox")
+			cmd = exec.Command("kubectl", "get", "pod", resumedPodName, "-n", pauseResumeNamespace,
+				"-o", "jsonpath={.metadata.uid}")
+			newUID, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(newUID).NotTo(BeEmpty())
+			Expect(newUID).NotTo(Equal(oldUID), "Resume must create a replacement pod")
 
 			By("reading marker file from resumed container to verify rootfs persistence")
 			cmd = exec.Command("kubectl", "exec", resumedPodName, "-n", pauseResumeNamespace,
@@ -335,7 +360,10 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "batchsandbox", sandboxName, "-n", pauseResumeNamespace, "--ignore-not-found=true")
 			utils.Run(cmd)
-		})
+		},
+			Entry("after pod deletion completes", true),
+			Entry("immediately while the old pod is terminating", false),
+		)
 
 		It("should complete pool-based pause-resume via spec.pause trigger", func() {
 			const poolName = "test-pool-pause"

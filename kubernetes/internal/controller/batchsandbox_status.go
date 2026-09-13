@@ -114,6 +114,10 @@ func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus
 }
 
 func getPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
+	// Deleting pods no longer contribute new runtime failures, including waiting states.
+	if pod.DeletionTimestamp != nil {
+		return "", "", false
+	}
 	if reason, message, failed := getTerminalPodFailureReasonAndMessage(pod); failed {
 		return reason, message, true
 	}
@@ -130,6 +134,11 @@ func getPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
 }
 
 func getTerminalPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
+	// Kubernetes may publish a terminal failure while deleting an old runtime pod.
+	// Ignore it for new failure attribution; already recorded sandbox failures remain terminal.
+	if pod.DeletionTimestamp != nil {
+		return "", "", false
+	}
 	if pod.Status.Phase != corev1.PodFailed {
 		return "", "", false
 	}

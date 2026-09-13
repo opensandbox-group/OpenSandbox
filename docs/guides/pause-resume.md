@@ -62,6 +62,13 @@ The sandbox transitions through both stable and intermediate states:
 
 The Lifecycle API exposes only the coarse-grained sandbox states above. For detailed snapshot progress, inspect the internal `SandboxSnapshot` resource:
 
+Pod termination can continue after the controller reports `Paused`. A resume request
+can be submitted during this interval; the controller waits for the old Pod to be
+removed before recreating its replacement. Pods with a deletion timestamp do not
+contribute new runtime failure conditions, including terminal exit statuses reported
+by Kubernetes during deletion. Failures already recorded on the sandbox remain
+terminal, and failures of replacement Pods are still reported normally.
+
 - `Pending`: snapshot request accepted, waiting to resolve source Pod / create commit Job
 - `Committing`: commit Job is running and pushing snapshot images
 - `Succeed`: snapshot is ready and can be used for the next resume
