@@ -67,6 +67,7 @@ class SandboxesSync(Protocol):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        read_only_root_filesystem: bool | None = None,
         lifecycle: SandboxLifecycle | None = None,
     ) -> SandboxCreateResponse:
         """
@@ -85,6 +86,7 @@ class SandboxesSync(Protocol):
                 Prefer namespaced keys (e.g. ``storage.id``).
             volumes: Optional list of volumes to mount in the sandbox.
             secure_access: Whether to enable secured access for sandbox endpoints.
+            read_only_root_filesystem: Request a read-only root filesystem for the main container.
             lifecycle: Optional pre-start and periodic lifecycle hooks.
 
         Returns:

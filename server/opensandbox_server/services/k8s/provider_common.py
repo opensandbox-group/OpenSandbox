@@ -30,7 +30,10 @@ from kubernetes.client import (
 
 from opensandbox_server.api.schema import ImageSpec
 from opensandbox_server.extensions.keys import ISOLATION_UPPER_MOUNT_PATH
-from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.constants import (
+    OPENSANDBOX_RUNTIME_MOUNT_PATH,
+    SandboxErrorCodes,
+)
 from opensandbox_server.services.helpers import parse_gpu_request
 from opensandbox_server.services.k8s.egress_helper import (
     build_security_context_for_sandbox_container,
@@ -173,9 +176,18 @@ def _build_main_container(
     isolation_enabled: bool = False,
     image_pull_policy: Optional[str] = None,
     resource_requests: Optional[Dict[str, str]] = None,
+    read_only_root_filesystem: Optional[bool] = None,
 ) -> V1Container:
     env_vars = [V1EnvVar(name=k, value=v) for k, v in env.items()]
     env_vars.append(V1EnvVar(name="EXECD", value="/opt/opensandbox/execd"))
+    if read_only_root_filesystem is True:
+        # execd stores command stdout/stderr descriptors under os.TempDir().
+        # Keep those internal files on the writable runtime volume while the
+        # user's /tmp remains governed by the read-only root filesystem.
+        env_vars = [env_var for env_var in env_vars if env_var.name != "TMPDIR"]
+        env_vars.append(
+            V1EnvVar(name="TMPDIR", value=OPENSANDBOX_RUNTIME_MOUNT_PATH)
+        )
 
     translated_limits = _translate_resource_limits_for_k8s(resource_limits)
     resources = None
@@ -201,6 +213,10 @@ def _build_main_container(
     if has_network_policy:
         security_context_dict = build_security_context_for_sandbox_container(True)
         security_context = build_security_context_from_dict(security_context_dict)
+
+    if read_only_root_filesystem is True:
+        security_context = security_context or V1SecurityContext()
+        security_context.read_only_root_filesystem = True
 
     if isolation_enabled:
         security_context = security_context or V1SecurityContext()

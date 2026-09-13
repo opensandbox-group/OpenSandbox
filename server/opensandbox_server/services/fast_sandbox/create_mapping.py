@@ -279,6 +279,11 @@ def _canonical_quantity(value: str) -> decimal.Decimal:
 
 def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
     """Reject pod-identity-dependent fields that have no shared-Fastlet meaning."""
+    if request.read_only_root_filesystem is not None:
+        raise UnsupportedFieldError(
+            "readOnlyRootFilesystem",
+            "root filesystem policy is controlled by the Fastlet pool, not per sandbox",
+        )
     if request.lifecycle is not None:
         raise UnsupportedFieldError(
             "lifecycle",

@@ -113,6 +113,115 @@ internal class SandboxesAdapter(
             snapshotId = snapshotId,
             credentialProxy = null,
             resourceRequests = resourceRequests,
+            readOnlyRootFilesystem = null,
+            lifecycle = null,
+        )
+
+    override fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec?,
+        secureAccess: Boolean,
+        snapshotId: String?,
+        credentialProxy: CredentialProxyConfig?,
+        resourceRequests: Map<String, String>?,
+        readOnlyRootFilesystem: Boolean?,
+    ): SandboxCreateResponse =
+        createSandbox(
+            spec = spec,
+            entrypoint = entrypoint,
+            env = env,
+            metadata = metadata,
+            timeout = timeout,
+            resource = resource,
+            networkPolicy = networkPolicy,
+            extensions = extensions,
+            volumes = volumes,
+            platform = platform,
+            secureAccess = secureAccess,
+            snapshotId = snapshotId,
+            credentialProxy = credentialProxy,
+            resourceRequests = resourceRequests,
+            readOnlyRootFilesystem = readOnlyRootFilesystem,
+            lifecycle = null,
+        )
+
+    override fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec?,
+        secureAccess: Boolean,
+        snapshotId: String?,
+        credentialProxy: CredentialProxyConfig?,
+        resourceRequests: Map<String, String>?,
+        lifecycle: SandboxLifecycle?,
+    ): SandboxCreateResponse =
+        createSandbox(
+            spec = spec,
+            entrypoint = entrypoint,
+            env = env,
+            metadata = metadata,
+            timeout = timeout,
+            resource = resource,
+            networkPolicy = networkPolicy,
+            extensions = extensions,
+            volumes = volumes,
+            platform = platform,
+            secureAccess = secureAccess,
+            snapshotId = snapshotId,
+            credentialProxy = credentialProxy,
+            resourceRequests = resourceRequests,
+            readOnlyRootFilesystem = null,
+            lifecycle = lifecycle,
+        )
+
+    override fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec?,
+        secureAccess: Boolean,
+        snapshotId: String?,
+        resourceRequests: Map<String, String>?,
+        readOnlyRootFilesystem: Boolean?,
+    ): SandboxCreateResponse =
+        createSandbox(
+            spec = spec,
+            entrypoint = entrypoint,
+            env = env,
+            metadata = metadata,
+            timeout = timeout,
+            resource = resource,
+            networkPolicy = networkPolicy,
+            extensions = extensions,
+            volumes = volumes,
+            platform = platform,
+            secureAccess = secureAccess,
+            snapshotId = snapshotId,
+            credentialProxy = null,
+            resourceRequests = resourceRequests,
+            readOnlyRootFilesystem = readOnlyRootFilesystem,
+            lifecycle = null,
         )
 
     override fun createSandbox(
@@ -146,6 +255,7 @@ internal class SandboxesAdapter(
             snapshotId = snapshotId,
             credentialProxy = credentialProxy,
             resourceRequests = resourceRequests,
+            readOnlyRootFilesystem = null,
             lifecycle = null,
         )
 
@@ -164,6 +274,7 @@ internal class SandboxesAdapter(
         snapshotId: String?,
         credentialProxy: CredentialProxyConfig?,
         resourceRequests: Map<String, String>?,
+        readOnlyRootFilesystem: Boolean?,
         lifecycle: SandboxLifecycle?,
     ): SandboxCreateResponse {
         logger.info("Creating sandbox with startup source: {}", spec?.image ?: snapshotId)
@@ -185,6 +296,7 @@ internal class SandboxesAdapter(
                     volumes = volumes,
                     snapshotId = snapshotId,
                     resourceRequests = resourceRequests,
+                    readOnlyRootFilesystem = readOnlyRootFilesystem,
                     lifecycle = lifecycle,
                 )
             val apiResponse = api.sandboxesPost(createRequest)

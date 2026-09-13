@@ -268,6 +268,7 @@ internal object SandboxModelConverter {
         volumes: List<Volume>?,
         snapshotId: String?,
         resourceRequests: Map<String, String>? = null,
+        readOnlyRootFilesystem: Boolean? = null,
         lifecycle: SandboxLifecycle? = null,
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
@@ -284,6 +285,7 @@ internal object SandboxModelConverter {
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
             credentialProxy = credentialProxy?.toApiCredentialProxyConfig(),
             secureAccess = secureAccess,
+            readOnlyRootFilesystem = readOnlyRootFilesystem,
             extensions = extensions,
             volumes = volumes?.map { it.toApiVolume() },
         )
@@ -360,6 +362,7 @@ internal object SandboxModelConverter {
                 },
             metadata = metadata,
             extensions = extensions,
+            readOnlyRootFilesystem = this.readOnlyRootFilesystem,
         )
     }
 
@@ -410,6 +413,7 @@ internal object SandboxModelConverter {
             id = this.id,
             platform = this.platform?.toDomainPlatformSpec(),
             extensions = this.extensions,
+            readOnlyRootFilesystem = this.readOnlyRootFilesystem,
         )
     }
 

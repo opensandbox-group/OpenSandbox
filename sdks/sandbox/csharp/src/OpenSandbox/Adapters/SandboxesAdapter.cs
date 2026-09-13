@@ -347,6 +347,10 @@ internal sealed class SandboxesAdapter : ISandboxes
                     State = allocation.GetProperty("state").GetString() ?? throw new SandboxApiException("Missing allocation.state in response")
                 }
                 : null,
+            ReadOnlyRootFilesystem = element.TryGetProperty("readOnlyRootFilesystem", out var readOnlyRootFilesystem)
+                && readOnlyRootFilesystem.ValueKind != JsonValueKind.Null
+                ? readOnlyRootFilesystem.GetBoolean()
+                : null,
             Entrypoint = element.GetProperty("entrypoint").EnumerateArray().Select(e => e.GetString() ?? string.Empty).ToList(),
             Metadata = ParseStringMap(element, "metadata"),
             Extensions = ParseStringMap(element, "extensions"),
@@ -385,7 +389,11 @@ internal sealed class SandboxesAdapter : ISandboxes
             ExpiresAt = element.TryGetProperty("expiresAt", out var expiresAtElement)
                 ? ParseOptionalIsoDate("expiresAt", expiresAtElement)
                 : null,
-            Entrypoint = element.GetProperty("entrypoint").EnumerateArray().Select(e => e.GetString() ?? string.Empty).ToList()
+            Entrypoint = element.GetProperty("entrypoint").EnumerateArray().Select(e => e.GetString() ?? string.Empty).ToList(),
+            ReadOnlyRootFilesystem = element.TryGetProperty("readOnlyRootFilesystem", out var readOnlyRootFilesystem)
+                && readOnlyRootFilesystem.ValueKind != JsonValueKind.Null
+                ? readOnlyRootFilesystem.GetBoolean()
+                : null
         };
     }
 

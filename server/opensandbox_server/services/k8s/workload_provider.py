@@ -66,6 +66,7 @@ class WorkloadProvider(ABC):
         platform: Optional[PlatformSpec] = None,
         annotations: Optional[Dict[str, str]] = None,
         resource_requests: Optional[Dict[str, str]] = None,
+        read_only_root_filesystem: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Create a new workload resource.
@@ -85,6 +86,7 @@ class WorkloadProvider(ABC):
                 This is a flexible field for various use cases (e.g., ``poolRef`` for pool-based creation).
             egress_settings: Complete settings for an egress sidecar, or None when the workload does not require egress policy enforcement.
             volumes: Optional list of volume mounts for the sandbox.
+            read_only_root_filesystem: Request to make the main container root filesystem read-only.
 
         Returns:
             Dict containing workload metadata (name, uid, etc.)

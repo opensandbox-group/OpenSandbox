@@ -322,6 +322,36 @@ public class ModelsTests
     }
 
     [Fact]
+    public void CreateSandboxRequest_ReadOnlyRootFilesystemPreservesOmittedAndFalse()
+    {
+        var omitted = new CreateSandboxRequest
+        {
+            ResourceLimits = new Dictionary<string, string>(),
+            Entrypoint = new List<string> { "python" }
+        };
+        var explicitFalse = new CreateSandboxRequest
+        {
+            ResourceLimits = new Dictionary<string, string>(),
+            Entrypoint = new List<string> { "python" },
+            ReadOnlyRootFilesystem = false
+        };
+
+        JsonSerializer.Serialize(omitted).Should().NotContain("readOnlyRootFilesystem");
+        JsonSerializer.Serialize(explicitFalse).Should().Contain("\"readOnlyRootFilesystem\":false");
+    }
+
+    [Fact]
+    public void CreateSandboxResponse_ReadOnlyRootFilesystemDeserializesNull()
+    {
+        const string json = "{\"id\":\"sbx-1\",\"status\":{\"state\":\"Running\"},\"createdAt\":\"2026-03-14T12:00:00Z\",\"entrypoint\":[\"python\"],\"readOnlyRootFilesystem\":null}";
+
+        var response = JsonSerializer.Deserialize<CreateSandboxResponse>(json);
+
+        response.Should().NotBeNull();
+        response!.ReadOnlyRootFilesystem.Should().BeNull();
+    }
+
+    [Fact]
     public void SandboxMetrics_ShouldStoreProperties()
     {
         // Arrange & Act

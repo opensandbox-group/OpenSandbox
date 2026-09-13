@@ -71,6 +71,10 @@ class Sandbox:
         metadata (SandboxMetadata | Unset): Custom metadata from creation request
         extensions (SandboxExtensions | Unset): Opaque extension data restored from provider-specific storage
         allocation (AllocationSummary | Unset): Public summary of a confirmed active pool allocation.
+        read_only_root_filesystem (bool | None | Unset): Actual read-only root filesystem state confirmed from the
+            runtime.
+            Null means the runtime could not confirm the policy, such as an
+            opaque pre-created Pool workload.
         expires_at (datetime.datetime | Unset): Timestamp when sandbox will auto-terminate. Omitted when manual cleanup
             is enabled.
     """
@@ -85,6 +89,7 @@ class Sandbox:
     metadata: SandboxMetadata | Unset = UNSET
     extensions: SandboxExtensions | Unset = UNSET
     allocation: AllocationSummary | Unset = UNSET
+    read_only_root_filesystem: bool | None | Unset = UNSET
     expires_at: datetime.datetime | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -119,6 +124,12 @@ class Sandbox:
         if not isinstance(self.allocation, Unset):
             allocation = self.allocation.to_dict()
 
+        read_only_root_filesystem: bool | None | Unset
+        if isinstance(self.read_only_root_filesystem, Unset):
+            read_only_root_filesystem = UNSET
+        else:
+            read_only_root_filesystem = self.read_only_root_filesystem
+
         expires_at: str | Unset = UNSET
         if not isinstance(self.expires_at, Unset):
             expires_at = self.expires_at.isoformat()
@@ -145,6 +156,8 @@ class Sandbox:
             field_dict["extensions"] = extensions
         if allocation is not UNSET:
             field_dict["allocation"] = allocation
+        if read_only_root_filesystem is not UNSET:
+            field_dict["readOnlyRootFilesystem"] = read_only_root_filesystem
         if expires_at is not UNSET:
             field_dict["expiresAt"] = expires_at
 
@@ -205,6 +218,15 @@ class Sandbox:
         else:
             allocation = AllocationSummary.from_dict(_allocation)
 
+        def _parse_read_only_root_filesystem(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        read_only_root_filesystem = _parse_read_only_root_filesystem(d.pop("readOnlyRootFilesystem", UNSET))
+
         _expires_at = d.pop("expiresAt", UNSET)
         expires_at: datetime.datetime | Unset
         if isinstance(_expires_at, Unset):
@@ -223,6 +245,7 @@ class Sandbox:
             metadata=metadata,
             extensions=extensions,
             allocation=allocation,
+            read_only_root_filesystem=read_only_root_filesystem,
             expires_at=expires_at,
         )
 

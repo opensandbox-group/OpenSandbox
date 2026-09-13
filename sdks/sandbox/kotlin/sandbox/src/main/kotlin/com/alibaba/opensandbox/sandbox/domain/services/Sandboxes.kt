@@ -75,6 +75,44 @@ interface Sandboxes {
     ): SandboxCreateResponse
 
     /**
+     * Creates a sandbox with an optional read-only root filesystem request.
+     *
+     * The default implementation delegates to the legacy method so custom
+     * Sandboxes implementations remain source-compatible.
+     */
+    fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec? = null,
+        secureAccess: Boolean = false,
+        snapshotId: String? = null,
+        resourceRequests: Map<String, String>? = null,
+        readOnlyRootFilesystem: Boolean?,
+    ): SandboxCreateResponse =
+        createSandbox(
+            spec = spec,
+            entrypoint = entrypoint,
+            env = env,
+            metadata = metadata,
+            timeout = timeout,
+            resource = resource,
+            networkPolicy = networkPolicy,
+            extensions = extensions,
+            volumes = volumes,
+            platform = platform,
+            secureAccess = secureAccess,
+            snapshotId = snapshotId,
+            resourceRequests = resourceRequests,
+        )
+
+    /**
      * Creates a sandbox with optional Credential Vault proxy startup settings.
      */
     fun createSandbox(
@@ -116,13 +154,50 @@ interface Sandboxes {
     }
 
     /**
+     * Creates a sandbox with credential proxy and an optional read-only root filesystem request.
+     */
+    fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec? = null,
+        secureAccess: Boolean = false,
+        snapshotId: String? = null,
+        credentialProxy: CredentialProxyConfig?,
+        resourceRequests: Map<String, String>? = null,
+        readOnlyRootFilesystem: Boolean?,
+    ): SandboxCreateResponse {
+        if (credentialProxy == null) {
+            return createSandbox(
+                spec = spec,
+                entrypoint = entrypoint,
+                env = env,
+                metadata = metadata,
+                timeout = timeout,
+                resource = resource,
+                networkPolicy = networkPolicy,
+                extensions = extensions,
+                volumes = volumes,
+                platform = platform,
+                secureAccess = secureAccess,
+                snapshotId = snapshotId,
+                resourceRequests = resourceRequests,
+                readOnlyRootFilesystem = readOnlyRootFilesystem,
+            )
+        }
+        throw UnsupportedOperationException(
+            "Credential Vault proxy is not supported by this Sandboxes implementation",
+        )
+    }
+
+    /**
      * Creates a sandbox with optional Credential Vault proxy and lifecycle hooks.
-     *
-     * Existing implementations remain compatible when [lifecycle] is null or empty.
-     *
-     * @param lifecycle Optional hooks. A value without pre-start or periodic hooks is ignored.
-     * @throws UnsupportedOperationException if non-empty hooks are requested from an
-     * implementation that does not override this method.
      */
     fun createSandbox(
         spec: SandboxImageSpec?,
@@ -161,6 +236,77 @@ interface Sandboxes {
         }
         throw UnsupportedOperationException(
             "Sandbox lifecycle hooks are not supported by this Sandboxes implementation",
+        )
+    }
+
+    /**
+     * Creates a sandbox with optional Credential Vault proxy, read-only root filesystem,
+     * and lifecycle hooks.
+     *
+     * Existing implementations remain compatible when [lifecycle] is null or empty.
+     *
+     * @param lifecycle Optional hooks. A value without pre-start or periodic hooks is ignored.
+     * @throws UnsupportedOperationException if non-empty hooks are requested from an
+     * implementation that does not override this method.
+     */
+    fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec? = null,
+        secureAccess: Boolean = false,
+        snapshotId: String? = null,
+        credentialProxy: CredentialProxyConfig?,
+        resourceRequests: Map<String, String>? = null,
+        readOnlyRootFilesystem: Boolean?,
+        lifecycle: SandboxLifecycle?,
+    ): SandboxCreateResponse {
+        if (lifecycle == null || lifecycle.isEmpty) {
+            return createSandbox(
+                spec = spec,
+                entrypoint = entrypoint,
+                env = env,
+                metadata = metadata,
+                timeout = timeout,
+                resource = resource,
+                networkPolicy = networkPolicy,
+                extensions = extensions,
+                volumes = volumes,
+                platform = platform,
+                secureAccess = secureAccess,
+                snapshotId = snapshotId,
+                credentialProxy = credentialProxy,
+                resourceRequests = resourceRequests,
+                readOnlyRootFilesystem = readOnlyRootFilesystem,
+            )
+        }
+        if (readOnlyRootFilesystem == null) {
+            return createSandbox(
+                spec = spec,
+                entrypoint = entrypoint,
+                env = env,
+                metadata = metadata,
+                timeout = timeout,
+                resource = resource,
+                networkPolicy = networkPolicy,
+                extensions = extensions,
+                volumes = volumes,
+                platform = platform,
+                secureAccess = secureAccess,
+                snapshotId = snapshotId,
+                credentialProxy = credentialProxy,
+                resourceRequests = resourceRequests,
+                lifecycle = lifecycle,
+            )
+        }
+        throw UnsupportedOperationException(
+            "Combined sandbox creation options are not supported by this Sandboxes implementation",
         )
     }
 

@@ -121,6 +121,7 @@ class SandboxesAdapterSync(SandboxesSync):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        read_only_root_filesystem: bool | None = None,
         lifecycle: SandboxLifecycle | None = None,
     ) -> SandboxCreateResponse:
         logger.info(
@@ -147,6 +148,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                read_only_root_filesystem=read_only_root_filesystem,
                 lifecycle=lifecycle,
             )
             response_obj = post_sandboxes.sync_detailed(

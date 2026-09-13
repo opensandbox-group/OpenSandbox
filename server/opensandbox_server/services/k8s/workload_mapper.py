@@ -77,6 +77,10 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
         image_spec = ImageSpec(uri=image_uri) if image_uri else ImageSpec(uri="unknown")
     platform_spec = _extract_platform_from_workload(workload)
     allocation = _extract_confirmed_pool_allocation(metadata, spec, workload_status)
+    read_only_root_filesystem = _extract_read_only_root_filesystem(
+        workload,
+        pool_mode=isinstance(_field(spec, "poolRef", "pool_ref"), str),
+    )
     return Sandbox(
         id=sandbox_id,
         status=SandboxStatus(
@@ -94,7 +98,50 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
         entrypoint=entrypoint,
         platform=platform_spec,
         allocation=allocation,
+        readOnlyRootFilesystem=read_only_root_filesystem,
     )
+
+
+def _extract_read_only_root_filesystem(
+    workload: Any,
+    *,
+    pool_mode: bool = False,
+) -> Optional[bool]:
+    """Read the effective main-container root filesystem policy from a workload."""
+    if isinstance(workload, dict):
+        spec = workload.get("spec") or {}
+        template = spec.get("template") or spec.get("podTemplate") or {}
+        pod_spec = template.get("spec") or {}
+    else:
+        spec = getattr(workload, "spec", None)
+        if spec is None:
+            return None
+        template = getattr(spec, "template", None) or getattr(spec, "pod_template", None)
+        pod_spec = getattr(template, "spec", None) if template is not None else spec
+
+    containers = _field(pod_spec, "containers")
+    if not containers:
+        return None
+    container = containers[0]
+    security_context = _field(container, "securityContext", "security_context")
+    value = _field(
+        security_context,
+        "readOnlyRootFilesystem",
+        "read_only_root_filesystem",
+    )
+    if isinstance(value, bool):
+        return value
+    if security_context is None:
+        return None if pool_mode else False
+    if isinstance(security_context, dict):
+        has_policy = any(
+            key in security_context
+            for key in ("readOnlyRootFilesystem", "read_only_root_filesystem")
+        )
+        return None if pool_mode or has_policy else False
+    if hasattr(security_context, "read_only_root_filesystem"):
+        return None if pool_mode else False
+    return None if pool_mode else False
 
 
 _POD_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?$")

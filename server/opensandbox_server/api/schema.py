@@ -544,6 +544,15 @@ class CreateSandboxRequest(BaseModel):
             "When enabled, the server provisions access credentials and returns required endpoint headers."
         ),
     )
+    read_only_root_filesystem: Optional[bool] = Field(
+        None,
+        alias="readOnlyRootFilesystem",
+        description=(
+            "Request a read-only root filesystem for the sandbox main container. "
+            "When omitted or false, the provider and template defaults are preserved. "
+            "This setting is not supported for Kubernetes Pool allocation requests."
+        ),
+    )
     volumes: Optional[List[Volume]] = Field(
         None,
         description=(
@@ -674,6 +683,11 @@ class CreateSandboxResponse(BaseModel):
     )
     created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
     entrypoint: Optional[List[str]] = Field(None, description="Entry process specification from creation request")
+    read_only_root_filesystem: Optional[bool] = Field(
+        None,
+        alias="readOnlyRootFilesystem",
+        description="Actual read-only root filesystem state when confirmed by the runtime.",
+    )
 
     class Config:
         populate_by_name = True
@@ -731,6 +745,11 @@ class Sandbox(BaseModel):
         description="Timestamp when sandbox will auto-terminate. Null when manual cleanup is enabled.",
     )
     created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
+    read_only_root_filesystem: Optional[bool] = Field(
+        None,
+        alias="readOnlyRootFilesystem",
+        description="Actual read-only root filesystem state when confirmed by the runtime.",
+    )
 
     class Config:
         populate_by_name = True

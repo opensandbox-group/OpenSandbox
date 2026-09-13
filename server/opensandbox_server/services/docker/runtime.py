@@ -24,6 +24,7 @@ from __future__ import annotations
 import io
 import logging
 import posixpath
+import socket
 import tarfile
 import time
 from typing import Optional
@@ -51,6 +52,52 @@ DEFAULT_EXECD_ENVS_PATH = posixpath.join(OPENSANDBOX_DIR, ".env")
 
 class DockerRuntimeMixin:
     """Mixin providing execd distribution and bootstrap launcher installation."""
+
+    def _put_archive(
+        self,
+        container,
+        path: str,
+        data: bytes,
+        sandbox_id: str,
+        operation: str,
+        *,
+        via_exec: bool = False,
+    ) -> None:
+        """Copy an archive, using an in-container tar for read-only rootfs mounts.
+
+        Docker rejects ``put_archive`` whenever the container rootfs is marked
+        read-only, even when the destination is a writable tmpfs or bind mount.
+        Feeding the same archive to ``tar`` through ``docker exec`` preserves
+        the mount semantics while avoiding a write through the rootfs layer.
+        """
+        if not via_exec:
+            container.put_archive(path=path, data=data)
+            return
+
+        exec_id = container.client.api.exec_create(
+            container.id,
+            ["/bin/sh", "-c", f"tar -x -C {path}"],
+            stdout=False,
+            stderr=True,
+            stdin=True,
+        )["Id"]
+        stream = None
+        try:
+            stream = container.client.api.exec_start(exec_id, socket=True)
+            raw_socket = getattr(stream, "_sock", stream)
+            raw_socket.sendall(data)
+            raw_socket.shutdown(socket.SHUT_WR)
+            while raw_socket.recv(64 * 1024):
+                pass
+        finally:
+            if stream is not None:
+                stream.close()
+
+        exit_code = container.client.api.exec_inspect(exec_id).get("ExitCode")
+        if exit_code != 0:
+            raise DockerException(
+                f"archive extraction into {path} exited with code {exit_code}"
+            )
 
     def _fetch_execd_archive(self, platform: Optional[PlatformSpec] = None) -> bytes:
         """Fetch (and memoize) the execd archive by effective target platform."""
@@ -219,14 +266,23 @@ class DockerRuntimeMixin:
         container,
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
+        runtime_directory_exists: bool = False,
     ) -> None:
         """Copy execd artifacts from the platform container into the sandbox."""
         archive = self._fetch_execd_archive(platform)
         target_parent = posixpath.dirname(EXECED_INSTALL_PATH.rstrip("/")) or "/"
-        self._ensure_directory(container, target_parent, sandbox_id)
+        if not runtime_directory_exists:
+            self._ensure_directory(container, target_parent, sandbox_id)
         try:
             with self._docker_operation("copy execd archive to sandbox", sandbox_id):
-                container.put_archive(path=target_parent, data=archive)
+                self._put_archive(
+                    container,
+                    target_parent,
+                    archive,
+                    sandbox_id,
+                    "copy execd archive to sandbox",
+                    via_exec=runtime_directory_exists,
+                )
         except DockerException as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -241,6 +297,7 @@ class DockerRuntimeMixin:
         container,
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
+        runtime_directory_exists: bool = False,
     ) -> None:
         """Install the full bootstrap.sh from the execd image into the sandbox.
 
@@ -261,11 +318,19 @@ class DockerRuntimeMixin:
             )
 
         script_dir = posixpath.dirname(BOOTSTRAP_PATH)
-        self._ensure_directory(container, script_dir, sandbox_id)
+        if not runtime_directory_exists:
+            self._ensure_directory(container, script_dir, sandbox_id)
 
         try:
             with self._docker_operation("install bootstrap script", sandbox_id):
-                container.put_archive(path=script_dir, data=archive)
+                self._put_archive(
+                    container,
+                    script_dir,
+                    archive,
+                    sandbox_id,
+                    "install bootstrap script",
+                    via_exec=runtime_directory_exists,
+                )
         except DockerException as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -280,6 +345,7 @@ class DockerRuntimeMixin:
         container,
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
+        runtime_directory_exists: bool = False,
     ) -> None:
         """Copy bwrap binary into /opt/opensandbox/bin/ (best-effort).
 
@@ -294,7 +360,14 @@ class DockerRuntimeMixin:
 
         try:
             with self._docker_operation("copy bwrap to sandbox", sandbox_id):
-                container.put_archive(path=OPENSANDBOX_DIR, data=archive)
+                self._put_archive(
+                    container,
+                    OPENSANDBOX_DIR,
+                    archive,
+                    sandbox_id,
+                    "copy bwrap to sandbox",
+                    via_exec=runtime_directory_exists,
+                )
         except DockerException as exc:
             logger.warning(
                 "Failed to copy bwrap into sandbox %s: %s (isolation will be unavailable)",
@@ -307,6 +380,7 @@ class DockerRuntimeMixin:
         container,
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
+        runtime_directory_exists: bool = False,
     ) -> None:
         """Copy the native workload gate into its managed runtime path.
 
@@ -326,7 +400,14 @@ class DockerRuntimeMixin:
 
         try:
             with self._docker_operation("copy session gate to sandbox", sandbox_id):
-                container.put_archive(path=OPENSANDBOX_DIR, data=archive)
+                self._put_archive(
+                    container,
+                    OPENSANDBOX_DIR,
+                    archive,
+                    sandbox_id,
+                    "copy session gate to sandbox",
+                    via_exec=runtime_directory_exists,
+                )
         except DockerException as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -344,6 +425,7 @@ class DockerRuntimeMixin:
         container,
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
+        runtime_directory_exists: bool = False,
     ) -> None:
         """Copy the hardening launcher into its managed runtime path.
 
@@ -362,7 +444,14 @@ class DockerRuntimeMixin:
 
         try:
             with self._docker_operation("copy launcher to sandbox", sandbox_id):
-                container.put_archive(path=OPENSANDBOX_DIR, data=archive)
+                self._put_archive(
+                    container,
+                    OPENSANDBOX_DIR,
+                    archive,
+                    sandbox_id,
+                    "copy launcher to sandbox",
+                    via_exec=runtime_directory_exists,
+                )
         except DockerException as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -380,10 +469,36 @@ class DockerRuntimeMixin:
         container,
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
+        runtime_directory_exists: bool = False,
     ) -> None:
         """Copy execd artifacts and bootstrap launcher into the sandbox container."""
-        self._copy_execd_to_container(container, sandbox_id, platform)
-        self._install_bootstrap_script(container, sandbox_id, platform)
-        self._copy_bwrap_to_container(container, sandbox_id, platform)
-        self._copy_session_gate_to_container(container, sandbox_id, platform)
-        self._copy_launcher_to_container(container, sandbox_id, platform)
+        self._copy_execd_to_container(
+            container,
+            sandbox_id,
+            platform,
+            runtime_directory_exists=runtime_directory_exists,
+        )
+        self._install_bootstrap_script(
+            container,
+            sandbox_id,
+            platform,
+            runtime_directory_exists=runtime_directory_exists,
+        )
+        self._copy_bwrap_to_container(
+            container,
+            sandbox_id,
+            platform,
+            runtime_directory_exists=runtime_directory_exists,
+        )
+        self._copy_session_gate_to_container(
+            container,
+            sandbox_id,
+            platform,
+            runtime_directory_exists=runtime_directory_exists,
+        )
+        self._copy_launcher_to_container(
+            container,
+            sandbox_id,
+            platform,
+            runtime_directory_exists=runtime_directory_exists,
+        )

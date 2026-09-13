@@ -20,6 +20,7 @@ import pytest
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     _extract_platform_from_workload,
+    _extract_read_only_root_filesystem,
 )
 
 
@@ -87,6 +88,85 @@ class TestBuildSandboxFromWorkload:
 
         assert sandbox.allocation is not None
         assert sandbox.allocation.pool_ref == "pool-runc"
+
+
+@pytest.mark.parametrize(
+    ("template_key", "value"),
+    [("template", True), ("podTemplate", False)],
+)
+def test_extract_read_only_root_filesystem_from_workload_templates(template_key, value):
+    workload = {
+        "spec": {
+            template_key: {
+                "spec": {
+                    "containers": [
+                        {"name": "sandbox", "securityContext": {"readOnlyRootFilesystem": value}}
+                    ]
+                }
+            }
+        }
+    }
+
+    assert _extract_read_only_root_filesystem(workload) is value
+
+
+def test_extract_read_only_root_filesystem_defaults_to_false_for_known_main_container():
+    workload = {"spec": {"template": {"spec": {"containers": [{"name": "sandbox"}]}}}}
+
+    assert _extract_read_only_root_filesystem(workload) is False
+
+
+def test_extract_read_only_root_filesystem_returns_null_without_main_container():
+    assert _extract_read_only_root_filesystem({"spec": {"template": {"spec": {}}}}) is None
+
+
+def test_extract_read_only_root_filesystem_returns_null_for_unconfirmed_pool_policy():
+    workload = {
+        "spec": {
+            "poolRef": "pool-runc",
+            "template": {"spec": {"containers": [{"name": "sandbox"}]}},
+        }
+    }
+
+    assert _extract_read_only_root_filesystem(workload, pool_mode=True) is None
+
+
+def test_extract_read_only_root_filesystem_keeps_explicit_pool_false():
+    workload = {
+        "spec": {
+            "poolRef": "pool-runc",
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "sandbox",
+                            "securityContext": {"readOnlyRootFilesystem": False},
+                        }
+                    ]
+                }
+            },
+        }
+    }
+
+    assert _extract_read_only_root_filesystem(workload, pool_mode=True) is False
+
+
+def test_extract_read_only_root_filesystem_from_kubernetes_object_template():
+    workload = SimpleNamespace(
+        spec=SimpleNamespace(
+            pod_template=SimpleNamespace(
+                spec=SimpleNamespace(
+                    containers=[
+                        SimpleNamespace(
+                            security_context=SimpleNamespace(read_only_root_filesystem=True)
+                        )
+                    ]
+                )
+            )
+        )
+    )
+
+    assert _extract_read_only_root_filesystem(workload) is True
 
     @pytest.mark.parametrize(
         ("name", "mutate"),

@@ -136,6 +136,82 @@ class TestAgentSandboxProvider:
         assert "containers" in body["spec"]["podTemplate"]["spec"]
         assert "volumes" in body["spec"]["podTemplate"]["spec"]
 
+    def test_create_workload_read_only_rootfs_keeps_init_writable(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+            read_only_root_filesystem=True,
+        )
+
+        pod_spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"][
+            "spec"
+        ]["podTemplate"]["spec"]
+        assert pod_spec["containers"][0]["securityContext"][
+            "readOnlyRootFilesystem"
+        ] is True
+        assert {env["name"]: env["value"] for env in pod_spec["containers"][0]["env"]}[
+            "TMPDIR"
+        ] == "/opt/opensandbox"
+        assert "securityContext" not in pod_spec["initContainers"][0]
+        assert pod_spec["volumes"][0] == {
+            "name": "opensandbox-bin",
+            "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"},
+        }
+
+    def test_create_workload_read_only_rootfs_replaces_null_template_security_context(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext: null
+"""
+        )
+        config = _app_config()
+        config.agent_sandbox.template_file = str(template_file)
+        provider = AgentSandboxProvider(mock_k8s_client, config)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+            read_only_root_filesystem=True,
+        )
+
+        container = mock_k8s_client.create_custom_object.call_args.kwargs["body"][
+            "spec"
+        ]["podTemplate"]["spec"]["containers"][0]
+        assert container["securityContext"]["readOnlyRootFilesystem"] is True
+        assert {env["name"]: env["value"] for env in container["env"]}["TMPDIR"] == (
+            "/opt/opensandbox"
+        )
+
     @pytest.mark.parametrize("expires_at", [None, datetime(2026, 12, 31, tzinfo=timezone.utc)])
     def test_create_workload_overrides_template_lifecycle(self, mock_k8s_client, expires_at):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config(shutdown_policy="Retain"))

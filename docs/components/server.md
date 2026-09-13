@@ -22,6 +22,7 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
 - **Resource quotas**: CPU/memory limits with Kubernetes-style specs
 - **Observability**: Unified status with transition tracking
 - **Registry support**: Public and private images
+- **Read-only root filesystems**: Optional per-sandbox hardening for Docker and Kubernetes template workloads
 
 ### Extended capabilities
 - **Async provisioning**: Background creation to reduce latency
@@ -29,6 +30,27 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
 - **Env/metadata injection**: Per-sandbox environment and metadata
 - **Port resolution**: Dynamic endpoint generation
 - **Structured errors**: Standard error codes and messages
+
+## Read-only root filesystem
+
+Set `readOnlyRootFilesystem: true` on a sandbox create request to make the main
+workload container's root filesystem read-only. The setting is supported by the
+Linux Docker provider and Kubernetes template workloads. The response field of
+the same name is read from Docker inspect or the final Kubernetes workload
+manifest, so it reports the effective runtime policy rather than only echoing
+the request.
+
+The OpenSandbox runtime directory remains writable: Docker provisions a
+server-managed writable tmpfs at `/opt/opensandbox`, and Kubernetes keeps the
+`opensandbox-bin` volume writable for the execd init container and runtime
+artifacts. Explicit user volumes retain their existing `readOnly` setting, so a
+declared read-write volume remains writable and a declared read-only volume
+remains read-only.
+
+Omitting the field or setting it to `false` preserves provider and operator
+template defaults. Request-level changes are not supported with
+`extensions.poolRef`, because Pool Pods are pre-created; configure the Pool
+template's main-container `securityContext.readOnlyRootFilesystem` instead.
 
 ::: warning
 Metadata keys under the reserved prefix `opensandbox.io/` are system-managed and cannot be supplied by users.
