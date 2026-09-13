@@ -81,6 +81,9 @@ func (w *WebhookSubscriber) HandleBlocked(ctx context.Context, ev BlockedEvent) 
 
 	var lastErr error
 	for attempt := 0; attempt <= w.maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
 		reqCtx := ctx
 		cancel := func() {}
 		if w.timeout > 0 {
@@ -114,7 +117,13 @@ func (w *WebhookSubscriber) HandleBlocked(ctx context.Context, ev BlockedEvent) 
 		cancel()
 		lastErr = err
 		if attempt < w.maxRetries {
-			time.Sleep(w.backoff * time.Duration(1<<attempt))
+			timer := time.NewTimer(w.backoff * time.Duration(1<<attempt))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 		}
 	}
 

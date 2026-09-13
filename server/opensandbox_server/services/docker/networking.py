@@ -30,6 +30,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
 
+from requests.exceptions import RequestException
 from docker.errors import DockerException, NotFound as DockerNotFound
 from fastapi import HTTPException, status
 
@@ -412,14 +413,27 @@ class DockerNetworkingMixin:
         for container in containers:
             try:
                 with self._docker_operation("cleanup egress sidecar", sandbox_id):
+                    try:
+                        # Bound Docker deletion independently of the image's supervisor grace.
+                        container.stop(timeout=9)
+                    except DockerNotFound:
+                        continue
+                    except (DockerException, RequestException) as exc:
+                        logger.warning("sandbox=%s | sidecar stop failed; forcing removal: %s", sandbox_id, exc)
                     container.remove(force=True)
-            except DockerException as exc:
+            except DockerNotFound:
+                continue
+            except (DockerException, RequestException) as exc:
                 logger.warning(
                     "sandbox=%s | failed to remove egress sidecar %s: %s",
                     sandbox_id,
                     container.id,
                     exc,
                 )
+
+        # The shared runtime volume can outlive a successfully removed app.
+        # Removal is best effort and still checks the server-managed label.
+        self._cleanup_managed_volumes(sandbox_id, [f"opensandbox-runtime-{sandbox_id}"])
 
     def _start_egress_sidecar(
         self,

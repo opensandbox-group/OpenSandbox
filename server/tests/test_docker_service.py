@@ -4621,3 +4621,37 @@ async def test_create_sandbox_does_not_retry_on_non_port_error(mock_docker):
     assert attempt_count == 1  # Did NOT retry
     mock_release.assert_called_once_with(bindings)
 
+
+
+@pytest.mark.parametrize("failed_operation", [None, "kill", "remove"])
+def test_delete_preserves_dependencies_until_application_removal(tmp_path, failed_operation):
+    docker_client = MagicMock()
+    docker_client.containers.list.return_value = []
+    with patch("docker.from_env", return_value=docker_client):
+        service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(tmp_path / "metadata")
+    sandbox_id = "short-stop-regression"
+    expiration = datetime.now(timezone.utc) + timedelta(hours=1)
+    service._metadata_store.set_expiration(sandbox_id, expiration)
+    application, sidecar = MagicMock(), MagicMock()
+    application.attrs = {"Config": {"Labels": {SANDBOX_ID_LABEL: sandbox_id}}}
+    docker_client.containers.get.return_value = application
+    docker_client.containers.list.return_value = [sidecar]
+    operations = []
+    application.kill.side_effect = lambda: operations.append("kill app")
+    application.remove.side_effect = lambda **kwargs: operations.append("remove app")
+    sidecar.stop.side_effect = lambda **kwargs: operations.append("stop sidecar")
+    sidecar.remove.side_effect = lambda **kwargs: operations.append("remove sidecar")
+    if failed_operation:
+        getattr(application, failed_operation).side_effect = DockerException("application operation failed")
+        with pytest.raises(HTTPException) as error:
+            service.delete_sandbox(sandbox_id)
+        assert error.value.status_code == 500
+        sidecar.stop.assert_not_called()
+        sidecar.remove.assert_not_called()
+        assert service._metadata_store.get_expiration(sandbox_id) == expiration.isoformat()
+    else:
+        service.delete_sandbox(sandbox_id)
+        assert operations == ["kill app", "remove app", "stop sidecar", "remove sidecar"]
+        sidecar.stop.assert_called_once_with(timeout=9)
+        assert service._metadata_store.get_expiration(sandbox_id) is None

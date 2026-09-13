@@ -364,6 +364,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             container = self._get_container_by_sandbox_id(sandbox_id)
         except HTTPException as exc:
             if exc.status_code == status.HTTP_404_NOT_FOUND:
+                self._cleanup_egress_sidecar(sandbox_id)
                 self._remove_expiration_tracking(sandbox_id)
                 self._cleanup_windows_oem_volume(sandbox_id, None)
                 if fallback_mount_keys:
@@ -424,6 +425,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             container.remove(force=True)
         except DockerException as exc:
             logger.warning("Failed to remove expired sandbox %s: %s", sandbox_id, exc)
+            # Re-read ownership on retry: a concurrent DELETE may already
+            # have released the mount references captured by this callback.
+            self._schedule_expiration(
+                sandbox_id, datetime.now(timezone.utc) + timedelta(seconds=30),
+                update_expiration=False,
+            )
+            return
 
         managed_volumes_raw = labels.get(SANDBOX_MANAGED_VOLUMES_LABEL, "[]")
         try:
@@ -1130,7 +1138,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         Raises:
             HTTPException: If sandbox not found or deletion fails
         """
-        container = self._get_container_by_sandbox_id(sandbox_id)
+        try:
+            container = self._get_container_by_sandbox_id(sandbox_id)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                self._cleanup_egress_sidecar(sandbox_id)
+            raise
         labels = container.attrs.get("Config", {}).get("Labels") or {}
         mount_keys_raw = labels.get(SANDBOX_OSSFS_MOUNTS_LABEL, "[]")
         try:
@@ -1160,13 +1173,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "message": f"Failed to delete sandbox container: {str(exc)}",
                 },
             ) from exc
-        finally:
-            self._remove_expiration_tracking(sandbox_id)
-            self._cleanup_egress_sidecar(sandbox_id)
-            self._cleanup_windows_oem_volume(sandbox_id, labels)
-            self._release_ossfs_mounts(mount_keys)
-            self._cleanup_managed_volumes(sandbox_id, managed_volumes)
-            self._metadata_store.delete(sandbox_id)
+        self._remove_expiration_tracking(sandbox_id)
+        self._cleanup_egress_sidecar(sandbox_id)
+        self._cleanup_windows_oem_volume(sandbox_id, labels)
+        self._release_ossfs_mounts(mount_keys)
+        self._cleanup_managed_volumes(sandbox_id, managed_volumes)
+        self._metadata_store.delete(sandbox_id)
 
     def pause_sandbox(self, sandbox_id: str) -> None:
         """

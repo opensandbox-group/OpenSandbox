@@ -23,20 +23,31 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/events"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 )
 
 const (
+	defaultWebhookDrainTimeout   = 5 * time.Second
 	defaultPolicyShutdownTimeout = 5 * time.Second
 	defaultNftTeardownTimeout    = 5 * time.Second
 	defaultMitmShutdownTimeout   = 5 * time.Second
 )
 
-func waitForShutdown(ctx context.Context, proxy *dnsproxy.Proxy, policySrv *http.Server, exemptDst []netip.Addr, applier nftApplier, mitm *mitmTransparent) {
+func waitForShutdown(ctx context.Context, proxy *dnsproxy.Proxy, policySrv *http.Server, exemptDst []netip.Addr, applier nftApplier, mitm *mitmTransparent, broadcaster *events.Broadcaster) {
 	<-ctx.Done()
 	log.Infof("received shutdown signal; beginning graceful shutdown")
+
+	// Keep DNS and enforcement alive while accepted notifications finish.
+	if broadcaster != nil {
+		drainCtx, cancel := context.WithTimeout(context.Background(), defaultWebhookDrainTimeout)
+		if err := broadcaster.Shutdown(drainCtx); err != nil {
+			log.Warnf("[webhook] drain timed out; remaining deliveries cancelled: %v", err)
+		}
+		cancel()
+	}
 
 	policyShutdownCtx, policyCancel := context.WithTimeout(context.Background(), defaultPolicyShutdownTimeout)
 	defer policyCancel()
