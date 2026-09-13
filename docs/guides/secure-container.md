@@ -11,6 +11,7 @@ This guide explains how to use secure container runtimes with OpenSandbox to pro
 
 - [Overview](#overview)
 - [Server Configuration](#server-configuration)
+- [Multiple Runtime Profiles on Kubernetes](#multiple-runtime-profiles-on-kubernetes)
 - [Docker Mode](#docker-mode)
 - [Kubernetes Mode](#kubernetes-mode)
 - [User Guide](#user-guide)
@@ -144,6 +145,176 @@ ERROR    Configured Docker runtime 'runsc' is not available.
         Available runtimes: runc.
         Please install and configure it in /etc/docker/daemon.json.
 ```
+
+---
+
+## Multiple Runtime Profiles on Kubernetes
+
+`[secure_runtime]` is a server startup setting, not a sandbox creation field. One
+Lifecycle Server process therefore applies one runtime profile to every
+template-mode sandbox it creates. To offer runc and a stronger runtime such as
+Kata in the same Kubernetes cluster, run one independently addressed Lifecycle
+Server release per profile and route each client to the appropriate Server API.
+
+| Server profile | API Service | `[secure_runtime]` | Resulting Pod field |
+|----------------|-------------|--------------------|---------------------|
+| Standard | `opensandbox-runc` | `type = ""` | `runtimeClassName` omitted |
+| Isolated | `opensandbox-kata` | `type = "kata"`, `k8s_runtime_class = "kata-qemu"` | `runtimeClassName: kata-qemu` |
+
+Both profiles can use the same OpenSandbox controller and sandbox workload
+namespace. The RuntimeClass should carry its own scheduling constraints so Kata
+Pods land only on nodes where Kata is installed.
+
+::: warning Resource names must be unique
+The Server chart defaults `fullnameOverride` to `opensandbox-server`, so changing
+only the Helm release name is not sufficient: two default releases would render
+the same Deployment, ServiceAccount, RBAC, ConfigMap, and Service names. Set a
+different `fullnameOverride` for every profile. Separate control-plane namespaces
+also prevent collisions between the chart's fixed ingress-gateway resource names.
+:::
+
+### Deploy two Server profiles
+
+Create the `opensandbox` workload namespace and one control-plane namespace per
+profile. Create the API-key Secrets in their corresponding control-plane
+namespaces as described in [Kubernetes Deployment](/kubernetes/deployment#configure-api-authentication).
+
+Use complete values files for both releases. These minimal configurations keep
+gateway mode disabled and differ only in resource names, Secrets, and secure
+runtime settings:
+
+::: code-group
+
+```yaml [values-runc.yaml]
+fullnameOverride: opensandbox-runc
+namespaceOverride: opensandbox-runc-system
+
+server:
+  replicaCount: 1
+  gateway:
+    enabled: false
+  env:
+    - name: OPENSANDBOX_SERVER_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: opensandbox-runc-api-key
+          key: api-key
+
+configToml: |
+  [server]
+  host = "0.0.0.0"
+  port = 80
+  api_key = ""
+
+  [log]
+  level = "INFO"
+
+  [runtime]
+  type = "kubernetes"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
+
+  [kubernetes]
+  namespace = "opensandbox"
+  workload_provider = "batchsandbox"
+
+  [secure_runtime]
+  type = ""
+```
+
+```yaml [values-kata.yaml]
+fullnameOverride: opensandbox-kata
+namespaceOverride: opensandbox-kata-system
+
+server:
+  replicaCount: 1
+  gateway:
+    enabled: false
+  env:
+    - name: OPENSANDBOX_SERVER_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: opensandbox-kata-api-key
+          key: api-key
+
+configToml: |
+  [server]
+  host = "0.0.0.0"
+  port = 80
+  api_key = ""
+
+  [log]
+  level = "INFO"
+
+  [runtime]
+  type = "kubernetes"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
+
+  [kubernetes]
+  namespace = "opensandbox"
+  workload_provider = "batchsandbox"
+
+  [secure_runtime]
+  type = "kata"
+  k8s_runtime_class = "kata-qemu"
+```
+
+:::
+
+Install both profiles with the chart and application versions from the same
+OpenSandbox release:
+
+```bash
+kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
+
+helm upgrade --install opensandbox-runc "${CHART_URL}" \
+  --namespace opensandbox-runc-system \
+  --create-namespace \
+  --set-string server.image.tag="${APP_VERSION}" \
+  --values values-runc.yaml
+
+helm upgrade --install opensandbox-kata "${CHART_URL}" \
+  --namespace opensandbox-kata-system \
+  --create-namespace \
+  --set-string server.image.tag="${APP_VERSION}" \
+  --values values-kata.yaml
+```
+
+Expose the two Services under different internal DNS names, hostnames, or API
+gateway routes. Do not put them behind an unqualified round-robin route: runtime
+selection is made by choosing the Server endpoint. Keep subsequent get, renew,
+pause, resume, snapshot, and delete calls on the same profile endpoint that
+created the sandbox.
+
+### Verify profile selection
+
+Create one sandbox through each Server, then inspect the generated BatchSandbox
+Pod template:
+
+```bash
+kubectl get batchsandbox --namespace opensandbox <runc-sandbox-id> \
+  -o jsonpath='{.spec.template.spec.runtimeClassName}'
+# Empty output: the cluster's default OCI runtime is used.
+
+kubectl get batchsandbox --namespace opensandbox <kata-sandbox-id> \
+  -o jsonpath='{.spec.template.spec.runtimeClassName}'
+# kata-qemu
+```
+
+::: tip Pool mode
+Pool-backed sandboxes reuse Pods that already exist, so the Server's
+`[secure_runtime]` setting does not rewrite their runtime. Create a separate Pool
+per profile, set `spec.template.spec.runtimeClassName` on each Pool explicitly,
+and expose only the matching `poolRef` through that profile.
+:::
+
+::: info Operational boundary
+Multiple Server profiles provide deterministic runtime selection, not a security
+or tenancy boundary. Servers targeting the same workload namespace can observe
+the same Kubernetes resources. Use separate workload namespaces (and suitably
+scoped RBAC or separate clusters) when profiles must also be isolated from one
+another. If gateway mode is required, keep the profiles in separate control-plane
+namespaces and configure a distinct gateway host for each release.
+:::
 
 ---
 
