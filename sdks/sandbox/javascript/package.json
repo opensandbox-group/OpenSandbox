@@ -43,7 +43,7 @@
     "build": "pnpm run gen:api && tsup",
     "test": "pnpm run build && node --test tests/*.test.mjs",
     "lint": "eslint src scripts --max-warnings 0",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.typecheck.json",
     "clean": "rm -rf dist"
   },
   "dependencies": {

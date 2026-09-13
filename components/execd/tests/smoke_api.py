@@ -49,28 +49,243 @@ def expect(cond: bool, msg: str):
         raise SystemExit(msg)
 
 
+def iter_sse_events(lines):
+    for line in lines:
+        if not line:
+            continue
+        try:
+            if line.startswith(b"data:"):
+                event = json.loads(line[len(b"data:") :].decode())
+            else:
+                # controller emits raw JSON lines without SSE 'data:' prefix
+                event = json.loads(line.decode())
+        except Exception:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def wait_for_command_barrier(events, *, background: bool, succeeds: bool) -> str:
+    command_id = None
+    expected = "execution_complete" if background or succeeds else "error"
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "init":
+            command_id = event.get("text")
+            expect(command_id, "missing command id in init event")
+            continue
+        if command_id is None:
+            if event_type in ("execution_complete", "error"):
+                raise SystemExit("command terminated before init")
+            continue
+        if event_type == expected:
+            return command_id
+        if event_type in ("execution_complete", "error"):
+            raise SystemExit(f"unexpected command event after init: {event_type}")
+    raise SystemExit("command stream ended before readiness barrier")
+
+
 def sse_get_command_id() -> str:
     url = f"{BASE_URL}/command"
-    payload = {"command": "echo smoke-command && sleep 1", "background": True}
+    if os.name == "nt":
+        command = "echo smoke-command & ping -n 2 127.0.0.1 >nul"
+    else:
+        command = "echo smoke-command && sleep 1"
+    payload = {"command": command, "background": True}
     with session.post(url, json=payload, stream=True, timeout=15) as resp:
         expect(resp.status_code == 200, f"SSE start failed: {resp.status_code} {resp.text}")
-        for line in resp.iter_lines():
-            if not line or not line.startswith(b"data:"):
-                # controller emits raw JSON lines without SSE 'data:' prefix
-                try:
-                    data = json.loads(line.decode())
-                except Exception:
-                    continue
-            else:
-                data = json.loads(line[len(b"data:") :].decode())
-            if data.get("type") == "init":
-                cmd_id = data.get("text")
-                expect(cmd_id, "missing command id in init event")
-                return cmd_id
-    raise SystemExit("Failed to obtain command id from SSE")
+        return wait_for_command_barrier(
+            iter_sse_events(resp.iter_lines()), background=True, succeeds=True
+        )
 
 
-def wait_status(cmd_id: str, timeout: float = 15.0) -> dict:
+def command_for(success: bool, label: str) -> str:
+    if os.name == "nt":
+        code = "0" if success else "17"
+        return f"echo {label} & exit /b {code}"
+    code = "0" if success else "17"
+    return f"printf '{label}\\n'; exit {code}"
+
+
+def start_command(command: str, background: bool, succeeds: bool) -> str:
+    url = f"{BASE_URL}/command"
+    payload = {"command": command, "background": background}
+    with session.post(url, json=payload, stream=True, timeout=15) as resp:
+        expect(resp.status_code == 200, f"command start failed: {resp.status_code} {resp.text}")
+        return wait_for_command_barrier(
+            iter_sse_events(resp.iter_lines()), background=background, succeeds=succeeds
+        )
+
+
+def list_commands(timeout: float = 10) -> list[dict]:
+    response = session.get(f"{BASE_URL}/command", timeout=timeout)
+    expect(response.status_code == 200, f"command list failed: {response.status_code} {response.text}")
+    payload = response.json()
+    commands = payload.get("commands")
+    expect(isinstance(commands, list), f"command list missing commands array: {payload}")
+    return commands
+
+
+INVENTORY_CONDITION_TIMEOUT = 5.0
+INVENTORY_CONDITION_INTERVAL = 0.05
+
+
+def wait_for_inventory_condition(
+    predicate,
+    *,
+    description: str,
+    timeout: float = INVENTORY_CONDITION_TIMEOUT,
+) -> list[dict]:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SystemExit(
+                f"inventory condition not reached before {timeout:g}s deadline: {description}"
+            )
+        commands = list_commands(timeout=min(10.0, remaining))
+        if predicate(commands):
+            return commands
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SystemExit(
+                f"inventory condition not reached before {timeout:g}s deadline: {description}"
+            )
+        time.sleep(min(INVENTORY_CONDITION_INTERVAL, remaining))
+
+
+def expect_terminal_delete_legacy_error(command_id: str):
+    response = session.delete(f"{BASE_URL}/command", params={"id": command_id}, timeout=10)
+    expect(response.status_code == 500, f"terminal DELETE changed legacy status: {response.status_code} {response.text}")
+    expect("not running" in response.text, f"terminal DELETE changed legacy error: {response.text}")
+
+
+def expect_known_session_compatibility(command_id: str, background: bool, expected_label: str | None = None):
+    status = wait_status(command_id)
+    expect(not status.get("running", True), f"terminal status still running: {status}")
+    logs = session.get(f"{BASE_URL}/command/{command_id}/logs", params={"cursor": 0}, timeout=10)
+    if background:
+        expect(logs.status_code == 200, f"known background logs unavailable: {logs.status_code} {logs.text}")
+        if expected_label:
+            expect(expected_label in logs.text, f"known background logs lost expected output {expected_label!r}: {logs.text!r}")
+    else:
+        expect(logs.status_code == 400, f"foreground logs must be rejected: {logs.status_code} {logs.text}")
+        expect("not running in background" in logs.text, f"foreground logs error changed: {logs.text}")
+    expect_terminal_delete_legacy_error(command_id)
+
+
+def command_lifecycle_regression():
+    commands = []
+    for background in (False, True):
+        for success in (True, False):
+            label = f"inventory-{'bg' if background else 'fg'}-{'ok' if success else 'fail'}"
+            command_id = start_command(command_for(success, label), background, success)
+            status = wait_status(command_id)
+            expect(not status.get("running", True), f"{label} did not become terminal: {status}")
+            expected_exit = 0 if success else 17
+            expect(status.get("exit_code") == expected_exit, f"{label} exit code mismatch: {status}")
+            commands.append((command_id, background, label))
+
+    listed = {entry.get("session") for entry in list_commands()}
+    for command_id, background, label in commands:
+        expect(command_id in listed, f"terminal command absent from inventory: {command_id}")
+        expect_known_session_compatibility(command_id, background, label)
+
+
+def inventory_cap_regression():
+    sessions = []
+    for index in range(3):
+        label = f"inventory-cap-{index}"
+        command_id = start_command(command_for(True, label), True, True)
+        wait_status(command_id)
+        sessions.append((command_id, label))
+    earliest_id, earliest_label = sessions[0]
+    second_id, _ = sessions[1]
+    third_id, _ = sessions[2]
+
+    def cap_evicted(entries: list[dict]) -> bool:
+        listed_sessions = {entry.get("session") for entry in entries}
+        return (
+            earliest_id not in listed_sessions
+            and second_id in listed_sessions
+            and third_id in listed_sessions
+        )
+
+    listed = {
+        entry.get("session")
+        for entry in wait_for_inventory_condition(
+            cap_evicted,
+            description=(
+                f"earliest terminal summary {earliest_id} was not evicted while "
+                f"{second_id} and {third_id} remained visible"
+            ),
+        )
+    }
+    expect(earliest_id not in listed, f"cap did not evict earliest terminal summary: {earliest_id}")
+    expect(second_id in listed, f"cap unexpectedly removed second terminal summary: {second_id}")
+    expect(third_id in listed, f"cap unexpectedly removed third terminal summary: {third_id}")
+    expect_known_session_compatibility(earliest_id, True, earliest_label)
+
+
+def command_for_inventory_observation(label: str) -> str:
+    if os.name == "nt":
+        return f"echo {label} & ping -n 2 127.0.0.1 >nul"
+    return f"printf '{label}\\n' && sleep 1"
+
+
+def start_background_command_for_inventory_observation(command: str) -> str:
+    url = f"{BASE_URL}/command"
+    payload = {"command": command, "background": True}
+    with session.post(url, json=payload, stream=True, timeout=15) as resp:
+        expect(resp.status_code == 200, f"command start failed: {resp.status_code} {resp.text}")
+        for event in iter_sse_events(resp.iter_lines()):
+            if event.get("type") != "init":
+                continue
+            command_id = event.get("text")
+            expect(command_id, "missing command id in init event")
+            return command_id
+    raise SystemExit("command stream ended before inventory observation barrier")
+
+
+def inventory_expiry_regression():
+    label = "inventory-expiry"
+    command_id = start_background_command_for_inventory_observation(
+        command_for_inventory_observation(label)
+    )
+    wait_for_inventory_condition(
+        lambda entries: any(
+            entry.get("session") == command_id and entry.get("running") is True
+            for entry in entries
+        ),
+        description=f"running command summary {command_id} was not visible",
+    )
+    deadline = time.monotonic() + 5
+    seen_terminal_summary = False
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        expect(remaining > 0, f"terminal summary did not expire before 5s deadline: {command_id}")
+        # Bound each request by the remaining deadline so a slow list endpoint
+        # cannot extend this regression beyond its declared five seconds.
+        entries = list_commands(timeout=min(10, remaining))
+        if any(
+            entry.get("session") == command_id and entry.get("running") is False
+            for entry in entries
+        ):
+            seen_terminal_summary = True
+        elif seen_terminal_summary and not any(
+            entry.get("session") == command_id for entry in entries
+        ):
+            expect_known_session_compatibility(command_id, True, label)
+            return
+        time.sleep(0.05)
+    if not seen_terminal_summary:
+        raise SystemExit(
+            f"terminal summary was not visible before expiry check deadline: {command_id}"
+        )
+    raise SystemExit(f"terminal summary did not expire before 5s deadline: {command_id}")
+
+
+def wait_status(cmd_id: str, timeout: float = 15.0, poll_interval: float = 0.3) -> dict:
     url = f"{BASE_URL}/command/status/{cmd_id}"
     deadline = time.time() + timeout
     last = None
@@ -80,7 +295,7 @@ def wait_status(cmd_id: str, timeout: float = 15.0) -> dict:
         last = r.json()
         if not last.get("running", True):
             return last
-        time.sleep(0.3)
+        time.sleep(poll_interval)
     return last
 
 
@@ -314,6 +529,19 @@ def main():
 
     run_command_blank_lines()
     print("[+] run_command preserves blank lines")
+
+    inventory_mode = os.environ.get("SMOKE_INVENTORY_MODE", "")
+    if inventory_mode == "":
+        command_lifecycle_regression()
+        print("[+] command inventory lifecycle compatibility ok")
+    elif inventory_mode == "cap":
+        inventory_cap_regression()
+        print("[+] command inventory cap eviction compatibility ok")
+    elif inventory_mode == "expiry":
+        inventory_expiry_regression()
+        print("[+] command inventory TTL expiry compatibility ok")
+    else:
+        raise SystemExit(f"unknown SMOKE_INVENTORY_MODE: {inventory_mode}")
 
     cmd_id = sse_get_command_id()
     print(f"[+] command id: {cmd_id}")

@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // ExecdClient provides access to the OpenSandbox Execd API for code execution,
@@ -133,6 +134,29 @@ func (e *ExecdClient) DeleteSession(ctx context.Context, sessionID string) error
 // RunCommand executes a shell command and streams output events via SSE.
 func (e *ExecdClient) RunCommand(ctx context.Context, req RunCommandRequest, handler EventHandler) error {
 	return e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, handler)
+}
+
+// ListCommands returns a page of command inventory summaries.
+func (e *ExecdClient) ListCommands(ctx context.Context, req ListCommandsRequest) (*ListCommandsResponse, error) {
+	params := url.Values{}
+	if req.Running != nil {
+		params.Set("running", strconv.FormatBool(*req.Running))
+	}
+	if req.Limit != 0 {
+		params.Set("limit", strconv.Itoa(req.Limit))
+	}
+	if strings.TrimSpace(req.Cursor) != "" {
+		params.Set("cursor", req.Cursor)
+	}
+	path := "/command"
+	if encoded := params.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var result ListCommandsResponse
+	if err := e.client.doRequest(ctx, http.MethodGet, path, nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // InterruptCommand interrupts the currently running command execution.

@@ -92,6 +92,41 @@ export interface CommandLogs {
   cursor?: number;
 }
 
+export interface ListCommandsOptions {
+  running?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface RunningCommandSummary {
+  session: string;
+  running: true;
+  background: boolean;
+  startedAt: Date;
+}
+
+export interface TerminalCommandSummary {
+  session: string;
+  running: false;
+  background: boolean;
+  startedAt: Date;
+  finishedAt: Date;
+  exitCode: number | null;
+  error?: string;
+}
+
+export type CommandSummary = RunningCommandSummary | TerminalCommandSummary;
+
+export interface CommandPagination {
+  limit: number;
+  nextCursor?: string;
+}
+
+export interface ListCommandsPage {
+  commands: CommandSummary[];
+  pagination: CommandPagination;
+}
+
 export type CommandExecution = Execution;
 
 export interface Metrics extends Record<string, unknown> {

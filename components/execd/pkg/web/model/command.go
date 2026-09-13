@@ -26,3 +26,34 @@ type CommandStatusResponse struct {
 	StartedAt  time.Time  `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
+
+// ListCommandsResponse represents a page of command inventory summaries.
+type ListCommandsResponse struct {
+	Commands   []any                      `json:"commands"`
+	Pagination CommandInventoryPagination `json:"pagination"`
+}
+
+// CommandInventoryPagination describes command inventory page traversal.
+type CommandInventoryPagination struct {
+	Limit      int     `json:"limit"`
+	NextCursor *string `json:"nextCursor,omitempty"`
+}
+
+// RunningCommandSummary represents a command that is still running.
+type RunningCommandSummary struct {
+	Session    string    `json:"session"`
+	Running    bool      `json:"running"`
+	Background bool      `json:"background"`
+	StartedAt  time.Time `json:"started_at"`
+}
+
+// TerminalCommandSummary represents a command that has completed.
+type TerminalCommandSummary struct {
+	Session    string     `json:"session"`
+	Running    bool       `json:"running"`
+	Background bool       `json:"background"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	ExitCode   *int       `json:"exit_code"`
+	Error      string     `json:"error,omitempty"`
+}

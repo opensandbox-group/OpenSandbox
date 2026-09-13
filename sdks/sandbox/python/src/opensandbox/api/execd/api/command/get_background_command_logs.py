@@ -98,6 +98,8 @@ def sync_detailed(
     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
     Response body is plain text so it can be rendered directly in browsers; the latest line index
     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    Completed background command output is retained for at least 24 hours and then
+    removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 
     Args:
         id (str):
@@ -138,6 +140,8 @@ def sync(
     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
     Response body is plain text so it can be rendered directly in browsers; the latest line index
     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    Completed background command output is retained for at least 24 hours and then
+    removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 
     Args:
         id (str):
@@ -173,6 +177,8 @@ async def asyncio_detailed(
     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
     Response body is plain text so it can be rendered directly in browsers; the latest line index
     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    Completed background command output is retained for at least 24 hours and then
+    removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 
     Args:
         id (str):
@@ -211,6 +217,8 @@ async def asyncio(
     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
     Response body is plain text so it can be rendered directly in browsers; the latest line index
     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    Completed background command output is retained for at least 24 hours and then
+    removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 
     Args:
         id (str):

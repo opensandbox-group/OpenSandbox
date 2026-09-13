@@ -27,6 +27,7 @@ from opensandbox.models.execd import (
     CommandStatus,
     Execution,
     ExecutionHandlers,
+    ListCommandsPage,
     RunCommandOpts,
 )
 
@@ -166,4 +167,17 @@ class Commands(Protocol):
         Raises:
             SandboxException: if the operation fails.
         """
+        ...
+
+
+class CommandInventory(Protocol):
+    """Optional command inventory capability for sandbox environments."""
+
+    async def list_commands(
+        self,
+        running: bool | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ListCommandsPage:
+        """List a weakly consistent page of running and terminal commands."""
         ...

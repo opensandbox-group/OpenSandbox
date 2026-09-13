@@ -191,3 +191,56 @@ func TestCleanupFinishedCommandsRetainsRunningAndRecentCommands(t *testing.T) {
 	require.NotNil(t, c.getCommandKernel("recent"))
 	require.NotNil(t, c.getCommandKernel("running"))
 }
+
+func TestCleanupFinishedCommandsPreservesPendingInventoryTransition(t *testing.T) {
+	c := NewController("", "", WithCommandInventory(CommandInventoryConfig{
+		RecoveryTTL: 48 * time.Hour,
+		MaxTerminal: 1000,
+	}))
+	const session = "pending-terminal-inventory"
+	outputPath := filepath.Join(t.TempDir(), "command.output")
+	require.NoError(t, os.WriteFile(outputPath, []byte("retained output"), 0o600))
+	startedAt := time.Now().Add(-time.Minute)
+	kernel := &commandKernel{
+		stdoutPath:   outputPath,
+		stderrPath:   outputPath,
+		startedAt:    startedAt,
+		running:      true,
+		isBackground: true,
+	}
+	c.storeCommandKernel(session, kernel)
+	c.registerCommandKernelRunning(session, kernel)
+
+	exitCode := 23
+	const errMsg = "exit status 23"
+	snapshot := c.markCommandFinished(session, exitCode, errMsg)
+	status, err := c.GetCommandStatus(session)
+	require.NoError(t, err)
+	require.NotNil(t, status.FinishedAt)
+
+	// Simulate the output janitor running after its retention window while
+	// the inventory transition is still waiting to consume the value snapshot.
+	cleanupAt := status.FinishedAt.Add(commandOutputRetention + time.Minute)
+	c.cleanupFinishedCommands(cleanupAt.Add(-commandOutputRetention))
+
+	require.NoFileExists(t, outputPath)
+	_, err = c.GetCommandStatus(session)
+	require.Error(t, err)
+	_, _, err = c.SeekBackgroundCommandOutput(session, 0)
+	require.Error(t, err)
+
+	c.transitionCommandTerminalSnapshot(snapshot)
+
+	running := false
+	page, err := c.ListCommands(ListCommandsRequest{Running: &running})
+	require.NoError(t, err)
+	require.Equal(t, []CommandSummary{{
+		Session:    session,
+		Running:    false,
+		Background: true,
+		StartedAt:  startedAt,
+		FinishedAt: status.FinishedAt,
+		ExitCode:   &exitCode,
+		Error:      errMsg,
+	}}, page.Commands)
+}

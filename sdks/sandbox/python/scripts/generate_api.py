@@ -23,9 +23,12 @@ using openapi-python-client, which generates httpx-based async clients
 that support custom httpx.AsyncClient injection.
 """
 
+import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 
 APACHE_2_LICENSE_HEADER = """#\n# Copyright 2026 Alibaba Group Holding Ltd.\n#\n# Licensed under the Apache License, Version 2.0 (the "License");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#     http://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an "AS IS" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n#\n\n"""
@@ -303,6 +306,69 @@ def add_license_headers(root: Path) -> None:
     )
 
 
+def replace_execd_directory(staged_package: Path, output_path: Path) -> None:
+    """Promote staged execd output and restore the prior output on failure."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    backup = output_path.parent / f".{output_path.name}-backup-{uuid.uuid4().hex}"
+    moved_old_output = False
+
+    try:
+        if output_path.exists():
+            output_path.rename(backup)
+            moved_old_output = True
+        staged_package.rename(output_path)
+    except Exception:
+        if moved_old_output and backup.exists() and not output_path.exists():
+            try:
+                backup.rename(output_path)
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    f"rollback output remains at {backup}"
+                ) from rollback_error
+        raise
+    else:
+        if backup.exists():
+            shutil.rmtree(backup)
+
+
+def generate_execd_target() -> None:
+    """Safely generate and atomically replace only the execd API client."""
+    spec_path = Path("../../../specs/execd-api.yaml").resolve()
+    config_path = Path("scripts/openapi_execd_config.yaml")
+    output_path = Path("src/opensandbox/api/execd")
+
+    if not spec_path.is_file():
+        raise FileNotFoundError(f"execd OpenAPI spec not found at {spec_path}")
+    if not config_path.is_file():
+        raise FileNotFoundError(f"execd generator config not found at {config_path}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        dir=output_path.parent, prefix=".execd-generation-"
+    ) as temporary_dir:
+        generated_root = Path(temporary_dir) / "output"
+        run_command(
+            [
+                "openapi-python-client",
+                "generate",
+                "--path",
+                str(spec_path),
+                "--output-path",
+                str(generated_root),
+                "--config",
+                str(config_path),
+                "--overwrite",
+            ],
+            "Generating execd API client",
+        )
+        staged_package = generated_root / "opensandbox_api_execd"
+        if not staged_package.is_dir():
+            raise RuntimeError("execd generator did not produce opensandbox_api_execd")
+
+        add_license_headers(staged_package)
+        replace_execd_directory(staged_package, output_path)
+
+
 
 def post_process_generated_code() -> None:
     """Post-process the generated code to ensure proper package structure."""
@@ -326,8 +392,22 @@ def post_process_generated_code() -> None:
     add_license_headers(Path("src/opensandbox/api"))
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse the optional isolated execd generation target."""
+    parser = argparse.ArgumentParser(
+        description="Generate OpenSandbox Python SDK API clients."
+    )
+    parser.add_argument(
+        "--target",
+        choices=("execd",),
+        help="Generate only execd safely without global post-processing.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
     """Main function to generate all API clients."""
+    args = parse_args()
     print("🚀 OpenSandbox Python SDK API Generator")
     print("=" * 50)
     print("Using openapi-python-client for httpx-based async clients")
@@ -345,6 +425,11 @@ def main() -> None:
         print("Please install it with: pip install openapi-python-client")
         print("Or: uv add --dev openapi-python-client")
         sys.exit(1)
+
+    if args.target == "execd":
+        generate_execd_target()
+        print("\n✅ Execd API client generation completed!")
+        return
 
     # Create API directories
     Path("src/opensandbox/api").mkdir(parents=True, exist_ok=True)
