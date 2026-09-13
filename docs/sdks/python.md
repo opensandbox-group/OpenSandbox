@@ -584,7 +584,7 @@ The `Sandbox.create()` allows configuring the sandbox environment.
 | `metadata`      | Custom metadata tags                     | Empty                           |
 | `network_policy` | Optional outbound network policy (egress) | -                             |
 | `credential_proxy` | Optional Credential Vault proxy startup settings | -                     |
-| `ready_timeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
+| `ready_timeout` | Total budget for endpoint publication and health checks | 30 seconds                      |
 
 ::: warning
 Metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.

@@ -498,7 +498,7 @@ class Sandbox:
         Args:
             image: Container image specification including image reference and optional auth
             timeout: Maximum sandbox lifetime. Pass None to require explicit cleanup.
-            ready_timeout: Maximum time to wait for sandbox to become ready
+            ready_timeout: Total budget for endpoint publication and health checks.
             env: Environment variables for the sandbox
             metadata: Custom metadata for the sandbox
             resource: Resource limits (CPU, memory, etc.)
@@ -512,8 +512,8 @@ class Sandbox:
                 Each volume specifies a backend (host path, PVC, or OSSFS) and mount configuration.
             connection_config: Connection configuration
             health_check: Custom async health check function
-            health_check_polling_interval: Time between health check attempts
-            skip_health_check: If True, do NOT wait for sandbox readiness/health; returned instance may not be ready yet.
+            health_check_polling_interval: Polling interval used while waiting for endpoint publication and readiness/health.
+            skip_health_check: Skip health checks; endpoint publication is still awaited.
             lifecycle: Optional pre-start and periodic lifecycle hooks.
 
         Returns:
@@ -570,13 +570,14 @@ class Sandbox:
             )
             sandbox_id = response.id
 
+            budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
             execd_endpoint, egress_endpoint = await asyncio.gather(
-                sandbox_service.get_sandbox_endpoint(
+                budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                     response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
-                ),
-                sandbox_service.get_sandbox_endpoint(
+                )),
+                budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                     response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-                ),
+                )),
             )
 
             sandbox = cls(
@@ -596,7 +597,7 @@ class Sandbox:
             )
 
             if not skip_health_check:
-                await sandbox.check_ready(ready_timeout, health_check_polling_interval)
+                await sandbox._check_ready(budget)
                 logger.info(f"Sandbox {sandbox.id} is ready")
             else:
                 logger.info(
