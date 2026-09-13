@@ -34,6 +34,19 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
 Metadata keys under the reserved prefix `opensandbox.io/` are system-managed and cannot be supplied by users.
 :::
 
+## Docker deletion
+
+Deletion synchronously removes the application, stops and removes its egress
+sidecar, then cleans up volumes. Docker allows 9 seconds for
+[egress shutdown](/components/egress#shutdown) before forced termination;
+the full deletion request can take longer.
+
+If application removal fails, dependent resources and metadata are kept for
+retry. TTL cleanup retries after 30 seconds without changing the expiration.
+If the application is already absent, DELETE and TTL attempt orphan sidecar
+cleanup; DELETE returns 404. Sidecar cleanup is best effort, so 404 does not
+guarantee that all resources are gone.
+
 ## Requirements
 
 - **Python**: 3.10 or higher

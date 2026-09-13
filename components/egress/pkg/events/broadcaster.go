@@ -17,7 +17,6 @@ package events
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -48,7 +47,8 @@ type Broadcaster struct {
 	mu          sync.RWMutex
 	subscribers []chan BlockedEvent
 	queueSize   int
-	closed      atomic.Bool
+	closed      bool
+	workers     sync.WaitGroup
 }
 
 func NewBroadcaster(ctx context.Context, cfg BroadcasterConfig) *Broadcaster {
@@ -70,10 +70,16 @@ func (b *Broadcaster) AddSubscriber(sub Subscriber) {
 	ch := make(chan BlockedEvent, b.queueSize)
 
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	b.workers.Add(1)
 	b.subscribers = append(b.subscribers, ch)
 	b.mu.Unlock()
 
 	safego.Go(func() {
+		defer b.workers.Done()
 		for {
 			select {
 			case <-b.ctx.Done():
@@ -89,12 +95,11 @@ func (b *Broadcaster) AddSubscriber(sub Subscriber) {
 }
 
 func (b *Broadcaster) Publish(event BlockedEvent) {
-	if b.closed.Load() {
-		return
-	}
-
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if b.closed {
+		return
+	}
 
 	for _, ch := range b.subscribers {
 		select {
@@ -105,20 +110,37 @@ func (b *Broadcaster) Publish(event BlockedEvent) {
 	}
 }
 
-func (b *Broadcaster) Close() {
-	if b.closed.Load() {
-		return
+// Shutdown seals admission and waits for queued deliveries within ctx's budget.
+func (b *Broadcaster) Shutdown(ctx context.Context) error {
+	b.seal()
+	defer b.cancel()
+	done := make(chan struct{})
+	safego.Go(func() {
+		b.workers.Wait()
+		close(done)
+	})
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
+}
 
+func (b *Broadcaster) Close() {
 	b.cancel()
+	b.seal()
+}
 
+func (b *Broadcaster) seal() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	subs := b.subscribers
-	b.subscribers = nil
-
-	for _, ch := range subs {
+	if b.closed {
+		return
+	}
+	b.closed = true
+	for _, ch := range b.subscribers {
 		close(ch)
 	}
-	b.closed.Store(true)
+	b.subscribers = nil
 }
