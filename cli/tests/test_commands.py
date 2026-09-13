@@ -1433,6 +1433,9 @@ class TestCommandRun:
         data = json.loads(result.output)
         assert data["execution_id"] == "exec-123"
         assert data["mode"] == "background"
+        # Background mode passes the payload as native argv, like foreground.
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == ["echo", "hello"]
 
     def test_foreground_run_rejects_json_output(self, runner: CliRunner) -> None:
         result = _invoke(
