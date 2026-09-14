@@ -236,7 +236,7 @@ override it.
 | `--port` | `44772` | HTTP listen port. |
 | `--log-level` | `6` | Log level (0=Emergency, 7=Debug). |
 | `--access-token` | `""` | Optional shared API access token. |
-| `--graceful-shutdown-timeout` | `1s` | SSE tail-drain wait window before closing. |
+| `--graceful-shutdown-timeout` | `200ms` | SSE tail-drain wait window before closing. |
 | `--jupyter-idle-poll-interval` | `100ms` | Poll interval after Jupyter reports idle. |
 | `--isolation-config` | `""` | Path to the isolation TOML config (see below). |
 | `--init` | `false` | Run as the sandbox init (OSEP-0018): reap children, forward signals, own the container lifecycle. Set together with `EXECD_INIT`; see [Init mode](#init-mode). |
