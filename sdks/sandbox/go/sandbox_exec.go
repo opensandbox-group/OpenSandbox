@@ -34,10 +34,11 @@ func (s *Sandbox) RunCommandWithOpts(ctx context.Context, req RunCommandRequest,
 	err := s.execd.RunCommand(ctx, req, func(event StreamEvent) error {
 		return processStreamEvent(exec, event, handlers)
 	})
-	if err != nil {
-		return exec, err
+	if req.Background {
+		// Completion acknowledges startup, not the background process exit.
+		exec.ExitCode = nil
 	}
-	return exec, nil
+	return exec, err
 }
 
 // ExecuteCode executes code in a context and streams output via SSE.

@@ -201,10 +201,12 @@ class CommandsAdapterSync(CommandsSync):
                 if event_node is None:
                     continue
                 dispatcher.dispatch(event_node)
+                # Foreground responses drain to EOF: older servers may emit
+                # trailing output after the completion event.
                 if is_background and event_node.type == "execution_complete":
                     # Background commands are done once execution_complete
                     # arrives; do not wait for the chunked terminator, which
-                    # execd sends only after a graceful-shutdown sleep and can
+                    # older execd versions delay with a grace-period sleep and can
                     # be lost if the connection is closed early (#1528).
                     break
 

@@ -29,6 +29,69 @@ namespace OpenSandbox.Tests;
 
 public class CommandsAdapterTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BackgroundCommand_StopsAtCompleteAndDisposesStream(bool argv)
+    {
+        using var stream = new CommandEventStream("data: {\"type\":\"execution_complete\"}\n\n", failAtEnd: true);
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) })));
+        var options = new RunCommandOptions { Background = true };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var execution = argv
+            ? await adapter.RunAsync(new[] { "sleep", "30" }, options, cancellationToken: timeout.Token)
+            : await adapter.RunAsync("sleep 30", options, cancellationToken: timeout.Token);
+        execution.Complete.Should().NotBeNull();
+        execution.ExitCode.Should().BeNull();
+        stream.Disposed.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ForegroundCommand_DrainsAndDisposesStream(bool failure, bool lateOutput)
+    {
+        var terminal = failure
+            ? "data: {\"type\":\"error\",\"error\":{\"ename\":\"CommandExecError\",\"evalue\":\"7\"}}\n\n"
+            : "data: {\"type\":\"execution_complete\"}\n\n";
+        var output = "data: {\"type\":\"stdout\",\"text\":\"tail\"}\n\ndata: {\"type\":\"stderr\",\"text\":\"error-tail\"}\n\n";
+        using var stream = new CommandEventStream(lateOutput ? terminal + output : output + terminal);
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) })));
+        var execution = await adapter.RunAsync("echo test");
+        execution.Logs.Stdout.Should().ContainSingle().Which.Text.Should().Be("tail");
+        execution.Logs.Stderr.Should().ContainSingle().Which.Text.Should().Be("error-tail");
+        execution.ExitCode.Should().Be(failure ? 7 : 0);
+        stream.Exhausted.Should().BeTrue();
+        stream.Disposed.Should().BeTrue();
+    }
+
+    private sealed class CommandEventStream(string text, bool failAtEnd = false)
+        : MemoryStream(Encoding.UTF8.GetBytes(text))
+    {
+        public bool Disposed { get; private set; }
+        public bool Exhausted { get; private set; }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (Position == Length)
+            {
+                if (failAtEnd) throw new IOException("Stream interrupted after terminal event");
+                Exhausted = true;
+            }
+            return base.ReadAsync(buffer[..Math.Min(buffer.Length, 7)], cancellationToken);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
     [Fact]
     public async Task NativeArgv_ShouldRejectInvalidInputsBeforeSending()
     {

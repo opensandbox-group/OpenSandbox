@@ -219,8 +219,8 @@ export class CommandsAdapter implements ExecdCommands {
       await dispatcher.dispatch(ev as any);
       if (isBackground && ev.type === "execution_complete") {
         // Background commands are done once execution_complete arrives; do
-        // not wait for the chunked terminator, which execd sends only after
-        // a graceful-shutdown sleep and can be lost if the connection is
+        // not wait for the chunked terminator, which older execd versions
+        // delay with a grace-period sleep and can be lost if the connection is
         // closed early (#1528).
         break;
       }

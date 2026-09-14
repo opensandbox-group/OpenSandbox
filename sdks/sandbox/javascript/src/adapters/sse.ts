@@ -101,5 +101,6 @@ export async function* parseJsonEventStream<T>(
     // instead of staying locked and holding the transport connection
     // open (#1528, #1532).
     await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }

@@ -132,7 +132,25 @@ func (e *ExecdClient) DeleteSession(ctx context.Context, sessionID string) error
 
 // RunCommand executes a shell command and streams output events via SSE.
 func (e *ExecdClient) RunCommand(ctx context.Context, req RunCommandRequest, handler EventHandler) error {
-	return e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, handler)
+	if !req.Background {
+		return e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, handler)
+	}
+	// Returning a private sentinel closes the response without masking callback errors.
+	complete := fmt.Errorf("background command started")
+	err := e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, func(event StreamEvent) error {
+		if err := handler(event); err != nil {
+			return err
+		}
+		var payload struct{ Type string }
+		if json.Unmarshal([]byte(event.Data), &payload) == nil && payload.Type == "execution_complete" {
+			return complete
+		}
+		return nil
+	})
+	if err == complete {
+		return nil
+	}
+	return err
 }
 
 // InterruptCommand interrupts the currently running command execution.

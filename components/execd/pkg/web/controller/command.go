@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
@@ -113,12 +112,6 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	waitForExecutionComplete(ctx, completeCh)
-
-	// Keep the SSE connection alive briefly so clients can read all
-	// buffered events and downstream components (e.g. egress sidecar)
-	// have time to synchronise state changes that were triggered
-	// during command execution.
-	time.Sleep(flag.ApiGracefulShutdownTimeout)
 }
 
 // InterruptCommand stops a running shell command session.

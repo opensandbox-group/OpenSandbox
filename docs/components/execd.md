@@ -102,6 +102,12 @@ Windows encoding. Batch files require a shell; use absolute paths instead of
 drive-relative paths such as `C:tool.exe`. See the [OpenAPI reference](/api/)
 for field constraints and executable lookup details.
 
+Command responses close without a fixed grace-period delay. Foreground SDK calls
+read to EOF, preserving trailing output from older servers. For background commands,
+`execution_complete` acknowledges startup; SDK methods that collect command results
+return on this event and close the stream without inferring a process exit code.
+Command completion does not imply asynchronous application readiness or audit delivery.
+
 ### Command output retention
 
 Foreground command output is streamed over SSE and its temporary stdout and
@@ -236,7 +242,7 @@ override it.
 | `--port` | `44772` | HTTP listen port. |
 | `--log-level` | `6` | Log level (0=Emergency, 7=Debug). |
 | `--access-token` | `""` | Optional shared API access token. |
-| `--graceful-shutdown-timeout` | `1s` | SSE tail-drain wait window before closing. |
+| `--graceful-shutdown-timeout` | `1s` | Maximum fallback wait for an execution completion callback before closing SSE. |
 | `--jupyter-idle-poll-interval` | `100ms` | Poll interval after Jupyter reports idle. |
 | `--isolation-config` | `""` | Path to the isolation TOML config (see below). |
 | `--init` | `false` | Run as the sandbox init (OSEP-0018): reap children, forward signals, own the container lifecycle. Set together with `EXECD_INIT`; see [Init mode](#init-mode). |

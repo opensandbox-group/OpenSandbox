@@ -288,3 +288,32 @@ test("native argv rejects invalid inputs before transport", async () => {
   }
   assert.equal(requests, 0);
 });
+
+for (const failure of [false, true]) {
+  for (const lateOutput of [false, true]) {
+    test(`foreground drains and releases stream: failure=${failure}, lateOutput=${lateOutput}`, async () => {
+      const terminal = failure
+        ? {type: "error", error: {ename: "CommandExecError", evalue: "7", traceback: []}}
+        : {type: "execution_complete", execution_time: 1};
+      const output = [{type: "stdout", text: "tail"}, {type: "stderr", text: "error-tail"}];
+      const events = lateOutput ? [terminal, ...output] : [...output, terminal];
+      const chunks = events.flatMap((event) => {
+        const frame = new TextEncoder().encode(`data: ${JSON.stringify({...event, timestamp: 1})}\n\n`);
+        return [frame.slice(0, 7), frame.slice(7)];
+      });
+      let exhausted = false;
+      const stream = new ReadableStream({
+        pull(controller) {
+          if (chunks.length) controller.enqueue(chunks.shift());
+          else { exhausted = true; controller.close(); }
+        },
+      });
+      const execution = await createAdapter(stream).run("echo test");
+      assert.deepEqual(execution.logs.stdout.map((item) => item.text), ["tail"]);
+      assert.deepEqual(execution.logs.stderr.map((item) => item.text), ["error-tail"]);
+      assert.equal(execution.exitCode, failure ? 7 : 0);
+      assert.equal(exhausted, true);
+      assert.equal(stream.locked, false);
+    });
+  }
+}

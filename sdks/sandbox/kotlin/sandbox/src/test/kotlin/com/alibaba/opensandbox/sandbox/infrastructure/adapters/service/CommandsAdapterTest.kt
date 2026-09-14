@@ -40,6 +40,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -78,6 +79,51 @@ class CommandsAdapterTest {
     fun tearDown() {
         mockWebServer.shutdown()
         httpClientProvider.close()
+    }
+
+    @Test
+    fun `background returns before EOF for shell and argv commands`() {
+        val complete = """data: {"timestamp":1,"type":"execution_complete","execution_time":1}""" + "\n\n"
+        for (argv in listOf(false, true)) {
+            mockWebServer.enqueue(
+                MockResponse().setBody(complete + "unread tail")
+                    .throttleBody(complete.toByteArray().size.toLong(), 3, TimeUnit.SECONDS),
+            )
+            val request = RunCommandRequest.builder().background(true)
+            if (argv) request.argv(listOf("sleep", "30")) else request.command("sleep 30")
+            assertTimeoutPreemptively(Duration.ofSeconds(2)) {
+                val result = commandsAdapter.run(request.build())
+                assertTrue(result.complete != null)
+                assertEquals(null, result.exitCode)
+            }
+            val pool = httpClientProvider.sseClient.connectionPool
+            assertEquals(pool.idleConnectionCount(), pool.connectionCount(), "response still holds a connection")
+        }
+    }
+
+    @Test
+    fun `foreground drains immediate EOF and output after terminal`() {
+        for (failure in listOf(false, true)) {
+            for (late in listOf(false, true)) {
+                val terminal =
+                    if (failure) {
+                        """data: {"timestamp":1,"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}"""
+                    } else {
+                        """data: {"timestamp":1,"type":"execution_complete","execution_time":1}"""
+                    }
+                val output =
+                    listOf(
+                        """data: {"timestamp":1,"type":"stdout","text":"tail"}""",
+                        """data: {"timestamp":1,"type":"stderr","text":"error-tail"}""",
+                    )
+                val frames = if (late) listOf(terminal) + output else output + terminal
+                mockWebServer.enqueue(MockResponse().setChunkedBody(frames.joinToString("\n\n") + "\n\n", 7))
+                val result = commandsAdapter.run(RunCommandRequest.builder().command("echo test").build())
+                assertEquals(listOf("tail"), result.logs.stdout.map { it.text })
+                assertEquals(listOf("error-tail"), result.logs.stderr.map { it.text })
+                assertEquals(if (failure) 7 else 0, result.exitCode)
+            }
+        }
     }
 
     @Test
