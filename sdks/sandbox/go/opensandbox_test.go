@@ -2207,6 +2207,23 @@ func TestGetCommandLogs_WithCursor(t *testing.T) {
 	}
 }
 
+func TestGetCommandLogs_RejectsNegativeCursorWithoutRequest(t *testing.T) {
+	client := NewExecdClient("http://unused.invalid", "token")
+	cursor := int64(-1)
+
+	got, err := client.GetCommandLogs(context.Background(), "cmd-logs", &cursor)
+
+	if got != nil {
+		assert.Fail(t, "GetCommandLogs returned a result for a negative cursor")
+	}
+	require.Error(t, err)
+	var invalid *InvalidArgumentError
+	require.ErrorAs(t, err, &invalid)
+	if invalid.Field != "cursor" {
+		assert.Fail(t, fmt.Sprintf("Field = %q, want cursor", invalid.Field))
+	}
+}
+
 func TestGetCommandLogs_WithCustomHeaders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Test-Header") != "logs-ok" {
