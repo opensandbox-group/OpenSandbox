@@ -64,3 +64,19 @@ test("CommandsAdapter.getBackgroundCommandLogs accepts a null parsed body on 200
   assert.equal(logs.content, "");
   assert.equal(logs.cursor, 42);
 });
+
+test("CommandsAdapter.getBackgroundCommandLogs rejects a negative cursor before transport", async () => {
+  const adapter = new CommandsAdapter(
+    {
+      async GET() {
+        throw new Error("transport should not be called");
+      },
+    },
+    { baseUrl: "http://unused.invalid" },
+  );
+
+  await assert.rejects(
+    () => adapter.getBackgroundCommandLogs("cmd-1", -1),
+    /cursor cannot be negative/,
+  );
+});
