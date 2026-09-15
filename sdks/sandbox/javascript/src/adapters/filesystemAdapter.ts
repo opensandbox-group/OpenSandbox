@@ -128,6 +128,24 @@ function encodeUtf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
+// `filename` is a quoted-string header parameter, so a backslash, a quote or a
+// line break in the basename would truncate the part header and make the whole
+// body unparseable.
+//
+// The backslash opens a quoted-pair, so it has to be doubled the way
+// `multipart.CreateFormFile` does on the Go side and `_multipart_header_filename`
+// does on the Python side; it is escaped first so it does not double the
+// backslashes we introduce. The remaining three are escaped the way the platform
+// `FormData` used on the in-memory path below does, so the two upload paths emit
+// the same header for the characters `FormData` handles.
+function multipartHeaderFilename(filename: string): string {
+  return filename
+    .replace(/\\/g, "\\\\")
+    .replace(/\r/g, "%0D")
+    .replace(/\n/g, "%0A")
+    .replace(/"/g, "%22");
+}
+
 async function* multipartUploadBody(opts: {
   boundary: string;
   metadataJson: string;
@@ -149,7 +167,7 @@ async function* multipartUploadBody(opts: {
   // Part 2: file
   yield encodeUtf8(`--${b}\r\n`);
   yield encodeUtf8(
-    `Content-Disposition: form-data; name="file"; filename="${opts.fileName}"\r\n`
+    `Content-Disposition: form-data; name="file"; filename="${multipartHeaderFilename(opts.fileName)}"\r\n`
   );
   yield encodeUtf8(`Content-Type: ${opts.fileContentType}\r\n\r\n`);
 
