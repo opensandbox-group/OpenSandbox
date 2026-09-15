@@ -26,7 +26,7 @@
 #     entire restart window. The new egress process re-installs them
 #     after its DNS proxy is listening, so the unfiltered window is
 #     limited to the startup duration (~200ms).
-#   * The `inet/ip/ip6 opensandbox_dns_redirect` nft tables ARE removed
+#   * The `inet/ip/ip6 opensandbox_dns_redirect` and `opensandbox_mitm_redirect` nft tables ARE removed
 #     here. Native nft DNS fallback uses those tables when iptables-nft
 #     cannot append OUTPUT rules; after a crash they would otherwise keep
 #     redirecting DNS to a dead proxy.
@@ -77,6 +77,7 @@ remove_stale_dns_redirect_nft() {
   command -v nft >/dev/null 2>&1 || { log "nft not present; skipping native DNS redirect cleanup"; return 0; }
   for family in inet ip ip6; do
     printf 'delete table %s opensandbox_dns_redirect\n' "$family" | nft -f - 2>/dev/null || true
+    printf 'delete table %s opensandbox_mitm_redirect\n' "$family" | nft -f - 2>/dev/null || true
   done
   log "stale native DNS redirect nft tables removed (best-effort)"
 }

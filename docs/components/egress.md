@@ -82,6 +82,12 @@ Most deployments only need these settings:
   - `OPENSANDBOX_EGRESS_TOKEN` (optional auth via `OPENSANDBOX-EGRESS-AUTH`)
 - **Rule limit**:
   - `OPENSANDBOX_EGRESS_MAX_RULES` for `POST/PATCH /policy` (default `4096`, `0` disables cap)
+- **Redirect backend**: `OPENSANDBOX_EGRESS_REDIRECT_BACKEND` — how the OUTPUT redirects (DNS → the
+  proxy, HTTP/HTTPS → the transparent mitmproxy) are installed: `auto` (default: iptables first,
+  native nft rules when iptables' nft backend cannot load an xtables extension such as `owner` or
+  the IPv6 `REDIRECT` target), `nft` (native nft from the start, both address families), or
+  `iptables` (never fall back). Firecracker-style guest kernels (Fly.io Machines and similar
+  microVM hosts) ship nf_tables without `CONFIG_NETFILTER_XT_MATCH_OWNER`: use `nft` there.
 
 Optional advanced features:
 

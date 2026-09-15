@@ -116,9 +116,24 @@ func (r redirectRunner) setupRedirect(ctx context.Context, port int, exemptDst [
 		}
 		log.Warnf("nft DNS redirect cleanup unavailable before iptables setup (ignored): %v", cleanupErr)
 	}
+	if redirectBackend() == backendNft {
+		// Native nft from the start: no xtables extensions involved, both families in one script.
+		script := dnsRedirectNftScript(port, exemptDst)
+		if output, nftErr := r.runNft(ctx, script); nftErr != nil {
+			if isNftMissingTableError(output, nftErr) {
+				if retryOutput, retryErr := r.runNft(ctx, removeNftDeleteTableLine(script)); retryErr != nil {
+					return fmt.Errorf("nft DNS redirect failed: %w (output: %s)", retryErr, strings.TrimSpace(string(retryOutput)))
+				}
+			} else {
+				return fmt.Errorf("nft DNS redirect failed: %w (output: %s)", nftErr, strings.TrimSpace(string(output)))
+			}
+		}
+		log.Infof("nft DNS redirect installed (%s=nft)", RedirectBackendEnv)
+		return nil
+	}
 	rules := dnsRedirectRules(port, exemptDst, "-A")
 	if applied, err := r.runRedirectRules(ctx, rules); err != nil {
-		if !isIptablesNftOutputAppendMissingChain(err) {
+		if redirectBackend() == backendIptables || !(isIptablesNftOutputAppendMissingChain(err) || isIptablesXtExtensionError(err)) {
 			r.rollbackRedirectRules(ctx, applied)
 			return err
 		}
@@ -205,19 +220,27 @@ func isNftUnavailableError(err error) bool {
 }
 
 func isNftMissingTableError(output []byte, err error) bool {
+	return isNftMissingTableErrorFor(output, err, dnsRedirectNftTable)
+}
+
+func isNftMissingTableErrorFor(output []byte, err error, table string) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error() + " " + string(output))
 	return strings.Contains(msg, "no such file or directory") &&
 		strings.Contains(msg, "delete table ") &&
-		strings.Contains(msg, " "+dnsRedirectNftTable)
+		strings.Contains(msg, " "+table)
 }
 
 func removeNftDeleteTableLine(script string) string {
+	return removeNftDeleteTableLineFor(script, dnsRedirectNftTable)
+}
+
+func removeNftDeleteTableLineFor(script string, table string) string {
 	var lines []string
 	for _, line := range strings.Split(script, "\n") {
-		if strings.HasPrefix(line, "delete table ") && strings.HasSuffix(line, " "+dnsRedirectNftTable) {
+		if strings.HasPrefix(line, "delete table ") && strings.HasSuffix(line, " "+table) {
 			continue
 		}
 		if strings.TrimSpace(line) == "" {
