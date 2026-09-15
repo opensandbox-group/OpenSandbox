@@ -162,31 +162,39 @@ def file_download(
     local_path: str,
     output_format: str | None,
 ) -> None:
-    """Download to local disk, preserving existing files on failure."""
+    """Download a file to the host.
+
+    Regular files are replaced only on success. Devices and named pipes receive
+    data directly, including partial data if the download fails.
+    """
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
         destination = Path(local_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination = destination.resolve()
         try:
             destination_mode = destination.stat().st_mode
         except FileNotFoundError:
             destination_mode = None
-        if destination_mode is not None:
-            if not stat.S_ISREG(destination_mode):
-                raise click.ClickException("Download destination must be a regular file.")
-            # Check write permission without truncating the existing file.
-            os.close(os.open(destination, os.O_WRONLY))
-
-        with TemporaryDirectory(prefix=".osb-download-", dir=destination.parent) as temp_dir:
-            staged = Path(temp_dir) / "download"
-            with staged.open("wb") as out:
+        if destination_mode is not None and not stat.S_ISREG(destination_mode):
+            # Special files are stream targets and must never be replaced.
+            with destination.open("wb") as out:
                 for chunk in sandbox.files.read_bytes_stream(remote_path):
                     out.write(chunk)
+        else:
+            destination = destination.resolve()
             if destination_mode is not None:
-                staged.chmod(destination_mode & 0o777)
-            staged.replace(destination)
+                # Check write permission without truncating the existing file.
+                os.close(os.open(destination, os.O_WRONLY))
+
+            with TemporaryDirectory(prefix=".osb-download-", dir=destination.parent) as temp_dir:
+                staged = Path(temp_dir) / "download"
+                with staged.open("wb") as out:
+                    for chunk in sandbox.files.read_bytes_stream(remote_path):
+                        out.write(chunk)
+                if destination_mode is not None:
+                    staged.chmod(destination_mode & 0o777)
+                staged.replace(destination)
         obj.output.success(f"Downloaded: {remote_path} → {local_path}")
     finally:
         sandbox.close()

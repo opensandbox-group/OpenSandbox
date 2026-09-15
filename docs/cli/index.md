@@ -216,10 +216,14 @@ osb file replace <sandbox-id> /workspace/app.py --old old --new new -o json
 osb file chmod <sandbox-id> /workspace/script.sh --mode 755 -o json
 ```
 
-`file download` replaces the local destination only after the entire download
+For regular files, `file download` replaces the local destination only after the entire download
 succeeds. If the download fails or you interrupt it, an existing file stays
 unchanged and temporary download files are removed. The destination directory
 must be writable so the CLI can stage the download before replacing the file.
+
+Existing devices (such as `/dev/null`) and named pipes receive the download
+directly. They are not replaced, and bytes already written cannot be rolled back
+if the download fails or is interrupted.
 
 ### Manage runtime egress policy
 

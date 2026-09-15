@@ -119,7 +119,8 @@ Rules:
 
 - use `upload` when the source file is on the host
 - use `download` when the destination should be written to the host filesystem
-- downloads replace the destination only on success; failures and interruptions preserve the existing file
+- downloads replace regular files only on success; failures and interruptions preserve the existing regular file
+- existing devices and named pipes receive data directly; failures can leave partial output
 - use `write` and `cat` only when the operation stays entirely inside the sandbox
 
 ## Metadata and Permissions
@@ -170,7 +171,7 @@ Rules:
 ## Failure Semantics
 
 - `upload` and `download` have host filesystem side effects; treat them as cross-boundary operations
-- `download` writes to the local path immediately, so be explicit about the destination
+- `download` replaces regular files on success and writes directly to devices and named pipes, so be explicit about the destination
 - permission or ownership failures are usually path/runtime permission issues, not a reason to switch away from `osb file`
 - if multiple file commands fail unexpectedly, check sandbox health before assuming a file-command bug
 
