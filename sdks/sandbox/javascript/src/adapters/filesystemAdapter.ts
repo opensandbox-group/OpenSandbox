@@ -128,6 +128,17 @@ function encodeUtf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
+// `filename` is a quoted-string header parameter, so a quote or a line break
+// in the basename would truncate the part header and make the whole body
+// unparseable. Escape them the way the platform `FormData` used on the
+// in-memory path below does, so both upload paths emit the same header.
+function multipartHeaderFilename(filename: string): string {
+  return filename
+    .replace(/\r/g, "%0D")
+    .replace(/\n/g, "%0A")
+    .replace(/"/g, "%22");
+}
+
 async function* multipartUploadBody(opts: {
   boundary: string;
   metadataJson: string;
@@ -149,7 +160,7 @@ async function* multipartUploadBody(opts: {
   // Part 2: file
   yield encodeUtf8(`--${b}\r\n`);
   yield encodeUtf8(
-    `Content-Disposition: form-data; name="file"; filename="${opts.fileName}"\r\n`
+    `Content-Disposition: form-data; name="file"; filename="${multipartHeaderFilename(opts.fileName)}"\r\n`
   );
   yield encodeUtf8(`Content-Type: ${opts.fileContentType}\r\n\r\n`);
 
