@@ -609,6 +609,52 @@ func TestGetPolicy(t *testing.T) {
 	}
 }
 
+// TestNetworkRule_PortScopedJSONRoundTrip guards against the read-side
+// crash/data-loss risk other language SDKs had for a port-only rule (no
+// `target` in the wire JSON): Go's zero-value string for an absent field is
+// "", so decoding must not panic and must preserve Ports.
+func TestNetworkRule_PortScopedJSONRoundTrip(t *testing.T) {
+	rule := NetworkRule{Action: "deny", Ports: []int{25}}
+
+	data, err := json.Marshal(rule)
+	require.NoError(t, err)
+	require.Equal(t, `{"action":"deny","ports":[25]}`, string(data), "target must be omitted, not sent as an empty string")
+
+	var decoded NetworkRule
+	require.NoError(t, json.Unmarshal([]byte(`{"action":"deny","ports":[25]}`), &decoded))
+	require.Equal(t, "", decoded.Target)
+	require.Equal(t, []int{25}, decoded.Ports)
+
+	// An IP/CIDR target combined with ports must also round-trip.
+	scoped := NetworkRule{Action: "allow", Target: "10.0.0.5", Ports: []int{22, 80}}
+	data, err = json.Marshal(scoped)
+	require.NoError(t, err)
+	require.Equal(t, `{"action":"allow","target":"10.0.0.5","ports":[22,80]}`, string(data))
+}
+
+func TestGetPolicy_PortOnlyRule(t *testing.T) {
+	want := PolicyStatusResponse{
+		Status: "active",
+		Policy: &NetworkPolicy{
+			DefaultAction: "deny",
+			Egress: []NetworkRule{
+				{Action: "deny", Ports: []int{25}},
+			},
+		},
+	}
+
+	_, client := newEgressServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, http.StatusOK, want)
+	})
+
+	got, err := client.GetPolicy(context.Background())
+	require.NoErrorf(t, err, "GetPolicy")
+	require.NotNil(t, got.Policy)
+	require.Len(t, got.Policy.Egress, 1)
+	require.Equal(t, "", got.Policy.Egress[0].Target, "a port-only rule has no target")
+	require.Equal(t, []int{25}, got.Policy.Egress[0].Ports)
+}
+
 func TestPatchPolicy(t *testing.T) {
 	want := PolicyStatusResponse{
 		Status: "active",

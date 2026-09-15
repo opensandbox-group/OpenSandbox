@@ -135,10 +135,14 @@ type NetworkPolicy struct {
 	Egress        []NetworkRule `json:"egress,omitempty"`
 }
 
-// NetworkRule defines a single egress allow/deny rule.
+// NetworkRule defines a single egress allow/deny rule. Target may be empty
+// when Ports is set: the rule then scopes by TCP destination port alone,
+// across all IPv4/IPv6 destinations. A domain Target combined with Ports is
+// rejected by the server/sidecar (domain rules have no port dimension).
 type NetworkRule struct {
 	Action string `json:"action"`
-	Target string `json:"target"`
+	Target string `json:"target,omitempty"`
+	Ports  []int  `json:"ports,omitempty"`
 }
 
 // CredentialProxyConfig enables Credential Vault transparent proxy support at

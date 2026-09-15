@@ -116,6 +116,7 @@ internal object SandboxModelConverter {
                             NetworkRule.Action.DENY -> ApiNetworkRule.Action.deny
                         },
                     target = rule.target,
+                    ports = rule.ports,
                 )
             }
         return ApiNetworkPolicy(
@@ -130,7 +131,7 @@ internal object SandboxModelConverter {
                 NetworkRule.Action.ALLOW -> ApiNetworkRule.Action.allow
                 NetworkRule.Action.DENY -> ApiNetworkRule.Action.deny
             }
-        return ApiNetworkRule(action = action, target = this.target)
+        return ApiNetworkRule(action = action, target = this.target, ports = this.ports)
     }
 
     fun NetworkRule.toApiEgressNetworkRule(): ApiEgressNetworkRule {
@@ -139,7 +140,7 @@ internal object SandboxModelConverter {
                 NetworkRule.Action.ALLOW -> ApiEgressNetworkRule.Action.allow
                 NetworkRule.Action.DENY -> ApiEgressNetworkRule.Action.deny
             }
-        return ApiEgressNetworkRule(action = action, target = this.target)
+        return ApiEgressNetworkRule(action = action, target = this.target, ports = this.ports)
     }
 
     fun ApiNetworkRule.toDomainNetworkRule(): NetworkRule {
@@ -148,11 +149,10 @@ internal object SandboxModelConverter {
                 ApiNetworkRule.Action.allow -> NetworkRule.Action.ALLOW
                 ApiNetworkRule.Action.deny -> NetworkRule.Action.DENY
             }
-        return NetworkRule
-            .builder()
-            .action(action)
-            .target(this.target)
-            .build()
+        val builder = NetworkRule.builder().action(action)
+        this.target?.let { builder.target(it) }
+        this.ports?.let { builder.ports(it) }
+        return builder.build()
     }
 
     fun ApiNetworkPolicy.toDomainNetworkPolicy(): NetworkPolicy {
@@ -174,11 +174,10 @@ internal object SandboxModelConverter {
                 ApiEgressNetworkRule.Action.allow -> NetworkRule.Action.ALLOW
                 ApiEgressNetworkRule.Action.deny -> NetworkRule.Action.DENY
             }
-        return NetworkRule
-            .builder()
-            .action(action)
-            .target(this.target)
-            .build()
+        val builder = NetworkRule.builder().action(action)
+        this.target?.let { builder.target(it) }
+        this.ports?.let { builder.ports(it) }
+        return builder.build()
     }
 
     fun ApiEgressNetworkPolicy.toDomainEgressNetworkPolicy(): NetworkPolicy {

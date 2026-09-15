@@ -262,11 +262,17 @@ class PlatformSpec private constructor(
  * Egress rule for matching network targets.
  *
  * @property action Whether to allow or deny matching targets.
- * @property target FQDN or wildcard domain (e.g., "example.com", "*.example.com")
+ * @property target FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP address, or
+ * CIDR. May be null when [ports] is set; otherwise required.
+ * @property ports Restricts this rule to specific TCP destination ports (1-65535, max 256). A
+ * null [target] with [ports] set applies to all IPv4/IPv6 destinations. A domain [target]
+ * combined with [ports] is rejected by the server/sidecar: domain rules are evaluated at the
+ * DNS layer, which has no port dimension.
  */
 class NetworkRule private constructor(
     val action: Action,
-    val target: String,
+    val target: String?,
+    val ports: List<Int>?,
 ) {
     enum class Action {
         ALLOW,
@@ -274,6 +280,8 @@ class NetworkRule private constructor(
     }
 
     companion object {
+        private const val MAX_PORTS_PER_RULE = 256
+
         @JvmStatic
         fun builder(): Builder = Builder()
     }
@@ -281,6 +289,7 @@ class NetworkRule private constructor(
     class Builder {
         private var action: Action? = null
         private var target: String? = null
+        private var ports: List<Int>? = null
 
         fun action(action: Action): Builder {
             this.action = action
@@ -293,12 +302,26 @@ class NetworkRule private constructor(
             return this
         }
 
+        fun ports(ports: List<Int>): Builder {
+            require(ports.isNotEmpty()) { "Ports cannot be empty" }
+            require(ports.size <= MAX_PORTS_PER_RULE) { "Ports cannot exceed $MAX_PORTS_PER_RULE entries" }
+            require(ports.toSet().size == ports.size) { "Ports cannot contain duplicates" }
+            for (port in ports) {
+                require(port in 1..65535) { "Port $port out of range 1-65535" }
+            }
+            this.ports = ports
+            return this
+        }
+
         fun build(): NetworkRule {
             val actionValue = action ?: throw IllegalArgumentException("Action must be specified")
-            val targetValue = target ?: throw IllegalArgumentException("Target must be specified")
+            val targetValue = target
+            val portsValue = ports
+            require(targetValue != null || portsValue != null) { "Either target or ports must be specified" }
             return NetworkRule(
                 action = actionValue,
                 target = targetValue,
+                ports = portsValue,
             )
         }
     }
