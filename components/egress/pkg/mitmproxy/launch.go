@@ -91,6 +91,9 @@ func LookupUser(userName string) (uid, gid uint32, home string, err error) {
 
 // Launch starts mitmdump in the background; check Wait/GracefulShutdown on the returned Running.
 func Launch(cfg Config) (*Running, error) {
+	if err := validateUpstreamProxyEnv(); err != nil {
+		return nil, fmt.Errorf("mitmproxy: %w", err)
+	}
 	if runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("mitmproxy: transparent mitmdump is only supported on linux")
 	}
@@ -161,6 +164,9 @@ func buildMitmdumpArgs(cfg Config) []string {
 	}
 
 	args = append(args, "-s", systemScriptPath)
+	if strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
+		args = append(args, "-s", upstreamProxyScriptPath)
+	}
 	for _, p := range cfg.ScriptPaths {
 		if s := strings.TrimSpace(p); s != "" {
 			args = append(args, "-s", s)

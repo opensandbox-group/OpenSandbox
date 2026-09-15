@@ -96,6 +96,50 @@ func TestBuildMitmdumpArgsSkipsEmptyScriptPaths(t *testing.T) {
 	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py", "/scripts/logging.py"}, scripts)
 }
 
+func TestBuildMitmdumpArgsUpstreamProxyScriptOrdered(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "https://proxy.example.com:8443")
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py"},
+	})
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, upstreamProxyScriptPath, "/scripts/auth.py"}, scripts)
+}
+
+func TestBuildMitmdumpArgsNoUpstreamProxyKeepsOrder(t *testing.T) {
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py"},
+	})
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py"}, scripts)
+	require.NotContains(t, args, upstreamProxyScriptPath)
+}
+
+func TestLaunchRejectsInvalidUpstreamProxy(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "not-a-url")
+	_, err := Launch(Config{ListenPort: 18081})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OPENSANDBOX_EGRESS_UPSTREAM_PROXY")
+}
+
+func TestLaunchRejectsUpstreamAuthWithoutProxy(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH", "Basic dXNlcjpwYXNz")
+	_, err := Launch(Config{ListenPort: 18081})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH")
+}
+
 func TestBuildMitmdumpEnvSetsMitmproxyHome(t *testing.T) {
 	env := buildMitmdumpEnv(
 		[]string{

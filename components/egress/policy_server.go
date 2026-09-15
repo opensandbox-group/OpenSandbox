@@ -50,6 +50,7 @@ type policyUpdater interface {
 type nftApplier interface {
 	ApplyStatic(context.Context, *policy.NetworkPolicy) error
 	AddResolvedDomain(context.Context, string, []nftables.ResolvedIP) error
+	AddUpstreamProxyIPs(context.Context, []nftables.ResolvedIP) error
 	StartConnectionRefresh(context.Context)
 	StartDomainRefresh(context.Context, func(context.Context, string) ([]nftables.ResolvedIP, error))
 	RemoveEnforcement(context.Context) error

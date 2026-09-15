@@ -65,6 +65,10 @@ func (s *stubNft) AddResolvedDomain(_ context.Context, _ string, _ []nftables.Re
 	return nil
 }
 
+func (s *stubNft) AddUpstreamProxyIPs(_ context.Context, _ []nftables.ResolvedIP) error {
+	return nil
+}
+
 func (s *stubNft) StartConnectionRefresh(context.Context) {}
 
 func (s *stubNft) StartDomainRefresh(context.Context, func(context.Context, string) ([]nftables.ResolvedIP, error)) {

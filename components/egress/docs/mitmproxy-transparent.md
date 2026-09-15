@@ -50,6 +50,8 @@ To bypass decryption for selected domains, edit the baked-in
 | `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR` | No | Trust directory for upstream TLS verification (OpenSSL style); overrides the config.yaml default | `/etc/ssl/certs` |
 | `OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE` | No | Skip upstream TLS verification (`1/true/on`); use when clients connect by IP and SNI is unavailable | Disabled |
 | `OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS` | No | **Experimental.** Extra destination TCP ports to intercept, appended to the always-on `80,443` (comma-separated, e.g. `8080,8443`). Fails closed at startup on invalid input; total ports (including 80/443) must be ≤ 15. Note: the system addon's credential-binding matcher currently only fires on canonical 80/443 — extras are decrypted and logged but not matched against bindings. | Empty |
+| `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` | No | Chained upstream proxy endpoint (`http://host[:port]` or `https://host[:port]`). When set, the bundled `upstream_proxy.py` addon is loaded after the system addon and every mitmproxy-handled connection is forwarded through the proxy via `CONNECT`. Fail closed: pass-through flows that cannot be chained are refused. | Empty (disabled) |
+| `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH` | No | Complete `Proxy-Authorization` header value sent on the upstream `CONNECT` (e.g. `Basic base64(user:pass)`). Requires `OPENSANDBOX_EGRESS_UPSTREAM_PROXY`; startup fails if set alone. Never logged. | Empty |
 
 Notes:
 
@@ -156,6 +158,12 @@ ignore_hosts:
 mitm still proxies the TCP connection, it just forwards bytes without
 breaking TLS, and addons do not see request/response content.
 
+`ignore_hosts` (like `tcp_hosts`/`udp_hosts`) is **incompatible** with
+`OPENSANDBOX_EGRESS_UPSTREAM_PROXY`: pass-through connections cannot be chained
+through a CONNECT proxy, so the upstream addon refuses to load when any
+pass-through list is non-empty instead of letting those destinations bypass
+the proxy.
+
 ### 5) Use a Fixed CA (consistent fingerprint across replicas)
 
 If CA files already exist in `confdir`, mitmproxy reuses them instead of regenerating on each startup. Typical paths:
@@ -164,6 +172,49 @@ If CA files already exist in `confdir`, mitmproxy reuses them instead of regener
 - `/var/lib/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem` (public cert)
 
 Ensure correct permissions (for example `mitmproxy:mitmproxy`, private key mode `600`).
+
+### 6) Chain Through an Upstream Proxy (Corporate/Forward Egress)
+
+```bash
+export OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true
+export OPENSANDBOX_EGRESS_UPSTREAM_PROXY=https://proxy.example.com:8443
+# Optional: complete Proxy-Authorization header value for the upstream CONNECT
+export OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH="Basic $(printf 'user:pass' | base64)"
+```
+
+When set, the bundled `upstream_proxy.py` addon is loaded after the system
+addon and all mitmproxy-handled egress is chained: mitmproxy dials the
+configured proxy and issues `CONNECT <request.host>:<port>`. For intercepted
+TLS the authority is the SNI/Host-derived FQDN (not the intercepted IP), so the
+upstream proxy resolves and dials the original destination itself; flows where
+only an IP is known keep `IP:port` as the authority.
+
+Semantics and limits:
+
+- **`https://` endpoints** get TLS to the proxy with SNI and hostname
+  verification against the proxy host, using the same
+  `ssl_verify_upstream_trusted_confdir`/`_trusted_ca` options that verify real
+  upstreams (default `/etc/ssl/certs`, overridable via
+  `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR`).
+- **Fail closed**: connections that cannot be chained — TLS pass-through
+  (no-SNI or `ignore_hosts`/`tcp_hosts`/`udp_hosts` matches) and UDP/QUIC
+  dials — are refused rather than silently sent direct.
+- **Requires `connection_strategy: lazy`** (the shipped default): eager
+  connects upstream before any request exists, so no `via` can be applied.
+- **Config validation**: a malformed proxy URL, credentials in the URL, or
+  `..._AUTH` without `..._PROXY` fail egress startup; the addon likewise raises
+  on load, so mitmdump will not start with an inconsistent config.
+- **Policy interaction (`dns+nft`)**: the proxy endpoint is treated as
+  infrastructure, not sandbox egress. The egress nft chain adds a dedicated
+  accept scoped to `(mitmproxy UID, proxy IP, proxy port)`; the proxy IP is
+  deliberately *not* added to the sandbox allow sets, which are IP-only and
+  would otherwise let sandbox code dial the proxy port directly (e.g. `CONNECT`
+  on 3128) to reach denied destinations. For a hostname endpoint the DNS
+  answer is exempted from sandbox policy evaluation and feeds only the
+  uid-scoped set, so the proxy name stays resolvable under a deny-all policy.
+- **Auth secrecy**: the auth value is sent only on the upstream `CONNECT` and
+  is never logged. Prefer injecting it via the container env or a Secret over
+  baking it into an image.
 
 ## Relationship with Policy/DNS
 
