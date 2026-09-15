@@ -20,8 +20,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestBuildMitmdumpArgsModeSpecs(t *testing.T) {
+	v6 := true
+	args := buildMitmdumpArgs(Config{ListenPort: 18081, ListenV6: &v6})
+	require.Contains(t, args, "transparent@127.0.0.1:18081")
+	require.Contains(t, args, "transparent@::1:18081")
+	v6 = false
+	args = buildMitmdumpArgs(Config{ListenPort: 18081, ListenV6: &v6})
+	require.Contains(t, args, "transparent@127.0.0.1:18081")
+	require.NotContains(t, args, "transparent@::1:18081")
+}
+
 func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
 	args := buildMitmdumpArgs(Config{ListenPort: 18081})
+	require.Contains(t, args, "--mode")
+	require.Contains(t, args, "transparent@127.0.0.1:18081")
 	require.Contains(t, args, "--listen-port")
 	require.Contains(t, args, "18081")
 	require.Contains(t, args, "--set")

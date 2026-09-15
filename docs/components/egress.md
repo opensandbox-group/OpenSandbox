@@ -82,6 +82,19 @@ Most deployments only need these settings:
   - `OPENSANDBOX_EGRESS_TOKEN` (optional auth via `OPENSANDBOX-EGRESS-AUTH`)
 - **Rule limit**:
   - `OPENSANDBOX_EGRESS_MAX_RULES` for `POST/PATCH /policy` (default `4096`, `0` disables cap)
+- **Redirect backend**: `OPENSANDBOX_EGRESS_REDIRECT_BACKEND` — how the OUTPUT redirects (DNS → the
+  proxy, HTTP/HTTPS → the transparent mitmproxy) are installed: `auto` (default: iptables first,
+  native nft rules when iptables' nft backend cannot load an xtables extension such as `owner` or
+  the IPv6 `REDIRECT` target), `nft` (native nft from the start, both address families), or
+  `iptables` (never fall back). Firecracker-style guest kernels (Fly.io Machines and similar
+  microVM hosts) ship nf_tables without `CONFIG_NETFILTER_XT_MATCH_OWNER`: use `nft` there.
+- **IPv6-only transport**: the `dns+nft` policy chain accepts ICMPv6 neighbor discovery (a host
+  whose default route is a link-local IPv6 gateway would otherwise lose its neighbor entry and
+  become unreachable once the cache goes stale), the DNS proxy also listens on `[::1]:15353`
+  so a `resolv.conf` naming an IPv6 resolver is proxied after the ip6 OUTPUT redirect, and the
+  transparent mitmproxy listens on `[::1]:18081` next to `127.0.0.1:18081` so IPv6 destinations
+  are intercepted too (the ip6 REDIRECT lands on `::1`, which `oifname "lo"` does not match —
+  the policy chain accepts `ip6 daddr ::1`).
 
 Optional advanced features:
 

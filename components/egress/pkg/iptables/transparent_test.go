@@ -15,47 +15,98 @@
 package iptables
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
 
-func TestTransparentHTTPRules_DportsAndOp(t *testing.T) {
-	cases := []struct {
-		name   string
-		dports string
-	}{
-		{"default", "80,443"},
-		{"extra_single", "80,443,8080"},
-		{"extra_multi", "80,443,8080,8443,9000"},
+func TestTransparentNftScriptCoversBothFamilies(t *testing.T) {
+	s := transparentNftScript(18081, 10042, "80,443,8443")
+	for _, want := range []string{
+		"delete table ip opensandbox_mitm_redirect",
+		"delete table ip6 opensandbox_mitm_redirect",
+		"add chain ip opensandbox_mitm_redirect output { type nat hook output priority -100; policy accept; }",
+		"add chain ip6 opensandbox_mitm_redirect output { type nat hook output priority -100; policy accept; }",
+		"add rule ip opensandbox_mitm_redirect output ip daddr 127.0.0.0/8 tcp dport { 80, 443, 8443 } return",
+		"add rule ip6 opensandbox_mitm_redirect output ip6 daddr ::1 tcp dport { 80, 443, 8443 } return",
+		"add rule ip opensandbox_mitm_redirect output meta skuid 10042 tcp dport { 80, 443, 8443 } return",
+		"add rule ip6 opensandbox_mitm_redirect output meta skuid 10042 tcp dport { 80, 443, 8443 } return",
+		"add rule ip opensandbox_mitm_redirect output tcp dport { 80, 443, 8443 } redirect to :18081",
+		"add rule ip6 opensandbox_mitm_redirect output tcp dport { 80, 443, 8443 } redirect to :18081",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("script missing %q:\n%s", want, s)
+		}
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rules := transparentHTTPRules(18081, 1234, tc.dports, "-A")
-			if len(rules) != 2 {
-				t.Fatalf("want 2 rules, got %d", len(rules))
-			}
-			redir := strings.Join(rules[1], " ")
-			if !strings.Contains(redir, "--dports "+tc.dports) {
-				t.Errorf("REDIRECT rule missing --dports %q: %s", tc.dports, redir)
-			}
-			if !strings.Contains(redir, "--to-ports 18081") {
-				t.Errorf("REDIRECT rule missing --to-ports 18081: %s", redir)
-			}
-			if !strings.Contains(redir, "! --uid-owner 1234") {
-				t.Errorf("REDIRECT rule missing uid-owner exclusion: %s", redir)
-			}
-			if !strings.HasPrefix(strings.Join(rules[0], " "), "iptables -t nat -A OUTPUT -p tcp -d 127.0.0.0/8 -j RETURN") {
-				t.Errorf("loopback RETURN rule malformed: %s", strings.Join(rules[0], " "))
-			}
-		})
+	// The skip-uid rule must come BEFORE the redirect in each family, or mitmproxy loops on itself.
+	for _, fam := range []string{"ip ", "ip6 "} {
+		skip := strings.Index(s, "add rule "+fam+"opensandbox_mitm_redirect output meta skuid")
+		redir := strings.Index(s, "add rule "+fam+"opensandbox_mitm_redirect output tcp dport")
+		if skip < 0 || redir < 0 || skip > redir {
+			t.Fatalf("%sskip-uid rule must precede the redirect", fam)
+		}
 	}
 }
 
-func TestTransparentHTTPRules_OpFlagPropagates(t *testing.T) {
-	rules := transparentHTTPRules(18081, 1234, "80,443", "-D")
-	for _, r := range rules {
-		if r[3] != "-D" {
-			t.Errorf("expected -D op, got %v", r)
+func TestSetupTransparentNftRetriesWithoutDeleteWhenTableIsMissing(t *testing.T) {
+	var scripts []string
+	r := redirectRunner{
+		runNft: func(_ context.Context, script string) ([]byte, error) {
+			scripts = append(scripts, script)
+			if strings.Contains(script, "delete table ip opensandbox_mitm_redirect") {
+				return []byte("Error: Could not process rule: No such file or directory\ndelete table ip opensandbox_mitm_redirect"), errors.New("exit status 1")
+			}
+			return nil, nil
+		},
+	}
+	if err := setupTransparentNft(context.Background(), r, 18081, 10042, "80,443"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(scripts) != 2 {
+		t.Fatalf("expected a retry without the delete lines, got %d scripts", len(scripts))
+	}
+	if strings.Contains(scripts[1], "delete table") {
+		t.Fatalf("retry still deletes:\n%s", scripts[1])
+	}
+}
+
+func TestRedirectBackendFromEnv(t *testing.T) {
+	t.Setenv(RedirectBackendEnv, "")
+	if redirectBackend() != backendAuto {
+		t.Fatal("empty → auto")
+	}
+	t.Setenv(RedirectBackendEnv, "NFT")
+	if redirectBackend() != backendNft {
+		t.Fatal("NFT → nft")
+	}
+	t.Setenv(RedirectBackendEnv, "iptables")
+	if redirectBackend() != backendIptables {
+		t.Fatal("iptables → iptables")
+	}
+	t.Setenv(RedirectBackendEnv, "bogus")
+	if redirectBackend() != backendAuto {
+		t.Fatal("unknown → auto")
+	}
+}
+
+func TestIsIptablesXtExtensionError(t *testing.T) {
+	yes := []string{
+		"iptables transparent: exit status 4 (output: Warning: Extension owner revision 0 not supported, missing kernel module?\niptables v1.8.11 (nf_tables):  RULE_APPEND failed (No such file or directory): rule in chain OUTPUT\n)",
+		"ip6tables: No chain/target/match by that name.",
+		"Warning: XT target REDIRECT not found",
+	}
+	for _, m := range yes {
+		if !isIptablesXtExtensionError(errors.New(m)) {
+			t.Fatalf("expected an xt-extension error for %q", m)
 		}
+	}
+	for _, m := range []string{"", "iptables: permission denied", "exit status 1"} {
+		if isIptablesXtExtensionError(errors.New(m)) {
+			t.Fatalf("false positive for %q", m)
+		}
+	}
+	if isIptablesXtExtensionError(nil) {
+		t.Fatal("nil is not an error")
 	}
 }
