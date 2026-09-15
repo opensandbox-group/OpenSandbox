@@ -110,6 +110,12 @@ for err == nil && info.Status.State == opensandbox.SnapshotStateCreating {
         info, err = mgr.GetSnapshot(ctx, snap.ID)
     }
 }
+if err != nil {
+    log.Fatal(err)
+}
+if info.Status.State != opensandbox.SnapshotStateReady {
+    log.Fatalf("snapshot not Ready: state=%s reason=%s", info.Status.State, info.Status.Reason)
+}
 
 page, err := mgr.ListSnapshots(ctx, opensandbox.ListSnapshotsOptions{})
 
@@ -122,6 +128,10 @@ restored, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
         "memory": "512Mi",
     },
 })
+if err != nil {
+    log.Fatal(err)
+}
+_ = restored
 
 // Only delete the snapshot after the restore has succeeded
 _ = mgr.DeleteSnapshot(ctx, snap.ID)
@@ -147,7 +157,7 @@ session, err := sbx.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionReques
 run, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
     Code:           "python -c 'print(1+1)'",
     TimeoutSeconds: 30,
-})
+}, nil)
 fmt.Println(run.Stdout[0].Text)
 
 // Background runs: start, poll until finished, then fetch logs
