@@ -32,7 +32,7 @@ jobs:
               "**/package-lock.json",
               "**/yarn.lock",
               "**/Cargo.lock",
-              "kubernetes/charts/opensandbox/Chart.lock",
+              "manifests/charts/opensandbox/Chart.lock",
               "sdks/sandbox/kotlin/sandbox-api/src/main/kotlin/com/alibaba/opensandbox/sandbox/api/openapitools.json",
 
               // Unit / integration / e2e test sources and fixtures. Kept out

@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [ main ]
     paths:
-      - 'kubernetes/charts/**'
+      - 'manifests/charts/**'
       - 'kubernetes/Makefile'
       - '.github/workflows/helm-docs.yml'
 
@@ -39,9 +39,9 @@ jobs:
 
       - name: Verify no drift
         run: |
-          if [ -n "$(git status --porcelain -- kubernetes/charts)" ]; then
+          if [ -n "$(git status --porcelain -- manifests/charts)" ]; then
             echo "::error::Helm chart documentation is out of date. Run 'make helm-docs' in kubernetes/ and commit the generated README.md files."
-            git diff -- kubernetes/charts
+            git diff -- manifests/charts
             exit 1
           fi
           echo "Chart documentation is up to date."

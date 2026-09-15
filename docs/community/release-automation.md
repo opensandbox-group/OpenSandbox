@@ -130,8 +130,8 @@ Examples:
 - `server` -> `server` + `specs/sandbox-lifecycle.yml`
 - `docker/egress` -> `components/egress`
 - `docker/nodeagent` -> `components/nodeagent` + `components/internal`
-- `helm/opensandbox` -> `kubernetes/charts/opensandbox`
-- `helm/opensandbox-node-agent` -> `kubernetes/charts/opensandbox-node-agent`
+- `helm/opensandbox` -> `manifests/charts/opensandbox`
+- `helm/opensandbox-node-agent` -> `manifests/charts/opensandbox-node-agent`
 
 Override behavior:
 

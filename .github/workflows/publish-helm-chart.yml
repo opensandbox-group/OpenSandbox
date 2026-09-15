@@ -159,10 +159,10 @@ jobs:
         run: |
           set -euo pipefail
           case "$COMPONENT" in
-            opensandbox-controller) chart_path="kubernetes/charts/opensandbox-controller" ;;
-            opensandbox-server) chart_path="kubernetes/charts/opensandbox-server" ;;
-            opensandbox) chart_path="kubernetes/charts/opensandbox" ;;
-            opensandbox-node-agent) chart_path="kubernetes/charts/opensandbox-node-agent" ;;
+            opensandbox-controller) chart_path="manifests/charts/opensandbox-controller" ;;
+            opensandbox-server) chart_path="manifests/charts/opensandbox-server" ;;
+            opensandbox) chart_path="manifests/charts/opensandbox" ;;
+            opensandbox-node-agent) chart_path="manifests/charts/opensandbox-node-agent" ;;
           esac
           echo "path=$chart_path" >>"$GITHUB_OUTPUT"
 

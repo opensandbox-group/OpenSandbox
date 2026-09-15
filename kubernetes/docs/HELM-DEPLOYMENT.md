@@ -532,7 +532,7 @@ options:
 
 # Add to Set chart path step
 if [ "$COMPONENT" == "opensandbox-controller" ]; then
-  CHART_PATH="kubernetes/charts/opensandbox-controller"
+  CHART_PATH="manifests/charts/opensandbox-controller"
 elif [ "$COMPONENT" == "new-component" ]; then
   CHART_PATH="path/to/new-component/chart"
 fi

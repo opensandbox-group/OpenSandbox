@@ -402,9 +402,9 @@ Steps:
 
    **Direct version fields:**
 
-   - `kubernetes/charts/opensandbox/Chart.yaml` — both `version:`
+   - `manifests/charts/opensandbox/Chart.yaml` — both `version:`
      and `appVersion:` must equal `${version}`.
-   - `kubernetes/charts/opensandbox/values.yaml` (and every
+   - `manifests/charts/opensandbox/values.yaml` (and every
      sub-chart's `values.yaml`) — every reference to an
      OpenSandbox platform image must resolve to
      `release-${version}`. The scan covers both shapes the chart

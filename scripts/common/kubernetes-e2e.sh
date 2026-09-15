@@ -221,7 +221,7 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 repo_root, values_file = sys.argv[1], sys.argv[2]
-chart_path = f"{repo_root}/kubernetes/charts/opensandbox-server"
+chart_path = f"{repo_root}/manifests/charts/opensandbox-server"
 
 rendered = subprocess.run(
     ["helm", "template", "opensandbox-server", chart_path, "-f", values_file],
@@ -258,7 +258,7 @@ k8s_e2e_helm_install_server() {
   kubectl get namespace "${SERVER_NAMESPACE}" >/dev/null 2>&1 || kubectl create namespace "${SERVER_NAMESPACE}"
   k8s_e2e_validate_rendered_config_toml
 
-  helm upgrade --install "${SERVER_RELEASE}" "${REPO_ROOT}/kubernetes/charts/opensandbox-server" \
+  helm upgrade --install "${SERVER_RELEASE}" "${REPO_ROOT}/manifests/charts/opensandbox-server" \
     --namespace "${SERVER_NAMESPACE}" \
     --create-namespace \
     -f "${SERVER_VALUES_FILE}"

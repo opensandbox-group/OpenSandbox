@@ -6,7 +6,7 @@ on:
     paths:
       - '.github/workflows/helm-release-test.yml'
       - '.github/workflows/publish-helm-chart.yml'
-      - 'kubernetes/charts/**'
+      - 'manifests/charts/**'
       - 'scripts/release/*helm*.sh'
       - 'sdks/code-interpreter/python/**'
       - 'sdks/sandbox/python/**'
@@ -69,7 +69,7 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          chart_path="kubernetes/charts/opensandbox"
+          chart_path="manifests/charts/opensandbox"
           chart_version="$(awk '$1 == "version:" {gsub(/"/, "", $2); print $2; exit}' "$chart_path/Chart.yaml")"
           app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' "$chart_path/Chart.yaml")"
           package_name="opensandbox-${chart_version}.tgz"
@@ -90,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          helm template opensandbox-server kubernetes/charts/opensandbox-server \
+          helm template opensandbox-server manifests/charts/opensandbox-server \
             --show-only templates/server.yaml >/tmp/opensandbox-server-rendered.yaml
           grep -qx '  replicas: 1' /tmp/opensandbox-server-rendered.yaml
           grep -qx '    type: Recreate' /tmp/opensandbox-server-rendered.yaml

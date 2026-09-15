@@ -218,7 +218,7 @@ components/nodeagent/
     sink/                    # Sink SPI, OSS, durable file, stdout
     state/                   # bbolt namespaces and schema
     server/                  # health, readiness, optional pprof
-kubernetes/charts/opensandbox-node-agent/
+manifests/charts/opensandbox-node-agent/
 ```
 
 The component follows existing Go-component conventions and reuses `components/internal` for zap
@@ -786,7 +786,7 @@ whole state directory; per-StreamRef state deletion is not a supported target mi
 
 ### 9. Deployment
 
-Ship an optional `kubernetes/charts/opensandbox-node-agent` chart and umbrella dependency. The
+Ship an optional `manifests/charts/opensandbox-node-agent` chart and umbrella dependency. The
 DaemonSet runs only on Linux, obtains `NODE_NAME` from the Downward API, tolerates the intended node
 set, and mounts a node-persistent state directory writable. It mounts `/var/log/pods` read-only only
 when `container-logs` is enabled. Durable-file data uses a separate persistent host path whose
@@ -979,7 +979,7 @@ structured audit events.
 ## Infrastructure Needed
 
 - A new Go module `components/nodeagent` and Dockerfile, plus CI image build.
-- A new Helm chart `kubernetes/charts/opensandbox-node-agent` with DaemonSet, RBAC, and values for privilege gating.
+- A new Helm chart `manifests/charts/opensandbox-node-agent` with DaemonSet, RBAC, and values for privilege gating.
 - Extend the Helm chart release workflow so `opensandbox-node-agent` can be released independently. If the umbrella chart integrates it, add it as a default-disabled optional dependency and update values and Chart.lock.
 - Kind e2e wiring and either a real OSS test bucket or a dedicated mock that fully implements the AppendObject state machine. A generic S3-compatible mock does not validate OSS behavior.
 - Go dependencies: Alibaba Cloud OSS client `github.com/aliyun/aliyun-oss-go-sdk`, `fsnotify` for inotify, and `client-go` for Pod watches, while reusing `components/internal`. The repository currently has no object-storage client, so the `oss` Sink adds one. Do not add an OTLP logs SDK. Self-telemetry continues to use the existing OTLP metrics path in `components/internal/telemetry`.

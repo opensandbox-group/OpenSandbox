@@ -421,12 +421,12 @@ case "$TARGET" in
     TARGET="helm/opensandbox"
     DISPLAY_NAME="Helm opensandbox"
     WORKFLOW_HINT=".github/workflows/publish-helm-chart.yml"
-    TARGET_PATH_FILTERS=("kubernetes/charts/opensandbox")
+    TARGET_PATH_FILTERS=("manifests/charts/opensandbox")
     ;;
   helm/opensandbox-node-agent)
     DISPLAY_NAME="Helm opensandbox-node-agent"
     WORKFLOW_HINT=".github/workflows/publish-helm-chart.yml"
-    TARGET_PATH_FILTERS=("kubernetes/charts/opensandbox-node-agent")
+    TARGET_PATH_FILTERS=("manifests/charts/opensandbox-node-agent")
     ;;
   *)
     die "Unsupported target '$TARGET'. Run with --help for supported target list."

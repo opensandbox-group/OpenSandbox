@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Kubernetes E2E (Python) with server ingress.mode=gateway and the chart-deployed
-# ingress-gateway (components/ingress). See kubernetes/charts/opensandbox-server/README.md.
+# ingress-gateway (components/ingress). See manifests/charts/opensandbox-server/README.md.
 #
 # Compared to scripts/python-k8s-e2e.sh:
 # - Builds/opensandbox/ingress image and sets server.gateway.* so Helm deploys opensandbox-ingress-gateway.

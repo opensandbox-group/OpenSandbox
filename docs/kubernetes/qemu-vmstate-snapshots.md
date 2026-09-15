@@ -271,7 +271,7 @@ Install or upgrade the controller:
 
 ```bash
 helm upgrade --install opensandbox-controller \
-  ./kubernetes/charts/opensandbox-controller \
+  ./manifests/charts/opensandbox-controller \
   --namespace opensandbox-system \
   --create-namespace \
   --values qemu-snapshot-values.yaml

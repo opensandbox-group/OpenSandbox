@@ -71,12 +71,12 @@ See the [Kubernetes deployment guide](../../../docs/kubernetes/deployment.md) fo
 kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
 
 # Server only (default namespace opensandbox-system)
-helm install opensandbox-server ./kubernetes/charts/opensandbox-server \
+helm install opensandbox-server ./manifests/charts/opensandbox-server \
   --namespace opensandbox-system \
   --create-namespace
 
 # With custom image and config
-helm install opensandbox-server ./kubernetes/charts/opensandbox-server \
+helm install opensandbox-server ./manifests/charts/opensandbox-server \
   --set server.image.repository=your-registry/opensandbox/server \
   --set server.image.tag=v0.1.0 \
   --namespace opensandbox-system \
@@ -88,7 +88,7 @@ helm install opensandbox-server ./kubernetes/charts/opensandbox-server \
 To run both the Lifecycle API server and the ingress gateway (components/ingress) in one release, set `server.gateway.enabled=true`. The chart will deploy the server and the gateway (Deployment, Service, RBAC), and write server config `[ingress] mode = "gateway"` so the server returns the correct gateway address to clients.
 
 ```bash
-helm install opensandbox-server ./kubernetes/charts/opensandbox-server \
+helm install opensandbox-server ./manifests/charts/opensandbox-server \
   --namespace opensandbox-system \
   --create-namespace \
   --set server.gateway.enabled=true \
