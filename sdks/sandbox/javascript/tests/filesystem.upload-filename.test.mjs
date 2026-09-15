@@ -68,6 +68,19 @@ test("streamed upload survives a line break in the filename", async () => {
   assert.equal(await form.get("file").text(), "hello");
 });
 
+// A backslash opens a quoted-pair, so a trailing one swallows the closing
+// delimiter. Node's own parser ignores quoted-pairs and reads the part anyway,
+// while Go's `mime/multipart` honours them and drops the part, so this case is
+// pinned on the emitted header rather than on a round trip through `formData()`.
+test("streamed upload doubles a backslash in the filename", async () => {
+  const capture = await upload("/tmp/report\\", streamOf("hello"));
+
+  assert.equal(
+    fileDisposition(capture),
+    'Content-Disposition: form-data; name="file"; filename="report\\\\"'
+  );
+});
+
 test("streamed and in-memory uploads agree on the file part header", async () => {
   const path = '/tmp/re"po\r\nrt.txt';
 
