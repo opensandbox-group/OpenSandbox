@@ -39,6 +39,30 @@ def test_parse_rejects_bad_json():
     assert parse_renew_intent_json("not json") is None
 
 
+def test_parse_reads_ingress_namespace():
+    raw = (
+        '{"namespace":"tenant-a","sandbox_id":"abc",'
+        '"observed_at":"2026-03-22T12:00:00.123456789Z"}'
+    )
+    intent = parse_renew_intent_json(raw)
+    assert intent is not None
+    assert intent.namespace == "tenant-a"
+
+
+@pytest.mark.parametrize(
+    "namespace_json",
+    [None, '""', '"   "', "7"],
+)
+def test_parse_namespace_absent_or_invalid(namespace_json):
+    base = '"sandbox_id":"abc","observed_at":"2026-03-22T12:00:00Z"'
+    raw = "{" + base + "}" if namespace_json is None else (
+        "{" + base + f',"namespace":{namespace_json}' + "}"
+    )
+    intent = parse_renew_intent_json(raw)
+    assert intent is not None
+    assert intent.namespace is None
+
+
 @pytest.mark.parametrize(
     "observed_at,expect_stale",
     [

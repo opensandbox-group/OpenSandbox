@@ -60,6 +60,7 @@ class RenewWorkItem:
     source: str
     sandbox_id: str
     observed_at: datetime
+    namespace: Optional[str] = None
 
 
 @dataclass
@@ -251,6 +252,7 @@ class RenewIntentConsumer:
                         source=RENEW_SOURCE_REDIS_QUEUE,
                         sandbox_id=intent.sandbox_id,
                         observed_at=intent.observed_at,
+                        namespace=intent.namespace,
                     )
                 )
             except Exception as exc:
@@ -291,7 +293,9 @@ class RenewIntentConsumer:
         st = self._ensure_mru_mem(work.sandbox_id)
         async with st.lock:
             if self._redis is not None:
-                await self._controller.renew_after_gates(work.sandbox_id, source=work.source)
+                await self._controller.renew_after_gates(
+                    work.sandbox_id, source=work.source, namespace=work.namespace
+                )
                 return
 
             now = time.monotonic()

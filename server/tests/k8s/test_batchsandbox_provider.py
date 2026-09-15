@@ -136,6 +136,23 @@ class TestBatchSandboxProvider:
         assert provider.version == "v1alpha1"
         assert provider.plural == "batchsandboxes"
 
+    def test_list_workloads_all_namespaces_delegates_to_client(self, mock_k8s_client):
+        """Cluster-wide lookup for the renew fallback must not no-op for batch."""
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.list_custom_objects_all_namespaces.return_value = [
+            {"metadata": {"namespace": "tenant-alpha"}}
+        ]
+
+        result = provider.list_workloads_all_namespaces("opensandbox.io/id=sbx-1")
+
+        assert result == [{"metadata": {"namespace": "tenant-alpha"}}]
+        mock_k8s_client.list_custom_objects_all_namespaces.assert_called_once_with(
+            group="sandbox.opensandbox.io",
+            version="v1alpha1",
+            plural="batchsandboxes",
+            label_selector="opensandbox.io/id=sbx-1",
+        )
+
     # ===== Workload Creation Tests =====
 
     def test_create_workload_builds_correct_manifest(self, mock_k8s_client):
