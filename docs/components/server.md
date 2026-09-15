@@ -285,6 +285,9 @@ Response:
 
 **Other lifecycle calls** (same `OPEN-SANDBOX-API-KEY` header): `GET /v1/sandboxes/{id}`, `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume`, `GET /v1/sandboxes/{id}/endpoints/{port}` (append `?use_server_proxy=true` when needed), `POST .../renew-expiration`, `DELETE /v1/sandboxes/{id}`. Full request/response shapes: **Swagger UI** above or OpenAPI under [specs/](/api/).
 
+Server-proxied HTTP responses preserve repeated response headers, including each
+`Set-Cookie` field, without combining their values. Hop-by-hop headers are filtered.
+
 When a server-proxied HTTP route cannot connect to the selected sandbox backend,
 the server returns HTTP `502` with error code `BACKEND_CONNECTION_FAILED`. Use the
 code, rather than the human-readable message, to classify this failure.
