@@ -215,16 +215,18 @@ import { SandboxManager } from "@alibaba-group/opensandbox";
 
 const manager = SandboxManager.create({ connectionConfig: config });
 
-// Create a snapshot from a running sandbox
+// Create a snapshot from a running sandbox, then wait until it is Ready
 const snapshot = await manager.createSnapshot(sandboxId, {
   name: "pre-migration",
 });
-console.log(snapshot.id);
+let info = await manager.getSnapshot(snapshot.id);
+while (info.status.state === "Creating") {
+  await new Promise((r) => setTimeout(r, 2000));
+  info = await manager.getSnapshot(snapshot.id);
+}
 
-// List / inspect / delete
+// List all snapshots
 const page = await manager.listSnapshots();
-const info = await manager.getSnapshot(snapshot.id);
-await manager.deleteSnapshot(snapshot.id);
 
 // Restore: create a new sandbox FROM a snapshot (exactly one of
 // image / snapshotId must be provided)
@@ -232,6 +234,9 @@ const restored = await Sandbox.create({
   connectionConfig: config,
   snapshotId: snapshot.id,
 });
+
+// Only delete the snapshot after the restore has succeeded
+await manager.deleteSnapshot(snapshot.id);
 ```
 
 ### 7. Isolated Sessions
@@ -248,14 +253,21 @@ const session = await sandbox.isolation.create({
 });
 
 const run = await session.run("python -c 'print(1+1)'", {
-  // timeoutMs: 30_000,
+  // timeout_seconds: 30, // seconds; applies to run() only —
+  // runBackground() deliberately ignores it (background runs are not time-limited)
 });
 console.log(run.logs.stdout[0]?.text);
 
-// Background runs: start, poll status, fetch logs incrementally
+// Background runs: start, poll until finished, then fetch logs.
+// NOTE: field names are snake_case (run_id) — they mirror the raw API
+// response and are NOT converted to camelCase.
 const bg = await session.runBackground("make build");
-const status = await session.getRunStatus(bg.runId);
-const logs = await session.getRunLogs(bg.runId);
+let status = await session.getRunStatus(bg.run_id);
+while (status.running) {
+  await new Promise((r) => setTimeout(r, 2000));
+  status = await session.getRunStatus(bg.run_id);
+}
+const logs = await session.getRunLogs(bg.run_id);
 
 await session.delete();
 ```
