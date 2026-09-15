@@ -25,6 +25,10 @@ connection_strategy: lazy
 # mitm default 0.0.0.0; transparent mode must only accept loopback inside
 # the netns (iptables REDIRECT pushes outbound traffic here, and exposing
 # mitm on the LAN would route any inbound connection through it).
+# launch.go passes explicit `--mode transparent@127.0.0.1:<port>` (and the
+# ::1 twin when IPv6 loopback exists, where the ip6 REDIRECT lands), which
+# take precedence over `mode` + `listen_host` here; these stay as the
+# fallback for a hand-started mitmdump.
 listen_host: 127.0.0.1
 
 # mitm default None (whole body buffered in memory). 1m bounds RSS for

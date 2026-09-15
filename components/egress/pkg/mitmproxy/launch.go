@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -63,6 +64,10 @@ var (
 // /var/lib/mitmproxy/.mitmproxy/config.yaml (shipped via the egress Dockerfile).
 const listenHostLoopback = "127.0.0.1"
 
+// The IPv6 loopback twin: the ip6 nat OUTPUT redirect lands on ::1 (mitmproxy's mode spec wants
+// the bare address, no brackets).
+const listenHostLoopbackV6 = "::1"
+
 // systemScriptPath: bundled system addon shipped via the egress Dockerfile
 // (COPY components/egress/mitmscripts /var/egress/mitmscripts). Always loaded.
 const systemScriptPath = "/var/egress/mitmscripts/system.py"
@@ -80,7 +85,10 @@ type Config struct {
 	// address, which a loopback bind would never receive (same reason the
 	// fast-sandbox DNS proxy binds :15353).
 	ListenHost string
-	UserName   string
+	// ListenV6 adds a transparent listener on [::1]:ListenPort next to the loopback one (the
+	// ip6 OUTPUT REDIRECT lands there). nil = probe ::1 at launch; ignored when ListenHost is set.
+	ListenV6 *bool
+	UserName string
 	// ScriptPaths are optional user-supplied addons, loaded after the system addon
 	// in the order given. Parsed from the comma-separated OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT env var.
 	ScriptPaths []string
@@ -150,6 +158,10 @@ func Launch(cfg Config) (*Running, error) {
 	}
 
 	args := buildMitmdumpArgs(cfg)
+	if cfg.ListenV6 == nil {
+		cfg.ListenV6 = loopbackV6Available()
+		args = buildMitmdumpArgs(cfg)
+	}
 
 	cmd := exec.Command("mitmdump", args...)
 	mitmOut, mitmIn := io.Pipe()
@@ -181,15 +193,46 @@ func Launch(cfg Config) (*Running, error) {
 		}
 	})
 
-	log.Infof("[mitmproxy] mitmdump started (pid %d, transparent on %s:%d)", cmd.Process.Pid, listenHostLoopback, cfg.ListenPort)
+	hosts := listenHostLoopback
+	if h := strings.TrimSpace(cfg.ListenHost); h != "" {
+		hosts = h
+	} else if cfg.ListenV6 != nil && *cfg.ListenV6 {
+		hosts += " + " + listenHostLoopbackV6
+	}
+	log.Infof("[mitmproxy] mitmdump started (pid %d, transparent on %s:%d)", cmd.Process.Pid, hosts, cfg.ListenPort)
 	return &Running{Cmd: cmd, done: done}, nil
 }
 
+// loopbackV6Available reports whether ::1 can be bound (false with ipv6.disable=1 or no v6 stack).
+// mitmdump exits when any listener fails, so the v6 mode is only requested when it will bind.
+func loopbackV6Available() *bool {
+	ok := false
+	if l, err := net.Listen("tcp6", net.JoinHostPort(listenHostLoopbackV6, "0")); err == nil {
+		_ = l.Close()
+		ok = true
+	}
+	return &ok
+}
+
 func buildMitmdumpArgs(cfg Config) []string {
+	// Explicit mode specs replace config.yaml's `mode: [transparent]` + `listen_host`: the ip6
+	// OUTPUT REDIRECT delivers to [::1]:<port>, which an IPv4 loopback listener never sees. Both
+	// stay on loopback unless ListenHost says otherwise (see config.yaml on why transparent mode
+	// must not listen on the LAN).
+	host := listenHostLoopback
+	if h := strings.TrimSpace(cfg.ListenHost); h != "" {
+		host = h
+	}
 	args := []string{
+		"--mode", fmt.Sprintf("transparent@%s:%d", host, cfg.ListenPort),
+	}
+	if host == listenHostLoopback && cfg.ListenV6 != nil && *cfg.ListenV6 {
+		args = append(args, "--mode", fmt.Sprintf("transparent@%s:%d", listenHostLoopbackV6, cfg.ListenPort))
+	}
+	args = append(args,
 		"--listen-port", strconv.Itoa(cfg.ListenPort),
 		"--set", "flow_detail=0",
-	}
+	)
 	if strings.TrimSpace(cfg.ListenHost) != "" {
 		args = append(args, "--listen-host", cfg.ListenHost)
 	}

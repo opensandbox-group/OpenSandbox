@@ -152,9 +152,54 @@ func (p *Proxy) Start(ctx context.Context) error {
 		}
 	}
 
+	// The ip6 OUTPUT REDIRECT delivers a query for an IPv6 nameserver to [::1]:<port>; listen there
+	// too so a resolv.conf that names an IPv6 resolver keeps working. Best-effort: a host without
+	// IPv6 loopback (ipv6.disable=1) simply has no v6 redirect to serve.
+	if v6Addr := loopbackV6Addr(p.listenAddr); v6Addr != "" {
+		p.startLoopbackV6(v6Addr, handler)
+	}
+
 	safego.Go(func() { p.runUpstreamProbes(ctx) })
 
 	return nil
+}
+
+// loopbackV6Addr maps the IPv4-loopback listen address to its ::1 twin ("" when listenAddr is not
+// 127.0.0.1:<port>, e.g. a test binding an ephemeral address).
+func loopbackV6Addr(listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil || host != "127.0.0.1" {
+		return ""
+	}
+	return net.JoinHostPort("::1", port)
+}
+
+func (p *Proxy) startLoopbackV6(addr string, handler dns.Handler) {
+	udpServer := &dns.Server{Addr: addr, Net: "udp6", Handler: handler}
+	tcpServer := &dns.Server{Addr: addr, Net: "tcp6", Handler: handler}
+	readyCh := make(chan struct{}, 2)
+	errCh := make(chan error, 2)
+	for _, srv := range []*dns.Server{udpServer, tcpServer} {
+		s := srv
+		s.NotifyStartedFunc = func() { readyCh <- struct{}{} }
+		safego.Go(func() {
+			if err := s.ListenAndServe(); err != nil {
+				errCh <- err
+			}
+		})
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errCh:
+			log.Warnf("[dns] IPv6 loopback listener %s unavailable, IPv6 nameservers will not be proxied: %v", addr, err)
+			_ = udpServer.Shutdown()
+			_ = tcpServer.Shutdown()
+			return
+		case <-readyCh:
+		}
+	}
+	p.servers = append(p.servers, udpServer, tcpServer)
+	log.Infof("[dns] also listening on %s for IPv6 nameserver redirects", addr)
 }
 
 // Shutdown stops UDP and TCP DNS listeners. Safe to call more than once.

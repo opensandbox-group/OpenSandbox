@@ -252,8 +252,15 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	fmt.Fprintf(&b, "add rule inet %s %s ct state established,related accept\n", tableName, chainName)
 	fmt.Fprintf(&b, "add rule inet %s %s meta mark %s accept\n", tableName, chainName, constants.MarkHex)
 	fmt.Fprintf(&b, "add rule inet %s %s oifname \"lo\" accept\n", tableName, chainName)
+	// IPv6 neighbor discovery is locally generated ICMPv6 that never matches an allow set: without
+	// this rule a host whose default route is IPv6 (a link-local gateway) loses its neighbor entry
+	// as soon as the cache goes stale and becomes unreachable in both directions.
+	fmt.Fprintf(&b, "add rule inet %s %s icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept\n", tableName, chainName)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 udp dport 15353 accept\n", tableName, chainName)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport 15353 accept\n", tableName, chainName)
+	// The ip6 OUTPUT REDIRECTs (DNS → :15353, MITM → :18081) land on ::1 with the original egress
+	// interface still selected, so oifname "lo" does not match them: ::1 is the v6 loopback rule.
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr ::1 accept\n", tableName, chainName)
 	if opts.BlockDoT {
 		fmt.Fprintf(&b, "add rule inet %s %s tcp dport 853 drop\n", tableName, chainName)
 		fmt.Fprintf(&b, "add rule inet %s %s udp dport 853 drop\n", tableName, chainName)
