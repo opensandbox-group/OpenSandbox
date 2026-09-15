@@ -89,6 +89,83 @@ err := exec.RunCommand(ctx, opensandbox.RunCommandRequest{
 })
 ```
 
+### Create and restore snapshots
+
+```go
+// Create a snapshot from a running sandbox, then wait until it is Ready
+mgr := opensandbox.NewSandboxManager(config)
+snap, err := mgr.CreateSnapshot(ctx, sandboxID, opensandbox.CreateSnapshotRequest{
+    Name: "pre-migration",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+info, err := mgr.GetSnapshot(ctx, snap.ID)
+for err == nil && info.Status.State == opensandbox.SnapshotStateCreating {
+    select {
+    case <-ctx.Done():
+        log.Fatal(ctx.Err())
+    case <-time.After(2 * time.Second):
+        info, err = mgr.GetSnapshot(ctx, snap.ID)
+    }
+}
+
+page, err := mgr.ListSnapshots(ctx, opensandbox.ListSnapshotsOptions{})
+
+// Restore: create a new sandbox FROM a snapshot (Image and SnapshotID are
+// mutually exclusive — set exactly one)
+restored, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+    SnapshotID: snap.ID,
+    ResourceLimits: opensandbox.ResourceLimits{
+        "cpu":    "500m",
+        "memory": "512Mi",
+    },
+})
+
+// Only delete the snapshot after the restore has succeeded
+_ = mgr.DeleteSnapshot(ctx, snap.ID)
+```
+
+### Run code in an isolated session
+
+Isolated sessions run multi-step code in a hardened, resource-bounded
+environment with bind mounts — reachable through `Sandbox.IsolationCreate`:
+
+```go
+shareNet := true
+session, err := sbx.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+    Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/workspace", Mode: "rw"},
+    Profile:   "strict",
+    // Optional bind mounts (source on host, dest inside the session)
+    Binds:     []opensandbox.BindMount{{Source: "/data", Dest: "/data", ReadOnly: true}},
+    ShareNet:  &shareNet,
+})
+
+// Foreground run — TimeoutSeconds applies here only; background runs are
+// deliberately not time-limited
+run, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
+    Code:           "python -c 'print(1+1)'",
+    TimeoutSeconds: 30,
+})
+fmt.Println(run.Stdout[0].Text)
+
+// Background runs: start, poll until finished, then fetch logs
+bg, err := session.RunBackground(ctx, "make build")
+status, err := session.GetRunStatus(ctx, bg.RunID)
+for err == nil && status.Running {
+    select {
+    case <-ctx.Done():
+        log.Fatal(ctx.Err())
+    case <-time.After(2 * time.Second):
+        status, err = session.GetRunStatus(ctx, bg.RunID)
+    }
+}
+logs, _, err := session.GetRunLogs(ctx, bg.RunID, 0)
+
+_ = session.Delete(ctx)
+```
+
 ### Check egress policy
 
 ```go
