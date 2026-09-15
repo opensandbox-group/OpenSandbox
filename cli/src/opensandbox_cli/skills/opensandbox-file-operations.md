@@ -121,6 +121,7 @@ Rules:
 - use `download` when the destination should be written to the host filesystem
 - downloads replace regular files only on success; failures and interruptions preserve the existing regular file
 - existing devices and named pipes receive data directly; failures can leave partial output
+- stdout aliases such as `/dev/stdout` stream file bytes without a success message in any output format; errors go to stderr, and failures can leave partial output
 - use `write` and `cat` only when the operation stays entirely inside the sandbox
 
 ## Metadata and Permissions

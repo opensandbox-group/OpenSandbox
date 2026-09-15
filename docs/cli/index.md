@@ -225,6 +225,11 @@ Existing devices (such as `/dev/null`) and named pipes receive the download
 directly. They are not replaced, and bytes already written cannot be rolled back
 if the download fails or is interrupted.
 
+Destinations that refer to standard output, such as `/dev/stdout` and `/dev/fd/1`,
+stream directly even when stdout is redirected to a regular file. These downloads
+omit the success message in all output formats so stdout contains only file bytes;
+errors still go to stderr. A failed or interrupted stream can contain partial data.
+
 ### Manage runtime egress policy
 
 Inspect current policy:

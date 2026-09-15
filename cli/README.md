@@ -222,7 +222,8 @@ osb file chmod <sandbox-id> /workspace/script.sh --mode 755 -o json
 
 Downloads replace regular files only on success; a failed or interrupted
 download preserves any existing regular file. Existing devices and named pipes
-receive data directly. See the [CLI guide](../docs/cli/index.md#work-with-files).
+receive data directly. Stdout aliases (such as `/dev/stdout`) stream only the file
+bytes, without a success message. See the [CLI guide](../docs/cli/index.md#work-with-files).
 
 ### Manage runtime egress policy
 

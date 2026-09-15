@@ -151,7 +151,7 @@ def file_upload(
 @file_group.command("download")
 @click.argument("sandbox_id")
 @click.argument("remote_path")
-@click.argument("local_path", type=click.Path())
+@click.argument("local_path", type=click.Path(readable=False))
 @output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
@@ -166,6 +166,7 @@ def file_download(
 
     Regular files are replaced only on success. Devices and named pipes receive
     data directly, including partial data if the download fails.
+    Destinations referring to stdout stream directly and omit the success message.
     """
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
@@ -173,12 +174,31 @@ def file_download(
         destination = Path(local_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
-            destination_mode = destination.stat().st_mode
+            destination_stat = destination.stat()
         except FileNotFoundError:
-            destination_mode = None
-        if destination_mode is not None and not stat.S_ISREG(destination_mode):
+            destination_stat = None
+        destination_mode = destination_stat.st_mode if destination_stat is not None else None
+        try:
+            destination_is_stdout = destination_stat is not None and os.path.samestat(
+                destination_stat, os.fstat(sys.stdout.fileno())
+            )
+            if not destination_is_stdout and destination_stat is not None:
+                # macOS reports different stat/fstat identities for /dev/fd entries.
+                destination_is_stdout = destination.samefile(f"/dev/fd/{sys.stdout.fileno()}")
+        except (OSError, ValueError):
+            # Embedded callers may capture stdout in a stream without a descriptor.
+            destination_is_stdout = False
+        if destination_is_stdout or (
+            destination_mode is not None and not stat.S_ISREG(destination_mode)
+        ):
             # Special files are stream targets and must never be replaced.
-            with destination.open("wb") as out:
+            # Duplicate stdout to preserve its offset/append mode and keep it open.
+            stream = (
+                os.fdopen(os.dup(sys.stdout.fileno()), "wb")
+                if destination_is_stdout
+                else destination.open("wb")
+            )
+            with stream as out:
                 for chunk in sandbox.files.read_bytes_stream(remote_path):
                     out.write(chunk)
         else:
@@ -195,7 +215,8 @@ def file_download(
                 if destination_mode is not None:
                     staged.chmod(destination_mode & 0o777)
                 staged.replace(destination)
-        obj.output.success(f"Downloaded: {remote_path} → {local_path}")
+        if not destination_is_stdout:
+            obj.output.success(f"Downloaded: {remote_path} → {local_path}")
     finally:
         sandbox.close()
 
