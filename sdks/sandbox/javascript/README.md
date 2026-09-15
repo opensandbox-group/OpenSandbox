@@ -205,7 +205,62 @@ const { endpoint } = await sandbox.getEndpoint(44772);
 const url = await sandbox.getEndpointUrl(44772);
 ```
 
-### 6. Volume Mounts
+### 6. Snapshots (Manager)
+
+`SandboxManager` administers sandbox snapshots — capture a sandbox's
+state and restore new sandboxes from it via `snapshotId`:
+
+```ts
+import { SandboxManager } from "@alibaba-group/opensandbox";
+
+const manager = SandboxManager.create({ connectionConfig: config });
+
+// Create a snapshot from a running sandbox
+const snapshot = await manager.createSnapshot(sandboxId, {
+  name: "pre-migration",
+});
+console.log(snapshot.id);
+
+// List / inspect / delete
+const page = await manager.listSnapshots();
+const info = await manager.getSnapshot(snapshot.id);
+await manager.deleteSnapshot(snapshot.id);
+
+// Restore: create a new sandbox FROM a snapshot (exactly one of
+// image / snapshotId must be provided)
+const restored = await Sandbox.create({
+  connectionConfig: config,
+  snapshotId: snapshot.id,
+});
+```
+
+### 7. Isolated Sessions
+
+Isolated sessions run multi-step code in a hardened, resource-bounded
+environment with bind mounts — reachable through `sandbox.isolation`:
+
+```ts
+const session = await sandbox.isolation.create({
+  workspace: { path: "/workspace", mode: "rw" },
+  profile: "strict",
+  // Optional bind mounts (source on host, dest inside the session)
+  binds: [{ source: "/data", dest: "/data", readonly: true }],
+});
+
+const run = await session.run("python -c 'print(1+1)'", {
+  // timeoutMs: 30_000,
+});
+console.log(run.logs.stdout[0]?.text);
+
+// Background runs: start, poll status, fetch logs incrementally
+const bg = await session.runBackground("make build");
+const status = await session.getRunStatus(bg.runId);
+const logs = await session.getRunLogs(bg.runId);
+
+await session.delete();
+```
+
+### 8. Volume Mounts
 
 `volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must specify exactly one backend.
 
@@ -230,7 +285,7 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-### 7. Sandbox Management (Admin)
+### 9. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 
