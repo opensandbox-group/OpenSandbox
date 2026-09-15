@@ -261,14 +261,15 @@ class _ProxyStreamingResponse(StreamingResponse):
         resp: httpx.Response,
         *,
         status_code: int,
-        headers: Mapping[str, str],
+        raw_headers: list[tuple[bytes, bytes]],
     ) -> None:
         self._backend_response = resp
         super().__init__(
             content=_stream_backend_response(resp),
             status_code=status_code,
-            headers=headers,
         )
+        # A mapping would collapse repeated fields such as Set-Cookie.
+        self.raw_headers = raw_headers
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
@@ -369,20 +370,23 @@ async def _proxy_http_request(
                     if header.strip()
                 )
             response_header_exclusions = hop_by_hop | SERVER_GENERATED_RESPONSE_HEADERS
-            response_headers = {
-                key: (
-                    _rewrite_proxy_location(value, request, sandbox_id, port)
-                    if key.lower() == "location"
-                    else value
+            response_headers = [
+                (
+                    key.lower(),
+                    _rewrite_proxy_location(
+                        value.decode("latin-1"), request, sandbox_id, port
+                    ).encode("latin-1")
+                    if key.lower() == b"location"
+                    else value,
                 )
-                for key, value in resp.headers.items()
-                if key.lower() not in response_header_exclusions
-            }
+                for key, value in resp.headers.raw
+                if key.decode("latin-1").lower() not in response_header_exclusions
+            ]
 
             return _ProxyStreamingResponse(
                 resp,
                 status_code=resp.status_code,
-                headers=response_headers,
+                raw_headers=response_headers,
             )
         except BaseException:
             # Until ownership passes to _ProxyStreamingResponse, any failure
