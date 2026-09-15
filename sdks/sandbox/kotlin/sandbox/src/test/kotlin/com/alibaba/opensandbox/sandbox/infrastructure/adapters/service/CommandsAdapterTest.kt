@@ -25,6 +25,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionInstance
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -35,10 +36,13 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -46,10 +50,162 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class CommandsAdapterTest {
+    private fun instanceResponse(issuedAt: Int = 123) =
+        MockResponse().setBody(
+            """{"instance_id":"scope","issued_at":$issuedAt,"retention_seconds":86400,"capacity":4096}""",
+        )
+
+    @Test
+    fun `instance cache shares requests and returns independent snapshots until expiry`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val calls = AtomicInteger()
+        mockWebServer.dispatcher =
+            object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val issuedAt = calls.incrementAndGet()
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    return instanceResponse(issuedAt)
+                }
+            }
+        val pool = Executors.newFixedThreadPool(16)
+        try {
+            val tasks = (1..16).map { pool.submit<ExecutionInstance> { commandsAdapter.getExecutionInstance() } }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            release.countDown()
+            val values = tasks.map { it.get(5, TimeUnit.SECONDS) }
+            assertEquals(1, calls.get())
+            values.forEach { assertEquals(1L, it.issuedAt) }
+            assertNotSame(values[0], values[1])
+            assertNotSame(values[0], commandsAdapter.getExecutionInstance())
+            CommandsAdapter::class.java.getDeclaredField("instanceFetchedAt").apply { isAccessible = true }
+                .setLong(commandsAdapter, System.nanoTime() - TimeUnit.MINUTES.toNanos(1))
+            assertEquals(2L, commandsAdapter.getExecutionInstance().issuedAt)
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `instance fetch failure is not cached`() {
+        // Use a terminal HTTP error so the existing transport retry policy is not involved.
+        mockWebServer.enqueue(MockResponse().setResponseCode(400).setBody("""{"code":"invalid","message":"bad request"}"""))
+        mockWebServer.enqueue(instanceResponse())
+        assertThrows<SandboxApiException> { commandsAdapter.getExecutionInstance() }
+        assertEquals("scope", commandsAdapter.getExecutionInstance().instanceId)
+        assertEquals(2, mockWebServer.requestCount)
+    }
+
+    @Test
+    fun `operation errors invalidate old inflight instance without replay`() {
+        for (code in listOf("operation_instance_mismatch", "operation_expired")) {
+            for (method in listOf("command", "pty", "lookup")) {
+                val adapter = CommandsAdapter(httpClientProvider, SandboxEndpoint("${mockWebServer.hostName}:${mockWebServer.port}"))
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val gets = AtomicInteger()
+                val operations = AtomicInteger()
+                mockWebServer.dispatcher =
+                    object : Dispatcher() {
+                        override fun dispatch(request: RecordedRequest): MockResponse {
+                            if (request.path == "/execution/instance") {
+                                val issuedAt = gets.incrementAndGet()
+                                if (issuedAt == 1) {
+                                    entered.countDown()
+                                    check(release.await(5, TimeUnit.SECONDS))
+                                }
+                                return instanceResponse(issuedAt)
+                            }
+                            operations.incrementAndGet()
+                            if (request.method == "POST") {
+                                val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+                                assertEquals("saved.identity", body["operation_id"]?.jsonPrimitive?.content)
+                            } else {
+                                assertEquals("saved.identity", request.getHeader("X-EXECD-OPERATION-ID"))
+                            }
+                            return MockResponse().setResponseCode(409).setBody("""{"code":"$code","message":"unknown outcome"}""")
+                        }
+                    }
+                val pool = Executors.newSingleThreadExecutor()
+                try {
+                    val old = pool.submit<ExecutionInstance> { adapter.getExecutionInstance() }
+                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    assertThrows<SandboxApiException> {
+                        when (method) {
+                            "command" ->
+                                adapter.createCommandOperation(
+                                    "saved.identity",
+                                    RunCommandRequest.builder().command("true").build(),
+                                )
+                            "pty" -> adapter.createPTYOperation("saved.identity", "", "")
+                            else -> adapter.getExecutionOperation("command", "saved.identity")
+                        }
+                    }
+                    assertEquals(2L, adapter.getExecutionInstance().issuedAt)
+                    release.countDown()
+                    assertEquals(1L, old.get(5, TimeUnit.SECONDS).issuedAt)
+                    assertEquals(2L, adapter.getExecutionInstance().issuedAt)
+                    assertEquals(2, gets.get())
+                    assertEquals(1, operations.get())
+                } finally {
+                    release.countDown()
+                    pool.shutdownNow()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `operation creation preserves identity and creation state`() {
+        mockWebServer.enqueue(
+            MockResponse().setBody("""{"instance_id":"scope","issued_at":123,"retention_seconds":86400,"capacity":4096}"""),
+        )
+        val instance = commandsAdapter.getExecutionInstance()
+        assertTrue(instance.newOperationId().startsWith("scope.123."))
+        mockWebServer.takeRequest()
+        val response = """{"id":"original","kind":"command","state":"creating","expires_at":"2026-09-09T00:00:00Z"}"""
+        mockWebServer.enqueue(MockResponse().setResponseCode(202).setBody(response))
+        val operation =
+            commandsAdapter.createCommandOperation(
+                "scope.123.persisted",
+                RunCommandRequest.builder().command("echo hello").build(),
+            )
+        assertEquals("creating", operation.state)
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("scope.123.persisted", body["operation_id"]?.jsonPrimitive?.content)
+        assertEquals("echo hello", body["command"]?.jsonPrimitive?.content)
+        assertTrue(body["argv"] == null)
+        mockWebServer.enqueue(MockResponse().setResponseCode(202).setBody(response))
+        assertEquals(operation.id, commandsAdapter.getExecutionOperation("command", "scope.123.persisted").id)
+        assertEquals("scope.123.persisted", mockWebServer.takeRequest().getHeader("X-EXECD-OPERATION-ID"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(202).setBody(response))
+        assertEquals(operation.id, commandsAdapter.createPTYOperation("scope.123.persisted", "/tmp", "echo hello").id)
+        val ptyBody = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("scope.123.persisted", ptyBody["operation_id"]?.jsonPrimitive?.content)
+    }
+
     // CommandsAdapter unit tests
+    @Test
+    fun `native operation creation preserves argv`() {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(202)
+                .setBody("""{"id":"native","kind":"command","state":"creating","expires_at":"2026-09-09T00:00:00Z"}"""),
+        )
+        val argv = listOf("/bin/echo", "argument with spaces", "$(literal)")
+        commandsAdapter.createCommandOperation("scope.123.persisted", RunCommandRequest.builder().argv(argv).build())
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(Json.parseToJsonElement("""["/bin/echo","argument with spaces","$(literal)"]"""), body["argv"])
+        assertTrue(body["command"] == null)
+        assertEquals("scope.123.persisted", body["operation_id"]?.jsonPrimitive?.content)
+    }
+
     private lateinit var mockWebServer: MockWebServer
     private lateinit var commandsAdapter: CommandsAdapter
     private lateinit var httpClientProvider: HttpClientProvider

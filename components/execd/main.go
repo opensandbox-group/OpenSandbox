@@ -122,6 +122,11 @@ func run() int {
 	}
 
 	ctrl := controller.InitCodeRunner()
+	if err := ctrl.ConfigureOperationCapacity(flag.OperationCapacity); err != nil {
+		log.Error("operation capacity: %v", err)
+		return 1
+	}
+	telemetry.SetOperationStatsProvider(ctrl.OperationStats)
 	commandJanitorCtx, stopCommandJanitor := context.WithCancel(context.Background())
 	defer stopCommandJanitor()
 	if err := ctrl.StartCommandOutputJanitor(commandJanitorCtx); err != nil {

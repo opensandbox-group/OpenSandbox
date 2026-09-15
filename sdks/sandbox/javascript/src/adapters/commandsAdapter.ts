@@ -18,12 +18,14 @@ import { parseJsonEventStream } from "./sse.js";
 import type { paths as ExecdPaths } from "../api/execd.js";
 import type {
   CommandExecution,
+  ExecutionInstance,
+  ExecutionOperation,
   CommandLogs,
   CommandStatus,
   RunCommandOpts,
   ServerStreamEvent,
 } from "../models/execd.js";
-import type { ExecdCommands } from "../services/execdCommands.js";
+import type { ExecdCommands, ExecutionOperations } from "../services/execdCommands.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 
@@ -131,14 +133,82 @@ export interface CommandsAdapterOptions {
   headers?: Record<string, string>;
 }
 
-export class CommandsAdapter implements ExecdCommands {
+export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   private readonly fetch: typeof fetch;
+  private instanceCache?: { started: number; value: ExecutionInstance };
+  private instanceFetch?: { started: number; promise: Promise<ExecutionInstance> };
 
   constructor(
     private readonly client: ExecdClient,
     private readonly opts: CommandsAdapterOptions,
   ) {
     this.fetch = opts.fetch ?? fetch;
+  }
+
+  async getExecutionInstance(): Promise<ExecutionInstance> {
+    if (this.instanceCache && performance.now() - this.instanceCache.started < 60_000) {
+      return { ...this.instanceCache.value };
+    }
+    const pending = this.instanceFetch ??= {
+      started: performance.now(),
+      promise: this.fetchExecutionInstance(),
+    };
+    try {
+      const value = await pending.promise;
+      if (this.instanceFetch === pending) {
+        this.instanceCache = { started: pending.started, value: { ...value } };
+      }
+      return { ...value };
+    } finally {
+      if (this.instanceFetch === pending) this.instanceFetch = undefined;
+    }
+  }
+
+  private async fetchExecutionInstance(): Promise<ExecutionInstance> {
+    const { data, error, response } = await this.client.GET("/execution/instance");
+    throwOnOpenApiFetchError({ error, response }, "Get execution instance failed");
+    if (!data) throw new Error("Missing execution instance");
+    return data;
+  }
+
+  private invalidateOperationInstance(error: unknown): void {
+    if (error && typeof error === "object" && "code" in error &&
+      (error.code === "operation_instance_mismatch" || error.code === "operation_expired")) {
+      this.instanceCache = undefined;
+      this.instanceFetch = undefined;
+    }
+  }
+
+  async getExecutionOperation(kind: "command" | "pty", operationId: string): Promise<ExecutionOperation> {
+    const { data, error, response } = await this.client.GET("/execution/operation", {
+      params: { query: { kind }, header: { "X-EXECD-OPERATION-ID": operationId } },
+    });
+    this.invalidateOperationInstance(error);
+    throwOnOpenApiFetchError({ error, response }, "Get execution operation failed");
+    if (!data) throw new Error("Missing execution operation");
+    return data;
+  }
+
+  async createCommandOperation(operationId: string, command: string, opts?: RunCommandOpts): Promise<ExecutionOperation> {
+    assertNonBlank(operationId, "operationId");
+    const { data, error, response } = await this.client.POST("/command/operations", {
+      body: { ...toRunCommandRequest(command, opts), operation_id: operationId },
+    });
+    this.invalidateOperationInstance(error);
+    throwOnOpenApiFetchError({ error, response }, "Create command operation failed");
+    if (!data || !("state" in data)) throw new Error("Missing execution operation");
+    return data;
+  }
+
+  async createPTYOperation(operationId: string, opts?: { cwd?: string; command?: string }): Promise<ExecutionOperation> {
+    assertNonBlank(operationId, "operationId");
+    const { data, error, response } = await this.client.POST("/pty/operations", {
+      body: { ...opts, operation_id: operationId },
+    });
+    this.invalidateOperationInstance(error);
+    throwOnOpenApiFetchError({ error, response }, "Create PTY operation failed");
+    if (!data || !("state" in data)) throw new Error("Missing execution operation");
+    return data;
   }
 
   private buildRunStreamSpec(

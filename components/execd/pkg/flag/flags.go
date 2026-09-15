@@ -32,6 +32,9 @@ var (
 	// ServerAccessToken guards API entrypoints when set.
 	ServerAccessToken string
 
+	// OperationCapacity limits retained execution creation records.
+	OperationCapacity int
+
 	// ApiGracefulShutdownTimeout waits before tearing down SSE streams.
 	ApiGracefulShutdownTimeout time.Duration
 

@@ -394,6 +394,271 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /execution/instance:
+    get:
+      summary: Get execution creation recovery scope
+      operationId: getExecutionInstance
+      tags:
+      - Command
+      description: 'Returns the current execd controller identity and server timestamp. Persist a caller-generated operation ID before creation. Never refresh its instance or timestamp during recovery. Cache-Control: no-store.'
+      responses:
+        '200':
+          description: Current controller scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionInstance'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /execution/operation:
+    get:
+      summary: Recover an execution creation by operation identity
+      operationId: getExecutionOperation
+      tags:
+      - Command
+      description: 'Private lookup within one authenticated sandbox/controller and kind. State describes creation, not script completion. No command, environment, output, fingerprint or caller identity is returned. Cache-Control: no-store. Old-instance IDs never authorize a new creation.'
+      parameters:
+      - name: kind
+        in: query
+        required: true
+        schema:
+          type: string
+          enum:
+          - command
+          - pty
+      - name: X-EXECD-OPERATION-ID
+        in: header
+        required: true
+        schema:
+          $ref: '#/components/schemas/ExecutionOperationID'
+      responses:
+        '200': &id001
+          description: 'Creation outcome: created or failed; not execution completion'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperation'
+        '202': &id002
+          description: Creation in progress; query or repeat the same immutable request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperation'
+        '400': &id003
+          description: Invalid identity or request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401': &id004
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409': &id005
+          description: operation_conflict or operation_instance_mismatch; never refresh identity to retry an unknown outcome
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410': &id006
+          description: operation_expired; execution outcome unknown, no new process created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503': &id007
+          description: operation_capacity_exceeded; creation refused; unexpired and active entries are not evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Operation not found in this authenticated controller and kind
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /pty:
+    post:
+      summary: Create a PTY session
+      operationId: createPTYSession
+      tags:
+      - Command
+      description: Creates a dormant PTY session; the first connection to /pty/{sessionId}/ws starts the process. For caller-bound recovery use POST /pty/operations.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePTYSessionRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePTYSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '501':
+          description: PTY unavailable on this platform
+  /command/operations:
+    post:
+      summary: Create or recover a caller-bound command
+      description: Create a command using an identity persisted before first send. Returns JSON creation acknowledgement only, not SSE or script completion. Equal identity and typed request returns the original handle; conflicting inputs return 409. The controller owns creation after claim, regardless of request cancellation. Foreground/background are execution modes; foreground output is not replayed. Unknown fields are rejected. Body limit is 1 MiB. See ExecutionOperationID for scope, capacity, expiry and restart boundaries.
+      operationId: createCommandOperation
+      tags:
+      - Command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCommandOperationRequest'
+      responses:
+        '200':
+          description: Creation outcome, not execution completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '202':
+          description: Creation in progress; query or repeat the same immutable request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperation'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: operation_conflict or operation_instance_mismatch; never refresh identity to retry an unknown outcome
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: operation_expired; execution outcome unknown, no new process created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: operation_capacity_exceeded; creation refused; unexpired and active entries are not evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /pty/operations:
+    post:
+      summary: Create or recover a caller-bound PTY session
+      operationId: createPTYOperation
+      tags:
+      - Command
+      description: Creates or recovers the same dormant PTY session using a persisted operation_id. The first WebSocket connection launches the process; a caller-bound session permits one launch attempt and reuses existing replay/takeover/terminal frames. This POST does not start a shell. Unknown fields are rejected. Body limit is 1 MiB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePTYOperationRequest'
+      responses:
+        '200':
+          description: 'Creation outcome: created or failed; not execution completion'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperation'
+        '202':
+          description: Creation in progress; query or repeat the same immutable request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperation'
+        '400':
+          description: Invalid identity or request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: operation_conflict or operation_instance_mismatch; never refresh identity to retry an unknown outcome
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: operation_expired; execution outcome unknown, no new process created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: operation_capacity_exceeded; creation refused; unexpired and active entries are not evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: PTY unavailable on this platform
+  /pty/{sessionId}:
+    parameters:
+    - name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+    get:
+      summary: Get PTY session status
+      operationId: getPTYSessionStatus
+      tags:
+      - Command
+      responses:
+        '200':
+          description: PTY session status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PTYSessionStatusResponse'
+        '404':
+          description: Session not found
+        '501':
+          description: PTY unavailable on this platform
+    delete:
+      summary: Delete PTY session
+      operationId: deletePTYSession
+      tags:
+      - Command
+      description: Terminates and removes the session. A retained operation identity still refers to the original handle and cannot recreate it.
+      responses:
+        '200':
+          description: Session deleted
+        '404':
+          description: Session not found
+        '501':
+          description: PTY unavailable on this platform
+
   /command:
     post:
       summary: Execute shell command or native argv
@@ -1816,6 +2081,115 @@ components:
         with a valid token. The token is configured during server initialization.
 
   schemas:
+    CreateCommandOperationRequest:
+      allOf:
+      - $ref: '#/components/schemas/RunCommandRequest'
+      - type: object
+        required:
+        - operation_id
+        properties:
+          timeout:
+            type: integer
+            format: int64
+            maximum: 9223372036854
+          operation_id:
+            $ref: '#/components/schemas/ExecutionOperationID'
+    CreatePTYOperationRequest:
+      allOf:
+      - $ref: '#/components/schemas/CreatePTYSessionRequest'
+      - type: object
+        required:
+        - operation_id
+        properties:
+          operation_id:
+            $ref: '#/components/schemas/ExecutionOperationID'
+    ExecutionOperationID:
+      type: string
+      minLength: 43
+      maxLength: 181
+      pattern: ^[0-9a-f]{32}\.[0-9]{1,19}\.[A-Za-z0-9_-]{8,128}$
+      description: 'Optional caller identity: <instance_id>.<issued_at Unix seconds>.<8-128 character random token>. Obtain instance_id and issued_at from GET /execution/instance, generate token and persist the entire ID before sending. Scope is the authenticated execd controller and kind; clients sharing its configured token share one principal. Recovery lasts 24 hours from issued_at, extended while creating or active. Default capacity is 4096 records/controller, configurable at startup with --operation-capacity or EXECD_OPERATION_CAPACITY and advertised by instance discovery; new claims fail closed at capacity. Expired terminal/dormant records are removed; old expired IDs return 410 instead of recreating. Controller restart or another sandbox returns 409 operation_instance_mismatch: outcome unknown. Memory and OS process creation are not a transaction. No cross-execd-restart reconciliation, exactly-once completion, or business-side-effect guarantee. Never regenerate any identity component during retry. Use an opaque random token, never a secret or business payload.'
+    ExecutionInstance:
+      type: object
+      required:
+      - instance_id
+      - issued_at
+      - retention_seconds
+      - capacity
+      properties:
+        instance_id:
+          type: string
+        issued_at:
+          type: integer
+          format: int64
+        retention_seconds:
+          type: integer
+          format: int64
+          example: 86400
+        capacity:
+          type: integer
+          example: 4096
+    ExecutionOperation:
+      type: object
+      required:
+      - id
+      - kind
+      - state
+      - expires_at
+      properties:
+        id:
+          type: string
+          description: Reserved command or PTY handle; may not yet be observable while creating.
+        kind:
+          type: string
+          enum:
+          - command
+          - pty
+        state:
+          type: string
+          enum:
+          - creating
+          - created
+          - failed
+          description: Creation only. created does not imply the command completed or succeeded; failed is retained and never reattempted with this identity.
+        expires_at:
+          type: string
+          format: date-time
+          description: End of the minimum recovery window, extended while creating or active.
+    CreatePTYSessionRequest:
+      type: object
+      properties:
+        cwd:
+          type: string
+        command:
+          type: string
+    CreatePTYSessionResponse:
+      type: object
+      required:
+      - session_id
+      properties:
+        session_id:
+          type: string
+    PTYSessionStatusResponse:
+      type: object
+      required:
+      - session_id
+      - running
+      - output_offset
+      properties:
+        session_id:
+          type: string
+        running:
+          type: boolean
+        output_offset:
+          type: integer
+          format: int64
+        launch_attempted:
+          type: boolean
+          description: Whether a process launch was attempted. False means a dormant session. Omitted by older servers; absence does not mean false.
+        launch_failed:
+          type: boolean
+          description: Whether the latest accepted launch attempt failed before starting a process. A nonzero process exit is not a launch failure. Caller-bound sessions cannot reattempt launch; their operation remains created because the session exists. Omitted by older servers.
     CreateSessionRequest:
       type: object
       description: Request to create a bash session (optional body; empty treated as defaults)

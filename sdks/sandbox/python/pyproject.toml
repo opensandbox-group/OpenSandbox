@@ -113,7 +113,7 @@ typeCheckingMode = "standard"
 pythonVersion = "3.10"
 pythonPlatform = "All"
 
-include = ["src"]
+include = ["src", "tests/typing"]
 
 exclude = [
     "**/node_modules",

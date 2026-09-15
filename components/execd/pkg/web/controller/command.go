@@ -30,9 +30,13 @@ import (
 )
 
 // RunCommand executes a shell command and streams the output via SSE.
-func (c *CodeInterpretingController) RunCommand() {
+func (c *CodeInterpretingController) RunCommand() { c.runCommand(false) }
+
+func (c *CodeInterpretingController) CreateCommandOperation() { c.runCommand(true) }
+
+func (c *CodeInterpretingController) runCommand(callerBound bool) {
 	var request model.RunCommandRequest
-	if err := c.bindJSON(&request); err != nil {
+	if err := c.decodeCreation(&request, callerBound); err != nil {
 		c.RespondError(
 			http.StatusBadRequest,
 			model.ErrorCodeInvalidRequest,
@@ -41,13 +45,37 @@ func (c *CodeInterpretingController) RunCommand() {
 		return
 	}
 
-	err := request.Validate()
+	if !callerBound {
+		request.OperationID = ""
+	}
+	err := request.ValidateCreation()
+	if callerBound && request.TimeoutMs > int64((1<<63-1)/time.Millisecond) {
+		err = fmt.Errorf("timeout exceeds supported duration")
+	}
+	if request.OperationID == "" {
+		err = request.Validate()
+	}
 	if err != nil {
+		message := "invalid command request"
+		if !callerBound {
+			message = fmt.Sprintf("invalid request, validation error %v", err)
+		}
 		c.RespondError(
 			http.StatusBadRequest,
 			model.ErrorCodeInvalidRequest,
-			fmt.Sprintf("invalid request, validation error %v", err),
+			message,
 		)
+		return
+	}
+
+	if request.OperationID != "" {
+		if runner := c.operations(); runner != nil {
+			if c.ctx.Request.Context().Err() != nil {
+				return
+			}
+			op, err := runner.CreateCommandOperation(c.ctx.GetString("operationPrincipal"), request.OperationID, c.buildExecuteCommandRequest(request))
+			c.operationResult(op, err)
+		}
 		return
 	}
 

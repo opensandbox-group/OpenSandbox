@@ -19,6 +19,8 @@ package com.alibaba.opensandbox.sandbox.domain.services
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionInstance
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionOperation
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import java.time.Duration
@@ -32,6 +34,24 @@ import kotlin.time.toJavaDuration
  * session management.
  */
 interface Commands {
+    fun getExecutionInstance(): ExecutionInstance = throw UnsupportedOperationException()
+
+    fun getExecutionOperation(
+        kind: String,
+        operationId: String,
+    ): ExecutionOperation = throw UnsupportedOperationException()
+
+    fun createCommandOperation(
+        operationId: String,
+        request: RunCommandRequest,
+    ): ExecutionOperation = throw UnsupportedOperationException()
+
+    fun createPTYOperation(
+        operationId: String,
+        cwd: String = "",
+        command: String = "",
+    ): ExecutionOperation = throw UnsupportedOperationException()
+
     /**
      * Executes a shell command in the sandbox environment.
      *

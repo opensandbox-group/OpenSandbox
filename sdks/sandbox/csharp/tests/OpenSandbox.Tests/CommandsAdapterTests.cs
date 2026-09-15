@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using System.Net;
+using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -29,6 +31,131 @@ namespace OpenSandbox.Tests;
 
 public class CommandsAdapterTests
 {
+    private static HttpResponseMessage InstanceResponse(int issuedAt = 123) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent($"{{\"instance_id\":\"scope\",\"issued_at\":{issuedAt},\"retention_seconds\":86400,\"capacity\":4096}}")
+    };
+
+    [Fact]
+    public async Task ExecutionInstanceCache_ShouldShareFetchAndRespectCancellationAndExpiry()
+    {
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var adapter = CreateAdapter(new StubHttpMessageHandler(async (_, _) =>
+        {
+            var issuedAt = Interlocked.Increment(ref calls);
+            await release.Task;
+            return InstanceResponse(issuedAt);
+        }));
+        var tasks = Enumerable.Range(0, 16).Select(_ => adapter.GetExecutionInstanceAsync()).ToArray();
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = adapter.GetExecutionInstanceAsync(cancellation.Token);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        release.SetResult(true);
+        var values = await Task.WhenAll(tasks);
+        calls.Should().Be(1);
+        values.Should().OnlyContain(value => value.IssuedAt == 1);
+        values[0].Should().NotBeSameAs(values[1]);
+        (await adapter.GetExecutionInstanceAsync()).Should().NotBeSameAs(values[0]);
+        typeof(CommandsAdapter).GetField("_instanceFetchedAt", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(adapter, Stopwatch.GetTimestamp() - 60L * Stopwatch.Frequency);
+        (await adapter.GetExecutionInstanceAsync()).IssuedAt.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ExecutionInstanceFailure_ShouldNotBeCached()
+    {
+        var calls = 0;
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) => Task.FromResult(++calls == 1
+            ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{\"code\":\"unavailable\",\"message\":\"retry later\"}") }
+            : InstanceResponse())));
+        await Assert.ThrowsAsync<SandboxApiException>(() => adapter.GetExecutionInstanceAsync());
+        (await adapter.GetExecutionInstanceAsync()).InstanceId.Should().Be("scope");
+        calls.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData("operation_instance_mismatch", "command")]
+    [InlineData("operation_instance_mismatch", "pty")]
+    [InlineData("operation_instance_mismatch", "lookup")]
+    [InlineData("operation_expired", "command")]
+    [InlineData("operation_expired", "pty")]
+    [InlineData("operation_expired", "lookup")]
+    public async Task OperationError_ShouldInvalidateInflightInstanceWithoutReplay(string code, string method)
+    {
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gets = 0;
+        var operations = 0;
+        var adapter = CreateAdapter(new StubHttpMessageHandler(async (request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/execution/instance")
+            {
+                var issuedAt = Interlocked.Increment(ref gets);
+                if (issuedAt == 1) await release.Task;
+                return InstanceResponse(issuedAt);
+            }
+            operations++;
+            if (request.Method == HttpMethod.Post)
+            {
+                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+                body.RootElement.GetProperty("operation_id").GetString().Should().Be("saved.identity");
+            }
+            else request.Headers.GetValues("X-EXECD-OPERATION-ID").Single().Should().Be("saved.identity");
+            return new HttpResponseMessage(HttpStatusCode.Conflict)
+            {
+                Content = new StringContent($"{{\"code\":\"{code}\",\"message\":\"unknown outcome\"}}")
+            };
+        }));
+        var old = adapter.GetExecutionInstanceAsync();
+        Task<ExecutionOperation> action = method switch
+        {
+            "command" => adapter.CreateCommandOperationAsync("saved.identity", "true"),
+            "pty" => adapter.CreatePtyOperationAsync("saved.identity"),
+            _ => adapter.GetExecutionOperationAsync("command", "saved.identity")
+        };
+        await Assert.ThrowsAsync<SandboxApiException>(() => action);
+        (await adapter.GetExecutionInstanceAsync()).IssuedAt.Should().Be(2);
+        release.SetResult(true);
+        (await old).IssuedAt.Should().Be(1);
+        (await adapter.GetExecutionInstanceAsync()).IssuedAt.Should().Be(2);
+        gets.Should().Be(2);
+        operations.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task ExecutionOperations_ShouldPreserveIdentityAndCreationState()
+    {
+        var calls = 0;
+        var adapter = CreateAdapter(new StubHttpMessageHandler(async (request, _) =>
+        {
+            calls++;
+            if (request.RequestUri!.AbsolutePath == "/execution/instance")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"instance_id\":\"scope\",\"issued_at\":123,\"retention_seconds\":86400,\"capacity\":4096}") };
+            if (request.Method == HttpMethod.Post)
+            {
+                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+                body.RootElement.GetProperty("operation_id").GetString().Should().Be("scope.123.persisted");
+                body.RootElement.GetProperty("command").GetString().Should().Be("echo hello");
+                body.RootElement.GetProperty("cwd").GetString().Should().Be("/tmp");
+                if (request.RequestUri.AbsolutePath == "/command/operations")
+                    body.RootElement.GetProperty("timeout").GetInt64().Should().Be(2000);
+            }
+            else request.Headers.GetValues("X-EXECD-OPERATION-ID").Single().Should().Be("scope.123.persisted");
+            return new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent("{\"id\":\"original\",\"kind\":\"command\",\"state\":\"creating\",\"expires_at\":\"2026-09-09T00:00:00Z\"}")
+            };
+        }));
+        var instance = await adapter.GetExecutionInstanceAsync();
+        instance.NewOperationId().Should().StartWith("scope.123.");
+        var operation = await adapter.CreateCommandOperationAsync("scope.123.persisted", "echo hello", new RunCommandOptions { WorkingDirectory = "/tmp", TimeoutSeconds = 2 });
+        operation.State.Should().Be("creating");
+        (await adapter.GetExecutionOperationAsync("command", "scope.123.persisted")).Id.Should().Be(operation.Id);
+        (await adapter.CreatePtyOperationAsync("scope.123.persisted", "/tmp", "echo hello")).Id.Should().Be(operation.Id);
+        calls.Should().Be(4);
+    }
+
     [Fact]
     public async Task NativeArgv_ShouldRejectInvalidInputsBeforeSending()
     {
