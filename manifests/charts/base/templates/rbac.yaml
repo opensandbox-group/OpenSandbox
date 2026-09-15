@@ -1,0 +1,232 @@
+{{/*
+User-facing RBAC for the OpenSandbox CRD API surface.
+
+These ClusterRoles belong to the CRDs (not to any controller release) and
+mirror the kustomize roles generated under kubernetes/config/rbac. They are
+not bound to any ServiceAccount; cluster admins bind them to users or groups
+as needed.
+*/}}
+{{- if .Values.rbac.create }}
+---
+# Grants full permissions ('*') over BatchSandboxes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: batchsandbox-admin-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - batchsandboxes
+  verbs:
+  - '*'
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - batchsandboxes/status
+  verbs:
+  - get
+---
+# Grants full permissions ('*') over Pools.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pool-admin-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - pools
+  verbs:
+  - '*'
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - pools/status
+  verbs:
+  - get
+---
+# Grants full permissions ('*') over SandboxSnapshots.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandboxsnapshot-admin-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - sandboxsnapshots
+  verbs:
+  - '*'
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - sandboxsnapshots/status
+  verbs:
+  - get
+---
+# Grants read-write access to BatchSandboxes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: batchsandbox-editor-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - batchsandboxes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - batchsandboxes/status
+  verbs:
+  - get
+---
+# Grants read-write access to Pools.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pool-editor-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - pools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - pools/status
+  verbs:
+  - get
+---
+# Grants read-write access to SandboxSnapshots.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandboxsnapshot-editor-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - sandboxsnapshots
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - sandboxsnapshots/status
+  verbs:
+  - get
+---
+# Grants read-only access to BatchSandboxes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: batchsandbox-viewer-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - batchsandboxes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - batchsandboxes/status
+  verbs:
+  - get
+---
+# Grants read-only access to Pools.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pool-viewer-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - pools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - pools/status
+  verbs:
+  - get
+---
+# Grants read-only access to SandboxSnapshots.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandboxsnapshot-viewer-role
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - sandboxsnapshots
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sandbox.opensandbox.io
+  resources:
+  - sandboxsnapshots/status
+  verbs:
+  - get
+{{- end }}

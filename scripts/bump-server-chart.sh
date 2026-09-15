@@ -33,7 +33,7 @@ if [[ ! "$NEW_VERSION" =~ ^v ]]; then
   NEW_VERSION="v${NEW_VERSION}"
 fi
 
-FILE="kubernetes/charts/opensandbox-server/values.yaml"
+FILE="manifests/charts/server/values.yaml"
 if [ ! -f "$FILE" ]; then
   echo "Error: missing $FILE" >&2
   exit 1
@@ -58,7 +58,7 @@ echo "Updated $FILE: server.image.tag -> $NEW_VERSION"
 # Until now appVersion was only patched at chart-package time by
 # publish-helm-chart.yml, leaving the committed Chart.yaml stale at 0.1.0.
 # chart `version` is intentionally left to the helm release process.
-CHART_FILE="kubernetes/charts/opensandbox-server/Chart.yaml"
+CHART_FILE="manifests/charts/server/Chart.yaml"
 if [ ! -f "$CHART_FILE" ]; then
   echo "Error: missing $CHART_FILE" >&2
   exit 1

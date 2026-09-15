@@ -1,6 +1,6 @@
-# VERSION defines the project version. It feeds the Helm chart version and
-# image tags. To build for a specific version, pass it as an arg
-# (e.g make helm-package VERSION=0.0.2) or export it (e.g export VERSION=0.0.2).
+# VERSION defines the project version. It feeds the image tags. To build for a
+# specific version, pass it as an arg or export it (e.g export VERSION=0.0.2).
+# Helm chart targets live in manifests/Makefile.
 VERSION ?= 0.1.0
 
 # IMAGE_TAG_BASE defines the registry namespace and part of the image name for remote images.
@@ -64,6 +64,7 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(MAKE) -C ../manifests helm-gen-crds
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -404,104 +405,3 @@ mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
 endef
-
-##@ Helm
-
-# Helm chart configuration
-HELM_CHART_PATH ?= charts/opensandbox-controller
-HELM_CHART_VERSION ?= $(VERSION)
-
-.PHONY: helm-lint
-helm-lint: ## Lint all Helm charts and verify dependencies
-	@echo "Linting Helm charts..."
-	helm lint charts/opensandbox-controller
-	helm lint charts/opensandbox-server
-	helm lint charts/opensandbox-node-agent
-	helm dependency build charts/opensandbox
-	helm lint charts/opensandbox
-
-.PHONY: helm-template
-helm-template: ## Generate Kubernetes manifests from Helm chart
-	@echo "Generating manifests from Helm chart..."
-	helm template opensandbox-controller $(HELM_CHART_PATH) \
-		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION)
-
-.PHONY: helm-template-debug
-helm-template-debug: ## Generate Kubernetes manifests with debug output
-	@echo "Generating manifests from Helm chart with debug..."
-	helm template opensandbox-controller $(HELM_CHART_PATH) \
-		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
-		--debug
-
-.PHONY: helm-package
-helm-package: ## Package the Helm chart
-	@echo "Packaging Helm chart..."
-	@mkdir -p dist
-	helm package $(HELM_CHART_PATH) -d dist/ --version $(HELM_CHART_VERSION) --app-version $(VERSION)
-
-.PHONY: helm-install
-helm-install: ## Install the Helm chart
-	@echo "Installing Helm chart..."
-	helm install opensandbox-controller $(HELM_CHART_PATH) \
-		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
-		--namespace opensandbox-system \
-		--create-namespace
-
-.PHONY: helm-upgrade
-helm-upgrade: ## Upgrade the Helm chart
-	@echo "Upgrading Helm chart..."
-	helm upgrade opensandbox-controller $(HELM_CHART_PATH) \
-		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
-		--namespace opensandbox-system
-
-.PHONY: helm-uninstall
-helm-uninstall: ## Uninstall the Helm chart
-	@echo "Uninstalling Helm chart..."
-	helm uninstall opensandbox-controller --namespace opensandbox-system
-
-.PHONY: helm-test
-helm-test: ## Run Helm chart tests
-	@echo "Running Helm chart tests..."
-	helm test opensandbox-controller --namespace opensandbox-system
-
-.PHONY: helm-docs
-helm-docs: ## Generate Helm chart documentation for all charts (requires helm-docs)
-	@if command -v helm-docs >/dev/null 2>&1; then \
-		echo "Generating Helm chart documentation..."; \
-		helm-docs --chart-search-root charts/; \
-	else \
-		echo "helm-docs is not installed. Install it with: go install github.com/norwoodj/helm-docs/cmd/helm-docs@latest"; \
-		exit 1; \
-	fi
-
-.PHONY: helm-docs-check
-helm-docs-check: ## Verify Helm chart documentation is up to date (requires helm-docs)
-	@if command -v helm-docs >/dev/null 2>&1; then \
-		echo "Checking Helm chart documentation is up to date..."; \
-		helm-docs --chart-search-root charts/; \
-		if [ -n "$$(git status --porcelain -- charts/ | head -n 1)" ]; then \
-			echo "ERROR: Helm chart documentation is out of date. Run 'make helm-docs' and commit the changes."; \
-			exit 1; \
-		fi; \
-		echo "Helm chart documentation is up to date."; \
-	else \
-		echo "helm-docs is not installed. Install it with: go install github.com/norwoodj/helm-docs/cmd/helm-docs@latest"; \
-		exit 1; \
-	fi
-
-.PHONY: helm-dry-run
-helm-dry-run: ## Perform a dry-run install of the Helm chart
-	@echo "Performing dry-run installation..."
-	helm install opensandbox-controller $(HELM_CHART_PATH) \
-		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
-		--namespace opensandbox-system \
-		--create-namespace \
-		--dry-run --debug
-
-.PHONY: helm-all
-helm-all: helm-lint helm-package ## Run all Helm-related tasks (lint and package)

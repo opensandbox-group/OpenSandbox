@@ -1,0 +1,29 @@
+{{/*
+Render the OpenSandbox CRDs from the generated bundle in files/crds.yaml.
+The bundle is synced from kubernetes/config/crd/bases by `make helm-gen-crds`;
+do not edit files/crds.yaml by hand.
+
+The bundle is split on "\n---\n" document separators (maintained by the sync
+target) so labels and annotations can be injected per CRD.
+*/}}
+{{- if .Values.crds.install }}
+{{- range $doc := $.Files.Get "files/crds.yaml" | splitList "\n---\n" }}
+{{- if $doc | trim }}
+{{- $crd := fromYaml $doc }}
+{{- if or (ne (index $crd "apiVersion") "apiextensions.k8s.io/v1") (ne (index $crd "kind") "CustomResourceDefinition") }}
+{{- fail (printf "crds.yaml split error: fragment is not a CustomResourceDefinition (apiVersion=%q kind=%q); check for a literal '---' inside the generated bundle" (index $crd "apiVersion" | toString) (index $crd "kind" | toString)) }}
+{{- end }}
+{{- $_ := set $crd.metadata "labels" (include "opensandbox-base.labels" $ | fromYaml) }}
+{{- $annotations := $crd.metadata.annotations | default dict }}
+{{- if $.Values.crds.keep }}
+{{- $_ := set $annotations "helm.sh/resource-policy" "keep" }}
+{{- end }}
+{{- with $.Values.crds.annotations }}
+{{- $annotations = mergeOverwrite $annotations . }}
+{{- end }}
+{{- $_ := set $crd.metadata "annotations" $annotations }}
+{{ $crd | toYaml }}
+---
+{{- end }}
+{{- end }}
+{{- end }}

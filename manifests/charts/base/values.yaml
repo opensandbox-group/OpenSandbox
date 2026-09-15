@@ -1,0 +1,36 @@
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default values for the OpenSandbox base chart.
+# This chart installs cluster-scoped resources only: the OpenSandbox CRDs and
+# user-facing RBAC roles. It contains no workloads and can be installed once
+# per cluster, independently of the controller and server releases.
+
+# -- Override the name of the chart
+nameOverride: ""
+# -- Override the full name of the chart
+fullnameOverride: ""
+
+crds:
+  # -- Specifies whether the CRDs should be installed
+  install: true
+  # -- Keep CRDs on chart uninstall (adds the helm.sh/resource-policy: keep annotation)
+  keep: true
+  # -- Additional annotations to add to CRDs (merged with resource-policy when keep is true)
+  annotations: {}
+
+rbac:
+  # -- Specifies whether user-facing ClusterRoles for the OpenSandbox CRD API
+  # (admin/editor/viewer per resource kind) should be installed
+  create: true

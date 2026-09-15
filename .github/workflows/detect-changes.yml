@@ -56,8 +56,9 @@ jobs:
               kubernetes: (path) =>
                 workflowChanged(path, "kubernetes-test.yml") ||
                 (path.startsWith("kubernetes/") &&
-                  !path.startsWith("kubernetes/docs/") &&
-                  !path.startsWith("kubernetes/charts/opensandbox-node-agent/")),
+                  !path.startsWith("kubernetes/docs/")) ||
+                (path.startsWith("manifests/charts/") &&
+                  !path.startsWith("manifests/charts/node-agent/")),
               "real-e2e": (path) =>
                 workflowChanged(path, "real-e2e.yml") ||
                 path.startsWith("server/opensandbox_server/") ||
@@ -86,7 +87,7 @@ jobs:
                 path === "tests/python/tests/support/server-pool.yaml" ||
                 path === "server/opensandbox_server/examples/e2e.batchsandbox-template.yaml" ||
                 path.startsWith("components/execd/") ||
-                path.startsWith("kubernetes/charts/"),
+                path.startsWith("manifests/charts/"),
               ingress: (path) =>
                 workflowChanged(path, "ingress-test.yaml") ||
                 path.startsWith("components/ingress/") ||
@@ -100,10 +101,10 @@ jobs:
                 workflowChanged(path, "nodeagent-test.yml") ||
                 path.startsWith("components/nodeagent/") ||
                 path.startsWith("components/internal/") ||
-                path.startsWith("kubernetes/charts/opensandbox-node-agent/") ||
-                path === "kubernetes/charts/opensandbox/Chart.yaml" ||
-                path === "kubernetes/charts/opensandbox/Chart.lock" ||
-                path === "kubernetes/charts/opensandbox/values.yaml",
+                path.startsWith("manifests/charts/node-agent/") ||
+                path === "manifests/charts/opensandbox/Chart.yaml" ||
+                path === "manifests/charts/opensandbox/Chart.lock" ||
+                path === "manifests/charts/opensandbox/values.yaml",
               sdk: (path) =>
                 workflowChanged(path, "sdk-tests.yml") ||
                 path.startsWith("cli/") ||

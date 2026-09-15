@@ -27,7 +27,7 @@ The umbrella chart disables Node Agent by default. For a durable local-file
 validation:
 
 ```bash
-helm install nodeagent ./kubernetes/charts/opensandbox-node-agent \
+helm install nodeagent ./manifests/charts/node-agent \
   --namespace opensandbox-system \
   --create-namespace \
   --set config.clusterID=prod-a \

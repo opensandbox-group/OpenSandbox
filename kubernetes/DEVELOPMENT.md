@@ -97,7 +97,8 @@ kubernetes/
 │   ├── manager/                   # Controller manager deployment
 │   ├── rbac/                      # ClusterRole bindings
 │   └── samples/                   # Example resources
-├── charts/opensandbox-controller/ # Helm chart
+├── ../manifests/charts/           # Helm charts (base, controller, server,
+│                                  #  ingress-gateway, node-agent, opensandbox umbrella)
 ├── test/
 │   ├── e2e/                       # Core e2e tests (Kind-based)
 │   ├── e2e_task/                  # Task-executor e2e tests
@@ -387,7 +388,7 @@ mockStore.EXPECT().GetAllocation(gomock.Any(), gomock.Any()).Return(&PoolAllocat
    ```
 3. Implement controller logic to handle the new field
 4. Add unit tests
-5. Update CRD YAML in Helm chart (`charts/opensandbox-controller/templates/crds/`)
+5. Sync CRDs into the base Helm chart (`make -C manifests helm-gen-crds` updates `manifests/charts/base/files/crds.yaml`; `make manifests` runs it automatically)
 
 ### Adding a New Strategy Implementation
 
@@ -447,15 +448,15 @@ make undeploy    # Remove controller
 ### Deploying with Helm
 
 ```bash
-make helm-install
+make -C manifests helm-install
 # Or with custom values
-helm install opensandbox-controller ./charts/opensandbox-controller \
+helm install opensandbox-controller ../manifests/charts/controller \
   --set controller.image.repository=myregistry/controller \
   --set controller.image.tag=v0.1.0 \
   --namespace opensandbox-system --create-namespace
 ```
 
-See `docs/HELM-DEPLOYMENT.md` for full Helm documentation.
+See `../manifests/HELM-DEPLOYMENT.md` for full Helm documentation.
 
 ### Controller Configuration
 

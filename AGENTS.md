@@ -11,7 +11,8 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - `components/internal/`: shared Go helpers used by runtime components
 - `sdks/`: sandbox, code-interpreter, and MCP SDKs plus generated clients
 - `specs/`: public OpenAPI contracts and examples
-- `kubernetes/`: Kubernetes operator, CRDs, task-executor, Helm charts, and Kind e2e tests
+- `kubernetes/`: Kubernetes operator, CRDs, task-executor, and Kind e2e tests
+- `manifests/charts/`: Helm charts (base, controller, server, ingress-gateway, node-agent, opensandbox umbrella)
 - `cli/`: `osb` command-line client and bundled CLI skills
 - `tests/`: cross-language end-to-end SDK tests
 - `docs/`, `examples/`, `oseps/`: documentation, samples, and proposals

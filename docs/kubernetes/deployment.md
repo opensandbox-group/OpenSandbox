@@ -199,7 +199,7 @@ helm upgrade opensandbox-server "${CHART_URL}" \
   --values values-server.yaml
 ```
 
-For the complete values reference and local development installation, see the [`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes/charts/opensandbox-server).
+For the complete values reference and local development installation, see the [`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/server).
 
 ## Operator Metrics
 

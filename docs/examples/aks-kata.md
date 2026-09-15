@@ -43,11 +43,14 @@ kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f
 
 kubectl apply -f examples/aks-kata/batchsandbox-template-configmap.yaml
 
-helm upgrade --install opensandbox-controller ./kubernetes/charts/opensandbox-controller \
+# The controller chart no longer ships the CRDs; install base first on a fresh cluster
+helm upgrade --install base ./manifests/charts/base
+
+helm upgrade --install opensandbox-controller ./manifests/charts/controller \
   --namespace opensandbox-system \
   -f examples/aks-kata/controller-values.yaml
 
-helm upgrade --install opensandbox-server ./kubernetes/charts/opensandbox-server \
+helm upgrade --install opensandbox-server ./manifests/charts/server \
   --namespace opensandbox-system \
   -f examples/aks-kata/server-values.yaml
 ```
@@ -118,7 +121,7 @@ kubectl create secret docker-registry acr-snapshot-push-secret \
 ### Step 3: Upgrade the controller
 
 ```bash
-helm upgrade opensandbox-controller ./kubernetes/charts/opensandbox-controller \
+helm upgrade opensandbox-controller ./manifests/charts/controller \
   --namespace opensandbox-system \
   --reuse-values \
   --set controller.snapshot.registry=<acr-name>.azurecr.io/opensandbox-snapshots \

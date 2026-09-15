@@ -18,7 +18,7 @@ For detailed development setup, architecture deep-dive, coding standards, testin
 - `pkg/task-executor/`: task-executor public types and config
 - `pkg/utils/`: public-ish helper contracts used by server-side Kubernetes integration
 - `config/`: Kustomize overlays, RBAC, CRD bases, samples
-- `charts/opensandbox-controller/`: Helm chart for deployment
+- `../manifests/charts/`: component Helm charts (base, controller, server, ingress-gateway, node-agent) plus the `opensandbox` umbrella chart
 - `cmd/image-committer/` and `Dockerfile.image-committer`: image used by pause/resume rootfs commit jobs
 - `test/e2e/`: end-to-end tests (Kind-based)
 - `test/e2e_task/`: task-executor e2e tests
@@ -125,7 +125,7 @@ Deploy via Helm:
 
 ```bash
 cd kubernetes
-make helm-install
+make -C manifests helm-install
 ```
 
 Regenerate CRD manifests and DeepCopy:

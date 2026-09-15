@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Bump component image versions across the project (image refs like component:vX.Y.Z).
-# For ingress, also updates gateway image tag in kubernetes/charts/opensandbox-server/values.yaml.
+# For ingress, also updates gateway image tag in manifests/charts/ingress-gateway/values.yaml.
 #
 # External image pins:
 # OpenSandbox does not own or release the code-interpreter sandbox image, which is maintained
@@ -90,7 +90,7 @@ if [ "$COMPONENT" = "nodeagent" ]; then
     echo "Error: invalid nodeagent version: $NEW_VERSION" >&2
     exit 1
   fi
-  CHART_VALUES="kubernetes/charts/opensandbox-node-agent/values.yaml"
+  CHART_VALUES="manifests/charts/node-agent/values.yaml"
   if [ ! -f "$CHART_VALUES" ]; then
     echo "Error: missing $CHART_VALUES" >&2
     exit 1
@@ -124,7 +124,7 @@ if [ "$COMPONENT" = "nodeagent" ]; then
 fi
 
 # Helm values: gateway ingress image uses repository + tag (not ingress:vX in one string).
-CHART_VALUES="kubernetes/charts/opensandbox-server/values.yaml"
+CHART_VALUES="manifests/charts/ingress-gateway/values.yaml"
 if [ "$COMPONENT" = "ingress" ]; then
   INGRESS_REPO='repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress'
   if [ ! -f "$CHART_VALUES" ]; then
@@ -147,7 +147,7 @@ if [ "$COMPONENT" = "ingress" ]; then
     exit 1
   fi
   if ! cmp -s "$CHART_VALUES" "$tmpfile"; then
-    echo "Updated $CHART_VALUES (server.gateway.image tag for ingress)"
+    echo "Updated $CHART_VALUES (gateway.image tag for ingress)"
     updated=$((updated + 1))
   else
     echo "$CHART_VALUES already uses $NEW_VERSION"

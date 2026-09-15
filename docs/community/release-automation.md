@@ -15,7 +15,7 @@ This repository uses tag-driven publish workflows. The script below standardizes
 
 Script path:
 
-- `scripts/release/create-release.sh`
+- `manifests/release/create-release.sh`
 
 ## Supported Targets
 
@@ -100,7 +100,7 @@ Commit categorization:
 ## Usage
 
 ```bash
-scripts/release/create-release.sh --target <target> --version <version> [options]
+manifests/release/create-release.sh --target <target> --version <version> [options]
 ```
 
 Required:
@@ -130,8 +130,8 @@ Examples:
 - `server` -> `server` + `specs/sandbox-lifecycle.yml`
 - `docker/egress` -> `components/egress`
 - `docker/nodeagent` -> `components/nodeagent` + `components/internal`
-- `helm/opensandbox` -> `kubernetes/charts/opensandbox`
-- `helm/opensandbox-node-agent` -> `kubernetes/charts/opensandbox-node-agent`
+- `helm/opensandbox` -> `manifests/charts/opensandbox`
+- `helm/opensandbox-node-agent` -> `manifests/charts/node-agent`
 
 Override behavior:
 
@@ -145,43 +145,43 @@ Override behavior:
 Dry-run JavaScript SDK release:
 
 ```bash
-scripts/release/create-release.sh --target js/sandbox --version 1.0.5 --dry-run
+manifests/release/create-release.sh --target js/sandbox --version 1.0.5 --dry-run
 ```
 
 Dry-run server release:
 
 ```bash
-scripts/release/create-release.sh --target server --version 0.2.0 --dry-run
+manifests/release/create-release.sh --target server --version 0.2.0 --dry-run
 ```
 
 Dry-run JavaScript SDK release with additional docs scope:
 
 ```bash
-scripts/release/create-release.sh --target js/sandbox --version 1.0.5 --dry-run --path docs/
+manifests/release/create-release.sh --target js/sandbox --version 1.0.5 --dry-run --path docs/
 ```
 
 Dry-run JavaScript SDK release without path filtering (full range):
 
 ```bash
-scripts/release/create-release.sh --target js/sandbox --version 1.0.5 --dry-run --no-path-filter
+manifests/release/create-release.sh --target js/sandbox --version 1.0.5 --dry-run --no-path-filter
 ```
 
 Server release with tag push:
 
 ```bash
-scripts/release/create-release.sh --target server --version 0.2.0 --push
+manifests/release/create-release.sh --target server --version 0.2.0 --push
 ```
 
 Component image release:
 
 ```bash
-scripts/release/create-release.sh --target docker/execd --version v0.3.0 --push
+manifests/release/create-release.sh --target docker/execd --version v0.3.0 --push
 ```
 
 Helm chart release:
 
 ```bash
-scripts/release/create-release.sh --target helm/opensandbox --version 0.1.0 --push
+manifests/release/create-release.sh --target helm/opensandbox --version 0.1.0 --push
 ```
 
 ## Dry-Run Output Example
@@ -234,10 +234,10 @@ If `--dry-run` is enabled, the script never creates/pushes tags and never create
 
 The GitHub Actions dispatch entry for this flow (`release-generic.yml`) was
 removed because it had no callers; the release process uses tag pushes that
-trigger the `publish-*` workflows directly. Run `scripts/release/create-release.sh`
+trigger the `publish-*` workflows directly. Run `manifests/release/create-release.sh`
 locally to create release tags and GitHub Releases:
 
-When `dry_run=false`, `scripts/release/create-release.sh` creates the tag and
+When `dry_run=false`, `manifests/release/create-release.sh` creates the tag and
 the GitHub Release. Source archives (`opensandbox-<tag>.tar.gz` + `SHA256SUMS`)
 were previously uploaded by the removed `release-generic.yml` workflow; releases
 created after its removal no longer carry source archives. See

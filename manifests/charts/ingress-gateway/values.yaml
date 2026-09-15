@@ -1,0 +1,117 @@
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default values for the OpenSandbox ingress-gateway chart.
+#
+# The gateway proxies sandbox traffic (components/ingress). The lifecycle
+# server announces the gateway to clients through its [ingress] config
+# section; configure the matching host/route mode/secure access values in
+# the opensandbox-server chart (server.gateway.*).
+
+# -- Override the name of the chart
+nameOverride: ""
+# -- Resource names and app.kubernetes.io/name are fixed to this value,
+# independent of release name (keeps names stable across releases).
+fullnameOverride: "opensandbox-ingress-gateway"
+
+# -- Override the namespace (default: opensandbox-system)
+namespaceOverride: ""
+
+# -- Image pull secrets for the gateway deployment. Each entry: {name: <secret-name>}.
+imagePullSecrets: []
+
+gateway:
+  # -- Gateway image configuration.
+  image:
+    # -- Gateway image repository.
+    repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress
+    # -- Gateway image tag.
+    tag: "v1.0.10"
+
+  # -- Number of gateway replicas.
+  replicaCount: 2
+
+  # -- Gateway container port.
+  port: 28888
+
+  # -- Namespace where the gateway dataplane workloads run.
+  dataplaneNamespace: "opensandbox"
+
+  # -- Gateway provider type (e.g. batchsandbox).
+  providerType: "batchsandbox"
+
+  # -- Gateway route mode: header or uri. Must match server.gateway.gatewayRouteMode.
+  gatewayRouteMode: "header"
+
+  # -- Gateway log level.
+  logLevel: "info"
+
+  # -- Additional environment variables for the gateway container
+  # (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics).
+  env: []
+
+  # -- Resource requests and limits for the gateway.
+  resources:
+    limits:
+      cpu: "2"
+      memory: 8Gi
+    requests:
+      cpu: "1"
+      memory: 4Gi
+
+  # OSEP-0011 signing keys shared between server and ingress.
+  # The gateway verifies route tokens against this key ring; the server
+  # (opensandbox-server chart, server.gateway.secureAccess) signs with it.
+  secureAccess:
+    # -- List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
+    # key_id must be exactly one character in [0-9a-z]. Mutually exclusive with
+    # existingSecret.
+    keys: []
+    # -- Name of an existing Secret holding the signing key ring. Mutually
+    # exclusive with keys. The Secret must carry a `keys` entry containing the
+    # ring, "a=<base64-secret>[,b=<base64-secret>...]". The chart wires it into
+    # the `--secure-access-keys` arg via $(...) env expansion, so key material
+    # never appears in values or pod args.
+    existingSecret: ""
+
+  # -- Service settings for the gateway.
+  service:
+    # -- Service type for the gateway.
+    type: ClusterIP
+    # -- Service port. The targetPort always points to gateway.port.
+    port: 80
+
+  # -- Node selector for the gateway pod.
+  nodeSelector: {}
+  # -- Pod-level security context for the gateway pod.
+  podSecurityContext: {}
+  # -- Container-level security context for the gateway container.
+  containerSecurityContext: {}
+  # -- Extra annotations for the gateway pod.
+  podAnnotations: {}
+  # -- Extra labels for the gateway pod.
+  podLabels: {}
+  # -- Priority class name for the gateway pod.
+  priorityClassName: ""
+  # -- Topology spread constraints for the gateway pod.
+  topologySpreadConstraints: []
+  # -- Tolerations for the gateway pod.
+  tolerations: []
+  # -- Affinity for the gateway pod.
+  affinity: {}
+
+rbac:
+  # -- Specifies whether the gateway RBAC resources (ClusterRole + binding for
+  # reading pods/services and BatchSandboxes) should be created.
+  create: true

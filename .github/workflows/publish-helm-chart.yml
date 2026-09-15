@@ -12,14 +12,17 @@ on:
           - opensandbox-server
           - opensandbox
           - opensandbox-node-agent
+          - base
+          - ingress-gateway
         default: 'opensandbox-controller'
       chart_version:
         description: 'Chart version to release (without v prefix, e.g., 0.1.0)'
         required: true
         default: '0.1.0'
       app_version:
-        description: 'Expected committed appVersion (without v prefix, e.g., 0.1.0)'
-        required: true
+        description: 'Expected committed appVersion (without v prefix, e.g., 0.1.0). Ignored for charts without an appVersion (base, ingress-gateway).'
+        required: false
+        default: 
   push:
     tags:
       - 'helm/**'  # Format: helm/<component>/<chart_version>, e.g., helm/opensandbox-controller/0.1.0
@@ -113,7 +116,7 @@ jobs:
           fi
 
           case "$component" in
-            opensandbox-controller|opensandbox-server|opensandbox|opensandbox-node-agent) ;;
+            opensandbox-controller|opensandbox-server|opensandbox|opensandbox-node-agent|base|ingress-gateway) ;;
             *)
               echo "::error::Unknown Helm component: $component"
               exit 1
@@ -159,10 +162,12 @@ jobs:
         run: |
           set -euo pipefail
           case "$COMPONENT" in
-            opensandbox-controller) chart_path="kubernetes/charts/opensandbox-controller" ;;
-            opensandbox-server) chart_path="kubernetes/charts/opensandbox-server" ;;
-            opensandbox) chart_path="kubernetes/charts/opensandbox" ;;
-            opensandbox-node-agent) chart_path="kubernetes/charts/opensandbox-node-agent" ;;
+            opensandbox-controller) chart_path="manifests/charts/controller" ;;
+            opensandbox-server) chart_path="manifests/charts/server" ;;
+            opensandbox) chart_path="manifests/charts/opensandbox" ;;
+            opensandbox-node-agent) chart_path="manifests/charts/node-agent" ;;
+            base) chart_path="manifests/charts/base" ;;
+            ingress-gateway) chart_path="manifests/charts/ingress-gateway" ;;
           esac
           echo "path=$chart_path" >>"$GITHUB_OUTPUT"
 
@@ -188,11 +193,17 @@ jobs:
         run: |
           set -euo pipefail
           app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' "$CHART_PATH/Chart.yaml")"
+          if [[ -z "$app_version" ]]; then
+            # Infrastructure charts (base, ingress-gateway) ship without an
+            # appVersion: there is no application image version they pin.
+            echo "version=" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ ! "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Stable Helm releases require an X.Y.Z appVersion, got: $app_version"
             exit 1
           fi
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$app_version" != "$EXPECTED_APP_VERSION" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && -n "$EXPECTED_APP_VERSION" && "$app_version" != "$EXPECTED_APP_VERSION" ]]; then
             echo "::error::Committed appVersion '$app_version' does not match requested app version '$EXPECTED_APP_VERSION'. Update and tag the chart source instead of mutating release metadata."
             exit 1
           fi
@@ -224,7 +235,7 @@ jobs:
           test -f "dist/$package_name"
           test "$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)" -eq 1
 
-          scripts/release/verify-helm-package.sh \
+          manifests/release/verify-helm-package.sh \
             "dist/$package_name" "$COMPONENT" "$CHART_VERSION" "$APP_VERSION"
 
           package_sha256="$(sha256sum "dist/$package_name" | awk '{print $1}')"
@@ -288,7 +299,7 @@ jobs:
           (cd dist && sha256sum -c SHA256SUMS)
           actual_sha256="$(sha256sum "dist/$PACKAGE_NAME" | awk '{print $1}')"
           test "$actual_sha256" = "$EXPECTED_SHA256"
-          scripts/release/verify-helm-package.sh \
+          manifests/release/verify-helm-package.sh \
             "dist/$PACKAGE_NAME" "$COMPONENT" "$CHART_VERSION" "$APP_VERSION"
 
       - name: Set up Python
@@ -326,8 +337,8 @@ jobs:
         env:
           PACKAGE_NAME: ${{ needs.package.outputs.package_name }}
         run: |
-          scripts/release/smoke-helm-release.sh \
-            --package "dist/$PACKAGE_NAME" -- scripts/release/run-helm-release-e2e.sh
+          manifests/release/smoke-helm-release.sh \
+            --package "dist/$PACKAGE_NAME" -- manifests/release/run-helm-release-e2e.sh
 
       - name: Record tested image identities
         id: runtime_evidence
@@ -422,4 +433,4 @@ jobs:
           RUNTIME_VERIFIED: ${{ needs.package.outputs.component == 'opensandbox' && 'true' || 'false' }}
           RUNTIME_PROFILE: ${{ needs.package.outputs.component == 'opensandbox' && 'Kind Kubernetes v1.30.13 linux/amd64 core lifecycle' || 'package verification only' }}
           TESTED_IMAGES: ${{ needs.kind-gate.outputs.tested_images }}
-        run: scripts/release/publish-helm-release.sh
+        run: manifests/release/publish-helm-release.sh

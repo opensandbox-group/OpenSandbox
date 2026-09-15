@@ -1,0 +1,124 @@
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- include "opensandbox-ingress-gateway.secureAccess.validate" . }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opensandbox-ingress-gateway.fullname" . }}
+  namespace: {{ include "opensandbox-ingress-gateway.namespace" . }}
+  labels:
+    {{- include "opensandbox-ingress-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opensandbox-ingress-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opensandbox-ingress-gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ingress-gateway
+        app.kubernetes.io/part-of: opensandbox
+        {{- with .Values.gateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "opensandbox-ingress-gateway.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.gateway.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: main
+          image: {{ include "opensandbox-ingress-gateway.image" . }}
+          {{- with .Values.gateway.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--namespace={{ .Values.gateway.dataplaneNamespace }}"
+            - "--port={{ .Values.gateway.port }}"
+            - "--provider-type={{ .Values.gateway.providerType }}"
+            - "--mode={{ .Values.gateway.gatewayRouteMode }}"
+            - "--log-level={{ .Values.gateway.logLevel }}"
+{{- if .Values.gateway.secureAccess.keys }}
+            - "--secure-access-keys={{- range $i, $k := .Values.gateway.secureAccess.keys }}{{ if $i }},{{ end }}{{ $k.key_id }}={{ $k.key }}{{- end }}"
+{{- else if .Values.gateway.secureAccess.existingSecret }}
+            # Kubelet expands $(...) from the env below, so the key ring
+            # reaches the arg only at container start, never via the pod spec.
+            - "--secure-access-keys=$(OPENSANDBOX_SECURE_ACCESS_KEYS)"
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.port }}
+              protocol: TCP
+          {{- if or .Values.gateway.env .Values.gateway.secureAccess.existingSecret }}
+          env:
+            {{- if .Values.gateway.secureAccess.existingSecret }}
+            - name: OPENSANDBOX_SECURE_ACCESS_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.secureAccess.existingSecret | quote }}
+                  key: keys
+            {{- end }}
+            {{- with .Values.gateway.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /status.ok
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /status.ok
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}

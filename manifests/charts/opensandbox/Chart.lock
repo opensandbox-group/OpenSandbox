@@ -1,0 +1,18 @@
+dependencies:
+- name: base
+  repository: file://../base
+  version: 0.1.0
+- name: opensandbox-controller
+  repository: file://../controller
+  version: 0.2.1
+- name: opensandbox-server
+  repository: file://../server
+  version: 0.1.0
+- name: ingress-gateway
+  repository: file://../ingress-gateway
+  version: 0.1.0
+- name: opensandbox-node-agent
+  repository: file://../node-agent
+  version: 0.1.0
+digest: sha256:9084424bfd8300b535f15437daf2b9c8482a98091b7b9838a89327d12c485e6f
+generated: "2026-09-15T21:41:43.973859+08:00"

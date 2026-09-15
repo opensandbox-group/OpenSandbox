@@ -46,7 +46,7 @@ Proposals (OSEPs).
 |------|--------|----------|-------|
 | OpenTelemetry metrics and logs | Implementing | [OSEP-0010](oseps/0010-opentelemetry-instrumentation.md) | Add observability across execd, ingress, and egress. |
 | Agent in-sandbox audit trail | Planned | TBD / OSEP needed | Define auditable records for agent actions inside sandboxes, such as command/session execution, file operations, network access, identity context, retention, and privacy boundaries. |
-| Kubernetes deployment | Ongoing | [kubernetes/](kubernetes/README.md), [Helm charts](kubernetes/charts/) | Keep self-hosted deployment, chart, and operational documentation current. |
+| Kubernetes deployment | Ongoing | [kubernetes/](kubernetes/README.md), [Helm charts](manifests/charts/) | Keep self-hosted deployment, chart, and operational documentation current. |
 | Network isolation guidance | Ongoing | [network isolation guide](docs/architecture/network-isolation.md) | Continue documenting safe defaults and practical isolation patterns. |
 
 ### Public Contracts and Governance

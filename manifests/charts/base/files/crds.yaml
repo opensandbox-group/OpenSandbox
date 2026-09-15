@@ -1,0 +1,691 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: batchsandboxes.sandbox.opensandbox.io
+spec:
+  group: sandbox.opensandbox.io
+  names:
+    kind: BatchSandbox
+    listKind: BatchSandboxList
+    plural: batchsandboxes
+    shortNames:
+    - bsbx
+    singular: batchsandbox
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: The desired number of pods.
+      jsonPath: .spec.replicas
+      name: DESIRED
+      type: integer
+    - description: The number of currently all pods.
+      jsonPath: .status.replicas
+      name: TOTAL
+      type: integer
+    - description: The number of currently all allocated pods.
+      jsonPath: .status.allocated
+      name: ALLOCATED
+      type: integer
+    - description: The number of currently all ready pods.
+      jsonPath: .status.ready
+      name: Ready
+      type: integer
+    - description: The number of currently all running tasks.
+      jsonPath: .status.taskRunning
+      name: TASK_RUNNING
+      priority: 1
+      type: integer
+    - description: The number of currently all succeed tasks.
+      jsonPath: .status.taskSucceed
+      name: TASK_SUCCEED
+      priority: 1
+      type: integer
+    - description: The number of currently all failed tasks.
+      jsonPath: .status.taskFailed
+      name: TASK_FAILED
+      priority: 1
+      type: integer
+    - description: The number of currently all unknown tasks.
+      jsonPath: .status.taskUnknown
+      name: TASK_UNKNOWN
+      priority: 1
+      type: integer
+    - description: sandbox expire time
+      jsonPath: .spec.expireTime
+      name: EXPIRE
+      type: string
+    - description: CreationTimestamp is a timestamp representing the server time when
+        this object was created. It is not guaranteed to be set in happens-before
+        order across separate operations. Clients may not set this value. It is represented
+        in RFC3339 form and is in UTC.
+      jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: BatchSandbox is the Schema for the batchsandboxes API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: BatchSandboxSpec defines the desired state of BatchSandbox.
+            properties:
+              expireTime:
+                description: |-
+                  ExpireTime - Absolute time when the batch-sandbox is deleted.
+                  If a time in the past is provided, the batch-sandbox will be deleted immediately.
+                format: date-time
+                type: string
+              pause:
+                description: |-
+                  Pause is the pause/resume intent written by Server and executed by Controller.
+                  nil = no operation / server retry bridge
+                  true = request Pause
+                  false = request Resume
+                  Controller never clears this field; Server may temporarily patch nil to force a new generation for retries.
+                type: boolean
+              poolRef:
+                description: |-
+                  PoolRef references the Pool resource name for pooled sandbox creation.
+                  Mutually exclusive with Template - use PoolRef for pool-based allocation or Template for direct sandbox creation.
+                type: string
+              replicas:
+                default: 1
+                description: Replicas is the number of desired replicas.
+                format: int32
+                minimum: 0
+                type: integer
+              shardPatches:
+                description: ShardPatches indicates patching to the Template for BatchSandbox.
+                x-kubernetes-preserve-unknown-fields: true
+              shardTaskPatches:
+                description: ShardTaskPatches indicates patching to the TaskTemplate
+                  for individual Task.
+                x-kubernetes-preserve-unknown-fields: true
+              taskResourcePolicyWhenCompleted:
+                default: Retain
+                description: |-
+                  TaskResourcePolicyWhenCompleted specifies how resources should be handled once a task reaches a completed state (SUCCEEDED or FAILED).
+                  - Retain: Keep the resources until the BatchSandbox is deleted.
+                  - Release: Free the resources immediately when the task completes.
+                type: string
+              taskTemplate:
+                description: |-
+                  Task is a custom task spec that is automatically dispatched after the sandbox is successfully created.
+                  The Sandbox is responsible for managing the lifecycle of the task.
+                x-kubernetes-preserve-unknown-fields: true
+              template:
+                description: Template describes the pods that will be created.
+                x-kubernetes-preserve-unknown-fields: true
+            required:
+            - replicas
+            type: object
+          status:
+            description: BatchSandboxStatus defines the observed state of BatchSandbox.
+            properties:
+              allocated:
+                description: "\tAllocated is the number of actual scheduled Pod"
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions records lifecycle and operational state details.
+                items:
+                  description: BatchSandboxCondition represents a condition of a BatchSandbox
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time the condition
+                        transitioned
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable message about the condition
+                      type: string
+                    reason:
+                      description: Reason is a brief reason for the condition
+                      type: string
+                    status:
+                      description: Status is the condition status
+                      enum:
+                      - "True"
+                      - "False"
+                      type: string
+                    type:
+                      description: Type is the condition type
+                      enum:
+                      - Ready
+                      - Progressing
+                      - Paused
+                      - PauseFailed
+                      - ResumeFailed
+                      - PodFailed
+                      - PoolAllocationPending
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
+                  BatchSandbox's generation, which is updated on mutation by the API Server.
+                format: int64
+                type: integer
+              pauseObservedGeneration:
+                description: |-
+                  PauseObservedGeneration is the generation most recently ACKed by the Controller
+                  when entering pause/resume dispatch logic. Written immediately to prevent reentry (idempotent gating).
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  Phase is the overall phase of the BatchSandbox, aggregated and written by Controller.
+                  Server reads this field directly without combining multiple fields.
+                enum:
+                - Pending
+                - Succeed
+                - Pausing
+                - Paused
+                - Resuming
+                - Failed
+                type: string
+              ready:
+                description: "\tReady is the number of actual Ready Pod"
+                format: int32
+                type: integer
+              replicas:
+                description: Replicas is the number of actual Pods
+                format: int32
+                type: integer
+              taskFailed:
+                description: TaskFailed is the number of Failed task
+                format: int32
+                type: integer
+              taskLastErrorMessage:
+                description: |-
+                  TaskLastErrorMessage holds the most recent error message from a failed task.
+                  This includes lifecycle hook failures (e.g., ossfs mount timeout or error output).
+                type: string
+              taskPending:
+                description: TaskPending is the number of Pending task which is unassigned
+                format: int32
+                type: integer
+              taskRunning:
+                description: TaskRunning is the number of Running task
+                format: int32
+                type: integer
+              taskSucceed:
+                description: TaskSucceed is the number of Succeed task
+                format: int32
+                type: integer
+              taskUnknown:
+                description: TaskUnknown is the number of Unknown task
+                format: int32
+                type: integer
+            required:
+            - allocated
+            - ready
+            - replicas
+            - taskFailed
+            - taskPending
+            - taskRunning
+            - taskSucceed
+            - taskUnknown
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: pools.sandbox.opensandbox.io
+spec:
+  group: sandbox.opensandbox.io
+  names:
+    kind: Pool
+    listKind: PoolList
+    plural: pools
+    singular: pool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: The number of all nodes in pool.
+      jsonPath: .status.total
+      name: TOTAL
+      type: integer
+    - description: The number of allocated nodes in pool.
+      jsonPath: .status.allocated
+      name: ALLOCATED
+      type: integer
+    - description: The number of available nodes in pool.
+      jsonPath: .status.available
+      name: AVAILABLE
+      type: integer
+    - description: The number of nodes updated to the latest revision.
+      jsonPath: .status.updated
+      name: UPDATED
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Pool is the Schema for the pools API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: PoolSpec defines the desired state of Pool.
+            properties:
+              capacitySpec:
+                description: CapacitySpec controls the size of the resource pool.
+                properties:
+                  bufferMax:
+                    description: BufferMax is the maximum number of nodes kept in
+                      the warm buffer.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  bufferMin:
+                    description: BufferMin is the minimum number of nodes that must
+                      remain in the buffer.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  poolMax:
+                    description: PoolMax is the maximum total number of nodes allowed
+                      in the entire pool.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  poolMin:
+                    description: PoolMin is the minimum total size of the pool.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - bufferMax
+                - bufferMin
+                - poolMax
+                - poolMin
+                type: object
+              recycleStrategy:
+                description: |-
+                  RecycleStrategy controls how pods are handled when returned to the pool.
+                  Default is Delete, which deletes the pod.
+                  Restart strategy restarts the pod containers instead of deleting.
+                properties:
+                  type:
+                    default: Delete
+                    description: |-
+                      Type specifies the recycle policy type.
+                      Default is Delete.
+                    enum:
+                    - Delete
+                    - Restart
+                    - Noop
+                    type: string
+                type: object
+              scaleStrategy:
+                description: ScaleStrategy controls the scaling behavior.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number of pods that can be unavailable during scaling.
+                      Can be an absolute number (ex: 5) or a percentage of desired pods (ex: "20%").
+                      Defaults to 25%.
+                    x-kubernetes-int-or-string: true
+                type: object
+              template:
+                description: Pod Template used to create pre-warmed nodes in the pool.
+                x-kubernetes-preserve-unknown-fields: true
+              updateStrategy:
+                description: UpdateStrategy controls how pool pods are updated when
+                  the template changes.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number of pods that can be unavailable during an update.
+                      Can be an absolute number (ex: 5) or a percentage of desired pods (ex: "20%").
+                      Defaults to 25%.
+                    x-kubernetes-int-or-string: true
+                type: object
+            required:
+            - capacitySpec
+            type: object
+          status:
+            description: PoolStatus defines the observed state of Pool.
+            properties:
+              allocated:
+                description: Allocated is the number of nodes currently allocated
+                  to sandboxes.
+                format: int32
+                type: integer
+              available:
+                description: Available is the number of nodes currently available
+                  in the pool.
+                format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
+                  BatchSandbox's generation, which is updated on mutation by the API Server.
+                format: int64
+                type: integer
+              revision:
+                description: Revision is the latest version of pool
+                type: string
+              total:
+                description: Total is the total number of nodes in the pool.
+                format: int32
+                type: integer
+              updated:
+                description: Updated is the number of nodes that have been updated
+                  to the latest revision.
+                format: int32
+                type: integer
+            required:
+            - allocated
+            - available
+            - revision
+            - total
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: sandboxsnapshots.sandbox.opensandbox.io
+spec:
+  group: sandbox.opensandbox.io
+  names:
+    kind: SandboxSnapshot
+    listKind: SandboxSnapshotList
+    plural: sandboxsnapshots
+    shortNames:
+    - sbxsnap
+    singular: sandboxsnapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .spec.sandboxName
+      name: SANDBOX
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SandboxSnapshotSpec defines the desired state of SandboxSnapshot.
+              Pure atomic capability: caller fills spec, Controller only reads spec.
+              Registry/snapshotPushSecret/snapshotType come from Controller Manager startup params.
+            properties:
+              sandboxName:
+                description: |-
+                  SandboxName is the name of the target BatchSandbox (same namespace as SandboxSnapshot).
+                  Controller uses this to find BatchSandbox -> find Pod -> dispatch commit Job.
+                type: string
+            required:
+            - sandboxName
+            type: object
+          status:
+            description: |-
+              SandboxSnapshotStatus defines the observed state of SandboxSnapshot.
+              Status is written by Controller, read-only for callers.
+            properties:
+              conditions:
+                description: Conditions records the readiness or failure of the snapshot.
+                items:
+                  description: SandboxSnapshotCondition represents a condition of
+                    a SandboxSnapshot.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time the condition
+                        transitioned.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable message about the condition.
+                      type: string
+                    reason:
+                      description: Reason is a brief reason for the condition.
+                      type: string
+                    status:
+                      description: Status is the condition status.
+                      enum:
+                      - "True"
+                      - "False"
+                      type: string
+                    type:
+                      description: Type is the condition type.
+                      enum:
+                      - Ready
+                      - Failed
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              containers:
+                description: Containers holds per-container snapshot results, filled
+                  after Succeed.
+                items:
+                  description: ContainerSnapshot records the snapshot result for a
+                    single container.
+                  properties:
+                    containerName:
+                      description: ContainerName is the name of the container.
+                      type: string
+                    imageDigest:
+                      description: ImageDigest is the config digest of the pushed
+                        snapshot image.
+                      type: string
+                    imageUri:
+                      description: ImageURI is the snapshot image URI for this container.
+                      type: string
+                  required:
+                  - containerName
+                  - imageUri
+                  type: object
+                type: array
+              format:
+                description: |-
+                  Format identifies the snapshot representation. Empty means rootfs-v1 for
+                  backward compatibility with snapshots created before this field existed.
+                enum:
+                - rootfs-v1
+                - qemu-v1
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  observed by the Controller.
+                format: int64
+                type: integer
+              phase:
+                description: Phase indicates the current phase of the snapshot.
+                enum:
+                - Pending
+                - Committing
+                - Succeed
+                - Failed
+                type: string
+              sourceNodeName:
+                description: SourceNodeName is the node where the source Pod runs
+                  (for Job scheduling).
+                type: string
+              sourcePodName:
+                description: SourcePodName is the name of the source Pod (resolved
+                  by Controller).
+                type: string
+              virtualMachine:
+                description: VirtualMachine contains the QEMU VM state artifact for
+                  qemu-v1 snapshots.
+                properties:
+                  compatibility:
+                    description: Compatibility contains the restore compatibility
+                      summary.
+                    properties:
+                      architecture:
+                        description: Architecture is the guest host architecture,
+                          for example amd64.
+                        type: string
+                      cpuModel:
+                        description: CPUModel is the configured virtual CPU model.
+                        type: string
+                      machineType:
+                        description: MachineType is the versioned QEMU machine type.
+                        type: string
+                      memoryBytes:
+                        description: MemoryBytes is the configured guest RAM in bytes.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      qemuConfigDigest:
+                        description: QEMUConfigDigest identifies the normalized QEMU
+                          launch configuration.
+                        type: string
+                      qemuVersion:
+                        description: QEMUVersion is the source QEMU version string.
+                        type: string
+                      requiredNodeClass:
+                        description: RequiredNodeClass optionally constrains restore
+                          to a compatible node class.
+                        type: string
+                      vcpus:
+                        description: VCPUs is the number of virtual CPUs.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - architecture
+                    - cpuModel
+                    - machineType
+                    - memoryBytes
+                    - qemuConfigDigest
+                    - qemuVersion
+                    - vcpus
+                    type: object
+                  compression:
+                    description: Compression identifies the payload compression algorithm.
+                    enum:
+                    - zstd
+                    type: string
+                  imageDigest:
+                    description: ImageDigest is the digest of the pushed standard
+                      container image.
+                    type: string
+                  imageUri:
+                    description: ImageURI is the repository and tag used when the
+                      VM state image was pushed.
+                    type: string
+                  manifestDigest:
+                    description: ManifestDigest identifies the compatibility manifest
+                      stored in the image.
+                    type: string
+                  payloadDigest:
+                    description: PayloadDigest is the digest of the compressed VM
+                      state payload.
+                    type: string
+                  sizeBytes:
+                    description: SizeBytes is the compressed VM state payload size.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                required:
+                - compatibility
+                - compression
+                - imageDigest
+                - imageUri
+                - manifestDigest
+                - payloadDigest
+                - sizeBytes
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---

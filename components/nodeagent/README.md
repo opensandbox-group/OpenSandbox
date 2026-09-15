@@ -63,7 +63,7 @@ The process exposes `/healthz` and `/readyz` on
 identity conflicts, and unrecoverable sink results keep the process alive but
 unready and stop progress.
 
-See `kubernetes/charts/opensandbox-node-agent` for deployment settings. OSS
+See `manifests/charts/node-agent` for deployment settings. OSS
 credentials must come from a Kubernetes Secret and must not include
 `DeleteObject`; cleanup uses the separate offline command.
 

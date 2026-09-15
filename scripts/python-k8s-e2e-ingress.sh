@@ -14,14 +14,15 @@
 # limitations under the License.
 
 # Kubernetes E2E (Python) with server ingress.mode=gateway and the chart-deployed
-# ingress-gateway (components/ingress). See kubernetes/charts/opensandbox-server/README.md.
+# ingress-gateway (components/ingress). See manifests/charts/server/README.md.
 #
 # Compared to scripts/python-k8s-e2e.sh:
-# - Builds/opensandbox/ingress image and sets server.gateway.* so Helm deploys opensandbox-ingress-gateway.
+# - Builds/opensandbox/ingress image, enables the server [ingress] announcement
+#   (server.gateway.*) and deploys the ingress-gateway chart (opensandbox-ingress-gateway).
 # - Port-forwards both the lifecycle API and the gateway.
 # - Sets OPENSANDBOX_TEST_USE_SERVER_PROXY=false so the SDK uses gateway routes + headers from the API.
 #
-# Route mode (Helm server.gateway.gatewayRouteMode + ingress --mode):
+# Route mode (Helm server.gateway.gatewayRouteMode + gateway.gatewayRouteMode + ingress --mode):
 #   Default header. For URI path routing: E2E_GATEWAY_ROUTE_MODE=uri ./scripts/python-k8s-e2e-ingress.sh
 
 set -euxo pipefail

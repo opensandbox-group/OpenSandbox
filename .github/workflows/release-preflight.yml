@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
 
       - name: Verify release commit is reachable from main
-        run: scripts/release/verify-release-ref.sh
+        run: manifests/release/verify-release-ref.sh
 
   approve-release:
     name: Approve release

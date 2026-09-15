@@ -37,7 +37,7 @@ OpenSandbox uses these signing paths:
   Maven publish signing configuration. Download the `.asc` signature next to
   the Maven artifact and verify it with OpenPGP tooling.
 
-Release tags may also be signed with `scripts/release/create-release.sh
+Release tags may also be signed with `manifests/release/create-release.sh
 --sign-tag` when the release operator has a local git signing key configured.
 Do not rely on signed tags alone for generated deliverables; verify the
 artifact you are installing.
