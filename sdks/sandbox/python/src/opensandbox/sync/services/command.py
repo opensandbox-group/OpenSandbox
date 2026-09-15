@@ -27,6 +27,7 @@ from opensandbox.models.execd import (
     CommandLogs,
     CommandStatus,
     Execution,
+    ListCommandsPage,
     RunCommandOpts,
 )
 from opensandbox.models.execd_sync import ExecutionHandlersSync
@@ -144,4 +145,17 @@ class CommandsSync(Protocol):
 
     def delete_session(self, session_id: str) -> None:
         """Delete a bash session and release resources."""
+        ...
+
+
+class CommandInventorySync(Protocol):
+    """Optional synchronous command inventory capability for sandbox environments."""
+
+    def list_commands(
+        self,
+        running: bool | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ListCommandsPage:
+        """List a weakly consistent page of running and terminal commands."""
         ...

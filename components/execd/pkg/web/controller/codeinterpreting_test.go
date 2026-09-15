@@ -34,6 +34,7 @@ import (
 type fakeCodeRunner struct {
 	execute          func(request *runtime.ExecuteCodeRequest) error
 	runInBashSession func(_ context.Context, _ *runtime.ExecuteCodeRequest) error
+	listCommands     func(runtime.ListCommandsRequest) (runtime.ListCommandsResponse, error)
 }
 
 func (f *fakeCodeRunner) CreateContext(_ *runtime.CreateContextRequest) (string, error) {
@@ -53,6 +54,13 @@ func (f *fakeCodeRunner) GetContext(_ string) (runtime.CodeContext, error) {
 
 func (f *fakeCodeRunner) GetCommandStatus(_ string) (*runtime.CommandStatus, error) {
 	return nil, nil
+}
+
+func (f *fakeCodeRunner) ListCommands(request runtime.ListCommandsRequest) (runtime.ListCommandsResponse, error) {
+	if f.listCommands != nil {
+		return f.listCommands(request)
+	}
+	return runtime.ListCommandsResponse{}, nil
 }
 
 func (f *fakeCodeRunner) ListContext(_ string) ([]runtime.CodeContext, error) {
@@ -96,6 +104,68 @@ func (f *fakeCodeRunner) CreatePTYSession(_ string, _ string, _ string) (runtime
 func (f *fakeCodeRunner) GetPTYSession(_ string) runtime.PTYSession         { return nil }
 func (f *fakeCodeRunner) DeletePTYSession(_ string) error                   { return nil }
 func (f *fakeCodeRunner) GetPTYSessionStatus(_ string) (bool, int64, error) { return false, 0, nil }
+
+func TestInitCodeRunnerCommandInventoryConfig(t *testing.T) {
+	previousRunner := codeRunner
+	previousTTL := flag.CommandRecoveryTTL
+	previousMaxTerminal := flag.CommandRecoveryMaxTerminal
+	t.Cleanup(func() {
+		codeRunner = previousRunner
+		flag.CommandRecoveryTTL = previousTTL
+		flag.CommandRecoveryMaxTerminal = previousMaxTerminal
+	})
+
+	for _, test := range []struct {
+		name        string
+		ttl         time.Duration
+		maxTerminal int
+		commands    int
+		wantListed  int
+	}{
+		{name: "retains configured terminal inventory", ttl: time.Hour, maxTerminal: 1000, commands: 1, wantListed: 1},
+		{name: "enforces configured terminal cap", ttl: time.Hour, maxTerminal: 1, commands: 2, wantListed: 1},
+		{name: "zero terminal capacity", ttl: time.Hour, maxTerminal: 0, commands: 1},
+		{name: "zero recovery TTL", ttl: 0, maxTerminal: 1000, commands: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			flag.CommandRecoveryTTL = test.ttl
+			flag.CommandRecoveryMaxTerminal = test.maxTerminal
+			runner := InitCodeRunner()
+			sessions := make([]string, 0, test.commands)
+			for range test.commands {
+				var session string
+				err := runner.Execute(&runtime.ExecuteCodeRequest{
+					Language: runtime.Command,
+					Code:     "exit 0",
+					Cwd:      t.TempDir(),
+					Hooks: runtime.ExecuteResultHook{
+						OnExecuteInit:     func(id string) { session = id },
+						OnExecuteStdout:   func(string) {},
+						OnExecuteStderr:   func(string) {},
+						OnExecuteError:    func(*execute.ErrorOutput) {},
+						OnExecuteComplete: func(time.Duration) {},
+					},
+				})
+				require.NoError(t, err)
+				require.NotEmpty(t, session)
+				sessions = append(sessions, session)
+			}
+
+			for _, session := range sessions {
+				status, err := runner.GetCommandStatus(session)
+				require.NoError(t, err)
+				require.False(t, status.Running)
+			}
+
+			page, err := runner.ListCommands(runtime.ListCommandsRequest{})
+			require.NoError(t, err)
+			require.Len(t, page.Commands, test.wantListed)
+			if test.commands == 1 && test.wantListed == 1 {
+				require.Equal(t, sessions[0], page.Commands[0].Session)
+			}
+		})
+	}
+}
 
 func TestBuildExecuteCodeRequestDefaultsToCommand(t *testing.T) {
 	ctrl := &CodeInterpretingController{}

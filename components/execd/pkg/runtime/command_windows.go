@@ -90,21 +90,21 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
+	c.registerCommandKernelRunning(session, kernel)
 
 	err = cmd.Wait()
 	close(done)
 	wg.Wait()
 	if err != nil {
 		var eName, eValue string
-		eCode := 1
+		exitCode := 1
 		var traceback []string
 
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) {
-			exitCode := exitError.ExitCode()
+			exitCode = exitError.ExitCode()
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
-			eCode = exitCode
 		} else {
 			eName = "CommandExecError"
 			eValue = err.Error()
@@ -118,11 +118,13 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		})
 
 		log.Error("CommandExecError: error running commands: %v", err)
-		c.markCommandFinished(session, eCode, err.Error())
+		snapshot := c.markCommandFinished(session, exitCode, err.Error())
+		c.transitionCommandTerminalSnapshot(snapshot)
 		return nil
 	}
-	c.markCommandFinished(session, 0, "")
+	snapshot := c.markCommandFinished(session, 0, "")
 	request.Hooks.OnExecuteComplete(time.Since(startAt))
+	c.transitionCommandTerminalSnapshot(snapshot)
 	return nil
 }
 
@@ -172,6 +174,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		isBackground: true,
 	}
 	c.storeCommandKernel(session, kernel)
+	c.registerCommandKernelRunning(session, kernel)
 
 	safego.Go(func() {
 		<-ctx.Done()
@@ -193,10 +196,12 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 			if errors.As(err, &exitError) {
 				exitCode = exitError.ExitCode()
 			}
-			c.markCommandFinished(session, exitCode, err.Error())
+			snapshot := c.markCommandFinished(session, exitCode, err.Error())
+			c.transitionCommandTerminalSnapshot(snapshot)
 			return
 		}
-		c.markCommandFinished(session, 0, "")
+		snapshot := c.markCommandFinished(session, 0, "")
+		c.transitionCommandTerminalSnapshot(snapshot)
 	})
 
 	request.Hooks.OnExecuteComplete(time.Since(startAt))

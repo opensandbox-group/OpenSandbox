@@ -100,6 +100,31 @@ The Server validates `TimeoutSeconds`; `PreStart` accepts 1–10800 seconds, whi
 
 ## Usage Examples
 
+### Command Inventory
+
+Use the optional `sandbox.CommandInventory` capability to list command
+summaries. Set `running` to `true` or `false` to select a state, or omit it for
+both. Preserve a returned cursor exactly and the exact initial `running` filter
+on each subsequent page or receive `INVALID_QUERY`. The cursor works only while
+requests reach the same execd controller; after a restart or routing change,
+begin again without a cursor.
+
+```csharp
+if (sandbox.CommandInventory is { } inventory)
+{
+    var page = await inventory.ListCommandsAsync(running: false, limit: 50);
+    if (page.Pagination.NextCursor is { } nextCursor)
+    {
+        var nextPage = await inventory.ListCommandsAsync(
+            running: false,
+            cursor: nextCursor);
+    }
+}
+```
+
+`CommandInventory` can be `null` when a legacy or custom adapter does not
+provide this additive capability.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.

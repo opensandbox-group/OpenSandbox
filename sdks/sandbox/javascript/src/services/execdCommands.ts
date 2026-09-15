@@ -16,6 +16,8 @@ import type { ExecutionHandlers } from "../models/execution.js";
 import type {
   CommandExecution,
   CommandLogs,
+  ListCommandsOptions,
+  ListCommandsPage,
   CommandStatus,
   RunCommandOpts,
   ServerStreamEvent,
@@ -48,6 +50,9 @@ export interface ExecdCommands {
    * Get background command logs (non-streamed).
    */
   getBackgroundCommandLogs(commandId: string, cursor?: number): Promise<CommandLogs>;
+
+  /** List a weakly consistent page of running and terminal command summaries. */
+  listCommands?(options?: ListCommandsOptions): Promise<ListCommandsPage>;
 
   /**
    * Create a bash session with optional working directory.

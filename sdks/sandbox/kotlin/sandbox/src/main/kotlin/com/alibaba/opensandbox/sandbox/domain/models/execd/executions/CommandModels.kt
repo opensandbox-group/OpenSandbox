@@ -49,3 +49,44 @@ class CommandLogs(
     val content: String,
     val cursor: Long?,
 )
+
+/** A command inventory entry. */
+sealed interface CommandSummary {
+    val session: String
+    val running: Boolean
+    val background: Boolean
+    val startedAt: OffsetDateTime
+}
+
+/** A command which has not reached a terminal state. */
+data class RunningCommandSummary(
+    override val session: String,
+    override val background: Boolean,
+    override val startedAt: OffsetDateTime,
+) : CommandSummary {
+    override val running: Boolean = true
+}
+
+/** A command which has reached a terminal state. */
+data class TerminalCommandSummary(
+    override val session: String,
+    override val background: Boolean,
+    override val startedAt: OffsetDateTime,
+    val finishedAt: OffsetDateTime,
+    val exitCode: Int?,
+    val error: String?,
+) : CommandSummary {
+    override val running: Boolean = false
+}
+
+/** Cursor metadata for a command inventory page. */
+data class CommandPagination(
+    val limit: Int,
+    val nextCursor: String?,
+)
+
+/** A weakly consistent page of command inventory entries. */
+data class ListCommandsPage(
+    val commands: List<CommandSummary>,
+    val pagination: CommandPagination,
+)

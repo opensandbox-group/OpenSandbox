@@ -52,4 +52,10 @@ var (
 	// LifecycleStartupStatusFile is an internal bootstrap synchronization file.
 	// Execd writes the preStart result after its HTTP server is available.
 	LifecycleStartupStatusFile string
+
+	// CommandRecoveryTTL controls retention of completed command summaries.
+	CommandRecoveryTTL time.Duration
+
+	// CommandRecoveryMaxTerminal caps retained completed command summaries.
+	CommandRecoveryMaxTerminal int
 )

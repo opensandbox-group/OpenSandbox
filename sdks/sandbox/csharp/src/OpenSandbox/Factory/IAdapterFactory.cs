@@ -99,6 +99,12 @@ public class ExecdStack
     public required IExecdCommands Commands { get; init; }
 
     /// <summary>
+    /// Gets the optional additive command inventory service.
+    /// Existing custom factories may omit this capability.
+    /// </summary>
+    public IExecdCommandInventory? CommandInventory { get; init; }
+
+    /// <summary>
     /// Gets the files service.
     /// </summary>
     public required ISandboxFiles Files { get; init; }

@@ -40,6 +40,14 @@ func (s *Sandbox) RunCommandWithOpts(ctx context.Context, req RunCommandRequest,
 	return exec, nil
 }
 
+// ListCommands returns a page of command inventory summaries.
+func (s *Sandbox) ListCommands(ctx context.Context, req ListCommandsRequest) (*ListCommandsResponse, error) {
+	if s.execd == nil {
+		return nil, fmt.Errorf("opensandbox: execd client not initialized")
+	}
+	return s.execd.ListCommands(ctx, req)
+}
+
 // ExecuteCode executes code in a context and streams output via SSE.
 func (s *Sandbox) ExecuteCode(ctx context.Context, req RunCodeRequest, handlers *ExecutionHandlers) (*Execution, error) {
 	if s.execd == nil {
