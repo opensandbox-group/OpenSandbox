@@ -51,6 +51,7 @@ from opensandbox.models.sandboxes import (
     SandboxLifecycle,
     SandboxMetrics,
     SandboxRenewResponse,
+    SandboxSource,
     SnapshotInfo,
     Volume,
 )
@@ -161,7 +162,7 @@ class Sandbox:
         diagnostics_service: Diagnostics | None = None,
         isolated_service: IsolationService | None = None,
         custom_health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
-        from_template: bool = False,
+        source: str = SandboxSource.UNKNOWN,
     ) -> None:
         """
         Internal constructor for Sandbox. Use Sandbox.create() or Sandbox.connect() instead.
@@ -180,17 +181,18 @@ class Sandbox:
         )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
-        self._from_template = from_template
+        self._source = source
 
     @property
-    def from_template(self) -> bool:
-        """Whether this sandbox was created from a fsb template.
+    def source(self) -> str:
+        """Runtime source backing this sandbox (see :class:`SandboxSource`).
 
-        Template-based sandboxes route egress policy operations through the
-        lifecycle control plane (``/sandboxes/{sandboxId}/networkpolicy``)
-        instead of the sandbox-side egress sidecar.
+        Template-backed sandboxes (``source == "template"``) route egress
+        policy operations through the lifecycle control plane
+        (``/sandboxes/{sandboxId}/networkpolicy``) instead of the
+        sandbox-side egress sidecar.
         """
-        return self._from_template
+        return self._source
 
     @property
     def isolation(self) -> IsolationService:
@@ -232,13 +234,13 @@ class Sandbox:
         Provides access to sandbox-scoped Credential Vault operations.
 
         Raises:
-            SandboxException: for sandboxes created from fsb templates
-                (they have no sandbox-side egress sidecar).
+            SandboxException: for template-backed sandboxes (they have no
+                sandbox-side egress sidecar).
         """
-        if self._from_template:
+        if self._source == SandboxSource.TEMPLATE:
             raise SandboxException(
-                "Credential Vault is not available for sandboxes created "
-                "from fsb templates: they have no sandbox-side egress sidecar."
+                "Credential Vault is not available for template-backed "
+                "sandboxes: they have no sandbox-side egress sidecar."
             )
         return self._egress_service
 
@@ -591,6 +593,7 @@ class Sandbox:
         if isinstance(image, str):
             image = SandboxImageSpec(image=image)
 
+        source = SandboxSource.SNAPSHOT if snapshot_id else SandboxSource.IMAGE
         startup_source = image.image if image is not None else snapshot_id
         timeout_log = (
             "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
@@ -607,6 +610,7 @@ class Sandbox:
             health_check=health_check,
             health_check_polling_interval=health_check_polling_interval,
             skip_health_check=skip_health_check,
+            source=source,
             create_call=lambda service: service.create_sandbox(
                 spec=image,
                 entrypoint=entrypoint,
@@ -701,7 +705,7 @@ class Sandbox:
                 network_policy=network_policy,
                 extensions=extensions,
             ),
-            from_template=True,
+            source=SandboxSource.TEMPLATE,
         )
 
     @classmethod
@@ -716,7 +720,7 @@ class Sandbox:
         health_check_polling_interval: timedelta,
         skip_health_check: bool,
         create_call: Callable[[Sandboxes], Awaitable[SandboxCreateResponse]],
-        from_template: bool = False,
+        source: str = SandboxSource.UNKNOWN,
     ) -> "Sandbox":
         """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
         factory = AdapterFactory(config)
@@ -730,9 +734,10 @@ class Sandbox:
             sandbox_id = response.id
 
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
-            if from_template:
-                # fsb template sandboxes have no sandbox-side egress sidecar:
-                # policy operations go through the lifecycle control plane.
+            if source == SandboxSource.TEMPLATE:
+                # Template-backed (fsb) sandboxes have no sandbox-side egress
+                # sidecar: policy operations go through the lifecycle control
+                # plane.
                 execd_endpoint = await budget.endpoint(
                     lambda: sandbox_service.get_sandbox_endpoint(
                         response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
@@ -764,7 +769,7 @@ class Sandbox:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                from_template=from_template,
+                source=source,
             )
 
             if not skip_health_check:
@@ -825,7 +830,6 @@ class Sandbox:
         connect_timeout: timedelta = timedelta(seconds=30),
         health_check_polling_interval: timedelta = timedelta(milliseconds=200),
         skip_health_check: bool = False,
-        from_template: bool = False,
     ) -> "Sandbox":
         """
         Connect to an existing sandbox instance by ID.
@@ -837,10 +841,6 @@ class Sandbox:
             connect_timeout: Total budget for endpoint publication and health checks.
             health_check_polling_interval: Polling interval used while waiting for readiness/health.
             skip_health_check: Skip health checks; endpoint publication is still awaited.
-            from_template: Declare that the sandbox was created from a fsb
-                template. Egress policy operations then go through the
-                lifecycle control plane instead of the egress sidecar, and
-                Credential Vault is unavailable.
 
         Returns:
             Connected Sandbox instance
@@ -864,9 +864,11 @@ class Sandbox:
             execd_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            if from_template:
-                # fsb template sandboxes have no sandbox-side egress sidecar:
-                # policy operations go through the lifecycle control plane.
+            source = execd_endpoint.source or SandboxSource.UNKNOWN
+            if source == SandboxSource.TEMPLATE:
+                # Template-backed (fsb) sandboxes have no sandbox-side egress
+                # sidecar: policy operations go through the lifecycle control
+                # plane, and the egress sidecar endpoint is never resolved.
                 egress_service = factory.create_network_policy_service(sandbox_id)
             else:
                 egress_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
@@ -888,7 +890,7 @@ class Sandbox:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                from_template=from_template,
+                source=source,
             )
 
             if not skip_health_check:
@@ -916,7 +918,6 @@ class Sandbox:
         resume_timeout: timedelta = timedelta(seconds=30),
         health_check_polling_interval: timedelta = timedelta(milliseconds=200),
         skip_health_check: bool = False,
-        from_template: bool = False,
     ) -> "Sandbox":
         """
         Resume a paused sandbox by ID and return a new, usable Sandbox instance.
@@ -932,10 +933,6 @@ class Sandbox:
             resume_timeout: Total budget for endpoint publication and health checks after resuming.
             health_check_polling_interval: Polling interval used while waiting for readiness/health.
             skip_health_check: Skip health checks; endpoint publication is still awaited.
-            from_template: Declare that the sandbox was created from a fsb
-                template. Egress policy operations then go through the
-                lifecycle control plane instead of the egress sidecar, and
-                Credential Vault is unavailable.
         """
         if not sandbox_id:
             raise InvalidArgumentException("Sandbox ID must be specified")
@@ -955,9 +952,11 @@ class Sandbox:
             execd_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            if from_template:
-                # fsb template sandboxes have no sandbox-side egress sidecar:
-                # policy operations go through the lifecycle control plane.
+            source = execd_endpoint.source or SandboxSource.UNKNOWN
+            if source == SandboxSource.TEMPLATE:
+                # Template-backed (fsb) sandboxes have no sandbox-side egress
+                # sidecar: policy operations go through the lifecycle control
+                # plane, and the egress sidecar endpoint is never resolved.
                 egress_service = factory.create_network_policy_service(sandbox_id)
             else:
                 egress_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
@@ -979,7 +978,7 @@ class Sandbox:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                from_template=from_template,
+                source=source,
             )
 
             if not skip_health_check:

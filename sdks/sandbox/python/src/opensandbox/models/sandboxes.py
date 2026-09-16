@@ -787,6 +787,14 @@ class SandboxEndpoint(BaseModel):
         default_factory=dict,
         description="Headers that must be included on every request targeting this endpoint (e.g. when the server requires them for routing or auth). Empty if not required.",
     )
+    source: str | None = Field(
+        default=None,
+        description=(
+            "Runtime source reported by the server via the "
+            "OPEN-SANDBOX-RUNTIME-SOURCE response header (see SandboxSource). "
+            "None when the server does not report it."
+        ),
+    )
 
     def build_request_headers(
         self,
@@ -991,6 +999,36 @@ class SandboxState:
     @classmethod
     def values(cls) -> set[str]:
         """Returns a set of all known state values."""
+        return {
+            v for k, v in cls.__dict__.items() if k.isupper() and not k.startswith("_")
+        }
+
+
+class SandboxSource:
+    """Runtime source backing a sandbox, as reported by the server via the
+    ``OPEN-SANDBOX-RUNTIME-SOURCE`` response header.
+
+    Known values:
+        IMAGE (str): Created from a container image.
+        SNAPSHOT (str): Restored from a snapshot.
+        TEMPLATE (str): Runs on a fsb golden-image template (no sandbox-side
+            egress sidecar; egress policy goes through the lifecycle control
+            plane).
+        UNKNOWN (str): The server did not report a source (e.g. an older
+            server without the header).
+
+    The server may introduce new values in future versions; clients should
+    handle unknown string values gracefully.
+    """
+
+    IMAGE = "image"
+    SNAPSHOT = "snapshot"
+    TEMPLATE = "template"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def values(cls) -> set[str]:
+        """Returns a set of all known source values."""
         return {
             v for k, v in cls.__dict__.items() if k.isupper() and not k.startswith("_")
         }

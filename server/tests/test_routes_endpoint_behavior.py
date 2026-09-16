@@ -261,3 +261,30 @@ def test_get_endpoint_unsigned_when_expires_omitted(
 
     assert response.status_code == 200
     assert captured.get("expires") is None
+
+
+def test_get_endpoint_reports_template_runtime_source_for_fsb_ids(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
+            return Endpoint(endpoint=f"{sandbox_id}-endpoint")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fsb_response = client.get(
+        "/v1/sandboxes/fsb-abc123/endpoints/44772",
+        headers=auth_headers,
+    )
+    assert fsb_response.status_code == 200
+    assert fsb_response.headers["OPEN-SANDBOX-RUNTIME-SOURCE"] == "template"
+
+    container_response = client.get(
+        "/v1/sandboxes/sbx-001/endpoints/44772",
+        headers=auth_headers,
+    )
+    assert container_response.status_code == 200
+    assert "OPEN-SANDBOX-RUNTIME-SOURCE" not in container_response.headers

@@ -34,6 +34,7 @@ from opensandbox.models.sandboxes import (
     NetworkRule,
     SandboxEndpoint,
     SandboxLifecycle,
+    SandboxSource,
 )
 from opensandbox.sync.sandbox import SandboxSync
 
@@ -739,7 +740,7 @@ def test_sync_create_from_template_passes_only_allowed_fields(
     )
 
     assert sandbox.id == "sbx-from-template"
-    assert sandbox.from_template is True
+    assert sandbox.source == SandboxSource.TEMPLATE
     # Template sandboxes must not resolve the egress sidecar endpoint.
     assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
     assert len(factory.service.template_calls) == 1
@@ -773,7 +774,9 @@ def test_sync_connect_from_template_skips_egress_sidecar(
             self, _sandbox_id, port: int, _use_server_proxy: bool = False
         ):
             self.endpoint_ports.append(port)
-            return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+            return SandboxEndpoint(
+                endpoint=f"sbx.internal:{port}", source=SandboxSource.TEMPLATE
+            )
 
     class _FactoryStub:
         def __init__(self, _connection_config: ConnectionConfigSync) -> None:
@@ -811,11 +814,9 @@ def test_sync_connect_from_template_skips_egress_sidecar(
     factory = _FactoryStub(ConnectionConfigSync())
     monkeypatch.setattr("opensandbox.sync.sandbox.AdapterFactorySync", lambda _c: factory)
 
-    sandbox = SandboxSync.connect(
-        "sbx-1", from_template=True, skip_health_check=True
-    )
+    sandbox = SandboxSync.connect("sbx-1", skip_health_check=True)
 
-    assert sandbox.from_template is True
+    assert sandbox.source == SandboxSource.TEMPLATE
     assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
     assert factory.network_policy_calls == ["sbx-1"]
     with pytest.raises(SandboxException, match="Credential Vault"):
@@ -836,5 +837,5 @@ def _make_sync_template_sandbox() -> SandboxSync:
         metrics_service=_Noop(),
         egress_service=_Noop(),
         connection_config=ConnectionConfigSync(),
-        from_template=True,
+        source=SandboxSource.TEMPLATE,
     )

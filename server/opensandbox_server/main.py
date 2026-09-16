@@ -234,6 +234,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["OPEN-SANDBOX-RUNTIME-SOURCE"],
 )
 # RequestIdMiddleware wraps auth and CORS so every response (including 401 from
 # AuthMiddleware) gets X-Request-ID and logs have request_id in context.

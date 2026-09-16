@@ -846,6 +846,8 @@ paths:
           headers:
             X-Request-ID:
               $ref: '#/components/headers/XRequestId'
+            OpenSandboxRuntimeSource:
+              $ref: '#/components/headers/SandboxRuntimeSource'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1021,6 +1023,16 @@ components:
       schema:
         type: string
   headers:
+    SandboxRuntimeSource:
+      description: |
+        Runtime source of the sandbox: `template` when the sandbox runs on a
+        fsb golden-image template (no sandbox-side egress sidecar; egress
+        policy is managed through the lifecycle control plane). The set of
+        values may grow over time; clients must treat a missing or unknown
+        value as "not template-backed" and keep using the egress sidecar.
+      schema:
+        type: string
+        example: template
     XRequestId:
       description: Unique request identifier for tracing
       schema:

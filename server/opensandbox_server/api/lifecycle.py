@@ -47,6 +47,8 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.services.constants import (
     OPEN_SANDBOX_INGRESS_HEADER,
+    OPEN_SANDBOX_RUNTIME_SOURCE_HEADER,
+    RUNTIME_SOURCE_TEMPLATE,
     SandboxErrorCodes,
 )
 from opensandbox_server.services.factory import create_sandbox_service
@@ -529,6 +531,7 @@ def get_sandbox_endpoint(
     use_server_proxy: bool = Query(False, description="Whether to return a server-proxied URL"),
     expires: Optional[int] = Query(None, description="Request a signed route token with this Unix epoch second expiration. Requires ingress gateway with secure_access configured."),
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
+    response: Response = None,  # type: ignore[assignment]
 ) -> Endpoint:
     """
     Get sandbox access endpoint.
@@ -594,5 +597,13 @@ def get_sandbox_endpoint(
                 for key, value in endpoint.headers.items()
                 if key.lower() != OPEN_SANDBOX_INGRESS_HEADER.lower()
             } or None
+
+    # Tell clients which runtime source backs this sandbox. fsb sandboxes
+    # (id prefix, mirroring CompositeSandboxService._backend routing) run on
+    # golden-image templates and have no sandbox-side egress sidecar; the
+    # value space may grow (image/snapshot) as server-side source tracking
+    # matures. Clients treat a missing/unknown value as "not template".
+    if response is not None and sandbox_id.startswith("fsb-"):
+        response.headers[OPEN_SANDBOX_RUNTIME_SOURCE_HEADER] = RUNTIME_SOURCE_TEMPLATE
 
     return endpoint

@@ -524,3 +524,70 @@ def test_sync_create_sandbox_from_template_maps_wire_body(
     assert body["timeout"] == 300
     assert "resourceLimits" not in body
     assert "entrypoint" not in body
+
+
+@pytest.mark.asyncio
+async def test_endpoint_response_header_populates_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensandbox.api.lifecycle.models.endpoint import Endpoint
+    from opensandbox.api.lifecycle.models.endpoint_headers import EndpointHeaders
+
+    class _RespWithHeaders:
+        def __init__(self, *, status_code: int, parsed, headers) -> None:
+            self.status_code = status_code
+            self.parsed = parsed
+            self.headers = headers
+
+    async def _fake_asyncio_detailed(*, client, sandbox_id, port, use_server_proxy, expires=None):
+        return _RespWithHeaders(
+            status_code=200,
+            parsed=Endpoint(
+                endpoint=f"sbx.internal:{port}",
+                headers=EndpointHeaders.from_dict({}),
+            ),
+            headers={"OPEN-SANDBOX-RUNTIME-SOURCE": "template"},
+        )
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.sandboxes.get_sandboxes_sandbox_id_endpoints_port.asyncio_detailed",
+        _fake_asyncio_detailed,
+    )
+
+    adapter = SandboxesAdapter(ConnectionConfig())
+    endpoint = await adapter.get_sandbox_endpoint("sbx-tpl", 8080)
+
+    assert endpoint.source == "template"
+
+
+def test_sync_endpoint_response_header_populates_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensandbox.api.lifecycle.models.endpoint import Endpoint
+    from opensandbox.api.lifecycle.models.endpoint_headers import EndpointHeaders
+
+    class _RespWithHeaders:
+        def __init__(self, *, status_code: int, parsed, headers) -> None:
+            self.status_code = status_code
+            self.parsed = parsed
+            self.headers = headers
+
+    def _fake_sync_detailed(*, sandbox_id, port, client, use_server_proxy, expires=None):
+        return _RespWithHeaders(
+            status_code=200,
+            parsed=Endpoint(
+                endpoint=f"sbx.internal:{port}",
+                headers=EndpointHeaders.from_dict({}),
+            ),
+            headers={},
+        )
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.sandboxes.get_sandboxes_sandbox_id_endpoints_port.sync_detailed",
+        _fake_sync_detailed,
+    )
+
+    adapter = SyncSandboxesAdapter(ConnectionConfigSync())
+    endpoint = adapter.get_sandbox_endpoint("sbx-plain", 8080)
+
+    assert endpoint.source is None

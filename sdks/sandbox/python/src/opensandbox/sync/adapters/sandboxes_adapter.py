@@ -325,12 +325,23 @@ class SandboxesAdapterSync(SandboxesSync):
                 response_obj, f"Get endpoint for sandbox {sandbox_id} port {port}"
             )
             parsed = require_parsed(response_obj, ApiEndpoint, "Get endpoint")
-            return SandboxModelConverter.to_sandbox_endpoint(parsed)
+            return SandboxModelConverter.to_sandbox_endpoint(
+                parsed, source=self._runtime_source(response_obj)
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to retrieve sandbox endpoint for sandbox {sandbox_id}: {e}"
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    @staticmethod
+    def _runtime_source(response_obj: object) -> str | None:
+        """Extract the OPEN-SANDBOX-RUNTIME-SOURCE response header when present."""
+        headers = getattr(response_obj, "headers", None)
+        if headers is None:
+            return None
+        value = headers.get("OPEN-SANDBOX-RUNTIME-SOURCE")
+        return value or None
 
     def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
         """Remove all cached endpoints for a sandbox."""
@@ -362,7 +373,9 @@ class SandboxesAdapterSync(SandboxesSync):
                 f"Get signed endpoint for sandbox {sandbox_id} port {port}",
             )
             parsed = require_parsed(response_obj, ApiEndpoint, "Get signed endpoint")
-            return SandboxModelConverter.to_sandbox_endpoint(parsed)
+            return SandboxModelConverter.to_sandbox_endpoint(
+                parsed, source=self._runtime_source(response_obj)
+            )
         except Exception as e:
             logger.debug(
                 f"Failed to retrieve signed sandbox endpoint for sandbox {sandbox_id}",

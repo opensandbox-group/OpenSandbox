@@ -676,8 +676,14 @@ class SandboxModelConverter:
         )
 
     @staticmethod
-    def to_sandbox_endpoint(api_endpoint: Endpoint) -> SandboxEndpoint:
-        """Convert API Endpoint to domain SandboxEndpoint."""
+    def to_sandbox_endpoint(
+        api_endpoint: Endpoint, source: str | None = None
+    ) -> SandboxEndpoint:
+        """Convert API Endpoint to domain SandboxEndpoint.
+
+        ``source`` carries the value of the OPEN-SANDBOX-RUNTIME-SOURCE
+        response header when the server provides it.
+        """
         from opensandbox.api.lifecycle.types import Unset
         from opensandbox.models.sandboxes import SandboxEndpoint
 
@@ -687,6 +693,7 @@ class SandboxModelConverter:
         return SandboxEndpoint(
             endpoint=api_endpoint.endpoint,
             headers=headers,
+            source=source,
         )
 
     @staticmethod
