@@ -787,11 +787,11 @@ class SandboxEndpoint(BaseModel):
         default_factory=dict,
         description="Headers that must be included on every request targeting this endpoint (e.g. when the server requires them for routing or auth). Empty if not required.",
     )
-    source: str | None = Field(
+    origin: str | None = Field(
         default=None,
         description=(
-            "Runtime source reported by the server via the "
-            "OPEN-SANDBOX-RUNTIME-SOURCE response header (see SandboxSource). "
+            "Origin of the sandbox, reported by the server via the "
+            "OPEN-SANDBOX-ORIGIN response header (see SandboxOrigin). "
             "None when the server does not report it."
         ),
     )
@@ -1004,9 +1004,9 @@ class SandboxState:
         }
 
 
-class SandboxSource:
-    """Runtime source backing a sandbox, as reported by the server via the
-    ``OPEN-SANDBOX-RUNTIME-SOURCE`` response header.
+class SandboxOrigin:
+    """Origin of a sandbox, as reported by the server via the
+    ``OPEN-SANDBOX-ORIGIN`` response header.
 
     Known values:
         IMAGE (str): Created from a container image.

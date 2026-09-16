@@ -34,7 +34,7 @@ from opensandbox.models.sandboxes import (
     NetworkRule,
     SandboxEndpoint,
     SandboxLifecycle,
-    SandboxSource,
+    SandboxOrigin,
 )
 from opensandbox.sync.sandbox import SandboxSync
 
@@ -740,7 +740,7 @@ def test_sync_create_from_template_passes_only_allowed_fields(
     )
 
     assert sandbox.id == "sbx-from-template"
-    assert sandbox.source == SandboxSource.TEMPLATE
+    assert sandbox.origin == SandboxOrigin.TEMPLATE
     # Template sandboxes must not resolve the egress sidecar endpoint.
     assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
     assert len(factory.service.template_calls) == 1
@@ -775,7 +775,7 @@ def test_sync_connect_from_template_skips_egress_sidecar(
         ):
             self.endpoint_ports.append(port)
             return SandboxEndpoint(
-                endpoint=f"sbx.internal:{port}", source=SandboxSource.TEMPLATE
+                endpoint=f"sbx.internal:{port}", origin=SandboxOrigin.TEMPLATE
             )
 
     class _FactoryStub:
@@ -816,7 +816,7 @@ def test_sync_connect_from_template_skips_egress_sidecar(
 
     sandbox = SandboxSync.connect("sbx-1", skip_health_check=True)
 
-    assert sandbox.source == SandboxSource.TEMPLATE
+    assert sandbox.origin == SandboxOrigin.TEMPLATE
     assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
     assert factory.network_policy_calls == ["sbx-1"]
     with pytest.raises(SandboxException, match="Credential Vault"):
@@ -837,5 +837,5 @@ def _make_sync_template_sandbox() -> SandboxSync:
         metrics_service=_Noop(),
         egress_service=_Noop(),
         connection_config=ConnectionConfigSync(),
-        source=SandboxSource.TEMPLATE,
+        origin=SandboxOrigin.TEMPLATE,
     )

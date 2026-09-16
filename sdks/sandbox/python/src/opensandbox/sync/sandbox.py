@@ -48,8 +48,8 @@ from opensandbox.models.sandboxes import (
     SandboxInfo,
     SandboxLifecycle,
     SandboxMetrics,
+    SandboxOrigin,
     SandboxRenewResponse,
-    SandboxSource,
     SnapshotInfo,
     Volume,
 )
@@ -141,7 +141,7 @@ class SandboxSync:
         diagnostics_service: DiagnosticsSync | None = None,
         isolated_service: IsolationServiceSync | None = None,
         custom_health_check: Callable[["SandboxSync"], bool] | None = None,
-        source: str = SandboxSource.UNKNOWN,
+        origin: str = SandboxOrigin.UNKNOWN,
     ) -> None:
         """
         Internal constructor for SandboxSync. Use :meth:`create` or :meth:`connect` instead.
@@ -160,18 +160,18 @@ class SandboxSync:
         )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
-        self._source = source
+        self._origin = origin
 
     @property
-    def source(self) -> str:
-        """Runtime source backing this sandbox (see :class:`SandboxSource`).
+    def origin(self) -> str:
+        """Origin of this sandbox (see :class:`SandboxOrigin`).
 
-        Template-backed sandboxes (``source == "template"``) route egress
+        Template-backed sandboxes (``origin == "template"``) route egress
         policy operations through the lifecycle control plane
         (``/sandboxes/{sandboxId}/networkpolicy``) instead of the
         sandbox-side egress sidecar.
         """
-        return self._source
+        return self._origin
 
     @property
     def isolation(self) -> IsolationServiceSync:
@@ -216,7 +216,7 @@ class SandboxSync:
             SandboxException: for template-backed sandboxes (they have no
                 sandbox-side egress sidecar).
         """
-        if self._source == SandboxSource.TEMPLATE:
+        if self._origin == SandboxOrigin.TEMPLATE:
             raise SandboxException(
                 "Credential Vault is not available for template-backed "
                 "sandboxes: they have no sandbox-side egress sidecar."
@@ -563,7 +563,7 @@ class SandboxSync:
         if isinstance(image, str):
             image = SandboxImageSpec(image=image)
 
-        source = SandboxSource.SNAPSHOT if snapshot_id else SandboxSource.IMAGE
+        origin = SandboxOrigin.SNAPSHOT if snapshot_id else SandboxOrigin.IMAGE
         startup_source = image.image if image is not None else snapshot_id
         timeout_log = (
             "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
@@ -580,7 +580,7 @@ class SandboxSync:
             health_check=health_check,
             health_check_polling_interval=health_check_polling_interval,
             skip_health_check=skip_health_check,
-            source=source,
+            origin=origin,
             create_call=lambda service: service.create_sandbox(
                 spec=image,
                 entrypoint=entrypoint,
@@ -677,7 +677,7 @@ class SandboxSync:
                 network_policy=network_policy,
                 extensions=extensions,
             ),
-            source=SandboxSource.TEMPLATE,
+            origin=SandboxOrigin.TEMPLATE,
         )
 
     @classmethod
@@ -692,7 +692,7 @@ class SandboxSync:
         health_check_polling_interval: timedelta,
         skip_health_check: bool,
         create_call: Callable[[SandboxesSync], SandboxCreateResponse],
-        source: str = SandboxSource.UNKNOWN,
+        origin: str = SandboxOrigin.UNKNOWN,
     ) -> "SandboxSync":
         """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
         factory = AdapterFactorySync(config)
@@ -705,7 +705,7 @@ class SandboxSync:
             response = create_call(sandbox_service)
             sandbox_id = response.id
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
-            if source == SandboxSource.TEMPLATE:
+            if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
                 # sidecar: policy operations go through the lifecycle control
                 # plane.
@@ -736,7 +736,7 @@ class SandboxSync:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                source=source,
+                origin=origin,
             )
 
             if not skip_health_check:
@@ -823,8 +823,8 @@ class SandboxSync:
             execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            source = execd_endpoint.source or SandboxSource.UNKNOWN
-            if source == SandboxSource.TEMPLATE:
+            origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
+            if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
                 # sidecar: policy operations go through the lifecycle control
                 # plane, and the egress sidecar endpoint is never resolved.
@@ -849,7 +849,7 @@ class SandboxSync:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                source=source,
+                origin=origin,
             )
 
             if not skip_health_check:
@@ -914,8 +914,8 @@ class SandboxSync:
             execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            source = execd_endpoint.source or SandboxSource.UNKNOWN
-            if source == SandboxSource.TEMPLATE:
+            origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
+            if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
                 # sidecar: policy operations go through the lifecycle control
                 # plane, and the egress sidecar endpoint is never resolved.
@@ -940,7 +940,7 @@ class SandboxSync:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                source=source,
+                origin=origin,
             )
 
             if not skip_health_check:

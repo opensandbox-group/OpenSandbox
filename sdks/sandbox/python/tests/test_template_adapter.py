@@ -527,7 +527,7 @@ def test_sync_create_sandbox_from_template_maps_wire_body(
 
 
 @pytest.mark.asyncio
-async def test_endpoint_response_header_populates_source(
+async def test_endpoint_response_header_populates_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from opensandbox.api.lifecycle.models.endpoint import Endpoint
@@ -546,7 +546,7 @@ async def test_endpoint_response_header_populates_source(
                 endpoint=f"sbx.internal:{port}",
                 headers=EndpointHeaders.from_dict({}),
             ),
-            headers={"OPEN-SANDBOX-RUNTIME-SOURCE": "template"},
+            headers={"OPEN-SANDBOX-ORIGIN": "template"},
         )
 
     monkeypatch.setattr(
@@ -557,10 +557,10 @@ async def test_endpoint_response_header_populates_source(
     adapter = SandboxesAdapter(ConnectionConfig())
     endpoint = await adapter.get_sandbox_endpoint("sbx-tpl", 8080)
 
-    assert endpoint.source == "template"
+    assert endpoint.origin == "template"
 
 
-def test_sync_endpoint_response_header_populates_source(
+def test_sync_endpoint_response_header_populates_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from opensandbox.api.lifecycle.models.endpoint import Endpoint
@@ -590,4 +590,4 @@ def test_sync_endpoint_response_header_populates_source(
     adapter = SyncSandboxesAdapter(ConnectionConfigSync())
     endpoint = adapter.get_sandbox_endpoint("sbx-plain", 8080)
 
-    assert endpoint.source is None
+    assert endpoint.origin is None

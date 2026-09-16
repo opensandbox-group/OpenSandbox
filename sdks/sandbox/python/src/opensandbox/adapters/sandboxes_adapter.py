@@ -578,7 +578,7 @@ class SandboxesAdapter(Sandboxes):
 
             parsed = require_parsed(response_obj, Endpoint, "Get endpoint")
             return SandboxModelConverter.to_sandbox_endpoint(
-                parsed, source=self._runtime_source(response_obj)
+                parsed, origin=self._sandbox_origin(response_obj)
             )
 
         except Exception as e:
@@ -588,12 +588,12 @@ class SandboxesAdapter(Sandboxes):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     @staticmethod
-    def _runtime_source(response_obj: object) -> str | None:
-        """Extract the OPEN-SANDBOX-RUNTIME-SOURCE response header when present."""
+    def _sandbox_origin(response_obj: object) -> str | None:
+        """Extract the OPEN-SANDBOX-ORIGIN response header when present."""
         headers = getattr(response_obj, "headers", None)
         if headers is None:
             return None
-        value = headers.get("OPEN-SANDBOX-RUNTIME-SOURCE")
+        value = headers.get("OPEN-SANDBOX-ORIGIN")
         return value or None
 
     def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
@@ -636,7 +636,7 @@ class SandboxesAdapter(Sandboxes):
 
             parsed = require_parsed(response_obj, Endpoint, "Get signed endpoint")
             return SandboxModelConverter.to_sandbox_endpoint(
-                parsed, source=self._runtime_source(response_obj)
+                parsed, origin=self._sandbox_origin(response_obj)
             )
 
         except Exception as e:

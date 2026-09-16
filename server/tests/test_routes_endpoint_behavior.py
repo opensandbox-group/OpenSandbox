@@ -280,11 +280,11 @@ def test_get_endpoint_reports_template_runtime_source_for_fsb_ids(
         headers=auth_headers,
     )
     assert fsb_response.status_code == 200
-    assert fsb_response.headers["OPEN-SANDBOX-RUNTIME-SOURCE"] == "template"
+    assert fsb_response.headers["OPEN-SANDBOX-ORIGIN"] == "template"
 
     container_response = client.get(
         "/v1/sandboxes/sbx-001/endpoints/44772",
         headers=auth_headers,
     )
     assert container_response.status_code == 200
-    assert "OPEN-SANDBOX-RUNTIME-SOURCE" not in container_response.headers
+    assert "OPEN-SANDBOX-ORIGIN" not in container_response.headers

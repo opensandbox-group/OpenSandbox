@@ -50,8 +50,8 @@ from opensandbox.models.sandboxes import (
     SandboxInfo,
     SandboxLifecycle,
     SandboxMetrics,
+    SandboxOrigin,
     SandboxRenewResponse,
-    SandboxSource,
     SnapshotInfo,
     Volume,
 )
@@ -162,7 +162,7 @@ class Sandbox:
         diagnostics_service: Diagnostics | None = None,
         isolated_service: IsolationService | None = None,
         custom_health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
-        source: str = SandboxSource.UNKNOWN,
+        origin: str = SandboxOrigin.UNKNOWN,
     ) -> None:
         """
         Internal constructor for Sandbox. Use Sandbox.create() or Sandbox.connect() instead.
@@ -181,18 +181,18 @@ class Sandbox:
         )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
-        self._source = source
+        self._origin = origin
 
     @property
-    def source(self) -> str:
-        """Runtime source backing this sandbox (see :class:`SandboxSource`).
+    def origin(self) -> str:
+        """Origin of this sandbox (see :class:`SandboxOrigin`).
 
-        Template-backed sandboxes (``source == "template"``) route egress
+        Template-backed sandboxes (``origin == "template"``) route egress
         policy operations through the lifecycle control plane
         (``/sandboxes/{sandboxId}/networkpolicy``) instead of the
         sandbox-side egress sidecar.
         """
-        return self._source
+        return self._origin
 
     @property
     def isolation(self) -> IsolationService:
@@ -237,7 +237,7 @@ class Sandbox:
             SandboxException: for template-backed sandboxes (they have no
                 sandbox-side egress sidecar).
         """
-        if self._source == SandboxSource.TEMPLATE:
+        if self._origin == SandboxOrigin.TEMPLATE:
             raise SandboxException(
                 "Credential Vault is not available for template-backed "
                 "sandboxes: they have no sandbox-side egress sidecar."
@@ -593,7 +593,7 @@ class Sandbox:
         if isinstance(image, str):
             image = SandboxImageSpec(image=image)
 
-        source = SandboxSource.SNAPSHOT if snapshot_id else SandboxSource.IMAGE
+        origin = SandboxOrigin.SNAPSHOT if snapshot_id else SandboxOrigin.IMAGE
         startup_source = image.image if image is not None else snapshot_id
         timeout_log = (
             "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
@@ -610,7 +610,7 @@ class Sandbox:
             health_check=health_check,
             health_check_polling_interval=health_check_polling_interval,
             skip_health_check=skip_health_check,
-            source=source,
+            origin=origin,
             create_call=lambda service: service.create_sandbox(
                 spec=image,
                 entrypoint=entrypoint,
@@ -705,7 +705,7 @@ class Sandbox:
                 network_policy=network_policy,
                 extensions=extensions,
             ),
-            source=SandboxSource.TEMPLATE,
+            origin=SandboxOrigin.TEMPLATE,
         )
 
     @classmethod
@@ -720,7 +720,7 @@ class Sandbox:
         health_check_polling_interval: timedelta,
         skip_health_check: bool,
         create_call: Callable[[Sandboxes], Awaitable[SandboxCreateResponse]],
-        source: str = SandboxSource.UNKNOWN,
+        origin: str = SandboxOrigin.UNKNOWN,
     ) -> "Sandbox":
         """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
         factory = AdapterFactory(config)
@@ -734,7 +734,7 @@ class Sandbox:
             sandbox_id = response.id
 
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
-            if source == SandboxSource.TEMPLATE:
+            if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
                 # sidecar: policy operations go through the lifecycle control
                 # plane.
@@ -769,7 +769,7 @@ class Sandbox:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                source=source,
+                origin=origin,
             )
 
             if not skip_health_check:
@@ -864,8 +864,8 @@ class Sandbox:
             execd_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            source = execd_endpoint.source or SandboxSource.UNKNOWN
-            if source == SandboxSource.TEMPLATE:
+            origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
+            if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
                 # sidecar: policy operations go through the lifecycle control
                 # plane, and the egress sidecar endpoint is never resolved.
@@ -890,7 +890,7 @@ class Sandbox:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                source=source,
+                origin=origin,
             )
 
             if not skip_health_check:
@@ -952,8 +952,8 @@ class Sandbox:
             execd_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            source = execd_endpoint.source or SandboxSource.UNKNOWN
-            if source == SandboxSource.TEMPLATE:
+            origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
+            if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
                 # sidecar: policy operations go through the lifecycle control
                 # plane, and the egress sidecar endpoint is never resolved.
@@ -978,7 +978,7 @@ class Sandbox:
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
-                source=source,
+                origin=origin,
             )
 
             if not skip_health_check:
