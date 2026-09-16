@@ -115,7 +115,7 @@ func CreateCodeInterpreter(ctx context.Context, config ConnectionConfig, opts Co
 			readyTimeout = time.Duration(DefaultReadyTimeoutSeconds) * time.Second
 		}
 		interval := opts.HealthCheckInterval
-		if interval == 0 {
+		if interval <= 0 {
 			interval = DefaultHealthCheckPollingInterval
 		}
 		if err := ci.waitRuntimeReady(ctx, readyTimeout, interval); err != nil {

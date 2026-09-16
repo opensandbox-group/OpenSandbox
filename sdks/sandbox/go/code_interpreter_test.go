@@ -100,3 +100,49 @@ func TestCodeInterpreter_WaitRuntimeReady_TimesOut(t *testing.T) {
 	require.ErrorAs(t, err, &readyErr, "timeout error type")
 	assert.Contains(t, readyErr.Error(), "jupyter", "timeout message should mention the runtime")
 }
+
+func TestCreateCodeInterpreter_NegativeHealthCheckIntervalUsesDefault(t *testing.T) {
+	var commandCalls int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			jsonResponse(w, http.StatusCreated, SandboxInfo{
+				ID:        "sbx-ci-interval",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-ci-interval":
+			jsonResponse(w, http.StatusOK, SandboxInfo{
+				ID:        "sbx-ci-interval",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-ci-interval/endpoints/44772":
+			jsonResponse(w, http.StatusOK, Endpoint{Endpoint: srv.URL})
+		case r.URL.Path == "/ping":
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/command":
+			atomic.AddInt32(&commandCalls, 1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"type\":\"error\",\"ename\":\"CommandExecError\",\"evalue\":\"1\"}\n\n")
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	// CreateSandbox treats a non-positive interval as the default; the runtime
+	// readiness poll must do the same instead of busy-looping on /command.
+	_, err := CreateCodeInterpreter(context.Background(), ConnectionConfig{
+		Domain:         srv.URL,
+		DisableMetrics: true,
+	}, CodeInterpreterCreateOptions{
+		ReadyTimeout:        500 * time.Millisecond,
+		HealthCheckInterval: -time.Millisecond,
+	})
+	var readyErr *SandboxReadyTimeoutError
+	require.ErrorAs(t, err, &readyErr, "runtime never comes up")
+	calls := atomic.LoadInt32(&commandCalls)
+	require.True(t, calls <= 5, fmt.Sprintf("runtime check ran %d times in 500ms, want the default 200ms spacing", calls))
+}
