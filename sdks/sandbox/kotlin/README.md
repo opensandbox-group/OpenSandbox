@@ -182,7 +182,94 @@ files.forEach(f -> System.out.println("Found: " + f.getPath()));
 sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 ```
 
-### 5. Sandbox Management (Admin)
+### 5. Snapshots
+
+Capture a sandbox's state and restore new sandboxes from it. Snapshots are
+administered through `SandboxManager` (the per-sandbox shortcut
+`sandbox.createSnapshot(name)` also exists):
+
+```java
+SnapshotInfo snapshot = manager.createSnapshot(sandboxId, "pre-migration");
+
+// Poll until Ready — the built-in helper throws SnapshotFailedException on
+// Failed and SandboxReadyTimeoutException past the deadline, so manual
+// state inspection is only needed for custom retry policies
+SnapshotInfo ready = manager.waitForSnapshotReady(snapshot.getId());
+
+// List snapshots (filter fields are all optional)
+PagedSnapshotInfos page = manager.listSnapshots(
+    SnapshotFilter.builder().pageSize(10).page(1).build()
+);
+```
+
+Restore by pointing `Sandbox.builder()` at the snapshot — `image(...)` and
+`snapshotId(...)` are mutually exclusive by construction: setting one clears
+the other:
+
+```java
+try (Sandbox restored = Sandbox.builder()
+        .connectionConfig(config)
+        .snapshotId(ready.getId())
+        .resource("cpu", "500m")
+        .resource("memory", "512Mi")
+        .build()) {
+    // ... use the restored sandbox
+}
+
+// Only delete the snapshot after the restore has succeeded
+manager.deleteSnapshot(ready.getId());
+```
+
+### 6. Isolated Sessions
+
+Isolated sessions run multi-step code in a hardened, resource-bounded
+namespace with bind mounts — reachable through `sandbox.isolation()`. The
+service also offers `runOnce(...)` (create → run → guaranteed delete in one
+call) and `withSession(...) { }` (scoped block with guaranteed delete) for
+callers that don't need to keep the session around:
+
+```java
+IsolationSession session = sandbox.isolation().create(
+    new CreateIsolatedSessionRequest(
+        new IsolatedWorkspaceSpec("/workspace", "rw"),  // path, mode
+        "strict",                                       // profile
+        null,                                           // extraWritable
+        List.of(new BindMount("/data", "/data", true)), // binds: source, dest, readonly
+        null,                                           // shareNet
+        null,                                           // envPassthrough
+        null,                                           // uid
+        null,                                           // gid
+        null,                                           // uidMode
+        600                                             // idleTimeoutSeconds (0 disables idle GC)
+    )
+);
+try {
+    // Foreground run — timeoutSeconds applies here only; background runs
+    // are deliberately not time-limited
+    Execution run = session.run(
+        new IsolatedRunRequest("python -c 'print(1+1)'", null, 30)  // code, envs, timeoutSeconds
+    );
+    System.out.println(run.getLogs().getStdout().get(0).getText());
+
+    // Background runs: start, poll until finished, then drain logs
+    IsolatedBackgroundRun bg = session.runBackground("make build");
+    IsolatedRunStatus status = session.getRunStatus(bg.getRunId());
+    while (status.getRunning()) {
+        Thread.sleep(2000);
+        status = session.getRunStatus(bg.getRunId());
+    }
+    IsolatedRunLogs logs = session.getRunLogs(bg.getRunId());
+    System.out.println(logs.getText());
+} finally {
+    session.delete();
+}
+```
+
+`getRunLogs` is cursor-based: each call returns at most 16 MiB, and per-run
+retention is capped at 16 MiB, so drain incrementally with the returned
+cursor while the run is active if the output may exceed one page.
+
+### 7. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 
@@ -214,7 +301,7 @@ sandboxes.getSandboxInfos().forEach(info -> {
 // manager.close();
 ```
 
-### 6. Sandbox Pool (Client-Side)
+### 8. Sandbox Pool (Client-Side)
 
 Use `SandboxPool` to keep an idle buffer of ready sandboxes and reduce acquire latency.
 
