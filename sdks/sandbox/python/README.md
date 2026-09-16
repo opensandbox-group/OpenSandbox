@@ -370,7 +370,7 @@ administered through `SandboxManager`:
 
 ```python
 from opensandbox.manager import SandboxManager
-from opensandbox import SnapshotFilter
+from opensandbox.models.sandboxes import SnapshotFilter
 
 async with await SandboxManager.create(connection_config=config) as manager:
     # Create a snapshot from a running sandbox, then wait until it is Ready
@@ -409,7 +409,7 @@ Isolated sessions run multi-step code in a hardened, resource-bounded
 namespace with bind mounts — reachable through `sandbox.isolation`:
 
 ```python
-from opensandbox import (
+from opensandbox.models.isolated import (
     CreateIsolatedSessionRequest,
     IsolatedRunOpts,
     IsolatedWorkspaceSpec,
@@ -422,26 +422,32 @@ session = await sandbox.isolation.create(
         profile="strict",
         # Optional bind mounts (source on host, dest inside the session)
         binds=[BindMount(source="/data", dest="/data", readonly=True)],
+        # Auto-destroy after 10 idle minutes; omitting this leaves the
+        # session alive with no idle GC
+        idle_timeout_seconds=600,
     )
 )
+try:
+    # Foreground run — timeout_seconds applies here only; background
+    # runs are deliberately not time-limited
+    run = await session.run(
+        "python -c 'print(1+1)'",
+        opts=IsolatedRunOpts(timeout_seconds=30),
+    )
+    print(run.logs.stdout[0].text)
 
-# Foreground run — timeout_seconds applies here only; background runs are
-# deliberately not time-limited
-run = await session.run(
-    "python -c 'print(1+1)'",
-    opts=IsolatedRunOpts(timeout_seconds=30),
-)
-print(run.logs.stdout[0].text)
-
-# Background runs: start, poll until finished, then fetch logs
-bg = await session.run_background("make build")
-status = await session.run_status(bg.run_id)
-while status.running:
-    await asyncio.sleep(2)
+    # Background runs: start, poll until finished, then fetch logs
+    bg = await session.run_background("make build")
     status = await session.run_status(bg.run_id)
-logs = await session.run_logs(bg.run_id)
-
-await session.delete()
+    while status.running:
+        await asyncio.sleep(2)
+        status = await session.run_status(bg.run_id)
+    logs = await session.run_logs(bg.run_id)
+finally:
+    # Runs even if a foreground run, polling, or log fetch raises —
+    # without this the session leaks (idle GC only fires if
+    # idle_timeout_seconds was set)
+    await session.delete()
 ```
 
 ### 7. Sandbox Management (Admin)
