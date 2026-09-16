@@ -245,8 +245,9 @@ await manager.DeleteSnapshotAsync(ready.Id);
 Isolated sessions run multi-step code in a hardened, resource-bounded
 namespace with bind mounts — reachable through `sandbox.Isolation`. The
 `RunOnceAsync` / `WithSessionAsync` extension methods (create → run →
-guaranteed delete in one call) cover callers that don't need to keep the
-session around:
+best-effort delete in one call — both suppress delete failures, so the
+session can remain active if execd is unavailable) cover callers that
+don't need to keep the session around:
 
 ```csharp
 var session = await sandbox.Isolation.CreateAsync(new CreateIsolatedSessionRequest(
