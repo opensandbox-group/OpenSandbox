@@ -44,6 +44,7 @@ from opensandbox.models.sandboxes import (
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
+    SandboxCreateResponse,
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
@@ -576,14 +577,16 @@ class Sandbox:
         logger.info(
             f"Creating sandbox with startup source: {startup_source} (timeout: {timeout_log})"
         )
-        factory = AdapterFactory(config)
-        sandbox_id: str | None = None
-        sandbox_service: Sandboxes | None = None
-        create_started = time.monotonic()
 
-        try:
-            sandbox_service = factory.create_sandbox_service()
-            response = await sandbox_service.create_sandbox(
+        return await cls._launch(
+            config=config,
+            startup_source=startup_source,
+            timeout=timeout,
+            ready_timeout=ready_timeout,
+            health_check=health_check,
+            health_check_polling_interval=health_check_polling_interval,
+            skip_health_check=skip_health_check,
+            create_call=lambda service: service.create_sandbox(
                 spec=image,
                 entrypoint=entrypoint,
                 env=env,
@@ -599,7 +602,108 @@ class Sandbox:
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
                 lifecycle=lifecycle,
+            ),
+        )
+
+    @classmethod
+    async def create_from_template(
+        cls,
+        template_id: str,
+        *,
+        timeout: timedelta,
+        ready_timeout: timedelta = timedelta(seconds=30),
+        metadata: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+        extensions: dict[str, str] | None = None,
+        connection_config: ConnectionConfig | None = None,
+        health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
+        health_check_polling_interval: timedelta = timedelta(milliseconds=200),
+        skip_health_check: bool = False,
+    ) -> "Sandbox":
+        """
+        Create a new sandbox from a ``Succeeded`` fsb template.
+
+        Template mode fixes the workload shape on the server: the entrypoint,
+        env, resources, volumes, platform and lifecycle of the sandbox come
+        from the template's golden image and cannot be overridden here. Only
+        metadata, network policy and extensions may accompany the template id,
+        and the timeout is required.
+
+        Args:
+            template_id: ID of a ``Succeeded`` fsb template (see
+                ``SandboxManager.create_template``)
+            timeout: Maximum sandbox lifetime (required in template mode)
+            ready_timeout: Total budget for endpoint publication and health checks.
+            metadata: Custom metadata for the sandbox
+            network_policy: Optional outbound network policy (egress).
+            extensions: Opaque extension parameters passed through to the server as-is.
+                Prefer namespaced keys (e.g. ``storage.id``).
+            connection_config: Connection configuration
+            health_check: Custom async health check function
+            health_check_polling_interval: Polling interval used while waiting for endpoint publication and readiness/health.
+            skip_health_check: Skip health checks; endpoint publication is still awaited.
+
+        Returns:
+            Fully configured and ready Sandbox instance
+
+        Raises:
+            InvalidArgumentException: if template_id is blank or timeout is missing
+            SandboxException: if sandbox creation or initialization fails
+        """
+        if not template_id or not template_id.strip():
+            raise InvalidArgumentException("Template ID must be specified")
+        if timeout is None:
+            raise InvalidArgumentException(
+                "timeout is required when creating a sandbox from a template"
             )
+        if not skip_health_check:
+            validate_polling_interval(health_check_polling_interval)
+
+        config = (connection_config or ConnectionConfig()).with_transport_if_missing()
+        logger.info(
+            f"Creating sandbox from template: {template_id} "
+            f"(timeout: {timeout.total_seconds()}s)"
+        )
+
+        return await cls._launch(
+            config=config,
+            startup_source=f"template:{template_id}",
+            timeout=timeout,
+            ready_timeout=ready_timeout,
+            health_check=health_check,
+            health_check_polling_interval=health_check_polling_interval,
+            skip_health_check=skip_health_check,
+            create_call=lambda service: service.create_sandbox_from_template(
+                template_id=template_id,
+                timeout=timeout,
+                metadata=metadata,
+                network_policy=network_policy,
+                extensions=extensions,
+            ),
+        )
+
+    @classmethod
+    async def _launch(
+        cls,
+        *,
+        config: ConnectionConfig,
+        startup_source: str | None,
+        timeout: timedelta | None,
+        ready_timeout: timedelta,
+        health_check: Callable[["Sandbox"], Awaitable[bool]] | None,
+        health_check_polling_interval: timedelta,
+        skip_health_check: bool,
+        create_call: Callable[[Sandboxes], Awaitable[SandboxCreateResponse]],
+    ) -> "Sandbox":
+        """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
+        factory = AdapterFactory(config)
+        sandbox_id: str | None = None
+        sandbox_service: Sandboxes | None = None
+        create_started = time.monotonic()
+
+        try:
+            sandbox_service = factory.create_sandbox_service()
+            response = await create_call(sandbox_service)
             sandbox_id = response.id
 
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)

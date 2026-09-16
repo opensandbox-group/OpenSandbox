@@ -24,6 +24,7 @@ import pytest
 from opensandbox.config import ConnectionConfig
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
 from opensandbox.exceptions import (
+    InvalidArgumentException,
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
@@ -972,3 +973,101 @@ async def test_create_restore_from_snapshot_preserves_custom_entrypoint(
         entrypoint=["python", "app.py"],
         skip_health_check=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_from_template_passes_only_allowed_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CreateResponse:
+        id = "sbx-from-template"
+
+    class _SandboxServiceCreateStub:
+        def __init__(self) -> None:
+            self.template_calls: list[dict[str, object]] = []
+
+        async def create_sandbox_from_template(
+            self,
+            template_id,
+            timeout,
+            metadata=None,
+            network_policy=None,
+            extensions=None,
+        ):
+            self.template_calls.append(
+                {
+                    "template_id": template_id,
+                    "timeout": timeout,
+                    "metadata": metadata,
+                    "network_policy": network_policy,
+                    "extensions": extensions,
+                }
+            )
+            return _CreateResponse()
+
+        async def get_sandbox_endpoint(self, _sandbox_id, port: int, _use_server_proxy: bool = False):
+            return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            self.service = _SandboxServiceCreateStub()
+
+        def create_sandbox_service(self):
+            return self.service
+
+        def create_filesystem_service(self, _endpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint):
+            return _EgressServiceStub()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    factory = _FactoryStub(ConnectionConfig())
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", lambda _c: factory)
+
+    sandbox = await Sandbox.create_from_template(
+        "tpl_1",
+        timeout=timedelta(minutes=5),
+        metadata={"team": "platform"},
+        skip_health_check=True,
+    )
+
+    assert sandbox.id == "sbx-from-template"
+    assert len(factory.service.template_calls) == 1
+    call = factory.service.template_calls[0]
+    assert call["template_id"] == "tpl_1"
+    assert call["timeout"] == timedelta(minutes=5)
+    assert call["metadata"] == {"team": "platform"}
+    assert call["network_policy"] is None
+    assert call["extensions"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_from_template_requires_timeout() -> None:
+    with pytest.raises(InvalidArgumentException):
+        await Sandbox.create_from_template("tpl_1", timeout=None)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_create_from_template_rejects_blank_template_id() -> None:
+    with pytest.raises(InvalidArgumentException):
+        await Sandbox.create_from_template(
+            "  ", timeout=timedelta(minutes=5)
+        )

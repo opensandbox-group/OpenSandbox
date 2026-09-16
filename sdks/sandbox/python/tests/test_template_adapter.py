@@ -416,3 +416,111 @@ def test_sync_manager_delegates_template_operations() -> None:
         "list",
         "delete",
     ]
+
+
+def _api_create_sandbox_response(sandbox_id: str):
+    from opensandbox.api.lifecycle.models.create_sandbox_response import (
+        CreateSandboxResponse,
+    )
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    return CreateSandboxResponse(
+        id=sandbox_id,
+        status=SandboxStatus(state="Running"),
+        expires_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        entrypoint=["/bin/sh"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_from_template_maps_wire_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule
+
+    captured = {}
+
+    async def _fake_asyncio_detailed(*, client, body):
+        captured["body"] = body.to_dict()
+        return _Resp(
+            status_code=201, parsed=_api_create_sandbox_response("sbx-from-template")
+        )
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.sandboxes.post_sandboxes.asyncio_detailed",
+        _fake_asyncio_detailed,
+    )
+
+    adapter = SandboxesAdapter(ConnectionConfig())
+    response = await adapter.create_sandbox_from_template(
+        "tpl_1",
+        timeout=timedelta(minutes=5),
+        metadata={"team": "platform"},
+        network_policy=NetworkPolicy(
+            defaultAction="deny",
+            egress=[NetworkRule(action="allow", target="pypi.org")],
+        ),
+        extensions={"debug": "true"},
+    )
+
+    assert response.id == "sbx-from-template"
+    body = captured["body"]
+    assert body["templateId"] == "tpl_1"
+    assert body["timeout"] == 300
+    assert body["metadata"] == {"team": "platform"}
+    assert body["extensions"] == {"debug": "true"}
+    assert body["networkPolicy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "pypi.org"}],
+    }
+    # Template mode: workload-shaping fields must be absent from the wire body.
+    # (secureAccess is always serialized by the generated model; false is valid.)
+    assert body["secureAccess"] is False
+    for absent in (
+        "image",
+        "snapshotId",
+        "entrypoint",
+        "env",
+        "resourceLimits",
+        "resourceRequests",
+        "volumes",
+        "platform",
+        "credentialProxy",
+        "lifecycle",
+    ):
+        assert absent not in body, f"{absent} must not be sent in template mode"
+
+
+def test_sync_create_sandbox_from_template_maps_wire_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    captured = {}
+
+    def _fake_sync_detailed(*, client, body):
+        captured["body"] = body.to_dict()
+        return _Resp(
+            status_code=201, parsed=_api_create_sandbox_response("sbx-from-template")
+        )
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.sandboxes.post_sandboxes.sync_detailed",
+        _fake_sync_detailed,
+    )
+
+    adapter = SyncSandboxesAdapter(ConnectionConfigSync())
+    response = adapter.create_sandbox_from_template(
+        "tpl_1",
+        timeout=timedelta(minutes=5),
+    )
+
+    assert response.id == "sbx-from-template"
+    body = captured["body"]
+    assert body["templateId"] == "tpl_1"
+    assert body["timeout"] == 300
+    assert "resourceLimits" not in body
+    assert "entrypoint" not in body

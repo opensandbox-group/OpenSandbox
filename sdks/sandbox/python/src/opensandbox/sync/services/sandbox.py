@@ -101,6 +101,23 @@ class SandboxesSync(Protocol):
         """
         ...
 
+    def create_sandbox_from_template(
+        self,
+        template_id: str,
+        timeout: timedelta,
+        metadata: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+        extensions: dict[str, str] | None = None,
+    ) -> SandboxCreateResponse:
+        """
+        Create a sandbox from a ``Succeeded`` fsb template (blocking).
+
+        Template mode fixes the workload shape on the server: only metadata,
+        network policy and extensions may accompany the template id, and the
+        timeout is required.
+        """
+        ...
+
     def get_sandbox_info(self, sandbox_id: str) -> SandboxInfo:
         """
         Retrieve information about an existing sandbox.

@@ -173,6 +173,42 @@ class SandboxesAdapterSync(SandboxesSync):
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
+    def create_sandbox_from_template(
+        self,
+        template_id: str,
+        timeout: timedelta,
+        metadata: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+        extensions: dict[str, str] | None = None,
+    ) -> SandboxCreateResponse:
+        try:
+            from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
+            from opensandbox.api.lifecycle.models import (
+                CreateSandboxResponse as ApiCreateSandboxResponse,
+            )
+
+            create_request = SandboxModelConverter.to_api_create_template_sandbox_request(
+                template_id=template_id,
+                timeout=timeout,
+                metadata=metadata,
+                network_policy=network_policy,
+                extensions=extensions,
+            )
+            response_obj = post_sandboxes.sync_detailed(
+                client=self._get_client(), body=create_request
+            )
+            handle_api_error(
+                response_obj, f"Create sandbox from template {template_id}"
+            )
+
+            parsed = require_parsed(
+                response_obj, ApiCreateSandboxResponse, "Create sandbox from template"
+            )
+            return SandboxModelConverter.to_sandbox_create_response(parsed)
+        except Exception as e:
+            logger.warning(f"Failed to create sandbox from template {template_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
     def get_sandbox_info(self, sandbox_id: str) -> SandboxInfo:
         try:
             from opensandbox.api.lifecycle.api.sandboxes import get_sandboxes_sandbox_id

@@ -100,6 +100,36 @@ class Sandboxes(Protocol):
         """
         ...
 
+    async def create_sandbox_from_template(
+        self,
+        template_id: str,
+        timeout: timedelta,
+        metadata: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+        extensions: dict[str, str] | None = None,
+    ) -> SandboxCreateResponse:
+        """
+        Create a sandbox from a ``Succeeded`` fsb template.
+
+        Template mode fixes the workload shape on the server: only metadata,
+        network policy and extensions may accompany the template id, and the
+        timeout is required.
+
+        Args:
+            template_id: Succeeded fsb template to create the sandbox from
+            timeout: Sandbox lifetime (required in template mode)
+            metadata: User-defined metadata used for management and filtering
+            network_policy: Optional outbound network policy (egress)
+            extensions: Opaque extension parameters passed through to the server as-is
+
+        Returns:
+            Sandbox create response
+
+        Raises:
+            SandboxException: if the operation fails
+        """
+        ...
+
     async def get_sandbox_info(self, sandbox_id: str) -> SandboxInfo:
         """
         Retrieve information about an existing sandbox.

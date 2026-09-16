@@ -42,6 +42,7 @@ from opensandbox.models.sandboxes import (
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
+    SandboxCreateResponse,
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
@@ -546,14 +547,16 @@ class SandboxSync:
         logger.info(
             f"Creating sandbox with startup source: {startup_source} (timeout: {timeout_log})"
         )
-        factory = AdapterFactorySync(config)
-        sandbox_id: str | None = None
-        sandbox_service: SandboxesSync | None = None
-        create_started = time.monotonic()
 
-        try:
-            sandbox_service = factory.create_sandbox_service()
-            response = sandbox_service.create_sandbox(
+        return cls._launch(
+            config=config,
+            startup_source=startup_source,
+            timeout=timeout,
+            ready_timeout=ready_timeout,
+            health_check=health_check,
+            health_check_polling_interval=health_check_polling_interval,
+            skip_health_check=skip_health_check,
+            create_call=lambda service: service.create_sandbox(
                 spec=image,
                 entrypoint=entrypoint,
                 env=env,
@@ -569,7 +572,110 @@ class SandboxSync:
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
                 lifecycle=lifecycle,
+            ),
+        )
+
+    @classmethod
+    def create_from_template(
+        cls,
+        template_id: str,
+        *,
+        timeout: timedelta,
+        ready_timeout: timedelta = timedelta(seconds=30),
+        metadata: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+        extensions: dict[str, str] | None = None,
+        connection_config: ConnectionConfigSync | None = None,
+        health_check: Callable[["SandboxSync"], bool] | None = None,
+        health_check_polling_interval: timedelta = timedelta(milliseconds=200),
+        skip_health_check: bool = False,
+    ) -> "SandboxSync":
+        """
+        Create a new sandbox from a ``Succeeded`` fsb template (blocking).
+
+        Template mode fixes the workload shape on the server: the entrypoint,
+        env, resources, volumes, platform and lifecycle of the sandbox come
+        from the template's golden image and cannot be overridden here. Only
+        metadata, network policy and extensions may accompany the template id,
+        and the timeout is required.
+
+        Args:
+            template_id: ID of a ``Succeeded`` fsb template (see
+                ``SandboxManagerSync.create_template``)
+            timeout: Maximum sandbox lifetime (required in template mode)
+            ready_timeout: Total budget for endpoint publication and health checks.
+            metadata: Custom metadata for the sandbox
+            network_policy: Optional outbound network policy (egress).
+            extensions: Opaque extension parameters passed through to the server as-is.
+                Prefer namespaced keys (e.g. ``storage.id``).
+            connection_config: Connection configuration
+            health_check: Custom sync health check function
+            health_check_polling_interval: Polling interval used while waiting for endpoint publication and readiness/health.
+            skip_health_check: Skip health checks; endpoint publication is still awaited.
+
+        Returns:
+            Fully configured and ready SandboxSync instance
+
+        Raises:
+            InvalidArgumentException: if template_id is blank or timeout is missing
+            SandboxException: if sandbox creation or initialization fails
+        """
+        if not template_id or not template_id.strip():
+            raise InvalidArgumentException("Template ID must be specified")
+        if timeout is None:
+            raise InvalidArgumentException(
+                "timeout is required when creating a sandbox from a template"
             )
+        if not skip_health_check:
+            validate_polling_interval(health_check_polling_interval)
+
+        config = (
+            connection_config or ConnectionConfigSync()
+        ).with_transport_if_missing()
+        logger.info(
+            f"Creating sandbox from template: {template_id} "
+            f"(timeout: {timeout.total_seconds()}s)"
+        )
+
+        return cls._launch(
+            config=config,
+            startup_source=f"template:{template_id}",
+            timeout=timeout,
+            ready_timeout=ready_timeout,
+            health_check=health_check,
+            health_check_polling_interval=health_check_polling_interval,
+            skip_health_check=skip_health_check,
+            create_call=lambda service: service.create_sandbox_from_template(
+                template_id=template_id,
+                timeout=timeout,
+                metadata=metadata,
+                network_policy=network_policy,
+                extensions=extensions,
+            ),
+        )
+
+    @classmethod
+    def _launch(
+        cls,
+        *,
+        config: ConnectionConfigSync,
+        startup_source: str | None,
+        timeout: timedelta | None,
+        ready_timeout: timedelta,
+        health_check: Callable[["SandboxSync"], bool] | None,
+        health_check_polling_interval: timedelta,
+        skip_health_check: bool,
+        create_call: Callable[[SandboxesSync], SandboxCreateResponse],
+    ) -> "SandboxSync":
+        """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
+        factory = AdapterFactorySync(config)
+        sandbox_id: str | None = None
+        sandbox_service: SandboxesSync | None = None
+        create_started = time.monotonic()
+
+        try:
+            sandbox_service = factory.create_sandbox_service()
+            response = create_call(sandbox_service)
             sandbox_id = response.id
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
             execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(

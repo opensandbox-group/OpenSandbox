@@ -202,6 +202,49 @@ class SandboxesAdapter(Sandboxes):
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
+    async def create_sandbox_from_template(
+        self,
+        template_id: str,
+        timeout: timedelta,
+        metadata: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+        extensions: dict[str, str] | None = None,
+    ) -> SandboxCreateResponse:
+        """Create a sandbox from a Succeeded fsb template."""
+        logger.info(f"Creating sandbox from template: {template_id}")
+
+        try:
+            from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
+
+            create_request = SandboxModelConverter.to_api_create_template_sandbox_request(
+                template_id=template_id,
+                timeout=timeout,
+                metadata=metadata,
+                network_policy=network_policy,
+                extensions=extensions,
+            )
+
+            client = await self._get_client()
+            response_obj = await post_sandboxes.asyncio_detailed(
+                client=client,
+                body=create_request,
+            )
+
+            handle_api_error(response_obj, f"Create sandbox from template {template_id}")
+
+            from opensandbox.api.lifecycle.models import CreateSandboxResponse
+
+            parsed = require_parsed(
+                response_obj, CreateSandboxResponse, "Create sandbox from template"
+            )
+            response = SandboxModelConverter.to_sandbox_create_response(parsed)
+            logger.info(f"Successfully created sandbox from template: {response.id}")
+            return response
+
+        except Exception as e:
+            logger.warning(f"Failed to create sandbox from template {template_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
     async def get_sandbox_info(self, sandbox_id: str) -> SandboxInfo:
         """Retrieve detailed information about a sandbox."""
         logger.debug(f"Retrieving sandbox information: {sandbox_id}")
