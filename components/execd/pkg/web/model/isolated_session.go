@@ -22,7 +22,6 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-// Workspace mode values.
 const (
 	WorkspaceModeRW      = "rw"
 	WorkspaceModeOverlay = "overlay"
@@ -31,7 +30,6 @@ const (
 
 // Create
 
-// CreateIsolatedSessionRequest is the request body for POST /v1/isolated/session.
 type CreateIsolatedSessionRequest struct {
 	Profile            string             `json:"profile"` // "strict" | "balanced"
 	Workspace          WorkspaceSpec      `json:"workspace" validate:"required"`
@@ -45,32 +43,27 @@ type CreateIsolatedSessionRequest struct {
 	IdleTimeoutSeconds int                `json:"idle_timeout_seconds,omitempty"`
 }
 
-// WorkspaceSpec describes the workspace mount.
 type WorkspaceSpec struct {
 	Path string `json:"path" validate:"required"`
 	Mode string `json:"mode,omitempty"` // "rw" | "overlay" | "ro", default per profile
 }
 
-// EnvPassthroughSpec controls environment passthrough into the namespace.
 type EnvPassthroughSpec struct {
 	Mode string   `json:"mode,omitempty"` // "deny" | "allow"
 	Keys []string `json:"keys,omitempty"`
 }
 
-// BindMount describes an explicit source→dest bind mount into the namespace.
 type BindMount struct {
 	Source   string `json:"source" validate:"required"`
 	Dest     string `json:"dest,omitempty"`
 	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
-// IsolatedCreateSessionResponse is the response for POST /v1/isolated/session.
 type IsolatedCreateSessionResponse struct {
 	SessionID string    `json:"session_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Validate checks CreateIsolatedSessionRequest fields.
 func (r *CreateIsolatedSessionRequest) Validate() error {
 	v := validator.New()
 	if err := v.Struct(r); err != nil {
@@ -116,7 +109,6 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 
 // Run
 
-// IsolatedRunRequest is the request body for POST /v1/isolated/session/<id>/run.
 type IsolatedRunRequest struct {
 	Code           string            `json:"code" validate:"required"`
 	Envs           map[string]string `json:"envs,omitempty"`
@@ -124,20 +116,17 @@ type IsolatedRunRequest struct {
 	Background     bool              `json:"background,omitempty"`
 }
 
-// Validate checks IsolatedRunRequest fields.
 func (r *IsolatedRunRequest) Validate() error {
 	v := validator.New()
 	return v.Struct(r)
 }
 
-// IsolatedBackgroundRunResponse is the handle returned for background: true runs.
 type IsolatedBackgroundRunResponse struct {
 	SessionID string    `json:"session_id"`
 	RunID     string    `json:"run_id"`
 	StartedAt time.Time `json:"started_at"`
 }
 
-// IsolatedRunStatus describes the lifecycle state of an isolated background run.
 type IsolatedRunStatus struct {
 	SessionID  string     `json:"session_id"`
 	RunID      string     `json:"run_id"`
@@ -177,7 +166,6 @@ type SessionState struct {
 	IdleTimeoutSeconds *int                `json:"idle_timeout_seconds,omitempty"`
 }
 
-// IsolatedSessionSummary describes a single session in a list response.
 type IsolatedSessionSummary struct {
 	SessionID            string    `json:"session_id"`
 	Status               string    `json:"status"` // "active" | "dead"
@@ -186,14 +174,12 @@ type IsolatedSessionSummary struct {
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
 }
 
-// ListIsolatedSessionsResponse is returned by GET /v1/isolated/sessions.
 type ListIsolatedSessionsResponse struct {
 	Sessions []IsolatedSessionSummary `json:"sessions"`
 }
 
 // Capabilities
 
-// CapabilitiesResponse is returned by GET /v1/isolated/capabilities.
 type CapabilitiesResponse struct {
 	Available        bool             `json:"available"`
 	Isolator         string           `json:"isolator,omitempty"`

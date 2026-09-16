@@ -28,7 +28,6 @@ const (
 	ProfileBalanced Profile = "balanced"
 )
 
-// Valid reports whether p is a known profile name.
 func (p Profile) Valid() bool {
 	return p == ProfileStrict || p == ProfileBalanced
 }
@@ -43,7 +42,6 @@ const (
 	WorkspaceRO      WorkspaceMode = "ro"
 )
 
-// Valid reports whether m is a known workspace mode.
 func (m WorkspaceMode) Valid() bool {
 	return m == WorkspaceRW || m == WorkspaceOverlay || m == WorkspaceRO
 }
@@ -57,7 +55,6 @@ const (
 	EnvModeAllow EnvMode = "allow"
 )
 
-// Valid reports whether m is a known env passthrough mode.
 func (m EnvMode) Valid() bool {
 	return m == EnvModeDeny || m == EnvModeAllow
 }
@@ -78,12 +75,9 @@ const (
 	UidModeUserns UidMode = "userns"
 )
 
-// Valid reports whether m is a known uid mode.
 func (m UidMode) Valid() bool {
 	return m == UidModeSetpriv || m == UidModeUserns
 }
-
-// Structs
 
 // WorkspaceSpec describes a workspace directory and how it is mounted.
 type WorkspaceSpec struct {
@@ -143,8 +137,6 @@ type WrapOptions struct {
 	UpperDir       string  // empty when upper is on tmpfs (persist disabled)
 	WorkDir        string
 }
-
-// Interface
 
 // Isolator wraps an *exec.Cmd in a namespace-isolated execution environment.
 type Isolator interface {

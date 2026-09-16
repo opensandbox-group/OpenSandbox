@@ -5,7 +5,7 @@ description: OpenSandbox architecture overview covering client SDKs, lifecycle c
 
 # OpenSandbox Architecture
 
-OpenSandbox is a general-purpose sandbox platform for AI applications. It provides client SDKs and tools, protocol definitions, a lifecycle control plane, Docker and Kubernetes runtime backends, and in-sandbox execution components for commands, files, code interpreters, browser automation, desktop environments, and training workloads.
+OpenSandbox is a general-purpose sandbox platform for AI applications. It provides client SDKs and tools, protocol definitions, a lifecycle control plane, Docker and Kubernetes runtime backends (supporting both container workloads and template-backed microVMs), and in-sandbox execution components for commands, files, code interpreters, browser automation, desktop environments, and training workloads.
 
 This document describes the current repository architecture and the main boundaries between public contracts, server implementation, runtime providers, and sandbox data-plane components.
 
@@ -13,14 +13,22 @@ This document describes the current repository architecture and the main boundar
 
 ![OpenSandbox Architecture](../public/images/architecture-overview.svg)
 
+The architecture distinguishes three primary interaction paths:
+
+- **Lifecycle management** (orange arrows): Applications, agents, and operators send lifecycle requests (creating, listing, renewing, pausing, resuming, or deleting sandboxes, as well as managing snapshots and templates) to the FastAPI lifecycle server. The server persists metadata and delegates provisioning and orchestration to the configured runtime backend.
+- **Execution and service access** (blue arrows): For command, file, PTY, and Jupyter code execution, or reaching user workload services, clients bypass lifecycle orchestration and connect directly to resolved endpoints—via direct host/pod addresses, the lifecycle server proxy, or an optional Kubernetes ingress gateway.
+- **Outbound controls** (green arrows): Outbound requests from the sandbox to external APIs, model providers, or web services can be filtered and secured through egress controls (a per-sandbox sidecar for container workloads or a shared Fastlet egress profile for FastSandbox), with support for DNS/nftables policies and optional Credential Vault secret injection.
+
+Runtime and networking capabilities depend on the selected backend; the diagram shows the shared architecture, not a requirement to deploy every component.
+
 OpenSandbox is organized around six practical surfaces:
 
 1. **Client surface** - SDKs, the `osb` CLI, and the MCP server used by applications, agents, and operators.
 2. **Protocol surface** - OpenAPI contracts under `specs/` for lifecycle, diagnostics, in-sandbox execution, and egress policy.
 3. **Lifecycle control plane** - the FastAPI server under `server/` that authenticates requests, validates config, persists server-managed records, and delegates lifecycle work to a configured runtime service.
-4. **Runtime backends** - Docker for local and single-host deployments, and Kubernetes through workload providers such as BatchSandbox and `kubernetes-sigs/agent-sandbox`.
-5. **Sandbox data plane** - the user workload container plus the injected `execd` daemon, optional Jupyter/code-interpreter runtime, volumes, and optional egress sidecar.
-6. **Network and security plane** - endpoint resolution, server proxying, Kubernetes ingress gateway routing, secure endpoint access, egress policy enforcement, resource limits, and secure container runtimes.
+4. **Runtime backends** - Docker for local and single-host deployments, and Kubernetes with container workload providers (BatchSandbox or `kubernetes-sigs/agent-sandbox`) alongside an optional FastSandbox integration for template-backed microVMs.
+5. **Sandbox data plane** - the user workload and `execd` daemon inside a container or microVM, with optional Jupyter/code-interpreter support. Volume and egress integration depend on the runtime.
+6. **Network and security plane** - endpoint resolution, server proxying, Kubernetes ingress gateway routing, secure endpoint access, egress policy enforcement, credential vault, resource limits, and secure container runtimes.
 
 The split is intentional: SDKs and tools should depend on the public contracts, the server should own lifecycle orchestration, runtime providers should own platform-specific resource creation, and `execd`/egress should own operations that happen from inside the sandbox network and filesystem namespace.
 
@@ -78,17 +86,18 @@ OpenSandbox treats `specs/` as the public contract source of truth.
 
 Main resource groups:
 
-- **Sandboxes**: create from an image or snapshot, list, get, delete, pause, resume, renew expiration, and resolve port endpoints.
+- **Sandboxes**: create from an image, snapshot, or template; list, get, delete, pause, resume, renew expiration, and resolve port endpoints. FastSandbox also supports inspecting and replacing runtime network policy through `GET/PUT /sandboxes/{sandboxId}/networkpolicy`.
 - **Snapshots**: create a persistent snapshot from a sandbox, list snapshots, get snapshot state, and delete snapshots.
+- **Templates**: create, list, inspect, and delete template definitions in the catalog used by FastSandbox (`/templates`).
 
 Important request features:
 
-- `image` or `snapshotId` startup source.
+- `image` or `snapshotId` for container startup, or `templateId` for the FastSandbox path in Kubernetes mode.
 - `entrypoint`, environment variables, metadata, and opaque `extensions`.
 - `resourceLimits` for CPU, memory, GPU, and future resource keys.
 - `platform` constraints.
 - `volumes` for host paths, platform-managed named volumes/PVCs, and OSSFS.
-- `networkPolicy` for egress sidecar configuration.
+- `networkPolicy` for outbound network policy configuration.
 - `secureAccess` for Kubernetes ingress gateway deployments that require endpoint credentials.
 
 ### 2.2 Diagnostics API
@@ -112,12 +121,12 @@ Command and code execution use Server-Sent Events for streaming output. The curr
 
 ### 2.4 Egress API
 
-`specs/egress-api.yaml` defines the runtime policy API exposed directly by the egress sidecar:
+`specs/egress-api.yaml` defines the runtime policy and credential broker APIs exposed by `components/egress/`:
 
-- `GET /policy`
-- `PATCH /policy`
+- **Policy**: `GET /policy` to inspect the current policy; `PATCH /policy` to mutate rules at runtime.
+- **Credential Vault**: `GET`, `POST`, `PATCH`, and `DELETE` on `/credential-vault` to manage sandbox-local credential bindings and token injection without exposing raw secrets to the workload.
 
-The API is reached by resolving the sandbox endpoint for the egress sidecar port. When sidecar authentication is enabled, callers must include the endpoint headers returned by the lifecycle endpoint resolution API.
+For container backends, callers resolve the sandbox endpoint for the egress sidecar port and connect directly (forwarding endpoint authentication headers when sidecar auth is enabled). For FastSandbox, runtime network policy is managed through the lifecycle API (`/sandboxes/{sandboxId}/networkpolicy`), while the shared Fastlet profile routes policy and per-subject credential vault operations using internal request headers.
 
 ## 3. Lifecycle Control Plane
 
@@ -131,22 +140,22 @@ Key packages:
 - `opensandbox_server/api/`: lifecycle routes, proxy routes, pool routes, diagnostics routes, and request/response schemas.
 - `opensandbox_server/services/`: lifecycle service interfaces and Docker/Kubernetes implementations.
 - `opensandbox_server/services/k8s/`: Kubernetes workload providers, endpoint resolution, volume/egress helpers, informer support, and provider-specific mapping.
-- `opensandbox_server/repositories/`: persistence adapters, currently used for server-managed snapshot records.
+- `opensandbox_server/repositories/`: persistence adapters, used for server-managed snapshot records and the FastSandbox template catalog.
 - `opensandbox_server/integrations/renew_intent/`: optional auto-renew-on-access integration.
 - `opensandbox_server/middleware/`: API-key authentication and request ID middleware.
 
 ### 3.2 Runtime Service Selection
 
-The server selects exactly one lifecycle implementation from `[runtime].type`:
+The server selects its lifecycle implementation based on `[runtime].type`:
 
 - `docker` -> `DockerSandboxService`
-- `kubernetes` -> `KubernetesSandboxService`
+- `kubernetes` -> `CompositeSandboxService`, which combines `KubernetesSandboxService` (backed by BatchSandbox or agent-sandbox providers) with `FastSandboxService` for template-based microVM execution.
 
-Both implementations satisfy the same `SandboxService` interface, so API routes stay thin and delegate behavior to services. Runtime-specific details stay behind the service boundary.
+The top-level `runtime.type` configuration option remains strictly `docker` or `kubernetes`. All implementations satisfy the same `SandboxService` interface, keeping API routes thin and delegating behavior to services. Under Kubernetes mode, `CompositeSandboxService` inspects creation requests: requests specifying a `templateId` dispatch to `FastSandboxService`, while container requests specifying an `image` or `snapshotId` dispatch to `KubernetesSandboxService`. Operations on existing sandboxes are routed by their ID prefix (IDs starting with `fsb-` route to `FastSandboxService`). Runtime-specific details stay behind the service boundary.
 
 ### 3.3 Server Persistence
 
-The `[store]` configuration selects the server-managed metadata store. The default is SQLite at `~/.opensandbox/opensandbox.db`. Snapshot metadata is the first persisted server resource; future persistent records should reuse the same repository boundary.
+The `[store]` configuration selects SQLite (the default, at `~/.opensandbox/opensandbox.db`) or PostgreSQL. The server persists snapshot metadata and the FastSandbox template catalog through separate repository adapters (`repositories/snapshots/` and `repositories/templates/`). The template catalog stored in the database is the public source of truth; Kubernetes `SandboxTemplate` resources drive golden-image builds and provide asynchronous status updates.
 
 ### 3.4 Server Proxy and Endpoint Resolution
 
@@ -214,13 +223,25 @@ The Kubernetes controller under `kubernetes/` implements OpenSandbox-specific CR
 
 - `BatchSandbox`: create one or many sandbox replicas from a pod template.
 - `Pool`: maintain pre-warmed resources for fast allocation.
-- `SandboxSnapshot`: internal rootfs snapshot records used by Kubernetes pause/resume.
+- `SandboxSnapshot`: snapshot records used by BatchSandbox pause/resume and the public snapshot workflow.
 
 BatchSandbox supports both template-based creation and pool-based creation via `extensions.poolRef`. It also supports optional task orchestration for batch and RL-style workloads.
 
-Kubernetes pause/resume is implemented through rootfs snapshots for `BatchSandbox.spec.replicas=1`: pause commits the sandbox root filesystem to an OCI image and releases runtime resources; resume rewrites the workload template to use the snapshot image and recreates the runtime while preserving the sandbox ID.
+For supported single-replica BatchSandbox workloads, the rootfs pause/resume path commits the sandbox filesystem to an OCI image and releases runtime resources; resume recreates the workload from that image while preserving the sandbox ID. Workloads configured with a QEMU snapshot contract use a VM-state checkpoint and restore path instead.
 
-The public snapshot API currently has a Docker-backed runtime implementation. Kubernetes pause/resume uses the controller's internal `SandboxSnapshot` flow; a general Kubernetes implementation of the public snapshot API is a separate runtime concern.
+The public snapshot API supports Docker and compatible `BatchSandbox` workloads. `DockerSnapshotRuntime` commits containers to local images, while `KubernetesSnapshotRuntime` creates a public `SandboxSnapshot` CR to commit and push images to an OCI registry. This is distinct from internal pause/resume, which releases compute while preserving sandbox continuity. Public snapshot support does not extend to every Kubernetes provider or VM runtime.
+
+### 4.4 FastSandbox Integration
+
+In Kubernetes mode, `FastSandboxService` connects OpenSandbox to the external `fast-sandbox` platform for template-backed microVM provisioning:
+
+- **Routing**: `CompositeSandboxService` routes create requests with `templateId` to `FastSandboxService`, and routes operations on existing sandboxes by the `fsb-` ID prefix. FastSandbox is part of the Kubernetes composition, not a separate `runtime.type` value.
+- **Control Protocol**: Communicates with an external `fast-sandbox` control plane via gRPC FastPath v2 (port 9090).
+- **State**: FastPath owns mutations and live runtime operations; Kubernetes LIST/WATCH reads persisted `sandbox.fast.io/v1alpha2` resources and their observations.
+- **Pause/resume**: Delegates to FastPath, which restores the checkpoint on resume. Clients must resolve endpoints again after restoration.
+- **Networking**: The configured Fastlet pool supplies a shared Egress profile; the adapter sends network policy through FastPath Actions. This differs from attaching a per-sandbox container sidecar. The current server adapter rejects the `credentialProxy.enabled` creation flag and volume mounts on this path.
+
+The adapter and endpoint integration live in this repository; FastPath and the microVM runtime are provided by the external platform. See the [service dispatch](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/composite_service.py) and [FastSandbox adapter](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/fast_sandbox/service.py) for the implementation boundaries.
 
 ## 5. Sandbox Data Plane
 
@@ -237,11 +258,14 @@ Responsibilities:
 - Persistent bash sessions.
 - Interactive PTY sessions over WebSocket.
 - File and directory operations.
+- Process isolation sessions for executing commands in isolated environments.
 - Jupyter-backed code contexts and code execution.
 - Local CPU/memory metrics and optional OpenTelemetry metrics export.
 - Optional shared access token enforcement through `X-EXECD-ACCESS-TOKEN`.
 
 In Docker, the server stages `execd` into the container and installs a bootstrap script. In Kubernetes BatchSandbox template mode, an init container copies `execd` and `bootstrap.sh` from the configured `execd_image` into an `emptyDir` volume mounted by the main sandbox container.
+
+For FastSandbox, the template build includes `execd` in the guest image before the microVM starts.
 
 ### 5.2 Code Interpreter Runtime
 
@@ -257,23 +281,23 @@ The lifecycle API exposes runtime-neutral volume models:
 - `pvc`: platform-managed named storage. Docker maps this to a Docker named volume; Kubernetes maps it to a PersistentVolumeClaim.
 - `ossfs`: mount Alibaba Cloud OSS through the server/runtime integration.
 
-Runtime providers validate and materialize these volume definitions differently, but the API shape stays shared.
+Runtime providers validate and materialize these volume definitions differently, but the API shape stays shared. Volume mounts are supported for Docker and Kubernetes container workloads; the FastSandbox adapter currently rejects volume mounts.
 
 ### 5.4 Egress Sidecar
 
-`components/egress/` enforces outbound network policy from the sandbox network namespace.
+`components/egress/` enforces outbound network policy and provides credential proxying for sandboxes.
 
 Capabilities:
 
 - FQDN and wildcard-domain allow/deny rules.
 - `dns` mode for DNS filtering.
 - `dns+nft` mode for DNS plus nftables enforcement of resolved IPs and CIDR/IP rules where supported.
+- Credential Vault / Proxy: transparent TLS MITM proxy (active in `dns+nft` mode) that provides scoped credential injection for outbound HTTPS requests based on host-managed secret bindings, keeping raw secrets out of the sandbox workload.
 - Runtime policy inspection and patching through `/policy`.
 - Optional sidecar authentication.
 - Optional platform-enforced always-allow and always-deny overlays.
-- Experimental transparent HTTPS MITM mode.
 
-Docker starts the egress sidecar as a separate container and runs the main sandbox container in the sidecar network namespace. Kubernetes appends the egress sidecar to the pod spec and drops `NET_ADMIN` from the main sandbox container so only the sidecar mutates network rules.
+Docker starts the egress sidecar as a separate container and runs the main sandbox container in the sidecar network namespace. Kubernetes container providers append the egress sidecar to the pod spec and drop `NET_ADMIN` from the main sandbox container so only the sidecar mutates network rules. FastSandbox uses the shared Fastlet profile outside the microVM guest, receiving policy actions through FastPath.
 
 ## 6. Networking and Access
 
@@ -288,6 +312,8 @@ Supported routing modes:
 - Wildcard host mode through server endpoint formatting.
 
 For `BatchSandbox`, ingress reads endpoint data from the `sandbox.opensandbox.io/endpoints` annotation. For `agent-sandbox`, it reads `status.serviceFQDN`.
+
+For FastSandbox routes, ingress asks FastPath to resolve the endpoint and forwards traffic through the returned Fastlet or central proxy address.
 
 ### 6.2 Secure Access
 
@@ -305,8 +331,8 @@ The optional renew-intent integration extends sandbox TTL when access is observe
 Client / SDK / CLI / MCP
   -> POST /v1/sandboxes
   -> FastAPI lifecycle server validates request and config
-  -> selected runtime service creates Docker container or Kubernetes workload
-  -> runtime stages execd and optional egress/volume/network configuration
+  -> selected service creates a Docker container, Kubernetes workload, or FastSandbox microVM
+  -> runtime stages execd or uses a prepared guest image, with backend-specific networking and storage
   -> sandbox reaches Running or reports Failed with status reason/message
 ```
 
@@ -336,10 +362,11 @@ Client
 
 ```text
 Create request with networkPolicy
-  -> server validates [egress] config
-  -> runtime attaches egress sidecar with initial policy
-  -> sandbox outbound DNS/network traffic is filtered by sidecar
-  -> clients may resolve the egress endpoint and PATCH /policy at runtime
+  -> server validates runtime-specific network policy settings
+  -> runtime attaches egress sidecar or binds policy actions to shared Fastlet profile
+  -> sandbox outbound DNS/network traffic is filtered
+  -> FastSandbox clients update policy via PUT /v1/sandboxes/{sandboxId}/networkpolicy
+  -> container clients resolve the egress endpoint and PATCH /policy
 ```
 
 ### 7.5 Pause, Resume, and Snapshots
@@ -348,11 +375,13 @@ Create request with networkPolicy
 Pause / resume
   -> lifecycle server delegates to runtime provider
   -> Docker pauses/resumes the sandbox container and its egress sidecar when present
-  -> BatchSandbox uses rootfs snapshot commit/recreate for supported single-replica sandboxes
+  -> BatchSandbox uses rootfs commit/recreate or the configured QEMU VM-state restore path
+  -> FastSandbox delegates pause/resume to external FastPath v2 service
 
 Public snapshot API
   -> server persists snapshot metadata
-  -> Docker runtime commits the sandbox to a restorable image
+  -> Docker runtime commits the sandbox to a local OCI image
+  -> Kubernetes runtime (scoped to BatchSandbox) creates a public SandboxSnapshot CR that commits and pushes to an OCI registry
   -> create-from-snapshot resolves that image and starts a new sandbox
 ```
 
@@ -402,6 +431,7 @@ Sandbox state includes `state`, `reason`, `message`, and transition time. `execd
 - [Kubernetes](/kubernetes/)
 - [Pause and Resume](/guides/pause-resume)
 - [Secure Container Runtime Guide](/guides/secure-container)
+- [Credential Vault](/guides/credential-vault)
 - [Network Isolation](/architecture/network-isolation)
 - [CLI](/cli/)
 - [MCP Server](/sdks/mcp)

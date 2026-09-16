@@ -210,14 +210,14 @@ class TestPatchMetadataValidation:
     def test_valid_metadata_accepted(self):
         from opensandbox_server.services.validators import ensure_metadata_labels
 
-        # Should not raise
         ensure_metadata_labels({"team": "platform", "version": "2.0"})
 
     def test_null_values_not_validated(self):
         """Null values (deletions) do not need validation — they are removed before validate."""
-        from opensandbox_server.services.validators import ensure_metadata_labels
+        from opensandbox_server.services.sandbox_service import SandboxService
 
-        # This simulates what happens: null keys are popped before validation
-        metadata = {"team": "valid", "bad-key": None}
-        metadata.pop("bad-key", None)  # null removed
-        ensure_metadata_labels({"team": "valid"})  # only remaining keys validated
+        labels = SandboxService._apply_metadata_patch(
+            {"team": "platform"},
+            {"Invalid Key!": None},
+        )
+        assert labels == {"team": "platform"}

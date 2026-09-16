@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
-from opensandbox_server.api.schema import CreateSandboxResponse, SandboxStatus
+from opensandbox_server.api.schema import CreateSandboxRequest, CreateSandboxResponse, SandboxStatus
 
 
 def test_create_sandbox_openapi_describes_synchronous_provisioning(
@@ -141,6 +141,11 @@ def test_create_sandbox_accepts_snapshot_id_without_entrypoint(
     now = datetime.now(timezone.utc)
     calls: list[object] = []
 
+    async def passthrough_resolve(request):
+        return request
+
+    monkeypatch.setattr(lifecycle, "resolve_sandbox_image_from_request", passthrough_resolve)
+
     class StubService:
         @staticmethod
         async def create_sandbox(request) -> CreateSandboxResponse:
@@ -177,6 +182,11 @@ def test_create_sandbox_accepts_snapshot_id_with_entrypoint(
 ) -> None:
     now = datetime.now(timezone.utc)
     calls: list[object] = []
+
+    async def passthrough_resolve(request):
+        return request
+
+    monkeypatch.setattr(lifecycle, "resolve_sandbox_image_from_request", passthrough_resolve)
 
     class StubService:
         @staticmethod
@@ -234,3 +244,49 @@ def test_delete_sandbox_requires_api_key(client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "MISSING_API_KEY"
+
+
+def test_create_sandbox_pool_only_passes_resolution_untouched(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    calls: list[CreateSandboxRequest] = []
+    resolve_calls: list[CreateSandboxRequest] = []
+
+    async def spy_resolve(request: CreateSandboxRequest):
+        resolve_calls.append(request)
+        return request
+
+    monkeypatch.setattr(lifecycle, "resolve_sandbox_image_from_request", spy_resolve)
+
+    class StubService:
+        @staticmethod
+        async def create_sandbox(request) -> CreateSandboxResponse:
+            calls.append(request)
+            return CreateSandboxResponse(
+                id="sbx-pool",
+                status=SandboxStatus(state="Pending"),
+                metadata=None,
+                expiresAt=now + timedelta(hours=1),
+                createdAt=now,
+                entrypoint=None,
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={
+            "extensions": {"poolRef": "pool-a"},
+            "timeout": 3600,
+        },
+    )
+
+    # Pool-only creates carry no snapshot; resolution must pass them
+    # through to the backend untouched (no 400/404 from the snapshot repo).
+    assert response.status_code == 202, response.text
+    assert len(resolve_calls) == 1
+    assert calls[0].extensions == {"poolRef": "pool-a"}

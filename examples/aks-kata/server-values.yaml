@@ -53,7 +53,6 @@ configToml: |
   informer_enabled = true
   informer_resync_seconds = 300
   informer_watch_timeout_seconds = 60
-  snapshot_create_timeout_seconds = 900
   workload_provider = "batchsandbox"
   image_pull_policy = "IfNotPresent"
   batchsandbox_template_file = "/etc/opensandbox/aks-kata.batchsandbox-template.yaml"

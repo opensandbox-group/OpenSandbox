@@ -48,6 +48,8 @@
 #      Pass-through is skipped when ssl_insecure is enabled, keeping the
 #      explicit insecure-MITM escape hatch working for no-SNI clients.
 #      TCP-layer enforcement (deny/allow rules) still applies to these flows.
+#   5. Owns the authenticated revision receiver only when the Go launcher hands
+#      off a complete per-process internal session. The default remains disabled.
 #
 # User-defined addons can be loaded alongside this script via
 # OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT (comma-separated for multiple scripts).
@@ -60,7 +62,7 @@ import os
 import re
 import socket
 from contextlib import suppress
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import quote, quote_plus, unquote
 
 from mitmproxy import ctx, http
@@ -107,6 +109,14 @@ ACTIVE_VAULT_HEADER_RESERVED_NAMES = {
 _ACTIVE_VAULT_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _ACTIVE_VAULT_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+_REVISION_RUNTIME_ERROR = "credential proxy: invalid revision runtime configuration"
+_REVISION_ENV = {
+    "socket": "OPENSANDBOX_EGRESS_REVISION_IPC_SOCKET",
+    "token": "OPENSANDBOX_EGRESS_REVISION_IPC_TOKEN",
+    "control": "OPENSANDBOX_EGRESS_REVISION_CONTROL_GENERATION",
+    "subject": "OPENSANDBOX_EGRESS_REVISION_SUBJECT_GENERATION",
+    "limit": "OPENSANDBOX_EGRESS_REVISION_MAX_SNAPSHOT_BYTES",
+}
 
 
 class ActiveVault:
@@ -128,6 +138,8 @@ class ActiveVaultLookupError(Exception):
 
 
 _vault_cache: ActiveVault | None = None
+_revision_receiver: Any | None = None
+_revision_server: Any | None = None
 
 # Operator-only diagnostics; no public interception mode is enabled here.
 _tls_shadow_enabled = os.environ.get(
@@ -158,6 +170,95 @@ def _set_fast_sandbox_mode_from_env() -> None:
 
 
 _set_fast_sandbox_mode_from_env()
+
+
+def _fatal_revision_runtime() -> NoReturn:
+    # mitmproxy 11 loads -s scripts in a reload watcher. Generic exceptions are
+    # swallowed and OptionsError only stops that watcher, so SystemExit is the
+    # process-level fence that prevents a listener without the system addon.
+    raise SystemExit(_REVISION_RUNTIME_ERROR) from None
+
+
+def _revision_configuration() -> tuple[str, str, str, str, int] | None:
+    present = {key for key, name in _REVISION_ENV.items() if name in os.environ}
+    if not present:
+        return None
+    if present != set(_REVISION_ENV):
+        _fatal_revision_runtime()
+    values = {key: os.environ[name] for key, name in _REVISION_ENV.items()}
+    limit_text = values["limit"]
+    if (
+        any(not value for value in values.values())
+        or not limit_text.isascii()
+        or not limit_text.isdecimal()
+    ):
+        _fatal_revision_runtime()
+    try:
+        limit = int(limit_text)
+    except ValueError:
+        _fatal_revision_runtime()
+    if limit <= 0 or limit >= 2**63 or str(limit) != limit_text:
+        _fatal_revision_runtime()
+    return (
+        values["socket"],
+        values["token"],
+        values["control"],
+        values["subject"],
+        limit,
+    )
+
+
+def load(_loader: Any) -> None:
+    """Start one generation-fenced receiver when the launcher enables it."""
+    global _revision_receiver, _revision_server
+    if _revision_receiver is not None or _revision_server is not None:
+        _fatal_revision_runtime()
+    configuration = _revision_configuration()
+    if configuration is None:
+        return
+    socket_path, token, control, subject, limit = configuration
+    receiver = server = None
+    try:
+        from decision_snapshot import validate
+        from revision_ipc import Receiver, Server
+
+        receiver = Receiver(
+            control,
+            subject,
+            validate,
+            max_snapshot_bytes=limit,
+        )
+        server = Server(
+            receiver,
+            socket_path,
+            token,
+            max_snapshot_bytes=limit,
+            request_timeout=1,
+        )
+        server.start()
+    except Exception:  # noqa: BLE001 - configuration may contain credentials
+        if server is not None:
+            with suppress(Exception):
+                server.close()
+        elif receiver is not None:
+            with suppress(Exception):
+                receiver.close()
+        _fatal_revision_runtime()
+    _revision_receiver = receiver
+    _revision_server = server
+
+
+def done() -> None:
+    """Fence the receiver and remove only its owned socket during addon exit."""
+    global _revision_receiver, _revision_server
+    server = _revision_server
+    _revision_receiver = None
+    _revision_server = None
+    if server is not None:
+        try:
+            server.close()
+        except Exception:  # noqa: BLE001 - never expose session-bearing details
+            ctx.log.warn("credential proxy: revision runtime cleanup failed")
 
 
 class UnixSocketHTTPConnection(http_client.HTTPConnection):

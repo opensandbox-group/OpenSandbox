@@ -95,22 +95,18 @@ func TestCredentialStartHint(t *testing.T) {
 	cred := &syscall.Credential{Uid: 1000, Gid: 1000}
 	permErr := &os.PathError{Op: "fork/exec", Path: "/usr/bin/bash", Err: syscall.EPERM}
 
-	// EPERM with a credential switch in play: annotate with the missing grant.
 	hinted := credentialStartHint(permErr, cred)
 	require.ErrorIs(t, hinted, os.ErrPermission)
 	assert.Contains(t, hinted.Error(), "CAP_SETUID")
 	assert.Contains(t, hinted.Error(), "drop_capabilities")
 	assert.Contains(t, hinted.Error(), "uid=1000")
 
-	// EPERM without a credential switch: keep the raw error.
 	same := credentialStartHint(permErr, nil)
 	assert.Equal(t, permErr, same)
 
-	// Non-permission errors are not annotated.
 	otherErr := &os.PathError{Op: "fork/exec", Path: "/usr/bin/bash", Err: syscall.ENOENT}
 	assert.Equal(t, otherErr, credentialStartHint(otherErr, cred))
 
-	// nil error stays nil-safe via passthrough.
 	assert.NoError(t, credentialStartHint(nil, cred))
 	assert.True(t, errors.Is(hinted, syscall.EPERM))
 }

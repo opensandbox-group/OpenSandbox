@@ -97,7 +97,6 @@ func TestWorkspaceOverlay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Read original + write new file in single command via overlay.
 	newFile := filepath.Join(wsDir, "upper-only.txt")
 	var lines []string
 	err = r.RunInIsolatedSession(ctx, id,

@@ -65,7 +65,10 @@ def test_snapshot_record_supports_ready_restore_config() -> None:
 def test_snapshot_restore_config_serialization_ignores_unknown_fields() -> None:
     config = SnapshotRestoreConfig(image="registry.example.com/snapshots/snap-003:latest")
 
-    assert config.to_dict() == {"image": "registry.example.com/snapshots/snap-003:latest"}
+    assert config.to_dict() == {
+        "image": "registry.example.com/snapshots/snap-003:latest",
+        "backend": None,
+    }
     assert (
         SnapshotRestoreConfig.from_dict(
             {

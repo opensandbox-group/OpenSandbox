@@ -159,8 +159,7 @@ class TestBatchSandboxProvider:
         )
         
         assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
-        # Verify API call
+
         call_args = mock_k8s_client.create_custom_object.call_args
         body = call_args.kwargs["body"]
 
@@ -552,7 +551,6 @@ spec:
         env_dict = {e["name"]: e["value"] for e in env_vars}
         assert env_dict["FOO"] == "bar"
         assert env_dict["BAZ"] == "qux"
-        # Verify EXECD is automatically injected
         assert env_dict["EXECD"] == "/opt/opensandbox/execd"
 
     def test_create_workload_merges_template_volumes_and_mounts(self, mock_k8s_client, tmp_path):
@@ -1032,19 +1030,9 @@ spec:
             mock_k8s_client.get_custom_object.call_args_list[1].kwargs["name"] == "sandbox-test-id"
         )
 
-    def test_get_workload_handles_404_gracefully(self, mock_k8s_client):
-        provider = BatchSandboxProvider(mock_k8s_client)
-
-        mock_k8s_client.get_custom_object.return_value = None
-
-        result = provider.get_workload("test-id", "test-ns")
-
-        assert result is None
-
     def test_get_workload_reraises_non_404_exceptions(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
 
-        # Mock 500 exception
         error = ApiException(status=500)
         mock_k8s_client.get_custom_object.side_effect = error
 
@@ -1053,7 +1041,7 @@ spec:
 
         assert exc_info.value.status == 500
 
-    def test_get_workload_prefers_informer_cache(self, mock_k8s_client):
+    def test_get_workload_returns_object_from_client(self, mock_k8s_client):
         cached = {"metadata": {"name": "test-id"}}
         mock_k8s_client.get_custom_object.return_value = cached
 
@@ -1183,7 +1171,6 @@ spec:
         provider = BatchSandboxProvider(MagicMock())
         workload = {"spec": {"expireTime": "invalid-date"}}
 
-        # Should return None and not raise exception
         result = provider.get_expiration(workload)
 
         assert result is None
@@ -1596,10 +1583,8 @@ spec:
             extensions={"poolRef": "my-pool"},
         )
 
-        # Should succeed and return workload info
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
-        # Verify poolRef is used
+
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
 
@@ -1628,10 +1613,8 @@ spec:
             extensions={"poolRef": "my-pool"},
         )
 
-        # Should succeed and return workload info
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
-        # Verify poolRef is used
+
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
 
@@ -1682,13 +1665,11 @@ spec:
         )
         
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
-        # Verify the call
+
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
         assert "taskTemplate" in body["spec"]
 
-        # Verify taskTemplate structure
         task_template = body["spec"]["taskTemplate"]
         assert "spec" in task_template
         assert "process" in task_template["spec"]
@@ -1760,14 +1741,12 @@ spec:
         assert "process" in result["spec"]
         process_task = result["spec"]["process"]
 
-        # Verify command structure
         command = process_task["command"]
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
         assert command[2] == "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
         assert not command[2].endswith(" &")
 
-        # Verify env list
         assert process_task["env"] == [
             {"name": "KEY1", "value": "value1"},
             {"name": "KEY2", "value": "value2"},
@@ -1816,21 +1795,12 @@ spec:
         assert "process" in result["spec"]
         process_task = result["spec"]["process"]
         assert process_task["env"] == [{"name": "OPENSANDBOX_ID", "value": "bs-1"}]
-        # Without env, command directly calls bootstrap.sh in background
         command = process_task["command"]
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
-        # Check escaped entrypoint
         assert command[2] == "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
 
     def test_build_task_template_uses_default_env_path(self, mock_k8s_client):
-        """
-        Test that taskTemplate executes bootstrap.sh properly.
-
-        Verifies:
-        - Entrypoint is properly escaped
-        - Command runs in background
-        """
         provider = BatchSandboxProvider(mock_k8s_client)
 
         result = provider._build_task_template(
@@ -1858,11 +1828,9 @@ spec:
 
         command = result["spec"]["process"]["command"][2]
 
-        # Verify entrypoint args are properly escaped
         assert "python" in command
         assert "-c" in command
-        # The python code with spaces and quotes should be properly escaped
-        assert "'print(" in command or '"print(' in command  # Escaped
+        assert "'print(" in command or '"print(' in command
 
         # Verify env is passed through env list, not in command
         env_list = result["spec"]["process"]["env"]
@@ -1900,19 +1868,16 @@ spec:
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
 
-        # Verify basic structure
         assert body["apiVersion"] == "sandbox.opensandbox.io/v1alpha1"
         assert body["kind"] == "BatchSandbox"
         assert body["metadata"]["name"] == "test-id"
         assert body["metadata"]["labels"] == {"test": "label"}
 
-        # Verify pool-specific fields
         assert body["spec"]["replicas"] == 1
         assert body["spec"]["poolRef"] == "test-pool"
         assert body["spec"]["expireTime"] == "2025-12-31T10:00:00+00:00"
         assert "taskTemplate" in body["spec"]
 
-        # Verify no template field (pool-based doesn't use template)
         assert "template" not in body["spec"]
 
     def test_create_workload_poolref_default_entrypoint_no_env_includes_task_template(
@@ -2042,7 +2007,6 @@ class TestBatchSandboxProviderEgress:
         pod_spec = body["spec"]["template"]["spec"]
         containers = pod_spec["containers"]
 
-        # Should only have main container
         assert len(containers) == 1
         assert containers[0]["name"] == "sandbox"
         # Should not have securityContext with sysctls
@@ -2082,15 +2046,12 @@ class TestBatchSandboxProviderEgress:
         pod_spec = body["spec"]["template"]["spec"]
         containers = pod_spec["containers"]
 
-        # Should have both main container and sidecar
         assert len(containers) == 2
 
-        # Find sidecar container
         sidecar = next((c for c in containers if c["name"] == "egress"), None)
         assert sidecar is not None
         assert sidecar["image"] == "opensandbox/egress:v1.1.7"
 
-        # Verify sidecar has environment variable
         env_vars = {e["name"]: e["value"] for e in sidecar.get("env", [])}
         assert "OPENSANDBOX_EGRESS_RULES" in env_vars
         assert env_vars["OPENSANDBOX_EGRESS_MODE"] == EGRESS_MODE_DNS
@@ -2346,11 +2307,9 @@ class TestBatchSandboxProviderEgress:
         pod_spec = body["spec"]["template"]["spec"]
         containers = pod_spec["containers"]
 
-        # Find main container
         main_container = next((c for c in containers if c["name"] == "sandbox"), None)
         assert main_container is not None
 
-        # Verify main container has securityContext
         assert "securityContext" in main_container
         assert "capabilities" in main_container["securityContext"]
         assert "drop" in main_container["securityContext"]["capabilities"]
@@ -2394,7 +2353,6 @@ class TestBatchSandboxProviderEgress:
         env_vars = {e["name"]: e["value"] for e in sidecar.get("env", [])}
         assert "OPENSANDBOX_EGRESS_RULES" in env_vars
 
-        # Verify the environment variable contains valid JSON with network policy
         import json
 
         policy_json = json.loads(env_vars["OPENSANDBOX_EGRESS_RULES"])
@@ -2428,7 +2386,6 @@ class TestBatchSandboxProviderEgress:
         containers = pod_spec["containers"]
 
         main_container = containers[0]
-        # Main container should not have securityContext when no network policy
         assert "securityContext" not in main_container
 
     def test_create_workload_with_network_policy_works_with_template(
@@ -2475,10 +2432,8 @@ spec:
         pod_spec = body["spec"]["template"]["spec"]
         containers = pod_spec["containers"]
 
-        # Should have both main container and sidecar
         assert len(containers) == 2
 
-        # Verify sidecar exists
         sidecar = next((c for c in containers if c["name"] == "egress"), None)
         assert sidecar is not None
 
@@ -2487,7 +2442,6 @@ spec:
             "securityContext", {}
         )
 
-        # Verify template volumes are still merged
         volume_names = [v["name"] for v in pod_spec["volumes"]]
         assert "sandbox-shared-data" in volume_names
         assert "opensandbox-bin" in volume_names
@@ -2917,14 +2871,6 @@ spec:
     # ===== Volume Support Tests =====
 
     def test_create_workload_with_pvc_volume(self, mock_k8s_client):
-        """
-        Test creating workload with PVC volume mount.
-
-        Verifies:
-        - PVC volume is correctly added to pod spec
-        - Volume mount is added to main container
-        - claimName is correctly set
-        """
         from opensandbox_server.api.schema import Volume, PVC
 
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -2979,9 +2925,6 @@ spec:
             )
 
     def test_create_workload_with_pvc_volume_readonly(self, mock_k8s_client):
-        """
-        Test creating workload with read-only PVC volume mount.
-        """
         from opensandbox_server.api.schema import Volume, PVC
 
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -3024,9 +2967,6 @@ spec:
         assert models_volume["persistentVolumeClaim"]["readOnly"] is True
 
     def test_create_workload_with_pvc_volume_subpath(self, mock_k8s_client):
-        """
-        Test creating workload with PVC volume mount with subPath.
-        """
         from opensandbox_server.api.schema import Volume, PVC
 
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -3067,9 +3007,6 @@ spec:
         assert data_mount.get("subPath") == "task-001"
 
     def test_create_workload_with_host_volume(self, mock_k8s_client):
-        """
-        Test creating workload with hostPath volume mount.
-        """
         from opensandbox_server.api.schema import Volume, Host
 
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -3102,14 +3039,12 @@ spec:
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         pod_spec = body["spec"]["template"]["spec"]
 
-        # Check volume definition
         volumes_list = pod_spec.get("volumes", [])
         host_volume = next((v for v in volumes_list if v["name"] == "host-volume"), None)
         assert host_volume is not None
         assert host_volume["hostPath"]["path"] == "/data/shared"
         assert host_volume["hostPath"]["type"] == "DirectoryOrCreate"
 
-        # Check volume mount
         main_container = pod_spec["containers"][0]
         mounts = main_container.get("volumeMounts", [])
         host_mount = next((m for m in mounts if m["name"] == "host-volume"), None)
@@ -3118,9 +3053,6 @@ spec:
         assert host_mount["readOnly"] is True
 
     def test_create_workload_with_multiple_volumes(self, mock_k8s_client):
-        """
-        Test creating workload with multiple volumes (PVC and hostPath).
-        """
         from opensandbox_server.api.schema import Volume, PVC, Host
 
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -3159,11 +3091,9 @@ spec:
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         pod_spec = body["spec"]["template"]["spec"]
 
-        # Check both volumes exist
         volumes_list = pod_spec.get("volumes", [])
         assert len([v for v in volumes_list if v["name"] in ("pvc-volume", "host-volume")]) == 2
 
-        # Check both mounts exist
         main_container = pod_spec["containers"][0]
         mounts = main_container.get("volumeMounts", [])
         mount_names = {m["name"] for m in mounts}
@@ -3171,9 +3101,6 @@ spec:
         assert "host-volume" in mount_names
 
     def test_create_workload_pool_mode_rejects_volumes(self, mock_k8s_client):
-        """
-        Test that pool mode rejects volumes with clear error message.
-        """
         from opensandbox_server.api.schema import Volume, PVC
 
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -3202,9 +3129,6 @@ spec:
             )
 
     def test_apply_volumes_to_pod_spec_empty_volumes(self, mock_k8s_client):
-        """
-        Test apply_volumes_to_pod_spec with empty volumes list.
-        """
         pod_spec = {
             "containers": [{"name": "main", "volumeMounts": []}],
             "volumes": [],
@@ -3212,29 +3136,21 @@ spec:
 
         apply_volumes_to_pod_spec(pod_spec, [])
 
-        # Should not modify pod_spec
         assert pod_spec["volumes"] == []
         assert pod_spec["containers"][0]["volumeMounts"] == []
 
     def test_apply_volumes_to_pod_spec_no_containers(self, mock_k8s_client):
-        """
-        Test apply_volumes_to_pod_spec with no containers returns early without error.
-        """
         from opensandbox_server.api.schema import Volume, PVC
 
         pod_spec = {"volumes": []}
         volumes = [Volume(name="test", pvc=PVC(claim_name="pvc"), mount_path="/mnt")]
 
-        # Should not raise exception
         apply_volumes_to_pod_spec(pod_spec, volumes)
 
         # Pod spec should remain unchanged (no containers to mount to)
         assert pod_spec["volumes"] == []
 
     def test_apply_volumes_to_pod_spec_duplicate_internal_volume(self, mock_k8s_client):
-        """
-        Test apply_volumes_to_pod_spec rejects volume names that collide with internal volumes.
-        """
         from opensandbox_server.api.schema import Volume, PVC
 
         pod_spec = {
@@ -3243,7 +3159,6 @@ spec:
         }
         volumes = [Volume(name="opensandbox-bin", pvc=PVC(claim_name="pvc"), mount_path="/mnt")]
 
-        # Should raise ValueError for duplicate volume name
         with pytest.raises(ValueError) as exc_info:
             apply_volumes_to_pod_spec(pod_spec, volumes)
 
@@ -3288,7 +3203,6 @@ spec:
         assert shared_volume["persistentVolumeClaim"]["claimName"] == "oss-pvc-r"
         assert shared_volume["persistentVolumeClaim"]["readOnly"] is True
 
-        # Two volumeMounts, both referencing the same volume name
         mounts = pod_spec["containers"][0]["volumeMounts"]
         assert len(mounts) == 2
         by_path = {m["mountPath"]: m for m in mounts}

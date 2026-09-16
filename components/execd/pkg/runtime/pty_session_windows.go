@@ -52,7 +52,6 @@ type PTYSession interface {
 
 var errPTYSessionNotSupported = errors.New("pty session is not supported on windows")
 
-// IsPTYSessionSupported reports whether PTY sessions are supported on this platform.
 func IsPTYSessionSupported() bool { return false }
 
 // NewPTYSessionID returns a new unique session ID (Windows stub).

@@ -42,24 +42,38 @@ creation fails closed when the gate is absent or untrusted.
 
 ```
 execd/
-├── main.go                 # Entry point
+├── main.go                 # Entry point (startup order, HTTP server, shutdown)
 ├── Makefile                # Build automation
 ├── Dockerfile              # Container image
+├── bootstrap.sh            # Container entrypoint (binary selection, init mode)
+├── configs/                # Example isolation config TOMLs
+├── native/                 # C sources for Linux helpers (session gate, launcher)
 ├── pkg/
-│   ├── flag/               # CLI flag parsing
+│   ├── flag/               # CLI flag parsing (env first, flag overrides)
+│   ├── log/                # Structured logger wrapper + command/token sanitization
 │   ├── web/
 │   │   ├── router.go       # Gin route registration
+│   │   ├── proxy.go        # Port proxying to sandbox processes
 │   │   ├── controller/     # Request handlers
 │   │   └── model/          # API request/response models
 │   ├── runtime/            # Execution engine
 │   │   ├── ctrl.go         # Main controller
 │   │   ├── jupyter.go      # Jupyter kernel execution
 │   │   ├── command.go      # Shell command execution
-│   │   └── bash_session.go # Pipe-based bash sessions
+│   │   ├── bash_session.go # Pipe-based bash sessions
+│   │   ├── pty_session.go  # PTY sessions
+│   │   ├── isolated_*.go   # Isolated sessions (bwrap, idle GC, background runs)
+│   │   ├── initmode_*.go   # Init mode (PID 1 duties: reap, forward signals)
+│   │   └── hardening_*.go  # Pre-exec hardening floor (OSEP-0018)
 │   ├── jupyter/            # Jupyter HTTP/WebSocket client
+│   ├── isolation/          # bwrap isolator, capability probe, upper-dir GC
+│   ├── lifecycle/          # preStart and periodic hooks
+│   ├── sessionresource/    # Session namespace pin management
+│   ├── vfs/                # Virtual FS interface for file handlers
+│   ├── ebpf/               # eBPF observation layer (execd-ebpf variant)
 │   ├── telemetry/          # OTLP metrics
 │   ├── clone3compat/       # Linux clone3 seccomp workaround
-│   └── log/                # Structured logger wrapper
+│   └── util/               # path/glob helpers
 └── tests/                  # Integration test scripts
 ```
 

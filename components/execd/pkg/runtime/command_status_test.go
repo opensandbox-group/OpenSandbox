@@ -132,7 +132,6 @@ func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
 	require.Empty(t, output)
 	require.Equal(t, int64(5), cursor, "cursor should be clamped to the current end of the log")
 
-	// New output written after the overshooting poll must still be readable.
 	require.NoError(t, os.WriteFile(stdoutPath, []byte("hello world"), 0o644))
 	output, cursor, err = c.SeekBackgroundCommandOutput(session, cursor)
 	require.NoError(t, err)
@@ -174,7 +173,6 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 		Hooks: ExecuteResultHook{
 			OnExecuteInit:     func(id string) { session = id },
 			OnExecuteComplete: func(executionTime time.Duration) {},
-			// other hooks unused in this test
 		},
 	}
 
@@ -200,7 +198,6 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 	require.Equal(t, expected, string(output))
 	require.GreaterOrEqual(t, cursor, int64(len(expected)), "cursor should advance to end of file")
 
-	// incremental seek from current cursor should return empty data and same-or-higher cursor
 	output2, cursor2, err := c.SeekBackgroundCommandOutput(session, cursor)
 	require.NoError(t, err, "SeekBackgroundCommandOutput (second call) error")
 	require.Empty(t, output2, "expected no new output")

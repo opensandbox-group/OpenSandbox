@@ -130,7 +130,6 @@ func TestSessionState_JSONRoundtrip(t *testing.T) {
 		}
 	}
 
-	// Round-trip: unmarshalling produces identical structure.
 	var back SessionState
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatal(err)

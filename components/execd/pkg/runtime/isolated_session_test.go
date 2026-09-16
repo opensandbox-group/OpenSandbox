@@ -258,7 +258,6 @@ func TestCreateIsolatedSession_HappyPath(t *testing.T) {
 		t.Error("expected non-empty session ID")
 	}
 
-	// Verify session is tracked.
 	s := runner.lookup(id)
 	if s == nil {
 		t.Fatal("session not found after create")
@@ -267,7 +266,6 @@ func TestCreateIsolatedSession_HappyPath(t *testing.T) {
 		t.Errorf("profile = %q, want strict", s.opts.Profile)
 	}
 
-	// Clean up.
 	if err := runner.DeleteIsolatedSession(id); err != nil {
 		t.Errorf("DeleteIsolatedSession: %v", err)
 	}
@@ -407,10 +405,8 @@ func TestGetIsolatedSession_ReturnsCreationParams(t *testing.T) {
 func TestGetIsolatedSession_EchoesEffectiveDefaults(t *testing.T) {
 	runner := newTestRunner(t)
 
-	// Bare-minimum create request: only workspace path is required.
 	opts := &IsolatedSessionOptions{
 		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
-		// Profile / WorkspaceMode / EnvPassthroughMode / UidMode all omitted.
 	}
 
 	id, err := runner.CreateIsolatedSession(opts)
@@ -424,7 +420,6 @@ func TestGetIsolatedSession_EchoesEffectiveDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Each of these must be the effective value, not "".
 	if state.Profile != "strict" {
 		t.Errorf("Profile = %q, want strict (execd default)", state.Profile)
 	}
@@ -453,9 +448,7 @@ func TestNormalize_EnvPassthroughEmptyModeDropsKeys(t *testing.T) {
 	runner := newTestRunner(t)
 
 	opts := &IsolatedSessionOptions{
-		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
-		// mode omitted, but caller supplied keys — must be dropped
-		// so the built-in secret blacklist is not silently bypassed.
+		WorkspacePath:      filepath.Join(t.TempDir(), "ws"),
 		EnvPassthroughMode: "",
 		EnvPassthroughKeys: []string{"USER_TOKEN", "AWS_SECRET_ACCESS_KEY"},
 	}
@@ -478,7 +471,6 @@ func TestNormalize_EnvPassthroughEmptyModeDropsKeys(t *testing.T) {
 		t.Errorf("EnvPassthroughKeys should be dropped when mode was omitted, got %v", state.EnvPassthroughKeys)
 	}
 
-	// Caller-supplied keys are preserved when mode is explicit.
 	opts2 := &IsolatedSessionOptions{
 		WorkspacePath:      filepath.Join(t.TempDir(), "ws2"),
 		EnvPassthroughMode: "deny",
@@ -527,7 +519,6 @@ func TestDeleteIsolatedSession_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify removed.
 	if s := runner.lookup(id); s != nil {
 		t.Error("session should be removed after delete")
 	}
@@ -551,13 +542,11 @@ func TestRunInIsolatedSession_HappyPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// echo should succeed (exit 0).
 	err = runner.RunInIsolatedSession(ctx, id, "echo hello", nil, nil)
 	if err != nil {
 		t.Errorf("RunInIsolatedSession: %v", err)
 	}
 
-	// Verify lastRunAt was updated.
 	s := runner.lookup(id)
 	if s == nil {
 		t.Fatal("session disappeared")
@@ -713,13 +702,11 @@ func TestRunInIsolatedSession_EnvPersistence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Run 1: set env var in the shell session.
 	err = runner.RunInIsolatedSession(ctx, id, "export MY_VAR=hello_from_session", nil, nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
 
-	// Run 2: echo the env var to verify persistence.
 	var lines []string
 	onStdout := func(line string) {
 		lines = append(lines, line)
@@ -757,11 +744,9 @@ func TestRunInIsolatedSession_ConcurrentSessions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Set different env vars in each session.
 	runner.RunInIsolatedSession(ctx, id1, "export SESSION=one", nil, nil)
 	runner.RunInIsolatedSession(ctx, id2, "export SESSION=two", nil, nil)
 
-	// Read back — each session should have its own value.
 	var out1, out2 []string
 	runner.RunInIsolatedSession(ctx, id1, "echo $SESSION", nil, func(l string) { out1 = append(out1, l) })
 	runner.RunInIsolatedSession(ctx, id2, "echo $SESSION", nil, func(l string) { out2 = append(out2, l) })
@@ -781,7 +766,6 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 	allowed := t.TempDir()
 	outside := t.TempDir()
 
-	// allowed/link -> outside (a directory outside the allowlist).
 	link := filepath.Join(allowed, "link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
@@ -789,7 +773,6 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 
 	r := &IsolatedRunner{allowedWritable: []string{allowed}}
 
-	// A direct path under the allowlist is fine.
 	if err := r.validateBinds([]isolation.BindMount{{Source: allowed}}); err != nil {
 		t.Errorf("direct allowlisted source should be accepted: %v", err)
 	}

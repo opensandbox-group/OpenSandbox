@@ -38,12 +38,6 @@ logger = logging.getLogger(__name__)
 
 
 def ensure_entrypoint(entrypoint: Sequence[str]) -> None:
-    """
-    Ensure a sandbox entrypoint is provided.
-
-    Raises:
-        HTTPException: When entrypoint is empty.
-    """
     if not entrypoint:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -140,12 +134,6 @@ def ensure_future_expiration(expires_at: datetime) -> datetime:
     """
     Validate and normalize expiration timestamps to UTC.
 
-    Args:
-        expires_at: Requested expiration time (timezone aware or naive).
-
-    Returns:
-        datetime: Normalized UTC expiration timestamp.
-
     Raises:
         HTTPException: If the timestamp is not in the future.
     """
@@ -167,12 +155,6 @@ def ensure_future_expiration(expires_at: datetime) -> datetime:
 
 
 def ensure_valid_port(port: int) -> None:
-    """
-    Validate that a port falls within the 1-65535 range.
-
-    Raises:
-        HTTPException: When the port is out of range.
-    """
     if port < 1 or port > 65535:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -290,9 +272,6 @@ def ensure_valid_volume_name(name: str) -> None:
     """
     Validate that a volume name is a valid DNS label.
 
-    Args:
-        name: Volume name to validate.
-
     Raises:
         HTTPException: When the name is invalid.
     """
@@ -326,9 +305,6 @@ def ensure_valid_mount_path(mount_path: str) -> None:
     """
     Validate that a mount path is an absolute path.
 
-    Args:
-        mount_path: Mount path to validate.
-
     Raises:
         HTTPException: When the path is not absolute.
     """
@@ -354,9 +330,6 @@ def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
     """
     Validate that a subPath does not contain path traversal or is absolute.
 
-    Args:
-        sub_path: SubPath to validate (optional).
-
     Raises:
         HTTPException: When the subPath is invalid.
     """
@@ -367,7 +340,6 @@ def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
         # Empty string is valid (no subpath)
         return
 
-    # Check for absolute path
     if sub_path.startswith("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -377,8 +349,6 @@ def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
             },
         )
 
-    # Check for path traversal
-    # Normalize and check each component
     parts = sub_path.split("/")
     for part in parts:
         if part == "..":
@@ -397,10 +367,6 @@ def ensure_valid_host_path(
 ) -> None:
     """
     Validate that a host path is absolute and optionally within allowed prefixes.
-
-    Args:
-        path: Host path to validate.
-        allowed_prefixes: Optional list of allowed path prefixes.
 
     Raises:
         HTTPException: When the path is invalid or not allowed.
@@ -433,7 +399,6 @@ def ensure_valid_host_path(
     _windows_drive_match = re.match(r"^[A-Za-z]:/", _path_fwd)
     _tail_fwd = _path_fwd[2:] if _windows_drive_match else _path_fwd
 
-    # Reject path traversal components
     if "/.." in _tail_fwd or _tail_fwd == "/..":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -443,7 +408,6 @@ def ensure_valid_host_path(
             },
         )
 
-    # Reject non-normalized paths (double slashes, trailing slashes except root)
     if "//" in _tail_fwd or (len(_tail_fwd) > 1 and _tail_fwd.endswith("/")):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -453,7 +417,6 @@ def ensure_valid_host_path(
             },
         )
 
-    # Check against allowed prefixes if provided
     if allowed_prefixes is not None:
         # Normalize separators for cross-platform prefix checks so Windows-style
         # paths can be validated consistently even when server runs on Unix.
@@ -476,9 +439,6 @@ def ensure_valid_host_path(
 def ensure_valid_pvc_name(claim_name: str) -> None:
     """
     Validate that a PVC claim name is a valid Kubernetes resource name.
-
-    Args:
-        claim_name: PVC claim name to validate.
 
     Raises:
         HTTPException: When the claim name is invalid.
@@ -510,15 +470,6 @@ def ensure_valid_pvc_name(claim_name: str) -> None:
 
 
 def ensure_valid_ossfs_volume(ossfs: "OSSFS") -> None:
-    """
-    Validate OSSFS backend fields.
-
-    Args:
-        ossfs: OSSFS backend model.
-
-    Raises:
-        HTTPException: When any OSSFS field is invalid.
-    """
     if not isinstance(ossfs.bucket, str) or not ossfs.bucket.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -579,13 +530,9 @@ def ensure_egress_configured(
 ) -> None:
     """
     Validate that egress.image is configured when network policy is provided.
-    
+
     This is a common validation shared by Docker and Kubernetes runtimes.
-    
-    Args:
-        network_policy: Optional network policy from the request.
-        egress_config: Optional egress configuration from app config.
-    
+
     Raises:
         HTTPException: When network_policy is provided but egress.image is not configured.
     """
@@ -629,10 +576,9 @@ def ensure_credential_proxy_configured(
     )
     if default_action != "deny":
         logger.warning(
-            "credentialProxy.enabled with networkPolicy.defaultAction=%s is allowed for backward "
-            "compatibility but is deprecated and may allow credential destination bypass; "
-            "use defaultAction=deny",
-            default_action,
+            f"credentialProxy.enabled with networkPolicy.defaultAction={default_action} "
+            "is allowed for backward compatibility but is deprecated and may "
+            "allow credential destination bypass; use defaultAction=deny"
         )
 
 
@@ -680,24 +626,12 @@ def ensure_volumes_valid(
     """
     Validate a list of volume definitions.
 
-    This function performs comprehensive validation:
-    - Unique volume names
-    - Exactly one backend per volume
-    - Valid mount paths
-    - Valid subPaths
-    - Backend-specific validation (host path, pvc name, ossfs config)
-
-    Args:
-        volumes: List of volumes to validate (optional).
-        allowed_host_prefixes: Optional list of allowed host path prefixes.
-
     Raises:
         HTTPException: When any validation fails.
     """
     if volumes is None or len(volumes) == 0:
         return
 
-    # Check for duplicate volume names
     seen_names: set[str] = set()
     for volume in volumes:
         if volume.name in seen_names:
@@ -710,16 +644,10 @@ def ensure_volumes_valid(
             )
         seen_names.add(volume.name)
 
-        # Validate volume name
         ensure_valid_volume_name(volume.name)
-
-        # Validate mount path
         ensure_valid_mount_path(volume.mount_path)
-
-        # Validate subPath
         ensure_valid_sub_path(volume.sub_path)
 
-        # Count specified backends
         backends_specified = sum([
             volume.host is not None,
             volume.pvc is not None,
@@ -750,7 +678,6 @@ def ensure_volumes_valid(
                 },
             )
 
-        # Backend-specific validation
         if volume.host is not None:
             ensure_valid_host_path(volume.host.path, allowed_host_prefixes)
 

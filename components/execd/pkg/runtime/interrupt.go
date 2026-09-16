@@ -31,7 +31,7 @@ func (c *Controller) Interrupt(sessionID string) error {
 	switch {
 	case c.getJupyterKernel(sessionID) != nil:
 		kernel := c.getJupyterKernel(sessionID)
-		log.Warn("Interrupting Jupyter kernel %s", kernel.kernelID)
+		log.Warn("jupyter: interrupt kernel %s", kernel.kernelID)
 		return kernel.client.InterruptKernel(kernel.kernelID)
 	case c.getCommandKernel(sessionID) != nil:
 		// Snapshot under c.mu so running/pid are observed consistently with
@@ -67,14 +67,14 @@ func (c *Controller) killPid(pid int) error {
 	if pid <= 0 {
 		return fmt.Errorf("invalid pid %d", pid)
 	}
-	log.Warn("Attempting to terminate process group %d", pid)
+	log.Warn("interrupt: terminating process group %d", pid)
 
 	sigtermDelivered := false
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
-		log.Warn("SIGTERM failed for pgroup %d: %v, trying SIGKILL", pid, err)
+		log.Warn("interrupt: SIGTERM process group %d: %v; escalating to SIGKILL", pid, err)
 	} else {
 		sigtermDelivered = true
 		// Probe the group for liveness. os.Process.Wait() doesn't apply
@@ -83,13 +83,13 @@ func (c *Controller) killPid(pid int) error {
 		for time.Now().Before(deadline) {
 			if err := syscall.Kill(-pid, 0); err != nil {
 				if errors.Is(err, syscall.ESRCH) {
-					log.Info("Process group %d terminated gracefully", pid)
+					log.Info("interrupt: process group %d terminated gracefully", pid)
 					return nil
 				}
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		log.Warn("Process group %d did not exit after SIGTERM, escalating to SIGKILL", pid)
+		log.Warn("interrupt: process group %d did not exit after SIGTERM; escalating to SIGKILL", pid)
 	}
 
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
@@ -102,7 +102,7 @@ func (c *Controller) killPid(pid int) error {
 			// a group reduced to zombies — the kernel will reap them once
 			// the parent runs Wait(). Surface as a warning rather than a
 			// hard error.
-			log.Warn("SIGKILL on pgroup %d failed: %v; teardown likely already in progress", pid, err)
+			log.Warn("interrupt: SIGKILL process group %d: %v; teardown likely already in progress", pid, err)
 			return nil
 		}
 		return fmt.Errorf("failed to kill process group %d: %w", pid, err)
@@ -111,12 +111,12 @@ func (c *Controller) killPid(pid int) error {
 	for range 3 {
 		if err := syscall.Kill(-pid, 0); err != nil {
 			if errors.Is(err, syscall.ESRCH) {
-				log.Info("Process group %d confirmed terminated", pid)
+				log.Info("interrupt: process group %d confirmed terminated", pid)
 				return nil
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	log.Warn("Process group %d still observable after SIGKILL; teardown may complete asynchronously", pid)
+	log.Warn("interrupt: process group %d still observable after SIGKILL; teardown may complete asynchronously", pid)
 	return nil
 }

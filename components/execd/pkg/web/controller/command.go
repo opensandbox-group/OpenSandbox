@@ -29,7 +29,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// RunCommand executes a shell command and streams the output via SSE.
 func (c *CodeInterpretingController) RunCommand() {
 	var request model.RunCommandRequest
 	if err := c.bindJSON(&request); err != nil {
@@ -121,12 +120,10 @@ func (c *CodeInterpretingController) RunCommand() {
 	time.Sleep(flag.ApiGracefulShutdownTimeout)
 }
 
-// InterruptCommand stops a running shell command session.
 func (c *CodeInterpretingController) InterruptCommand() {
 	c.interrupt()
 }
 
-// GetCommandStatus returns command status by id.
 func (c *CodeInterpretingController) GetCommandStatus() {
 	commandID := c.ctx.Param("id")
 	if commandID == "" {
@@ -157,7 +154,6 @@ func (c *CodeInterpretingController) GetCommandStatus() {
 	c.RespondSuccess(resp)
 }
 
-// GetBackgroundCommandOutput returns accumulated stdout/stderr for a command session as plain text.
 func (c *CodeInterpretingController) GetBackgroundCommandOutput() {
 	id := c.ctx.Param("id")
 	if id == "" {

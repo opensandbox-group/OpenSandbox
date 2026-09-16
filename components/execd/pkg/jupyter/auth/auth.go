@@ -14,7 +14,6 @@
 
 package auth
 
-// Auth represents authentication configuration.
 type Auth struct {
 	Token    string
 	Username string

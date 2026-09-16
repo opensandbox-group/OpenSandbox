@@ -453,6 +453,18 @@ installs the whole candidate snapshot atomically. An API response may report a
 new vault revision only after the proxy acknowledges that exact snapshot and
 any required connection fence has been installed.
 
+The local transaction wire splits this conceptual object at the only
+non-circular boundary. Its established revision envelope has six fields:
+`controlGeneration` (the wire name for conceptual
+`controlPlaneGeneration`), `subjectGeneration`, the coordinator-allocated
+`decisionEpoch`, `vaultRevision`, `policyEpoch`, and `digest` of the exact
+payload bytes. The versioned canonical payload carries `vaultRevision`,
+`effectivePolicyEpoch`, `interceptionMode`, `state`,
+`tlsBindingHostSelectors`, `fullRenderedBindings`, and `redactions`. Payload
+`vaultRevision` must equal envelope `vaultRevision`; payload
+`effectivePolicyEpoch` is the semantic alias of and must equal envelope
+`policyEpoch`. Together the envelope and payload form the complete snapshot.
+
 An installed snapshot has no data TTL. It remains authoritative until it is
 explicitly replaced, the subject generation changes, the proxy process loses
 it, or the owning Go control-plane incarnation disappears. Vault create,
@@ -811,19 +823,31 @@ bearer token for receiver-side authentication, and rejects malformed, oversized,
 or credential-bearing error responses. A matching unused Python endpoint now
 authenticates the bearer token before reading bounded request bodies, strictly
 decodes the envelope, and exposes only fixed errors and metadata
-acknowledgements. Neither adapter is loaded by the live process; token handoff,
-socket provisioning, and the public Vault mutation path remain unwired. Local
-close cancels pending transport and fences completion, but the future adapter
-must also fence the remote session and tear down receiver/connections.
-Startup/recovery and atomic public-store finalization under the shared mutation
-barrier remain integration work.
+acknowledgements. The always-loaded system addon now owns that endpoint only
+when the Go launcher supplies a complete internal per-process session bundle;
+missing configuration keeps it disabled, partial configuration fails startup,
+and addon shutdown fences the receiver and removes its owned socket. The Go
+launcher strips inherited bundle values and can hand off a validated bundle,
+but the current sidecar and fast-sandbox assembly still pass none. Socket-parent
+provisioning, per-process session generation, coordinator construction and
+reconciliation, connection teardown, and the public Vault mutation path remain
+unwired. Startup/recovery and atomic public-store finalization under the shared
+mutation barrier remain integration work.
 
-The proxy-side transaction receiver is an in-memory foundation: it validates
+The proxy-side transaction receiver validates
 generation/epoch/digest identities, stages immutable bytes, and implements
 commit, abort, and metadata-only readback. Its authenticated IPC endpoint is
-implemented but not connected to the live addon. The next integration must
-supply complete snapshot validation, process-lifetime token handoff, Go-side
-reconciliation, and connection fences before acknowledging public Vault
+conditionally attached to the live addon as described above, but no running
+egress profile supplies a session yet. An unused Go builder now emits
+the versioned canonical decision payload from a rendered Vault snapshot and
+policy epoch. It derives and sorts HTTPS selectors from the same canonical
+bindings, preserves redaction order, and rejects non-canonical revisions,
+selectors, or rendered credential/redaction coverage. A matching unused Python
+validator now strictly decodes those exact bytes, checks envelope vault/policy
+agreement, recomputes active state and HTTPS selectors from the full bindings,
+and rejects incomplete redaction coverage with a fixed sanitized error. The
+next integration must provision a fresh process session, construct and reconcile
+the Go coordinator, and add connection fences before acknowledging public Vault
 mutations. Existing request processing continues to use the conditional ETag
 lookup until that integration is ready.
 

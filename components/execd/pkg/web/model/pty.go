@@ -14,18 +14,15 @@
 
 package model
 
-// CreatePTYSessionRequest is the request body for POST /pty.
 type CreatePTYSessionRequest struct {
 	Cwd     string `json:"cwd,omitempty"`
 	Command string `json:"command,omitempty"`
 }
 
-// CreatePTYSessionResponse is the response for POST /pty.
 type CreatePTYSessionResponse struct {
 	SessionID string `json:"session_id"`
 }
 
-// PTYSessionStatusResponse is the response for GET /pty/:sessionId.
 type PTYSessionStatusResponse struct {
 	SessionID    string `json:"session_id"`
 	Running      bool   `json:"running"`

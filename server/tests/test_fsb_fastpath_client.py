@@ -62,6 +62,10 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         self.last_resolve: pb2.ResolveEndpointRequest | None = None
         self.get_error: grpc.StatusCode | None = None
         self.create_time_remaining: float | None = None
+        self.last_snapshot_create: pb2.CreateSandboxSnapshotRequest | None = None
+        self.last_snapshot_get: pb2.GetSandboxSnapshotRequest | None = None
+        self.last_snapshot_delete: pb2.DeleteSandboxSnapshotRequest | None = None
+        self.snapshot_get_error: grpc.StatusCode | None = None
 
     def CreateSandbox(self, request, context):
         self.created.append(request)
@@ -114,6 +118,36 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         return pb2.ListPoolsResponse(
             items=[pb2.PoolInfo(namespace=request.namespace, name="default-pool")]
         )
+
+    def CreateSandboxSnapshot(self, request, context):
+        self.last_snapshot_create = request
+        return pb2.CreateSandboxSnapshotResponse(
+            snapshot=pb2.SandboxSnapshotInfo(
+                identity=pb2.SandboxIdentity(uid="snap-uid", name=request.request_id),
+                sandbox_name=request.sandbox.namespaced_name.name,
+                template_name=request.template_name,
+                phase=pb2.SNAPSHOT_PHASE_CREATING,
+            )
+        )
+
+    def GetSandboxSnapshot(self, request, context):
+        self.last_snapshot_get = request
+        if self.snapshot_get_error is not None:
+            context.abort(self.snapshot_get_error, "scripted snapshot failure")
+        return pb2.GetSandboxSnapshotResponse(
+            snapshot=pb2.SandboxSnapshotInfo(
+                identity=pb2.SandboxIdentity(
+                    uid="snap-uid", name=request.snapshot.name, namespace=request.snapshot.namespace
+                ),
+                template_name=request.snapshot.name,
+                phase=pb2.SNAPSHOT_PHASE_SUCCEEDED,
+                manifest_ref="s3://bucket/snapshots/index",
+            )
+        )
+
+    def DeleteSandboxSnapshot(self, request, context):
+        self.last_snapshot_delete = request
+        return pb2.DeleteSandboxSnapshotResponse()
 
 
 @pytest.fixture
@@ -212,6 +246,39 @@ def test_not_found_is_typed(client_and_server):
 
     with pytest.raises(FastPathNotFound):
         client.get_sandbox("ns-1", "missing")
+
+
+def test_snapshot_lifecycle_round_trip(client_and_server):
+    client, service = client_and_server
+
+    create_request = pb2.CreateSandboxSnapshotRequest(
+        request_id="osb-snap-abc",
+        sandbox=namespaced_reference("ns-1", "fsb-sbx-1"),
+        template_name="osb-snap-abc",
+    )
+    create_request.metadata["opensandbox.io/snapshot-id"] = "snap-123"
+    created = client.create_sandbox_snapshot(create_request)
+    fetched = client.get_sandbox_snapshot("ns-1", "osb-snap-abc")
+    client.delete_sandbox_snapshot("ns-1", "osb-snap-abc")
+
+    assert created.snapshot.phase == pb2.SNAPSHOT_PHASE_CREATING
+    assert service.last_snapshot_create.sandbox.namespaced_name.name == "fsb-sbx-1"
+    assert service.last_snapshot_create.template_name == "osb-snap-abc"
+    assert dict(service.last_snapshot_create.metadata) == {"opensandbox.io/snapshot-id": "snap-123"}
+    assert fetched.snapshot.phase == pb2.SNAPSHOT_PHASE_SUCCEEDED
+    assert fetched.snapshot.manifest_ref == "s3://bucket/snapshots/index"
+    assert service.last_snapshot_get.snapshot.namespace == "ns-1"
+    assert service.last_snapshot_get.snapshot.name == "osb-snap-abc"
+    assert service.last_snapshot_delete.snapshot.namespaced_name.namespace == "ns-1"
+    assert service.last_snapshot_delete.snapshot.namespaced_name.name == "osb-snap-abc"
+
+
+def test_snapshot_not_found_is_typed(client_and_server):
+    client, service = client_and_server
+    service.snapshot_get_error = grpc.StatusCode.NOT_FOUND
+
+    with pytest.raises(FastPathNotFound):
+        client.get_sandbox_snapshot("ns-1", "osb-snap-missing")
 
 
 def test_error_mapping_covers_common_codes():

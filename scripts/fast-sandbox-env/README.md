@@ -20,15 +20,15 @@ caveats): `fast-sandbox/docs/guides/firecracker-integration-env.md`.
 ## Usage
 
 ```bash
-./scripts/fast-sandbox-env/fast-sandbox-env.sh up        # full stack + end-to-end verify
+./scripts/fast-sandbox-env/fast-sandbox-env.sh up        # full stack + end-to-end + pause/resume verify
 ./scripts/fast-sandbox-env/fast-sandbox-env.sh status    # component / pool / DART / OpenSandbox health
 ./scripts/fast-sandbox-env/fast-sandbox-env.sh pool      # re-apply the pool only
 ./scripts/fast-sandbox-env/fast-sandbox-env.sh down      # teardown, host left clean
 ```
 
-After `up`, point any OpenSandbox SDK at `http://127.0.0.1:8080` with the
+After `up`, point any OpenSandbox SDK at `http://127.0.0.1:18080` with the
 `OPEN-SANDBOX-API-KEY: fast-sandbox-env` header; sandbox endpoints are
-signed `f1.*` header routes served by the gateway at `http://127.0.0.1:8081`.
+signed `f1.*` header routes served by the gateway at `http://127.0.0.1:18081`.
 
 ## Wiring
 
@@ -91,9 +91,9 @@ manifests/
                                image rendered from IMG_AGENT
   pool/firecracker-egress-pool.yaml  SandboxPool: egress attached + P2P spread
   opensandbox/server.yaml      lifecycle server: fsb runtime config,
-                               NodePort 30880 -> host 8080
+                               NodePort 30880 -> host 18080
   opensandbox/ingress-gateway.yaml   fsb provider + FastPath + shared
-                               signing key, NodePort 30881 -> host 8081
+                               signing key, NodePort 30881 -> host 18081
 ```
 
 Canonical fast-sandbox manifests (CRDs, RBAC, control plane, dev route
@@ -106,12 +106,14 @@ define this environment's shape are split by concern above and rendered
 
 preflight → sysctl → fast-sandbox checkout → build images (6 fast-sandbox
 images + egress + server + ingress) → XFS StateRoot → kind cluster + node
-labels (host ports 8080/8081) → MinIO → CRDs + control plane →
+labels (host ports 18080/18081) → MinIO → CRDs + control plane →
 credentials → firecracker node assets → runtime-agent + DART (roster
 asserted) → OpenSandbox server + ingress gateway → SandboxTemplate golden
 image **built through the server `POST /templates` API** → SandboxPool
 (fastlet Ready, egress Ready, pool conditions, actions protocol check) →
 end-to-end verify (templateId create → signed gateway route → execd
+`/ping` → delete) → pause/resume round-trip (POST pause → poll
+`Paused` + route released → POST resume → poll `Running` → fresh-route
 `/ping` → delete).
 
 Every stage logs to `$WORK/logs/`; failures dump component logs to
@@ -121,13 +123,13 @@ Every stage logs to `$WORK/logs/`; failures dump component logs to
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WORK` | `$PWD/.fast-sandbox-env` | workspace + logs |
+| `WORK` | `/data/fast-sandbox-env` when `/data` exists, else `$PWD/.fast-sandbox-env` | workspace + logs + XFS loop + MinIO data (heavy: prefer a big volume) |
 | `FSB_DIR` | `$WORK/fast-sandbox` | fast-sandbox checkout (env-owned clone, created when missing) |
 | `KIND_CLUSTER` | `fast-sandbox-integration` | kind cluster name |
 | `KIND_SINGLE` | `0` | `1` = single node (cache-only, no peer traffic) |
 | `DOCKER_MIRROR` | — | comma list injected as docker.io containerd mirrors |
 | `EGRESS_IMAGE` | `docker.io/opensandbox/egress:latest` | egress image tag (built from `components/egress`) |
-| `SERVER_HOST_PORT` / `GATEWAY_HOST_PORT` | `8080` / `8081` | host-side publishes for server / gateway (loopback only) |
+| `SERVER_HOST_PORT` / `GATEWAY_HOST_PORT` | `18080` / `18081` | host-side publishes for server / gateway (loopback only) |
 | `SERVER_IMAGE` | `docker.io/opensandbox/server:env` | server image tag (built from `server/`) |
 | `INGRESS_IMAGE` | `docker.io/opensandbox/ingress:env` | ingress image tag (built from `components/ingress`) |
 | `IMAGE_AGENT` | `fast-sandbox/firecracker-runtime-agent:dev` | agent image (rendered into the DaemonSet) |

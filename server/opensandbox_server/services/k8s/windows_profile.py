@@ -32,7 +32,6 @@ WINDOWS_KVM_VOLUME_NAME = "opensandbox-win-kvm"
 WINDOWS_TUN_VOLUME_NAME = "opensandbox-win-tun"
 WINDOWS_STORAGE_VOLUME_NAME = "opensandbox-win-storage"
 WINDOWS_PROFILE_DEFAULT_USER_PORTS = ["44772", "8080", "3389/tcp", "3389/udp", "8006/tcp"]
-# Extra memory overhead (in Gi) reserved for QEMU process on top of guest RAM.
 WINDOWS_QEMU_MEMORY_OVERHEAD_GI = 2
 _SIZE_PATTERN = re.compile(r"^\s*(\d+)\s*([a-zA-Z]*)\s*$")
 
@@ -111,7 +110,6 @@ def apply_windows_profile_overrides(
         main_container.pop("command", None)
     main_container.pop("args", None)
     main_container["env"] = windows_env if windows_env else None
-    # Set pod resources from resource_limits for proper K8s scheduling.
     # Memory includes overhead for the QEMU process itself.
     if resource_limits:
         limits: Dict[str, str] = {}

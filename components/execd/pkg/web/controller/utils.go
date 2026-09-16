@@ -275,17 +275,6 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 	return buildFileInfo(absPath, fileInfo)
 }
 
-func SearchFileMetadata(metadata map[string]model.FileMetadata, filePath string) (string, model.FileMetadata, bool) {
-	base := filepath.Base(filePath)
-	for path, info := range metadata {
-		if filepath.Base(path) == base {
-			return path, info, true
-		}
-	}
-
-	return "", model.FileMetadata{}, false
-}
-
 type httpRange struct {
 	start, length int64
 }

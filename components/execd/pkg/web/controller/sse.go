@@ -184,7 +184,6 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	return hooks, stopSSE
 }
 
-// writeSingleEvent serializes one SSE frame.
 func (c *basicController) writeSingleEvent(handler string, data []byte, verbose bool, summary string) {
 	if c == nil || c.ctx == nil || c.ctx.Writer == nil {
 		return
@@ -192,7 +191,7 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 
 	select {
 	case <-c.ctx.Request.Context().Done():
-		log.Error("StreamEvent.%s: client disconnected", handler)
+		log.Error("sse: %s client disconnected", handler)
 		return
 	default:
 	}
@@ -216,10 +215,10 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 	}
 
 	if err != nil {
-		log.Error("StreamEvent.%s write data %s error: %v", handler, summary, err)
+		log.Error("sse: %s write %s: %v", handler, summary, err)
 	} else {
 		if verbose {
-			log.Info("StreamEvent.%s write data %s", handler, summary)
+			log.Info("sse: %s write %s", handler, summary)
 		}
 	}
 }

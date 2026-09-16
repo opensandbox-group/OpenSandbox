@@ -128,15 +128,12 @@ func unsetModelEnvForTest(t *testing.T, key string) {
 func ptr32(v uint32) *uint32 { return &v }
 
 func TestRunCommandRequestValidateUidGid(t *testing.T) {
-	// uid-only: valid
 	req := RunCommandRequest{Command: "id", Uid: ptr32(1000)}
 	require.NoError(t, req.Validate(), "expected success with uid only")
 
-	// uid + gid: valid
 	req = RunCommandRequest{Command: "id", Uid: ptr32(1000), Gid: ptr32(1000)}
 	require.NoError(t, req.Validate(), "expected success with uid and gid")
 
-	// gid-only: must be rejected
 	req = RunCommandRequest{Command: "id", Gid: ptr32(1000)}
 	require.Error(t, req.Validate(), "expected validation error when gid is set without uid")
 }

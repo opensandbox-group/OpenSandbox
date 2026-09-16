@@ -67,7 +67,6 @@ func run() int {
 	flag.InitFlags()
 	log.Init(flag.ServerLogLevel)
 
-	// Load isolation config.
 	isoCfg, err := isolation.LoadConfig(flag.IsolationConfigPath)
 	if err != nil {
 		log.Error("isolation: config: %v", err)
@@ -100,7 +99,6 @@ func run() int {
 		runtime.SetEbpfState(runtime.LayerState{State: ebpfState, Message: ebpfMessage})
 	}
 
-	// Probe isolation runtime capabilities.
 	isolationProbe := isolation.Probe(isolation.ProbeConfig{
 		UpperRoot:     isoCfg.UpperRoot,
 		UpperMaxBytes: isoCfg.UpperMaxBytes,
@@ -132,7 +130,6 @@ func run() int {
 	// Always store probe result for capabilities endpoint.
 	controller.InitIsolatedProbe(&isolationProbe)
 
-	// Init isolation runner if probe succeeded.
 	if isolationProbe.Available {
 		iso := isolation.NewBwrapWithProbe(isoCfg, isolationProbe)
 		runner, err := runtime.NewIsolatedRunner(ctrl, iso, isoCfg)
@@ -159,11 +156,11 @@ func run() int {
 		}
 	}
 	if clone3Compat {
-		log.Warn("execd running with clone3 compatibility (seccomp returns ENOSYS for clone3)")
+		log.Warn("clone3: compatibility mode enabled (seccomp returns ENOSYS for clone3)")
 	}
 	otelShutdown, err := telemetry.Init(context.Background())
 	if err != nil {
-		log.Warn("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+		log.Warn("otel: metrics disabled (continuing without OTLP): %v", err)
 		otelShutdown = nil
 	}
 	if otelShutdown != nil {
@@ -183,10 +180,10 @@ func run() int {
 		lifecycleConfig,
 	); err != nil {
 		if errors.Is(err, errStartupShutdown) {
-			log.Info("shutdown requested before user entrypoint started: %v", err)
+			log.Info("execd: shutdown requested before user entrypoint started: %v", err)
 			return 0
 		}
-		log.Error("execd server stopped with error: %v", err)
+		log.Error("execd: server stopped with error: %v", err)
 		return 1
 	}
 	return 0
@@ -204,7 +201,7 @@ func runHTTPServer(
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
-	log.Info("execd listening on %s (IPv4)", addr)
+	log.Info("execd: listening on %s (IPv4)", addr)
 	// In init mode SIGTERM belongs to the init lifecycle (forward + graceful
 	// shutdown with the entrypoint's exit status); only SIGINT cancels the
 	// HTTP server there.

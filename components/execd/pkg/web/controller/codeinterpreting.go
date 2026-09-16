@@ -40,7 +40,6 @@ func InitCodeRunner() *runtime.Controller {
 	return ctrl
 }
 
-// CodeInterpretingController handles code execution entrypoints.
 type CodeInterpretingController struct {
 	*basicController
 }
@@ -70,7 +69,6 @@ func NewCodeInterpretingController(ctx *gin.Context) *CodeInterpretingController
 	}
 }
 
-// CreateContext creates a new code execution context.
 func (c *CodeInterpretingController) CreateContext() {
 	var request model.CodeContextRequest
 	if err := c.bindJSON(&request); err != nil {
@@ -102,12 +100,10 @@ func (c *CodeInterpretingController) CreateContext() {
 	c.RespondSuccess(resp)
 }
 
-// InterruptCode interrupts the execution of running code in a session.
 func (c *CodeInterpretingController) InterruptCode() {
 	c.interrupt()
 }
 
-// RunCode executes code in a context and streams output via SSE.
 func (c *CodeInterpretingController) RunCode() {
 	var request model.RunCodeRequest
 	if err := c.bindJSON(&request); err != nil {
@@ -187,7 +183,6 @@ func (c *CodeInterpretingController) RunCode() {
 	waitForExecutionComplete(ctx, completeCh)
 }
 
-// GetContext returns a specific code context by id.
 func (c *CodeInterpretingController) GetContext() {
 	contextID := c.ctx.Param("contextId")
 	if contextID == "" {
@@ -219,7 +214,6 @@ func (c *CodeInterpretingController) GetContext() {
 	c.RespondSuccess(codeContext)
 }
 
-// ListContexts returns active code contexts, optionally filtered by language.
 func (c *CodeInterpretingController) ListContexts() {
 	language := c.ctx.Query("language")
 
@@ -236,7 +230,6 @@ func (c *CodeInterpretingController) ListContexts() {
 	c.RespondSuccess(contexts)
 }
 
-// DeleteContextsByLanguage deletes all contexts for a given language.
 func (c *CodeInterpretingController) DeleteContextsByLanguage() {
 	language := c.ctx.Query("language")
 	if language == "" {
@@ -261,7 +254,6 @@ func (c *CodeInterpretingController) DeleteContextsByLanguage() {
 	c.RespondSuccess(nil)
 }
 
-// DeleteContext deletes a specific code context by id.
 func (c *CodeInterpretingController) DeleteContext() {
 	contextID := c.ctx.Param("contextId")
 	if contextID == "" {
@@ -295,7 +287,6 @@ func (c *CodeInterpretingController) DeleteContext() {
 	c.RespondSuccess(nil)
 }
 
-// CreateSession creates a new bash session (create_session API).
 // An empty body is allowed and is treated as default options (no cwd override).
 func (c *CodeInterpretingController) CreateSession() {
 	var request model.CreateSessionRequest
@@ -323,7 +314,6 @@ func (c *CodeInterpretingController) CreateSession() {
 	c.RespondSuccess(model.CreateSessionResponse{SessionID: sessionID})
 }
 
-// RunInSession runs a command in an existing bash session and streams output via SSE (run_in_session API).
 func (c *CodeInterpretingController) RunInSession() {
 	sessionID := c.ctx.Param("sessionId")
 	if sessionID == "" {
@@ -422,7 +412,6 @@ func (c *CodeInterpretingController) RunInSession() {
 	waitForExecutionComplete(ctx, completeCh)
 }
 
-// DeleteSession deletes a bash session (delete_session API).
 func (c *CodeInterpretingController) DeleteSession() {
 	sessionID := c.ctx.Param("sessionId")
 	if sessionID == "" {
@@ -455,7 +444,6 @@ func (c *CodeInterpretingController) DeleteSession() {
 	c.RespondSuccess(nil)
 }
 
-// buildExecuteCodeRequest converts a RunCodeRequest to runtime format.
 func (c *CodeInterpretingController) buildExecuteCodeRequest(request model.RunCodeRequest) *runtime.ExecuteCodeRequest {
 	req := &runtime.ExecuteCodeRequest{
 		Language: runtime.Language(request.Context.Language),

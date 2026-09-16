@@ -31,9 +31,16 @@ from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as p
 
 
 def map_state(info: pb2.SandboxInfo) -> str:
-    """Map a fast-sandbox SandboxInfo to the OpenSandbox lifecycle state."""
     if info.runtime.state == pb2.RUNTIME_STATE_STOPPED:
         return "Terminated"
+    # Pausing/Paused/Resuming precede the failure checks: an unavailable
+    # data plane is expected there, not a failure.
+    if info.runtime.state == pb2.RUNTIME_STATE_PAUSED:
+        return "Paused"
+    if info.runtime.state == pb2.RUNTIME_STATE_PAUSING:
+        return "Pausing"
+    if info.runtime.state == pb2.RUNTIME_STATE_RESUMING:
+        return "Resuming"
     if info.runtime.state in (
         pb2.RUNTIME_STATE_FAILED,
         pb2.RUNTIME_STATE_UNAVAILABLE,

@@ -209,10 +209,6 @@ func dashExportEscape(v string) string {
 	return b.String()
 }
 
-// TestParseExportLine_DashFormatRoundTrip verifies parseExportLine accepts
-// dash / BusyBox ash's exact export -p wire format across a range of values,
-// including ones that start or end with a single quote (which produce a
-// leading or trailing "'" segment rather than a wrapping ' ').
 func TestParseExportLine_DashFormatRoundTrip(t *testing.T) {
 	values := []string{
 		"",
@@ -296,7 +292,6 @@ func TestBashSession_envAndExitCode(t *testing.T) {
 		},
 	}
 
-	// 1) export an env var
 	request := &ExecuteCodeRequest{
 		Code:    "export FOO=hello",
 		Hooks:   hooks,
@@ -305,7 +300,6 @@ func TestBashSession_envAndExitCode(t *testing.T) {
 	require.NoError(t, session.run(context.Background(), request))
 	exportStdoutCount := len(stdoutLines)
 
-	// 2) verify env is persisted
 	request = &ExecuteCodeRequest{
 		Code:    "echo $FOO",
 		Hooks:   hooks,
@@ -322,7 +316,6 @@ func TestBashSession_envAndExitCode(t *testing.T) {
 	}
 	require.True(t, foundHello, "expected echo $FOO to output 'hello', got %v", echoLines)
 
-	// 3) ensure exit code of previous command is reflected in shell state
 	request = &ExecuteCodeRequest{
 		Code:    "false; echo EXIT:$?",
 		Hooks:   hooks,
@@ -458,7 +451,6 @@ func TestBashSession_requestCwdOverridesAfterCd(t *testing.T) {
 		return append([]string(nil), stdoutLines[start:]...)
 	}
 
-	// First request: change session cwd via script.
 	firstRunLines := runAndCollect(&ExecuteCodeRequest{
 		Code:    fmt.Sprintf("cd %s\npwd", initialDir),
 		Hooks:   hooks,
@@ -466,7 +458,6 @@ func TestBashSession_requestCwdOverridesAfterCd(t *testing.T) {
 	})
 	require.True(t, containsLine(firstRunLines, initialDir), "expected cd to update cwd to %q, got %v", initialDir, firstRunLines)
 
-	// Second request: explicit Cwd overrides session cwd.
 	secondRunLines := runAndCollect(&ExecuteCodeRequest{
 		Code:    "pwd",
 		Cwd:     overrideDir,
@@ -556,7 +547,6 @@ func TestBashSession_heredoc(t *testing.T) {
 		},
 	}
 
-	// First run: heredoc + reward file write.
 	script := fmt.Sprintf(`
 set -x
 reward_dir=%q
@@ -583,7 +573,6 @@ cat "$reward_dir/reward.txt"
 		Hooks:    hooks,
 	}))
 
-	// Second run: ensure the session keeps working.
 	require.NoError(t, controller.RunInBashSession(ctx, &ExecuteCodeRequest{
 		Context:  sessionID,
 		Language: Bash,
@@ -669,7 +658,6 @@ echo "after-restore"
 	require.NoError(t, session.run(context.Background(), request), "expected complex exec to finish")
 	require.True(t, containsLine(stdoutLines, "from-complex-exec") && containsLine(stdoutLines, "after-restore"), "expected exec outputs, got %v", stdoutLines)
 
-	// Session should still be usable.
 	request = &ExecuteCodeRequest{
 		Code:    "echo still-alive",
 		Hooks:   hooks,
@@ -689,8 +677,6 @@ func containsLine(lines []string, target string) bool {
 	return false
 }
 
-// TestBashSession_CloseKillsRunningProcess verifies that session.close() kills the active
-// process group so that a long-running command (e.g. sleep) does not keep running after close.
 func TestBashSession_CloseKillsRunningProcess(t *testing.T) {
 	requireBash(t)
 
@@ -716,14 +702,11 @@ func TestBashSession_CloseKillsRunningProcess(t *testing.T) {
 
 	select {
 	case <-runDone:
-		// run() returned; process was killed so we did not wait 30s
 	case <-time.After(3 * time.Second):
 		require.Fail(t, "run did not return within 3s after close (process was not killed)")
 	}
 }
 
-// TestBashSession_DeleteBashSessionKillsRunningProcess verifies that DeleteBashSession
-// (close path) kills the active run and removes the session from the controller.
 func TestBashSession_DeleteBashSessionKillsRunningProcess(t *testing.T) {
 	requireBash(t)
 
@@ -749,19 +732,15 @@ func TestBashSession_DeleteBashSessionKillsRunningProcess(t *testing.T) {
 
 	select {
 	case <-runDone:
-		// RunInBashSession returned; process was killed
 	case <-time.After(3 * time.Second):
 		require.Fail(t, "RunInBashSession did not return within 3s after DeleteBashSession")
 	}
 
-	// Session should be gone; deleting again should return ErrContextNotFound.
 	err = c.DeleteBashSession(sessionID)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrContextNotFound)
 }
 
-// TestBashSession_CloseWithNoActiveRun verifies that close() with no running command
-// completes without error and does not hang.
 func TestBashSession_CloseWithNoActiveRun(t *testing.T) {
 	session := newBashSession("")
 	require.NoError(t, session.start())
@@ -774,7 +753,6 @@ func TestBashSession_CloseWithNoActiveRun(t *testing.T) {
 
 	select {
 	case <-done:
-		// close() returned
 	case <-time.After(2 * time.Second):
 		require.Fail(t, "close() did not return within 2s when no run was active")
 	}

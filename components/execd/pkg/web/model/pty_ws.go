@@ -14,7 +14,6 @@
 
 package model
 
-// ClientFrame is a JSON frame sent from the WebSocket client to the server.
 type ClientFrame struct {
 	Type   string `json:"type"`
 	Data   string `json:"data,omitempty"`
@@ -23,7 +22,6 @@ type ClientFrame struct {
 	Signal string `json:"signal,omitempty"`
 }
 
-// ServerFrame is a JSON frame sent from the server to the WebSocket client.
 type ServerFrame struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id,omitempty"`

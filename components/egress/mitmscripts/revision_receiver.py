@@ -14,8 +14,9 @@
 
 """Generation-fenced in-memory snapshot receiver for OSEP-0023.
 
-This receiver opens no IPC endpoint itself and has no live TLS hooks. The
-separate revision IPC adapter is not loaded by the live addon yet. Its owner
+This receiver opens no IPC endpoint itself and has no live TLS hooks. The live
+addon owns the separate revision IPC adapter only when its launcher hands off a
+complete internal session; current egress profiles do not supply one. Its owner
 must supply a pure, bounded validator for the complete payload (including
 agreement with the revision metadata). Validation must return None on success
 and raise on failure; any other return value is rejected. Request drain remains

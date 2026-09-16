@@ -838,6 +838,68 @@ class TestFileTransfer:
         assert local_path.read_bytes() == b"hello"
         mock_sb.files.read_bytes_stream.assert_called_once_with("/tmp/download.txt")
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX device file")
+    def test_download_to_null_device(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.files.read_bytes_stream.return_value = iter([b"\x00\xff", b"data"])
+
+        result = _invoke(
+            runner,
+            ["file", "download", "sb-1", "/tmp/data.bin", os.devnull],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert stat.S_ISCHR(Path(os.devnull).stat().st_mode)
+        mock_sb.files.read_bytes_stream.assert_called_once_with("/tmp/data.bin")
+        mock_sb.close.assert_called_once()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX named pipes and symlinks")
+    @pytest.mark.parametrize("symlink", [False, True])
+    @pytest.mark.parametrize("failure", [None, "disconnect", "interrupt"])
+    def test_download_streams_to_fifo_without_replacing_it(
+        self, runner: CliRunner, tmp_path: Path, symlink: bool, failure: str | None
+    ) -> None:
+        fifo = tmp_path / "download.pipe"
+        os.mkfifo(fifo)
+        original_inode = fifo.stat().st_ino
+        destination = fifo
+        if symlink:
+            destination = tmp_path / "download-link"
+            destination.symlink_to(fifo.name)
+
+        def stream():
+            yield b"\x00\xfffirst"
+            if failure == "disconnect":
+                raise ConnectionError("Download disconnected")
+            if failure == "interrupt":
+                raise KeyboardInterrupt
+            yield b"second"
+
+        mock_sb = MagicMock()
+        mock_sb.files.read_bytes_stream.return_value = stream()
+        # Keep a reader connected so opening the FIFO for writing cannot block.
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            result = _invoke(
+                runner,
+                ["file", "download", "sb-1", "/tmp/data.bin", str(destination)],
+                sandbox=mock_sb,
+            )
+            received = os.read(reader, 1024)
+        finally:
+            os.close(reader)
+
+        assert (result.exit_code == 0) == (failure is None), result.output
+        assert ("Downloaded:" in result.output) == (failure is None)
+        assert received == b"\x00\xfffirst" + (b"second" if failure is None else b"")
+        assert stat.S_ISFIFO(fifo.stat().st_mode)
+        assert fifo.stat().st_ino == original_inode
+        assert set(tmp_path.iterdir()) == {fifo, destination}
+        if symlink:
+            assert destination.is_symlink()
+        mock_sb.close.assert_called_once()
+
     @pytest.mark.parametrize("existing", [False, True])
     @pytest.mark.parametrize("failure", ["not_found", "disconnect", "interrupt"])
     def test_failed_download_preserves_destination(

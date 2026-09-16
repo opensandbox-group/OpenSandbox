@@ -54,7 +54,6 @@ func (c *Controller) commandSnapshot(session string) *commandKernel {
 	return &cp
 }
 
-// GetCommandStatus returns the execution status for a command session.
 func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
@@ -107,19 +106,16 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 		cursor = info.Size()
 	}
 
-	// Seek to the cursor position
 	_, err = file.Seek(cursor, 0)
 	if err != nil {
 		return nil, -1, fmt.Errorf("error seek file: %w", err)
 	}
 
-	// Read all content from cursor to end
 	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, -1, fmt.Errorf("error read file: %w", err)
 	}
 
-	// Get current file position (end of file)
 	currentPos, err := file.Seek(0, 1)
 	if err != nil {
 		return nil, -1, fmt.Errorf("error get current position: %w", err)

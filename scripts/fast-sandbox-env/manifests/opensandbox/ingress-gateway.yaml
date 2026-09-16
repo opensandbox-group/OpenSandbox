@@ -91,7 +91,7 @@ metadata:
     app.kubernetes.io/name: opensandbox-ingress-gateway
 spec:
   # NodePort is mapped to the host by the kind extraPortMappings rendered
-  # from GATEWAY_HOST_PORT (default 127.0.0.1:8081 -> node port 30881).
+  # from GATEWAY_HOST_PORT (default 127.0.0.1:18081 -> node port 30881).
   type: NodePort
   ports:
     - port: 80

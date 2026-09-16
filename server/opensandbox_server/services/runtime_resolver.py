@@ -161,8 +161,8 @@ async def validate_secure_runtime_on_startup(
         await _validate_k8s_runtime_class(resolver, k8s_client, config)
     else:
         logger.warning(
-            "Secure runtime validation skipped for unknown runtime type: %s",
-            config.runtime.type,
+            f"Secure runtime validation skipped for unknown runtime type: "
+            f"{config.runtime.type}"
         )
 
 
@@ -178,13 +178,12 @@ async def _validate_docker_runtime(
         logger.info("No Docker runtime configured for secure containers.")
         return
 
-    logger.info("Validating Docker OCI runtime: %s", runtime_name)
+    logger.info(f"Validating Docker OCI runtime: {runtime_name}")
 
     if docker_client is None:
         logger.warning(
             "Docker client not available; skipping runtime validation. "
-            "Runtime '%s' will be used but not validated.",
-            runtime_name,
+            f"Runtime '{runtime_name}' will be used but not validated."
         )
         return
 
@@ -203,12 +202,11 @@ async def _validate_docker_runtime(
             )
 
         logger.info(
-            "Docker OCI runtime '%s' is available: %s",
-            runtime_name,
-            runtimes.get(runtime_name, {}),
+            f"Docker OCI runtime '{runtime_name}' is available: "
+            f"{runtimes.get(runtime_name, {})}"
         )
     except Exception as exc:
-        logger.error("Failed to validate Docker runtime: %s", exc)
+        logger.error(f"Failed to validate Docker runtime: {exc}")
         raise
 
     _warn_gvisor_egress_incompatibility(config)
@@ -226,30 +224,29 @@ async def _validate_k8s_runtime_class(
         logger.info("No Kubernetes RuntimeClass configured for secure containers.")
         return
 
-    logger.info("Validating Kubernetes RuntimeClass: %s", runtime_class_name)
+    logger.info(f"Validating Kubernetes RuntimeClass: {runtime_class_name}")
 
     if k8s_client is None:
         logger.warning(
             "Kubernetes client not available; skipping RuntimeClass validation. "
-            "RuntimeClass '%s' will be used but not validated.",
-            runtime_class_name,
+            f"RuntimeClass '{runtime_class_name}' will be used but not validated."
         )
         return
 
     try:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, k8s_client.read_runtime_class, runtime_class_name)
-        logger.info("Kubernetes RuntimeClass '%s' is available.", runtime_class_name)
+        logger.info(f"Kubernetes RuntimeClass '{runtime_class_name}' is available.")
     except ApiException as exc:
         if exc.status == 404:
             raise ValueError(
                 f"Configured Kubernetes RuntimeClass '{runtime_class_name}' does not exist. "
                 f"Please create the RuntimeClass before starting the server."
             ) from exc
-        logger.error("Failed to validate RuntimeClass: %s", exc)
+        logger.error(f"Failed to validate RuntimeClass: {exc}")
         raise
     except Exception as exc:
-        logger.error("Failed to validate RuntimeClass: %s", exc)
+        logger.error(f"Failed to validate RuntimeClass: {exc}")
         raise
 
     _warn_gvisor_egress_incompatibility(config)

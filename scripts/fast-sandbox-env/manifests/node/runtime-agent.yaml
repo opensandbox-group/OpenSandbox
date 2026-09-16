@@ -12,8 +12,12 @@
 # Prerequisites (created by fast-sandbox-env.sh up):
 #   - Secret fast-sandbox-agent-registry: the compiled registry
 #     configuration (registryconfig.Compiled JSON) carrying the MinIO
-#     read-only key and endpoint for FAST_SANDBOX_ARTIFACT_STORE.
-#   - ConfigMap fast-sandbox-agent-config: artifact-endpoint override.
+#     read/write keys and endpoint. The write pair is what the agent
+#     publishes snapshots/checkpoints with.
+#   - ConfigMap fast-sandbox-artifact-store: the shared store root
+#     (s3://bucket/prefix) + optional endpoint, mounted below and read per
+#     pull (created by the fast-sandbox control plane manifests; the
+#     credentials_up stage pins the live endpoint).
 #
 # The image is a render token ("@AGENT_IMAGE@"): fast-sandbox-env.sh
 # substitutes it from IMG_AGENT (IMAGE_AGENT) so image overrides reach the
@@ -56,14 +60,9 @@ spec:
               fieldPath: metadata.uid
         - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
           value: /run/fast-sandbox/firecracker/runtime.sock
-        - name: FAST_SANDBOX_ARTIFACT_STORE
-          value: s3://sandbox-images/publish
-        - name: FAST_SANDBOX_ARTIFACT_ENDPOINT
-          valueFrom:
-            configMapKeyRef:
-              name: fast-sandbox-agent-config
-              key: artifact-endpoint
-              optional: true
+        # Artifact store: the fast-sandbox-artifact-store ConfigMap is
+        # mounted below and read per pull, so an edit applies without an
+        # agent restart (the legacy *_ARTIFACT_* env vars no longer exist).
         - name: FAST_SANDBOX_STATE_ROOT
           value: /var/lib/fast-sandbox/firecracker
         - name: FAST_SANDBOX_REGISTRY_CONFIG_PATH
@@ -99,6 +98,9 @@ spec:
         - name: agent-registry
           mountPath: /etc/fast-sandbox/agent
           readOnly: true
+        - name: artifact-store
+          mountPath: /etc/fast-sandbox/artifact-store
+          readOnly: true
         - name: node-hostname
           mountPath: /etc/hostname
           readOnly: true
@@ -114,6 +116,12 @@ spec:
       - name: agent-registry
         secret:
           secretName: fast-sandbox-agent-registry
+      # Shared artifact store root/endpoint, read per pull (live ConfigMap
+      # edits land without an agent restart).
+      - name: artifact-store
+        configMap:
+          name: fast-sandbox-artifact-store
+          optional: true
       # The stable node identity for the HRW keyspace.
       - name: node-hostname
         hostPath:

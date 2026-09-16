@@ -85,10 +85,10 @@ func (c *Controller) runJupyterCode(ctx context.Context, kernel *jupyterKernel, 
 			dispatchExecutionResultHooks(request, result)
 
 		case <-ctx.Done():
-			log.Warn("context cancelled, try to interrupt kernel")
+			log.Warn("jupyter: context cancelled; interrupting kernel")
 			err = kernel.client.InterruptKernel(kernel.kernelID)
 			if err != nil {
-				log.Error("interrupt kernel failed: %v", err)
+				log.Error("jupyter: interrupt kernel: %v", err)
 			}
 
 			request.Hooks.OnExecuteError(&execute.ErrorOutput{
@@ -129,7 +129,6 @@ func dispatchExecutionResultHooks(request *ExecuteCodeRequest, result *execute.E
 	}
 }
 
-// getJupyterKernel retrieves a kernel connection from the session map.
 func (c *Controller) getJupyterKernel(sessionID string) *jupyterKernel {
 	if v, ok := c.jupyterClientMap.Load(sessionID); ok {
 		if kernel, ok := v.(*jupyterKernel); ok {

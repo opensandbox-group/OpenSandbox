@@ -128,7 +128,6 @@ def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
 @pytest.mark.parametrize(
     "field_name,payload",
     [
-        ("snapshotId", {"image": None, "snapshot_id": "snap-1"}),
         ("platform", {"platform": PlatformSpec(os="linux", arch="amd64")}),
         (
             "resourceRequests",

@@ -194,7 +194,6 @@ func TestSeccompPersistsAcrossRuns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Run 1: check seccomp is active.
 	var lines []string
 	require.NoError(t, r.RunInIsolatedSession(ctx, id,
 		`grep Seccomp: /proc/self/status`, nil,
@@ -202,7 +201,6 @@ func TestSeccompPersistsAcrossRuns(t *testing.T) {
 	require.NotEmpty(t, lines)
 	assert.Contains(t, strings.TrimSpace(lines[0]), "2", "first run: seccomp should be mode 2")
 
-	// Run 2: seccomp should still be active (not a one-shot).
 	lines = nil
 	require.NoError(t, r.RunInIsolatedSession(ctx, id,
 		`grep Seccomp: /proc/self/status`, nil,
@@ -216,7 +214,6 @@ func TestSeccompPersistsAcrossRuns(t *testing.T) {
 // Uses a custom denylist that blocks "unshare" but does NOT block "mount",
 // then verifies mount succeeds (it would fail with the default denylist).
 func TestSeccompConfigOverride_E2E(t *testing.T) {
-	// Write a TOML config with a custom seccomp denylist.
 	cfgPath := filepath.Join(t.TempDir(), "isolation.toml")
 	tomlContent := `
 upper_root = "` + t.TempDir() + `"
@@ -248,7 +245,6 @@ deny = ["unshare"]
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Seccomp should still be active (mode 2).
 	var lines []string
 	require.NoError(t, r.RunInIsolatedSession(ctx, id,
 		`grep Seccomp: /proc/self/status`, nil,
@@ -256,7 +252,6 @@ deny = ["unshare"]
 	require.NotEmpty(t, lines)
 	assert.Contains(t, strings.TrimSpace(lines[0]), "2")
 
-	// mount should succeed — it's NOT in our custom denylist.
 	err = r.RunInIsolatedSession(ctx, id,
 		`mkdir -p /tmp/test-mnt && mount -t tmpfs tmpfs /tmp/test-mnt && echo mount-ok && umount /tmp/test-mnt`, nil,
 		func(line string) { lines = append(lines, line) })
@@ -287,7 +282,6 @@ func TestSeccompConfigDefault_E2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// mount should fail — blocked by built-in seccomp denylist.
 	err = r.RunInIsolatedSession(ctx, id,
 		`mkdir -p /tmp/mnt2 && mount -t tmpfs tmpfs /tmp/mnt2 2>&1`, nil,
 		nil)

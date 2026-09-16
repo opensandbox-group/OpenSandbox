@@ -57,12 +57,10 @@ func NewMergedView(lower, upper string, mode WorkspaceMode, uid, gid uint32) *Me
 	}
 }
 
-// resolveUpper returns the upper path for a relative path.
 func (m *MergedView) resolveUpper(rel string) string {
 	return filepath.Join(m.UpperDir, rel)
 }
 
-// resolveLower returns the lower path for a relative path.
 func (m *MergedView) resolveLower(rel string) string {
 	return filepath.Join(m.LowerDir, rel)
 }

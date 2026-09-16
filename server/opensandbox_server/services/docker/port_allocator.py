@@ -81,7 +81,6 @@ def allocate_host_port(
     max_port: int = 60000,
     attempts: int = 50,
 ) -> Optional[int]:
-    """Find an available TCP port on the host within the given range."""
     for _ in range(attempts):
         port = random.randint(min_port, max_port)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

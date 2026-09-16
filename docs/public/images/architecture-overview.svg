@@ -1,141 +1,122 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
-  <title id="title">OpenSandbox Architecture Overview</title>
-  <desc id="desc">OpenSandbox architecture overview showing clients, public contracts, lifecycle control plane, runtime backends, sandbox data plane, and network and security plane.</desc>
-  <defs>
-    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
-    </marker>
-    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
-    </marker>
-    <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2410c"/>
-    </marker>
-    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
-    </marker>
-    <style>
-      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-      .title { font-size: 34px; font-weight: 700; fill: #1e40af; }
-      .subtitle { font-size: 17px; font-weight: 500; fill: #64748b; }
-      .stage { font-size: 18px; font-weight: 700; fill: #64748b; }
-      .panel-title { font-size: 23px; font-weight: 700; fill: #1e40af; }
-      .card-title { font-size: 16px; font-weight: 700; fill: #374151; }
-      .card-text { font-size: 15px; font-weight: 600; fill: #374151; }
-      .small-text { font-size: 13px; font-weight: 600; fill: #374151; }
-      .detail { font-size: 13px; font-weight: 600; fill: #64748b; }
-      .accent { font-size: 13px; font-weight: 600; fill: #3b82f6; }
-      .line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
-      .panel { stroke-width: 2.5; rx: 8; ry: 8; }
-      .card { stroke-width: 2.5; rx: 8; ry: 8; }
-    </style>
-  </defs>
-
-  <rect width="1600" height="1000" fill="#ffffff"/>
-
-  <text class="title" x="42" y="62">OpenSandbox Architecture Overview</text>
-  <text class="subtitle" x="45" y="103">Public contracts define stable client boundaries; the lifecycle server dispatches one API surface to Docker or Kubernetes.</text>
-
-  <line x1="130" y1="170" x2="1470" y2="170" stroke="#1e3a5f" stroke-width="3"/>
-  <g fill="#3b82f6" stroke="#1e3a5f" stroke-width="2">
-    <circle cx="130" cy="170" r="12"/>
-    <circle cx="530" cy="170" r="12"/>
-    <circle cx="930" cy="170" r="12"/>
-    <circle cx="1330" cy="170" r="12"/>
-    <circle cx="1470" cy="170" r="12"/>
-  </g>
-  <text class="stage" x="88" y="210">Clients</text>
-  <text class="stage" x="455" y="210">OpenAPI Specs</text>
-  <text class="stage" x="850" y="210">Lifecycle Server</text>
-  <text class="stage" x="1235" y="210">Runtime</text>
-  <text class="stage" x="1390" y="210">Sandbox Data Plane</text>
-
-  <rect class="panel" x="30" y="250" width="330" height="330" fill="#ddd6fe" stroke="#6d28d9"/>
-  <text class="panel-title" x="65" y="306">Client Entry Points</text>
-  <rect class="card" x="70" y="345" width="250" height="92" fill="#ffffff" stroke="#6d28d9"/>
-  <text class="card-title" x="195" y="377" text-anchor="middle">Sandbox SDKs</text>
-  <text class="card-text" x="195" y="407" text-anchor="middle">Python / JS/TS</text>
-  <text class="card-text" x="195" y="432" text-anchor="middle">Java / C# / Go</text>
-  <rect class="card" x="70" y="470" width="250" height="72" fill="#ffffff" stroke="#6d28d9"/>
-  <text class="card-title" x="195" y="501" text-anchor="middle">osb CLI + MCP Server</text>
-  <text class="card-text" x="195" y="526" text-anchor="middle">operator / agent tools</text>
-
-  <rect class="panel" x="400" y="250" width="330" height="330" fill="#fed7aa" stroke="#c2410c"/>
-  <text class="panel-title" x="435" y="306">Public Contracts</text>
-  <path class="line" d="M 465 365 L 465 520 M 465 385 H 510 M 465 430 H 510 M 465 475 H 510 M 465 520 H 510" stroke="#c2410c" stroke-width="2.5"/>
-  <text class="card-text" x="530" y="390">sandbox-lifecycle.yml</text>
-  <text class="card-text" x="530" y="435">diagnostic-api.yml</text>
-  <text class="card-text" x="530" y="480">execd-api.yaml</text>
-  <text class="card-text" x="530" y="525">egress-api.yaml</text>
-
-  <rect class="panel" x="770" y="250" width="380" height="330" fill="#a7f3d0" stroke="#047857"/>
-  <text class="panel-title" x="805" y="306">Lifecycle Control Plane</text>
-  <rect class="card" x="810" y="345" width="300" height="82" fill="#ffffff" stroke="#047857"/>
-  <text class="card-title" x="960" y="378" text-anchor="middle">FastAPI Lifecycle Server</text>
-  <text class="card-text" x="960" y="405" text-anchor="middle">Auth / config / validation</text>
-  <text class="card-text" x="810" y="466">SandboxService</text>
-  <text class="card-text" x="810" y="492">SnapshotService</text>
-  <text class="card-text" x="810" y="518">Pool routes</text>
-  <text class="card-text" x="810" y="544">Server proxy / diagnostics</text>
-  <text class="card-text" x="810" y="570">SQLite store + renew intents</text>
-
-  <rect class="panel" x="1190" y="250" width="380" height="330" fill="#93c5fd" stroke="#1e3a5f"/>
-  <text class="panel-title" x="1230" y="306">Runtime Backends</text>
-  <rect class="card" x="1230" y="345" width="300" height="90" fill="#ffffff" stroke="#1e3a5f"/>
-  <text class="card-title" x="1380" y="376" text-anchor="middle">Docker Runtime</text>
-  <text class="card-text" x="1380" y="404" text-anchor="middle">Local containers</text>
-  <text class="card-text" x="1380" y="429" text-anchor="middle">Ports / volumes / snapshots</text>
-  <rect class="card" x="1230" y="460" width="300" height="96" fill="#ffffff" stroke="#1e3a5f"/>
-  <text class="card-title" x="1380" y="492" text-anchor="middle">Kubernetes Runtime</text>
-  <text class="card-text" x="1380" y="522" text-anchor="middle">BatchSandbox / Pool</text>
-  <text class="card-text" x="1380" y="548" text-anchor="middle">agent-sandbox provider</text>
-
-  <path class="line" d="M 360 415 H 400" stroke="#6d28d9" stroke-width="4" marker-end="url(#arrow-purple)"/>
-  <path class="line" d="M 730 415 H 770" stroke="#c2410c" stroke-width="4" marker-end="url(#arrow-orange)"/>
-  <path class="line" d="M 1150 415 H 1190" stroke="#047857" stroke-width="4" marker-end="url(#arrow-green)"/>
-
-  <rect class="panel" x="30" y="650" width="730" height="320" fill="#dbeafe" stroke="#1e40af"/>
-  <text class="panel-title" x="65" y="708">Sandbox Data Plane</text>
-  <rect class="card" x="75" y="745" width="660" height="210" fill="#ffffff" stroke="#1e3a5f"/>
-  <rect x="105" y="765" width="600" height="40" rx="7" ry="7" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
-  <text class="accent" x="405" y="790" text-anchor="middle">user image + injected OpenSandbox control processes</text>
-  <rect class="card" x="125" y="835" width="170" height="70" fill="#93c5fd" stroke="#1e3a5f"/>
-  <text class="card-title" x="210" y="864" text-anchor="middle">User workload</text>
-  <text class="card-text" x="210" y="890" text-anchor="middle">entrypoint</text>
-  <rect class="card" x="350" y="825" width="190" height="90" fill="#a7f3d0" stroke="#047857"/>
-  <text class="card-title" x="445" y="855" text-anchor="middle">execd</text>
-  <text class="card-text" x="445" y="881" text-anchor="middle">commands / files</text>
-  <text class="card-text" x="445" y="906" text-anchor="middle">PTY / metrics</text>
-  <rect class="card" x="560" y="820" width="160" height="58" fill="#ddd6fe" stroke="#6d28d9"/>
-  <text class="card-title" x="640" y="845" text-anchor="middle">Jupyter</text>
-  <text class="card-text" x="640" y="869" text-anchor="middle">kernels</text>
-  <rect class="card" x="560" y="886" width="160" height="58" fill="#ffffff" stroke="#1e3a5f"/>
-  <text class="card-title" x="640" y="909" text-anchor="middle">Volumes</text>
-  <text class="small-text" x="640" y="931" text-anchor="middle">host / PVC / OSSFS</text>
-  <path class="line" d="M 295 870 H 350" stroke="#1e3a5f" stroke-width="3" marker-end="url(#arrow-blue)"/>
-  <path class="line" d="M 540 850 H 560" stroke="#047857" stroke-width="3" marker-end="url(#arrow-green)"/>
-  <path class="line" d="M 540 890 L 560 912" stroke="#047857" stroke-width="3" marker-end="url(#arrow-green)"/>
-
-  <rect class="panel" x="800" y="650" width="770" height="310" fill="#fef3c7" stroke="#b45309"/>
-  <text class="panel-title" x="1020" y="708">Network &amp; Security Plane</text>
-  <rect class="card" x="850" y="745" width="190" height="68" fill="#ffffff" stroke="#b45309"/>
-  <text class="card-title" x="945" y="774" text-anchor="middle">Ingress Gateway</text>
-  <text class="card-text" x="945" y="800" text-anchor="middle">Header routing</text>
-  <rect class="card" x="1085" y="745" width="190" height="68" fill="#ffffff" stroke="#b45309"/>
-  <text class="card-title" x="1180" y="774" text-anchor="middle">Server Proxy</text>
-  <text class="card-text" x="1180" y="800" text-anchor="middle">HTTP + WebSocket</text>
-  <rect class="card" x="1320" y="745" width="190" height="68" fill="#ffffff" stroke="#b45309"/>
-  <text class="card-title" x="1415" y="774" text-anchor="middle">Secure Access</text>
-  <text class="card-text" x="1415" y="800" text-anchor="middle">Signed routes</text>
-  <rect class="card" x="850" y="855" width="300" height="76" fill="#a7f3d0" stroke="#047857"/>
-  <text class="card-title" x="1000" y="885" text-anchor="middle">Egress Sidecar</text>
-  <text class="card-text" x="1000" y="913" text-anchor="middle">Policy enforcement</text>
-  <rect class="card" x="1200" y="855" width="300" height="76" fill="#dbeafe" stroke="#1e40af"/>
-  <text class="card-title" x="1350" y="883" text-anchor="middle">Secure Runtime</text>
-  <text class="card-text" x="1350" y="909" text-anchor="middle">gVisor / Kata / Firecracker</text>
-
-  <path class="line" d="M 940 580 V 735" stroke="#047857" stroke-width="3" stroke-dasharray="8 10" marker-end="url(#arrow-green)"/>
-  <path class="line" d="M 1380 580 V 625 H 395 V 745" stroke="#1e3a5f" stroke-width="3" marker-end="url(#arrow-blue)"/>
-  <path class="line" d="M 850 893 H 720" stroke="#b45309" stroke-width="3" stroke-dasharray="8 10" marker-end="url(#arrow-orange)"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1288" viewBox="0 0 1600 1288" role="img" aria-labelledby="title desc">
+<title id="title">OpenSandbox architecture</title>
+<desc id="desc">Applications use SDKs, CLI and MCP tools. Lifecycle requests go to the FastAPI server, backed by Docker or Kubernetes. Kubernetes composes container workload providers with a FastSandbox adapter for the external FastPath microVM platform. Execution traffic uses direct endpoints, the server proxy, or ingress to reach workload ports and execd; execd connects to optional Jupyter kernels. Optional outbound enforcement uses container sidecars or a shared Fastlet profile. Metadata stores snapshot and template records. API contracts are specifications, not deployed services.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="outbound" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1600" height="1288" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">OpenSandbox</text>
+<text x="48" y="96" class="body">Architecture · lifecycle, execution and runtime boundaries</text>
+<path d="M988 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="1034" y="60" class="edge" style="fill:#dc6b2e">Lifecycle</text>
+<path d="M1180 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1226" y="60" class="edge" style="fill:#2563eb">Execution</text>
+<path d="M1370 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)"/>
+<text x="1416" y="60" class="edge" style="fill:#059669">Outbound</text>
+<rect x="48" y="128" width="1504" height="136" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="158" class="section">APPLICATIONS, AGENTS &amp; OPERATORS</text>
+<rect x="72" y="180" width="380" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="206" class="heading">Sandbox SDKs</text>
+<text x="88" y="231" class="label">Python · JS/TS · Java/Kotlin · C# · Go</text>
+<rect x="472" y="180" width="388" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="488" y="206" class="heading">Code Interpreter SDKs</text>
+<text x="488" y="231" class="label">Language-native code execution</text>
+<rect x="880" y="180" width="272" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="896" y="206" class="heading">osb CLI</text>
+<text x="896" y="231" class="label">Terminal &amp; automation</text>
+<rect x="1172" y="180" width="356" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="1188" y="206" class="heading">MCP server</text>
+<text x="1188" y="231" class="label">Tools for MCP clients</text>
+<path d="M340 264V326" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="356" y="299" class="edge" style="fill:#dc6b2e">Lifecycle API</text>
+<path d="M1260 264V326" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1276" y="299" class="edge" style="fill:#2563eb">Execution &amp; services</text>
+<rect x="48" y="326" width="840" height="180" rx="12" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="72" y="359" class="section">LIFECYCLE CONTROL PLANE</text>
+<text x="72" y="395" class="heading">FastAPI lifecycle server</text>
+<text x="72" y="428" class="body">API auth · tenant namespaces · orchestration</text>
+<text x="72" y="457" class="body">Templates · snapshots · endpoint discovery</text>
+<rect x="610" y="350" width="254" height="132" rx="10" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="630" y="383" class="heading">Metadata store</text>
+<text x="630" y="416" class="body">SQLite / PostgreSQL</text>
+<text x="630" y="446" class="label">Snapshot + template</text>
+<text x="630" y="470" class="label">records</text>
+<path d="M550 412H602" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<rect x="936" y="326" width="616" height="180" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="960" y="359" class="section">ENDPOINT ACCESS · ALTERNATIVE ROUTES</text>
+<rect x="960" y="382" width="166" height="102" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="974" y="410" class="heading">Direct</text>
+<text x="974" y="439" class="label">Host / Pod</text>
+<text x="974" y="465" class="label">endpoints</text>
+<rect x="1142" y="382" width="178" height="102" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="1156" y="410" class="heading">Server Proxy</text>
+<text x="1156" y="439" class="label">HTTP / WebSocket</text>
+<text x="1156" y="465" class="label">in lifecycle server</text>
+<rect x="1336" y="382" width="192" height="102" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="1350" y="410" class="heading">Ingress</text>
+<text x="1350" y="439" class="label">Kubernetes</text>
+<text x="1350" y="465" class="label">optional gateway</text>
+<path d="M466 506V566" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="482" y="543" class="edge" style="fill:#dc6b2e">Create / manage</text>
+<rect x="48" y="566" width="1072" height="256" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="600" class="section">RUNTIME BACKENDS</text>
+<text x="758" y="600" class="label">Docker or Kubernetes</text>
+<rect x="72" y="628" width="268" height="166" rx="10" fill="#fff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="92" y="661" class="heading">Docker</text>
+<text x="92" y="692" class="body">Local / single host</text>
+<text x="92" y="719" class="body">Containers · volumes</text>
+<text x="92" y="746" class="body">Public image snapshots</text>
+<rect x="364" y="616" width="732" height="182" rx="10" fill="#f4f8fd" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="388" y="646" class="heading">Kubernetes</text>
+<text x="558" y="646" class="label">composed services</text>
+<rect x="388" y="663" width="318" height="112" rx="10" fill="#fff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="408" y="696" class="heading">Container providers</text>
+<text x="408" y="727" class="body">BatchSandbox + Pool</text>
+<text x="408" y="754" class="body">or external agent-sandbox</text>
+<rect x="730" y="663" width="342" height="112" rx="10" fill="#f0fdfa" stroke="#76c7b6" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="750" y="696" class="heading">FastSandbox adapter</text>
+<text x="750" y="727" class="body">templateId → FastPath (external)</text>
+<text x="750" y="754" class="body">Template-backed microVMs</text>
+<path d="M510 822V884" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="526" y="858" class="edge" style="fill:#dc6b2e">Provision sandbox</text>
+<rect x="48" y="884" width="1072" height="250" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="72" y="915" class="section">SANDBOX ENVIRONMENT</text>
+<text x="401" y="915" class="label">Container / Pod / microVM</text>
+<rect x="72" y="966" width="304" height="136" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="92" y="999" class="heading">User workload</text>
+<text x="92" y="1030" class="body">Applications · service ports</text>
+<text x="92" y="1057" class="body">Your image &amp; entrypoint</text>
+<rect x="400" y="966" width="370" height="136" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="420" y="999" class="heading">execd</text>
+<text x="420" y="1030" class="body">Commands · files · PTY</text>
+<text x="420" y="1057" class="body">Isolation sessions · metrics</text>
+<rect x="798" y="966" width="298" height="136" rx="10" fill="#f8f4ff" stroke="#ccb6f0" stroke-width="1.5"/>
+<text x="818" y="999" class="heading">Jupyter (optional)</text>
+<text x="818" y="1030" class="body">Code execution kernels</text>
+<text x="818" y="1057" class="body">Local HTTP / WebSocket</text>
+<path d="M770 1044H795" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M1260 506V540H1150V942H224V964" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M590 942V964" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="790" y="932" class="edge" style="fill:#2563eb">Resolved endpoint</text>
+<rect x="1176" y="884" width="376" height="250" rx="12" fill="#f4fbf8" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="1200" y="915" class="section">OUTBOUND CONTROLS</text>
+<rect x="1200" y="966" width="328" height="116" rx="10" fill="#fff" stroke="#8bcbb0" stroke-width="1.5"/>
+<text x="1220" y="999" class="heading">Egress</text>
+<text x="1220" y="1030" class="body">DNS · nftables network policy</text>
+<text x="1220" y="1057" class="body">Credential Vault (optional)</text>
+<text x="1200" y="1113" class="label">Sidecar / shared Fastlet profile</text>
+<path d="M224 1102V1154H1144V1034H1198" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="585" y="1178" class="edge" style="fill:#059669">Outbound requests</text>
+<path d="M1364 1134V1192" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<rect x="48" y="1196" width="1072" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="1223" class="heading">Public contracts · specs/</text>
+<text x="430" y="1223" class="body">Lifecycle · execution · diagnostics · egress</text>
+<text x="72" y="1250" class="label">API definitions shared by clients, the server and runtime components.</text>
+<rect x="1176" y="1196" width="376" height="68" rx="10" fill="#ffffff" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="1200" y="1224" class="heading">External APIs &amp; services</text>
+<text x="1200" y="1249" class="label">Models · registries · web endpoints</text>
 </svg>

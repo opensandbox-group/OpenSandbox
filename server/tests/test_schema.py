@@ -212,7 +212,6 @@ class TestPVC:
         }
 
     def test_serialization_with_provisioning_hints(self):
-        """Provisioning hints should serialize with aliases."""
         backend = PVC(
             claim_name="my-pvc",
             storage_class="ssd",
@@ -802,7 +801,6 @@ class TestCreateSandboxRequestPoolMode:
         assert request.env == {"KEY": "value"}
 
     def test_pool_mode_rejects_snapshot_id_with_pool_ref(self):
-        """snapshotId and poolRef cannot be used together."""
         with pytest.raises(ValidationError) as exc_info:
             CreateSandboxRequest(
                 snapshotId="snap-001",
@@ -837,7 +835,6 @@ class TestCreateSandboxRequestPoolMode:
             )
 
     def test_pool_mode_normalizes_blank_snapshot_id(self):
-        """Blank snapshotId (e.g. whitespace) should be normalized to None in pool mode."""
         req = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
             snapshotId="   ",
@@ -845,7 +842,6 @@ class TestCreateSandboxRequestPoolMode:
         assert req.snapshot_id is None
 
     def test_pool_mode_ignores_blank_pool_ref(self):
-        """Blank poolRef should not trigger pool mode."""
         with pytest.raises(ValidationError):
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},

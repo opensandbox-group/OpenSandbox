@@ -57,8 +57,12 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         # templateId is the unambiguous fsb selector: fsb sandboxes are
         # the microVM catalog and coexist with the container-sandbox
-        # workload provider; every other create stays with it.
+        # workload provider. A snapshotId resolved to an fsb-produced
+        # artifact (restore_config.backend == "fsb") selects fsb the same
+        # way; every other create stays with it.
         if (request.template_id or "").strip():
+            return await self._fsb.create_sandbox(request)
+        if (request.snapshot_id or "").strip() and request.resolved_snapshot_backend == "fsb":
             return await self._fsb.create_sandbox(request)
         return await self._kubernetes.create_sandbox(request)
 
@@ -70,7 +74,7 @@ class CompositeSandboxService(SandboxService, ExtensionService):
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning("Cannot read complete sandbox list: %s", exc)
+            logger.warning(f"Cannot read complete sandbox list: {exc}")
             raise HTTPException(
                 503,
                 detail={

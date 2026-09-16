@@ -45,12 +45,10 @@ func TestFilesystem_ReadLower(t *testing.T) {
 	mv, err := r.GetMergedView(id)
 	require.NoError(t, err)
 
-	// Read file from lower (workspace).
 	data, err := mv.ReadFile("readme.txt")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("hello-lower"), data)
 
-	// Stat the file.
 	info, err := mv.Stat("readme.txt")
 	require.NoError(t, err)
 	assert.Equal(t, "readme.txt", info.Name())
@@ -73,7 +71,6 @@ func TestFilesystem_WriteUpper(t *testing.T) {
 	mv, err := r.GetMergedView(id)
 	require.NoError(t, err)
 
-	// Write a file via MergedView.
 	require.NoError(t, mv.WriteFile("session-file.txt", []byte("from-session"), 0o644))
 
 	// In rw mode, write goes directly to workspace (host view).
@@ -124,7 +121,6 @@ func TestFilesystem_Delete(t *testing.T) {
 	mv, err := r.GetMergedView(id)
 	require.NoError(t, err)
 
-	// Write then delete.
 	require.NoError(t, mv.WriteFile("del.txt", []byte("tmp"), 0o644))
 	require.NoError(t, mv.Remove("del.txt"))
 
@@ -288,16 +284,13 @@ func TestFilesystem_OverlayWriteNotVisibleOnHost(t *testing.T) {
 	// Write goes to upper, not lower.
 	require.NoError(t, mv.WriteFile("upper-only.txt", []byte("secret"), 0o644))
 
-	// NOT visible on host workspace.
 	_, err = os.ReadFile(filepath.Join(wsDir, "upper-only.txt"))
 	assert.True(t, os.IsNotExist(err))
 
-	// Visible via MergedView.
 	data, err := mv.ReadFile("upper-only.txt")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("secret"), data)
 
-	// Lower file still visible.
 	data, err = mv.ReadFile("lower.txt")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("lower"), data)
@@ -321,12 +314,10 @@ func TestFilesystem_ReadOnly(t *testing.T) {
 	mv, err := r.GetMergedView(id)
 	require.NoError(t, err)
 
-	// Read works.
 	data, err := mv.ReadFile("readme.txt")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("ro-data"), data)
 
-	// Write denied.
 	assert.Error(t, mv.WriteFile("new.txt", []byte("x"), 0o644))
 	assert.Error(t, mv.Remove("readme.txt"))
 	assert.Error(t, mv.MkdirAll("d", 0o755))

@@ -100,10 +100,7 @@ def _egress_container(
 
 
 class TestEgressSidecarViaApply:
-    """Egress sidecar shape (via ``apply_egress_to_spec``)."""
-
     def test_builds_container_with_basic_config(self):
-        """Test that container is built with correct basic configuration."""
         egress_image = "opensandbox/egress:v1.1.7"
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -161,7 +158,6 @@ class TestEgressSidecarViaApply:
         assert container["resources"] == expected
 
     def test_contains_egress_rules_environment_variable(self):
-        """Test that container includes OPENSANDBOX_EGRESS_RULES environment variable."""
         egress_image = "opensandbox/egress:v1.1.7"
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -247,7 +243,6 @@ class TestEgressSidecarViaApply:
         assert env_vars[EGRESS_MODE_ENV] == EGRESS_MODE_DNS_NFT
 
     def test_serializes_network_policy_correctly(self):
-        """Test that network policy is correctly serialized to JSON."""
         egress_image = "opensandbox/egress:v1.1.7"
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -272,7 +267,6 @@ class TestEgressSidecarViaApply:
         assert policy_dict["egress"][1]["target"] == "*.malicious.com"
 
     def test_handles_empty_egress_rules(self):
-        """Test that empty egress rules are handled correctly."""
         egress_image = "opensandbox/egress:v1.1.7"
         network_policy = NetworkPolicy(
             default_action="allow",
@@ -324,7 +318,6 @@ class TestEgressSidecarViaApply:
         assert "command" not in container
 
     def test_container_spec_is_valid_kubernetes_format(self):
-        """Test that returned container spec is in valid Kubernetes format."""
         egress_image = "opensandbox/egress:v1.1.7"
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -347,7 +340,6 @@ class TestEgressSidecarViaApply:
         assert container["readinessProbe"]["httpGet"]["path"] == "/healthz"
 
     def test_handles_wildcard_domains(self):
-        """Test that wildcard domains in egress rules are handled correctly."""
         egress_image = "opensandbox/egress:v1.1.7"
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -369,12 +361,10 @@ class TestEgressSidecarViaApply:
 
 class TestBuildSecurityContextForMainContainer:
     def test_returns_empty_dict_when_no_network_policy(self):
-        """Test that empty dict is returned when network policy is disabled."""
         result = build_security_context_for_sandbox_container(has_network_policy=False)
         assert result == {}
 
     def test_drops_net_admin_when_network_policy_enabled(self):
-        """Test that NET_ADMIN is dropped when network policy is enabled."""
         result = build_security_context_for_sandbox_container(has_network_policy=True)
 
         assert "capabilities" in result
@@ -384,7 +374,6 @@ class TestBuildSecurityContextForMainContainer:
 
 class TestApplyEgressToSpec:
     def test_adds_egress_sidecar_container(self):
-        """Test that egress sidecar container is added to containers list."""
         containers: list = []
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -530,7 +519,6 @@ class TestApplyEgressToSpec:
         assert env_names == {EGRESS_RULES_ENV, EGRESS_MODE_ENV}
 
     def test_sandbox_id_injected_as_env(self):
-        """sandbox_id is injected as OPENSANDBOX_EGRESS_SANDBOX_ID."""
         containers: list = []
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -547,7 +535,6 @@ class TestApplyEgressToSpec:
         assert env_by_name[OPENSANDBOX_EGRESS_SANDBOX_ID] == "sbx-abc123"
 
     def test_sandbox_id_omitted_when_not_provided(self):
-        """When sandbox_id is None/empty, OPENSANDBOX_EGRESS_SANDBOX_ID is not set."""
         containers: list = []
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -563,7 +550,6 @@ class TestApplyEgressToSpec:
         assert OPENSANDBOX_EGRESS_SANDBOX_ID not in env_names
 
     def test_otlp_endpoint_injected_as_env(self):
-        """egress.otlp_endpoint is injected as OTEL_EXPORTER_OTLP_ENDPOINT."""
         containers: list = []
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -585,7 +571,6 @@ class TestApplyEgressToSpec:
         )
 
     def test_otlp_endpoint_omitted_when_not_configured(self):
-        """Without otlp_endpoint, OTEL_EXPORTER_OTLP_ENDPOINT is not set."""
         containers: list = []
         network_policy = NetworkPolicy(
             default_action="deny",

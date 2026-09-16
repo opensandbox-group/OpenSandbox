@@ -44,7 +44,6 @@ def _is_user_label(key: str) -> bool:
 
 
 def _extract_user_labels(labels: dict) -> dict:
-    """Return only user-facing labels from a raw container label dict."""
     return {k: v for k, v in labels.items() if _is_user_label(k)}
 
 
@@ -53,10 +52,6 @@ class DockerMetadataStore:
 
     def __init__(self, root: Path | None = None) -> None:
         self._root = root or DEFAULT_STORE_DIR
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def get(self, sandbox_id: str, container_labels: dict) -> dict | None:
         """Return effective user metadata for a sandbox.
@@ -84,7 +79,6 @@ class DockerMetadataStore:
         """
         path = self._sandbox_path(sandbox_id)
 
-        # Build current effective state: container user labels + persisted file
         current = _extract_user_labels(container_labels)
         if path.exists():
             overrides = self._read_file(path)
@@ -100,7 +94,6 @@ class DockerMetadataStore:
         self._write_file(path, current)
 
     def get_expiration(self, sandbox_id: str) -> str | None:
-        """Return a persisted expiration override when one exists."""
         payload = self._read_file(self._expiration_path(sandbox_id))
         if not isinstance(payload, dict):
             return None
@@ -110,23 +103,17 @@ class DockerMetadataStore:
         return None
 
     def set_expiration(self, sandbox_id: str, expires_at: datetime) -> None:
-        """Persist the latest sandbox expiration override atomically."""
         self._write_file(
             self._expiration_path(sandbox_id),
             {"expires_at": expires_at.isoformat()},
         )
 
     def delete(self, sandbox_id: str) -> None:
-        """Remove persisted overrides for a sandbox."""
         for path in (self._sandbox_path(sandbox_id), self._expiration_path(sandbox_id)):
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
-                logger.warning("Failed to delete metadata file %s: %s", path, exc)
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
+                logger.warning(f"Failed to delete metadata file {path}: {exc}")
 
     def _sandbox_path(self, sandbox_id: str) -> Path:
         return self._root / f"{sandbox_id}.json"
@@ -140,7 +127,7 @@ class DockerMetadataStore:
             if path.exists():
                 return json.loads(path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to read metadata file %s: %s", path, exc)
+            logger.warning(f"Failed to read metadata file {path}: {exc}")
         return None
 
     @staticmethod

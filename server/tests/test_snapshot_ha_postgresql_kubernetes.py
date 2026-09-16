@@ -86,7 +86,6 @@ def _config(dsn: str) -> AppConfig:
         runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
         kubernetes=KubernetesRuntimeConfig(
             namespace="default",
-            snapshot_create_timeout_seconds=1,
         ),
         store=StoreConfig(
             type="postgresql",

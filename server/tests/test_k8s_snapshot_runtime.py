@@ -141,6 +141,24 @@ def _snapshot_cr(*, phase: str, containers: list[dict] | None = None, sandbox_id
     }
 
 
+class WatchRecordingK8sClient(FakeK8sClient):
+    """FakeK8sClient that records watch handlers for reactor tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.watch_calls: list[tuple[str, str, str, str]] = []
+        self.watch_handlers: list = []
+        self.stopped = 0
+
+    def watch_custom_objects(self, group, version, namespace, plural, event_handler):
+        self.watch_calls.append((group, version, namespace, plural))
+        self.watch_handlers.append(event_handler)
+        return object()
+
+    def stop_informers(self) -> None:
+        self.stopped += 1
+
+
 def test_public_snapshot_name_and_tag_are_derived_from_snapshot_id() -> None:
     assert build_public_snapshot_name(SNAPSHOT_ID) == f"osb-snap-{SNAPSHOT_HEX}"
     assert build_public_snapshot_tag(SNAPSHOT_ID) == f"snap-{SNAPSHOT_HEX}"
@@ -219,8 +237,6 @@ def test_create_snapshot_creates_cr_and_maps_succeed_to_ready() -> None:
     runtime = KubernetesSnapshotRuntime(
         k8s_client,
         namespace="default",
-        wait_timeout_seconds=0,
-        poll_interval_seconds=0,
     )
 
     status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
@@ -308,19 +324,18 @@ def test_inspect_snapshot_keeps_transient_read_error_creating() -> None:
     assert "temporary apiserver error" in (status.message or "")
 
 
-def test_create_snapshot_retries_transient_inspect_error_until_controller_ready() -> None:
+def test_create_snapshot_converges_once_runtime_reads_stop_failing() -> None:
     k8s_client = TransientThenReadyK8sClient(failures=1)
-    runtime = KubernetesSnapshotRuntime(
-        k8s_client,
-        namespace="default",
-        wait_timeout_seconds=1,
-        poll_interval_seconds=0,
-    )
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
 
-    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+    submitted = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+    first_read = runtime.inspect_snapshot(SNAPSHOT_ID)
+    converged = runtime.inspect_snapshot(SNAPSHOT_ID)
 
-    assert status.state == SnapshotState.READY
-    assert status.image == "registry/sandbox:snap"
+    assert submitted.state == SnapshotState.CREATING
+    assert first_read.state == SnapshotState.CREATING
+    assert converged.state == SnapshotState.READY
+    assert converged.image == "registry/sandbox:snap"
 
 
 def test_postgresql_ha_observation_error_keeps_snapshot_creating() -> None:
@@ -363,50 +378,93 @@ def test_postgresql_ha_can_create_cr_missing_after_creator_crash() -> None:
     runtime = KubernetesSnapshotRuntime(
         k8s_client,
         namespace="default",
-        wait_timeout_seconds=1,
-        poll_interval_seconds=0,
         postgresql_ha_enabled=True,
     )
 
     recovered = runtime.inspect_snapshot(SNAPSHOT_ID)
-    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+    submitted = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+    converged = runtime.inspect_snapshot(SNAPSHOT_ID)
 
     assert recovered.state == SnapshotState.CREATING
     assert recovered.reason == "snapshot_recovery_missing_snapshot"
-    assert status.state == SnapshotState.READY
+    assert submitted.state == SnapshotState.CREATING
+    assert converged.state == SnapshotState.READY
     assert len(k8s_client.created) == 1
 
 
-def test_postgresql_ha_wait_timeout_keeps_snapshot_creating() -> None:
+def test_postgresql_ha_submitted_create_stays_creating_without_terminal_cr() -> None:
     k8s_client = FakeK8sClient()
     runtime = KubernetesSnapshotRuntime(
         k8s_client,
         namespace="default",
-        wait_timeout_seconds=0,
-        poll_interval_seconds=0,
         postgresql_ha_enabled=True,
     )
 
     status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
 
     assert status.state == SnapshotState.CREATING
-    assert status.reason == "snapshot_runtime_timeout"
-    assert "remains Creating" in (status.message or "")
+    assert status.reason == "snapshot_runtime_submitted"
 
 
-def test_default_kubernetes_wait_timeout_remains_failed() -> None:
+def test_submitted_create_stays_creating_without_terminal_cr() -> None:
     k8s_client = FakeK8sClient()
-    runtime = KubernetesSnapshotRuntime(
-        k8s_client,
-        namespace="default",
-        wait_timeout_seconds=0,
-        poll_interval_seconds=0,
-    )
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
 
     status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
 
-    assert status.state == SnapshotState.FAILED
-    assert status.reason == "snapshot_runtime_timeout"
+    assert status.state == SnapshotState.CREATING
+    assert status.reason == "snapshot_runtime_submitted"
+
+
+def test_start_status_watch_registers_namespaces_and_invokes_callback() -> None:
+    k8s_client = WatchRecordingK8sClient()
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+    observed: list[tuple[str, str]] = []
+
+    runtime.start_status_watch(
+        lambda snapshot_id, namespace: observed.append((snapshot_id, namespace)),
+        namespaces=["tenant-a", None],
+    )
+    k8s_client.watch_handlers[0]("MODIFIED", _snapshot_cr(phase="Succeed"))
+    k8s_client.watch_handlers[0]("DELETED", _snapshot_cr(phase="Succeed"))
+
+    assert k8s_client.watch_calls == [
+        ("sandbox.opensandbox.io", "v1alpha1", "default", "sandboxsnapshots"),
+        ("sandbox.opensandbox.io", "v1alpha1", "tenant-a", "sandboxsnapshots"),
+    ]
+    assert observed == [(SNAPSHOT_ID, "default"), (SNAPSHOT_ID, "default")]
+
+
+def test_status_watch_ignores_objects_without_snapshot_label() -> None:
+    k8s_client = WatchRecordingK8sClient()
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+    observed: list[tuple[str, str]] = []
+
+    runtime.start_status_watch(lambda snapshot_id, ns: observed.append((snapshot_id, ns)))
+    k8s_client.watch_handlers[0]("MODIFIED", {"metadata": {"name": "other", "namespace": "default"}})
+    k8s_client.watch_handlers[0]("SYNC", "not-a-dict")
+
+    assert observed == []
+
+
+def test_create_snapshot_registers_namespace_watch_when_sync_started() -> None:
+    k8s_client = WatchRecordingK8sClient()
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+    runtime.start_status_watch(lambda snapshot_id, namespace: None)
+
+    runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, namespace="tenant-b")
+
+    watched = [call[2] for call in k8s_client.watch_calls]
+    assert watched == ["default", "tenant-b"]
+
+
+def test_close_stops_informers_when_client_supports_it() -> None:
+    k8s_client = WatchRecordingK8sClient()
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    runtime.close()
+
+    assert k8s_client.stopped == 1
 
 
 def test_delete_snapshot_deletes_cr_and_ignores_missing_cr() -> None:
@@ -418,6 +476,19 @@ def test_delete_snapshot_deletes_cr_and_ignores_missing_cr() -> None:
     assert k8s_client.deleted == [build_public_snapshot_name(SNAPSHOT_ID)]
 
 
+def test_create_snapshot_submits_without_waiting_for_terminal_status() -> None:
+    k8s_client = FakeK8sClient()
+    snapshot_name = build_public_snapshot_name(SNAPSHOT_ID)
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert k8s_client.created, "the SandboxSnapshot CR must be persisted"
+    assert k8s_client.objects[snapshot_name]["spec"]["sandboxName"] == SANDBOX_ID
+    assert status.state == SnapshotState.CREATING
+    assert status.reason == "snapshot_runtime_submitted"
+
+
 def test_create_snapshot_fails_when_existing_cr_points_to_different_sandbox() -> None:
     k8s_client = FakeK8sClient()
     k8s_client.objects[build_public_snapshot_name(SNAPSHOT_ID)] = _snapshot_cr(
@@ -427,8 +498,6 @@ def test_create_snapshot_fails_when_existing_cr_points_to_different_sandbox() ->
     runtime = KubernetesSnapshotRuntime(
         k8s_client,
         namespace="default",
-        wait_timeout_seconds=0,
-        poll_interval_seconds=0,
     )
 
     status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
@@ -467,8 +536,6 @@ def test_create_snapshot_marks_ambiguous_multi_container_restore_failed() -> Non
     runtime = KubernetesSnapshotRuntime(
         k8s_client,
         namespace="default",
-        wait_timeout_seconds=0,
-        poll_interval_seconds=0,
     )
 
     status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)

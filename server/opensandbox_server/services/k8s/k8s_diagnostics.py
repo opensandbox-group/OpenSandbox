@@ -130,7 +130,6 @@ class K8sDiagnosticsMixin:
         )
 
     def _find_pod_for_sandbox(self, sandbox_id: str):
-        """Find the Pod associated with a sandbox ID via label selector."""
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
             pods = self.k8s_client.list_pods(
@@ -243,7 +242,6 @@ class K8sDiagnosticsMixin:
         if spec.runtime_class_name:
             lines.append(f"Runtime Class:  {spec.runtime_class_name}")
 
-        # Container statuses
         if pod_status and pod_status.container_statuses:
             lines.append("")
             lines.append("Containers:")
@@ -268,7 +266,6 @@ class K8sDiagnosticsMixin:
                     t = cs.last_state.terminated
                     lines.append(f"    Last State:     Terminated (exit={t.exit_code}, reason={t.reason})")
 
-        # Init container statuses
         if pod_status and pod_status.init_container_statuses:
             lines.append("")
             lines.append("Init Containers:")
@@ -282,7 +279,6 @@ class K8sDiagnosticsMixin:
                     elif cs.state.waiting:
                         lines.append(f"    State:          Waiting ({cs.state.waiting.reason})")
 
-        # Conditions
         if pod_status and pod_status.conditions:
             lines.append("")
             lines.append("Conditions:")
@@ -291,14 +287,12 @@ class K8sDiagnosticsMixin:
                 if cond.message:
                     lines.append(f"    Message: {cond.message}")
 
-        # Labels
         if meta.labels:
             lines.append("")
             lines.append("Labels:")
             for k, v in sorted(meta.labels.items()):
                 lines.append(f"  {k}={v}")
 
-        # Resource requests/limits
         if spec.containers:
             lines.append("")
             lines.append("Resources:")

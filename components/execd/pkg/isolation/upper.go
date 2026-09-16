@@ -120,7 +120,6 @@ func (m *UpperManager) reclaimStale() {
 	}
 }
 
-// ErrUpperLimitExceeded is returned when the upper directory size limit is exceeded.
 var ErrUpperLimitExceeded = errors.New("upper: total usage exceeds configured limit")
 
 // Allocate creates a new upper + work directory pair. Returns the session ID
@@ -247,17 +246,14 @@ func (m *UpperManager) usageLocked() (int64, error) {
 	return total, nil
 }
 
-// Root returns the manager's root path.
 func (m *UpperManager) Root() string {
 	return m.root
 }
 
-// MaxBytes returns the configured byte limit.
 func (m *UpperManager) MaxBytes() int64 {
 	return m.maxBytes
 }
 
-// newSessionID generates a random hex session ID.
 func newSessionID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -268,13 +264,11 @@ func newSessionID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// dirExists reports whether path is an existing directory.
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
 
-// dirSize walks a directory and returns total bytes used.
 func dirSize(path string) (int64, error) {
 	var size int64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {

@@ -78,6 +78,10 @@ class FastPathResourceExhausted(FastPathError):
     """The FastPath pool has insufficient capacity for the request."""
 
 
+class FastPathFailedPrecondition(FastPathError):
+    """The referenced sandbox is not in a state that allows the operation."""
+
+
 class FastPathClient:
     """Synchronous gRPC client for the fast-sandbox FastPathService v2 API."""
 
@@ -100,7 +104,6 @@ class FastPathClient:
         self.close()
 
     def connect(self) -> None:
-        """Open the gRPC channel to the FastPath endpoint."""
         if self._channel is not None:
             return
         with self._connect_lock:
@@ -110,7 +113,6 @@ class FastPathClient:
                 self._channel = channel
 
     def close(self) -> None:
-        """Close the gRPC channel if open."""
         with self._connect_lock:
             if self._channel is not None:
                 self._channel.close()
@@ -158,6 +160,42 @@ class FastPathClient:
         )
         self._call(
             lambda: self._require_stub().DeleteSandbox(request, timeout=self._timeout_seconds)
+        )
+
+    def pause_sandbox(
+        self,
+        namespace: str,
+        sandbox_name: str,
+        *,
+        expected_uid: str = "",
+        request_id: str = "",
+    ) -> fastpath_pb2.PauseSandboxResponse:
+        """Persist the pause intent; completion (PAUSED) is observed via get_sandbox."""
+        request = fastpath_pb2.PauseSandboxRequest(
+            sandbox=namespaced_reference(namespace, sandbox_name, expected_uid=expected_uid),
+            request_id=request_id,
+        )
+        return self._call(
+            lambda: self._require_stub().PauseSandbox(request, timeout=self._timeout_seconds)
+        )
+
+    def resume_sandbox(
+        self,
+        namespace: str,
+        sandbox_name: str,
+        *,
+        expected_uid: str = "",
+        expected_checkpoint_id: str = "",
+        request_id: str = "",
+    ) -> fastpath_pb2.ResumeSandboxResponse:
+        """Persist the resume intent; completion (READY) is observed via get_sandbox."""
+        request = fastpath_pb2.ResumeSandboxRequest(
+            sandbox=namespaced_reference(namespace, sandbox_name, expected_uid=expected_uid),
+            expected_checkpoint_id=expected_checkpoint_id,
+            request_id=request_id,
+        )
+        return self._call(
+            lambda: self._require_stub().ResumeSandbox(request, timeout=self._timeout_seconds)
         )
 
     def list_sandboxes(
@@ -257,6 +295,55 @@ class FastPathClient:
             lambda: self._require_stub().UpdateSandbox(request, timeout=self._timeout_seconds)
         )
 
+    # -- snapshots -----------------------------------------------------------
+
+    def create_sandbox_snapshot(
+        self,
+        request: fastpath_pb2.CreateSandboxSnapshotRequest,
+    ) -> fastpath_pb2.CreateSandboxSnapshotResponse:
+        """Submit a snapshot of a running sandbox; completion is observed via
+        get_sandbox_snapshot (the intent is durable and idempotent by request_id)."""
+        return self._call(
+            lambda: self._require_stub().CreateSandboxSnapshot(
+                request, timeout=self._timeout_seconds
+            )
+        )
+
+    def get_sandbox_snapshot(
+        self,
+        namespace: str,
+        snapshot_name: str,
+        *,
+        expected_uid: str = "",
+    ) -> fastpath_pb2.GetSandboxSnapshotResponse:
+        """Get a sandbox snapshot; raises FastPathNotFound on gRPC NotFound."""
+        request = fastpath_pb2.GetSandboxSnapshotRequest(
+            snapshot=fastpath_pb2.NamespacedName(namespace=namespace, name=snapshot_name),
+            expected_uid=expected_uid,
+        )
+        return self._call(
+            lambda: self._require_stub().GetSandboxSnapshot(
+                request, timeout=self._timeout_seconds
+            )
+        )
+
+    def delete_sandbox_snapshot(
+        self,
+        namespace: str,
+        snapshot_name: str,
+        *,
+        expected_uid: str = "",
+    ) -> None:
+        """Delete a sandbox snapshot and its published artifacts."""
+        request = fastpath_pb2.DeleteSandboxSnapshotRequest(
+            snapshot=namespaced_reference(namespace, snapshot_name, expected_uid=expected_uid)
+        )
+        self._call(
+            lambda: self._require_stub().DeleteSandboxSnapshot(
+                request, timeout=self._timeout_seconds
+            )
+        )
+
     # -- readiness / endpoints --------------------------------------------
 
     def resolve_endpoint(
@@ -288,7 +375,6 @@ class FastPathClient:
         )
 
     def list_pools(self, namespace: str) -> fastpath_pb2.ListPoolsResponse:
-        """List SandboxPools in a namespace."""
         request = fastpath_pb2.ListPoolsRequest(namespace=namespace)
         return self._call(
             lambda: self._require_stub().ListPools(request, timeout=self._timeout_seconds)
@@ -324,6 +410,8 @@ def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:
         return FastPathInvalidArgument(code.name, details)
     if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
         return FastPathResourceExhausted(code.name, details)
+    if code == grpc.StatusCode.FAILED_PRECONDITION:
+        return FastPathFailedPrecondition(code.name, details)
     if code in (grpc.StatusCode.ALREADY_EXISTS, grpc.StatusCode.ABORTED):
         return FastPathConflict(code.name, details)
     if code in (

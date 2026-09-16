@@ -43,12 +43,14 @@ class SnapshotRestoreConfig:
     """
     Runtime-agnostic restore configuration for a snapshot.
 
-    Phase 1 stores only the image reference needed to restore a sandbox from the
-    snapshot. Keep this as an object so future fields can be added without
-    changing the top-level snapshot record shape.
+    ``image`` is the artifact a sandbox restore creates from. ``backend`` is
+    an optional marker naming the runtime that produced the snapshot (e.g.
+    ``"fsb"``); create-time routing uses it to send snapshot restores to the
+    owning backend. Absent means the default (pod/Docker) backend.
     """
 
     image: str | None = None
+    backend: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -46,7 +46,6 @@ func TestCommandOutputTail_SplitsOnCRAndLF(t *testing.T) {
 		require.Equal(t, want[i], got[i], "token[%d] mismatch", i)
 	}
 
-	// append more content and ensure incremental read only yields the new part
 	appendPart := "tail1\r\ntail2\n"
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_WRONLY, 0o644)
 	require.NoError(t, err)
@@ -68,7 +67,7 @@ func TestCommandOutputTail_LongLine(t *testing.T) {
 	logFile := filepath.Join(tmp, "stdout.log")
 
 	// construct a single line larger than the default 64KB, but under 5MB
-	longLine := strings.Repeat("x", 256*1024) + "\n" // 256KB
+	longLine := strings.Repeat("x", 256*1024) + "\n"
 	require.NoError(t, os.WriteFile(logFile, []byte(longLine), 0o644))
 
 	var got []string
@@ -92,12 +91,10 @@ func TestCommandOutputTail_FlushesTrailingLine(t *testing.T) {
 		lines = append(lines, text)
 	}
 
-	// First read: should only get complete lines with newlines
 	tail.read(file, onExecute, false)
 	assert.Equal(t, int64(len(content)), tail.offset)
 	assert.Equal(t, []string{"line1"}, lines)
 
-	// Flush at end: should output the last line (without newline)
 	tail.read(file, onExecute, true)
 	assert.Equal(t, []string{"line1", "lastline-without-newline"}, lines)
 	tail.read(file, onExecute, true)
@@ -517,7 +514,6 @@ func TestStdLogDescriptor_AutoCreatesTempDir(t *testing.T) {
 	stdout.Close()
 	stderr.Close()
 
-	// The directory must have been created.
 	info, err := os.Stat(missingDir)
 	require.NoError(t, err, "expected temp dir to be created, stat error")
 	require.True(t, info.IsDir(), "expected %s to be a directory", missingDir)

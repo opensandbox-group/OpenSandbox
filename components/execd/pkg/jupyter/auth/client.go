@@ -26,7 +26,6 @@ type Client struct {
 	auth       *Auth
 }
 
-// NewClient creates a new authenticated HTTP client.
 func NewClient(httpClient *http.Client, auth *Auth) *Client {
 	return &Client{
 		httpClient: httpClient,
@@ -49,7 +48,6 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	return c.httpClient.Do(req)
 }
 
-// Get sends a GET request.
 func (c *Client) Get(url string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -58,7 +56,6 @@ func (c *Client) Get(url string) (*http.Response, error) {
 	return c.Do(req)
 }
 
-// Post sends a POST request.
 func (c *Client) Post(url, contentType string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
@@ -68,7 +65,6 @@ func (c *Client) Post(url, contentType string, body io.Reader) (*http.Response, 
 	return c.Do(req)
 }
 
-// Put sends a PUT request.
 func (c *Client) Put(url, contentType string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPut, url, body)
 	if err != nil {
@@ -78,7 +74,6 @@ func (c *Client) Put(url, contentType string, body io.Reader) (*http.Response, e
 	return c.Do(req)
 }
 
-// Delete sends a DELETE request.
 func (c *Client) Delete(url string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err != nil {

@@ -25,7 +25,6 @@ from opensandbox_server.services.k8s.informer import WorkloadInformer
 class TestK8sClient:
     
     def test_init_with_kubeconfig_loads_successfully(self, k8s_runtime_config):
-        """Verify successful initialization with kubeconfig path."""
         with patch('kubernetes.config.load_kube_config') as mock_load:
             client = K8sClient(k8s_runtime_config)
 
@@ -35,7 +34,6 @@ class TestK8sClient:
             )
 
     def test_init_with_incluster_config_loads_successfully(self):
-        """Verify successful initialization with in-cluster config."""
         config = KubernetesRuntimeConfig(
             kubeconfig_path=None,
             namespace="test-ns"
@@ -48,7 +46,6 @@ class TestK8sClient:
             mock_load.assert_called_once()
 
     def test_init_with_invalid_kubeconfig_raises_exception(self):
-        """Verify exception raised with invalid config file."""
         config = KubernetesRuntimeConfig(
             kubeconfig_path="/invalid/path",
             namespace="test-ns"
@@ -63,7 +60,6 @@ class TestK8sClient:
             assert "Failed to load Kubernetes configuration" in str(exc_info.value)
 
     def test_get_core_v1_api_returns_singleton(self, k8s_runtime_config):
-        """Verify CoreV1Api returns singleton."""
         with patch('kubernetes.config.load_kube_config'), \
              patch('kubernetes.client.CoreV1Api') as mock_api_class:
 
@@ -79,7 +75,6 @@ class TestK8sClient:
             assert mock_api_class.call_count == 1
 
     def test_get_custom_objects_api_returns_singleton(self, k8s_runtime_config):
-        """Verify CustomObjectsApi returns singleton."""
         with patch('kubernetes.config.load_kube_config'), \
              patch('kubernetes.client.CustomObjectsApi') as mock_api_class:
 
@@ -106,14 +101,12 @@ class TestK8sClient:
             assert mock_api_class.call_count == 1
 
     def test_no_rate_limiters_when_qps_is_zero(self, k8s_runtime_config):
-        """read_qps=0 and write_qps=0 means no rate limiters are created."""
         with patch('kubernetes.config.load_kube_config'):
             client = K8sClient(k8s_runtime_config)
             assert client._read_limiter is None
             assert client._write_limiter is None
 
     def test_read_limiter_created_when_read_qps_set(self):
-        """read_qps > 0 creates a read rate limiter."""
         config = KubernetesRuntimeConfig(read_qps=10.0, read_burst=20)
         with patch('kubernetes.config.load_incluster_config'):
             client = K8sClient(config)
@@ -121,7 +114,6 @@ class TestK8sClient:
             assert client._write_limiter is None
 
     def test_write_limiter_created_when_write_qps_set(self):
-        """write_qps > 0 creates a write rate limiter."""
         config = KubernetesRuntimeConfig(write_qps=5.0, write_burst=10)
         with patch('kubernetes.config.load_incluster_config'):
             client = K8sClient(config)
@@ -159,7 +151,6 @@ class TestK8sClient:
         return self._attach_informer(c, informer)
 
     def test_create_custom_object_delegates_to_api(self, k8s_runtime_config):
-        """create_custom_object forwards arguments to the raw API."""
         c = self._make_client(k8s_runtime_config)
         body = {"metadata": {"name": "foo"}}
         c.create_custom_object("g", "v1", "ns", "foos", body)
@@ -243,14 +234,12 @@ class TestK8sClient:
         fake_informer.invalidate.assert_not_called()
 
     def test_get_custom_object_returns_none_on_404(self, k8s_runtime_config):
-        """get_custom_object returns None when the API raises a 404."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.get_namespaced_custom_object.side_effect = ApiException(status=404)
         result = c.get_custom_object("g", "v1", "ns", "foos", "foo-1")
         assert result is None
 
     def test_get_custom_object_returns_object(self, k8s_runtime_config):
-        """get_custom_object returns the object from the API on a successful call."""
         c = self._make_client(k8s_runtime_config)
         obj = {"metadata": {"name": "foo-1"}}
         c._custom_objects_api.get_namespaced_custom_object.return_value = obj
@@ -359,14 +348,12 @@ class TestK8sClient:
         assert informer._thread is None
 
     def test_get_custom_object_reraises_non_404(self, k8s_runtime_config):
-        """get_custom_object re-raises non-404 API exceptions."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.get_namespaced_custom_object.side_effect = ApiException(status=500)
         with pytest.raises(ApiException):
             c.get_custom_object("g", "v1", "ns", "foos", "foo-1")
 
     def test_get_custom_object_returns_cached_when_synced(self, k8s_runtime_config):
-        """get_custom_object returns cached value and skips API when informer is synced."""
         c = self._make_client(k8s_runtime_config)
         cached_obj = {"metadata": {"name": "foo-1"}}
         fake_informer = self._attach_informer(c, MagicMock())
@@ -378,7 +365,6 @@ class TestK8sClient:
         c._custom_objects_api.get_namespaced_custom_object.assert_not_called()
 
     def test_get_custom_object_skips_informer_when_disabled(self, k8s_runtime_config):
-        """get_custom_object bypasses informer and calls API when informer_enabled=False."""
         c = self._make_client(k8s_runtime_config)
         c.config = MagicMock(informer_enabled=False, read_qps=0.0)
         obj = {"metadata": {"name": "foo-1"}}
@@ -388,7 +374,6 @@ class TestK8sClient:
         c._custom_objects_api.get_namespaced_custom_object.assert_called_once()
 
     def test_list_custom_objects_returns_items(self, k8s_runtime_config):
-        """list_custom_objects returns the items list from the API response."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.list_namespaced_custom_object.return_value = {
             "items": [{"metadata": {"name": "a"}}, {"metadata": {"name": "b"}}]
@@ -408,14 +393,12 @@ class TestK8sClient:
         parse.assert_not_called()
 
     def test_list_custom_objects_returns_empty_on_404(self, k8s_runtime_config):
-        """list_custom_objects returns [] when the API raises a 404."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.list_namespaced_custom_object.side_effect = ApiException(status=404)
         result = c.list_custom_objects("g", "v1", "ns", "foos")
         assert result == []
 
     def test_list_custom_objects_reraises_non_404(self, k8s_runtime_config):
-        """list_custom_objects re-raises non-404 API exceptions."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.list_namespaced_custom_object.side_effect = ApiException(status=500)
         with pytest.raises(ApiException):
@@ -427,7 +410,6 @@ class TestK8sClient:
         return self._attach_informer(c, fake_informer)
 
     def test_list_custom_objects_returns_cached_when_synced(self, k8s_runtime_config):
-        """When the informer is synced, list_custom_objects serves from cache."""
         c = self._make_client(k8s_runtime_config)
         items = [
             {"metadata": {"name": "a", "labels": {"opensandbox.io/id": "a"}}},
@@ -471,7 +453,6 @@ class TestK8sClient:
     def test_list_custom_objects_falls_back_when_informer_unsynced(
         self, k8s_runtime_config
     ):
-        """An unavailable cache routes to the direct API."""
         c = self._make_client(k8s_runtime_config)
         fake_informer = self._attach_informer(c, MagicMock())
         fake_informer.list_if_synced.return_value = None
@@ -499,7 +480,6 @@ class TestK8sClient:
         c._custom_objects_api.list_namespaced_custom_object.assert_called_once()
 
     def test_delete_custom_object_delegates_to_api(self, k8s_runtime_config):
-        """delete_custom_object forwards arguments to the raw API."""
         c = self._make_client(k8s_runtime_config)
         c.delete_custom_object("g", "v1", "ns", "foos", "foo-1", grace_period_seconds=0)
         c._custom_objects_api.delete_namespaced_custom_object.assert_called_once_with(
@@ -508,7 +488,6 @@ class TestK8sClient:
         )
 
     def test_patch_custom_object_delegates_to_api(self, k8s_runtime_config):
-        """patch_custom_object forwards arguments to the raw API."""
         c = self._make_client(k8s_runtime_config)
         body = {"spec": {"replicas": 2}}
         c.patch_custom_object("g", "v1", "ns", "foos", "foo-1", body)
@@ -549,7 +528,6 @@ class TestK8sClient:
             api_client.close()
 
     def test_create_secret_delegates_to_api(self, k8s_runtime_config):
-        """create_secret forwards to CoreV1Api.create_namespaced_secret."""
         c = self._make_client(k8s_runtime_config)
         body = {"metadata": {"name": "my-secret"}}
         c.create_secret("ns", body)
@@ -558,7 +536,6 @@ class TestK8sClient:
         )
 
     def test_list_pods_returns_items(self, k8s_runtime_config):
-        """list_pods returns the items attribute from the API response."""
         c = self._make_client(k8s_runtime_config)
         mock_pod = MagicMock()
         c._core_v1_api.list_namespaced_pod.return_value = MagicMock(items=[mock_pod])
@@ -568,7 +545,7 @@ class TestK8sClient:
             namespace="ns", label_selector="app=foo"
         )
 
-    def test_list_pods_returns_empty_list_on_exception(self, k8s_runtime_config):
+    def test_list_pods_reraises_exceptions(self, k8s_runtime_config):
         """list_pods re-raises exceptions from the API."""
         c = self._make_client(k8s_runtime_config)
         c._core_v1_api.list_namespaced_pod.side_effect = Exception("network error")
@@ -590,7 +567,6 @@ class TestK8sClient:
         assert c.read_pod("ns", "missing") is None
 
     def test_read_runtime_class_delegates_to_api(self, k8s_runtime_config):
-        """read_runtime_class forwards to NodeV1Api.read_runtime_class."""
         c = self._make_client(k8s_runtime_config)
         c._node_v1_api.read_runtime_class.return_value = MagicMock(metadata=MagicMock(name="gvisor"))
         result = c.read_runtime_class("gvisor")
@@ -598,7 +574,6 @@ class TestK8sClient:
         assert result is not None
 
     def test_write_limiter_called_on_create(self, k8s_runtime_config):
-        """create_custom_object acquires the write limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         mock_limiter = MagicMock()
         c._write_limiter = mock_limiter
@@ -606,7 +581,6 @@ class TestK8sClient:
         mock_limiter.acquire.assert_called_once()
 
     def test_write_limiter_called_on_delete(self, k8s_runtime_config):
-        """delete_custom_object acquires the write limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         mock_limiter = MagicMock()
         c._write_limiter = mock_limiter
@@ -614,7 +588,6 @@ class TestK8sClient:
         mock_limiter.acquire.assert_called_once()
 
     def test_write_limiter_called_on_patch(self, k8s_runtime_config):
-        """patch_custom_object acquires the write limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         mock_limiter = MagicMock()
         c._write_limiter = mock_limiter
@@ -622,7 +595,6 @@ class TestK8sClient:
         mock_limiter.acquire.assert_called_once()
 
     def test_write_limiter_called_on_create_secret(self, k8s_runtime_config):
-        """create_secret acquires the write limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         mock_limiter = MagicMock()
         c._write_limiter = mock_limiter
@@ -630,7 +602,6 @@ class TestK8sClient:
         mock_limiter.acquire.assert_called_once()
 
     def test_read_limiter_called_on_get(self, k8s_runtime_config):
-        """get_custom_object acquires the read limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         c.config = MagicMock(informer_enabled=False, read_qps=0.0)
         c._custom_objects_api.get_namespaced_custom_object.return_value = {}
@@ -640,7 +611,6 @@ class TestK8sClient:
         mock_limiter.acquire.assert_called_once()
 
     def test_read_limiter_called_on_list(self, k8s_runtime_config):
-        """list_custom_objects acquires the read limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.list_namespaced_custom_object.return_value = {"items": []}
         mock_limiter = MagicMock()
@@ -649,7 +619,6 @@ class TestK8sClient:
         mock_limiter.acquire.assert_called_once()
 
     def test_read_limiter_called_on_list_pods(self, k8s_runtime_config):
-        """list_pods acquires the read limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         c._core_v1_api.list_namespaced_pod.return_value = MagicMock(items=[])
         mock_limiter = MagicMock()
@@ -665,7 +634,6 @@ class TestK8sClient:
         mock_limiter.acquire.assert_called_once()
 
     def test_read_limiter_called_on_read_runtime_class(self, k8s_runtime_config):
-        """read_runtime_class acquires the read limiter before calling the API."""
         c = self._make_client(k8s_runtime_config)
         mock_limiter = MagicMock()
         c._read_limiter = mock_limiter

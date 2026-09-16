@@ -48,13 +48,19 @@ the image against the OpenSandbox GitHub Actions identity before deployment.
 
 ## SDKs
 
-Python:
+Pick your language:
+
+<details>
+<summary><b>Python</b></summary>
 
 ```bash
 pip install opensandbox
 ```
 
-Java/Kotlin (Gradle Kotlin DSL):
+</details>
+
+<details>
+<summary><b>Java/Kotlin (Gradle Kotlin DSL)</b></summary>
 
 ```kotlin
 dependencies {
@@ -62,7 +68,10 @@ dependencies {
 }
 ```
 
-Java/Kotlin (Maven):
+</details>
+
+<details>
+<summary><b>Java/Kotlin (Maven)</b></summary>
 
 ```xml
 <dependency>
@@ -72,23 +81,34 @@ Java/Kotlin (Maven):
 </dependency>
 ```
 
-JavaScript/TypeScript:
+</details>
+
+<details>
+<summary><b>JavaScript/TypeScript</b></summary>
 
 ```bash
 npm install @alibaba-group/opensandbox
 ```
 
-C#/.NET:
+</details>
+
+<details>
+<summary><b>C#/.NET</b></summary>
 
 ```bash
 dotnet add package Alibaba.OpenSandbox
 ```
 
-Go:
+</details>
+
+<details>
+<summary><b>Go</b></summary>
 
 ```bash
 go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 ```
+
+</details>
 
 ## CLI
 
@@ -159,67 +179,52 @@ uvx opensandbox-server
 # uvx opensandbox-server -h
 ```
 
-### Create a Code Interpreter and Execute Commands/Codes
+### Create a Sandbox and Execute Commands/Scripts
 
-Install the Code Interpreter SDK
+Install the Sandbox SDK
 
 ```bash
-uv pip install opensandbox-code-interpreter
+uv pip install opensandbox
 ```
 
-Create a sandbox and execute commands and codes.
+Create a sandbox from an `alpine` image and execute commands and scripts.
 
 ```python
 import asyncio
-from datetime import timedelta
 
-from code_interpreter import CodeInterpreter, SupportedLanguage
 from opensandbox import Sandbox
 from opensandbox.models import WriteEntry
 
 async def main() -> None:
-    # 1. Create a sandbox
-    sandbox = await Sandbox.create(
-        "opensandbox/code-interpreter:v1.1.0",
-        entrypoint=["/opt/code-interpreter/code-interpreter.sh"],
-        env={"PYTHON_VERSION": "3.11"},
-        timeout=timedelta(minutes=10),
-    )
+    # 1. Create a sandbox from the alpine image
+    sandbox = await Sandbox.create("alpine")
 
-    async with sandbox:
-
+    try:
         # 2. Execute a shell command
         execution = await sandbox.commands.run("echo 'Hello OpenSandbox!'")
         print(execution.logs.stdout[0].text)
 
-        # 3. Write a file
+        # 3. Write a script file
         await sandbox.files.write_files([
-            WriteEntry(path="/tmp/hello.txt", data="Hello World", mode=644)
+            WriteEntry(
+                path="/tmp/hello.sh",
+                data="echo \"Hello $1\"\necho '2 + 2 =' $((2 + 2))",
+                mode=755,
+            )
         ])
 
-        # 4. Read a file
-        content = await sandbox.files.read_file("/tmp/hello.txt")
-        print(f"Content: {content}") # Content: Hello World
+        # 4. Read the file back
+        content = await sandbox.files.read_file("/tmp/hello.sh")
+        print(f"Content: {content}")
 
-        # 5. Create a code interpreter
-        interpreter = await CodeInterpreter.create(sandbox)
+        # 5. Execute the script
+        execution = await sandbox.commands.run("sh /tmp/hello.sh OpenSandbox")
+        for log in execution.logs.stdout:
+            print(log.text)
 
-        # 6. Execute Python code (single-run, pass language directly)
-        result = await interpreter.codes.run(
-              """
-                  import sys
-                  print(sys.version)
-                  result = 2 + 2
-                  result
-              """,
-              language=SupportedLanguage.PYTHON,
-        )
-
-        print(result.result[0].text) # 4
-        print(result.logs.stdout[0].text) # 3.11.14
-
-        # 7. Cleanup the sandbox
-        await sandbox.kill()
+    finally:
+        # 6. Cleanup the sandbox
+        await sandbox.destroy()
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -256,36 +261,18 @@ OpenSandbox provides examples covering SDK usage, agent integrations, browser au
 
 For more details, please refer to the [examples documentation](docs/examples/index.md).
 
-## Project Structure
-
-| Directory | Description                                                      |
-|-----------|------------------------------------------------------------------|
-| [`sdks/`](sdks/) | Multi-language SDKs (Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET) |
-| [`specs/`](specs/README.md) | OpenAPI specs and lifecycle specifications                      |
-| [`server/`](server/README.md) | Python FastAPI sandbox lifecycle server                          |
-| [`cli/`](cli/README.md) | OpenSandbox command-line interface                               |
-| [`kubernetes/`](kubernetes/README.md) | Kubernetes deployment and examples                               |
-| [`components/execd/`](components/execd/README.md) | Sandbox execution daemon (commands and file operations)          |
-| [`components/ingress/`](components/ingress/README.md) | Sandbox traffic ingress proxy                                    |
-| [`components/egress/`](components/egress/README.md) | Sandbox network egress control                                   |
-| [`examples/`](examples/) | Runnable example code                                            |
-| [`docs/examples/`](docs/examples/index.md) | Example documentation and use cases                              |
-| [`oseps/`](oseps/README.md) | OpenSandbox Enhancement Proposals                                |
-| [`docs/`](docs/) | Architecture and design documentation                            |
-| [`tests/`](tests/) | Cross-component E2E tests                                        |
-| [`scripts/`](scripts/) | Development and maintenance scripts                              |
-
-For detailed architecture, see [Architecture](docs/architecture/).
-
 ## Documentation
 
 - [Architecture](docs/architecture/) – Overall architecture & design philosophy
 - [Credential Vault](docs/guides/credential-vault.md) - Credential Vault credential injection guide
 - [Release Verification](docs/community/release-verification.md) - Release signing and artifact verification
 - [oseps/README.md](oseps/README.md) – OpenSandbox Enhancement Proposals
-- SDK
-  - Sandbox base SDK ([Java/Kotlin SDK](sdks/sandbox/kotlin/README.md), [Python SDK](sdks/sandbox/python/README.md), [JavaScript/TypeScript SDK](sdks/sandbox/javascript/README.md), [C#/.NET SDK](sdks/sandbox/csharp/README.md)), [Go SDK](sdks/sandbox/go/README.md) - includes sandbox lifecycle, command execution, file operations
-  - Code Interpreter SDK ([Java/Kotlin SDK](sdks/sandbox/kotlin/code-interpreter/README.md), [Python SDK](sdks/code-interpreter/python/README.md), [JavaScript/TypeScript SDK](sdks/code-interpreter/javascript/README.md), [C#/.NET SDK](sdks/code-interpreter/csharp/README.md)) - code interpreter
+- SDK - sandbox lifecycle, command execution, and file operations
+  - [Java/Kotlin](sdks/sandbox/kotlin/README.md)
+  - [Python](sdks/sandbox/python/README.md)
+  - [JavaScript/TypeScript](sdks/sandbox/javascript/README.md)
+  - [C#/.NET](sdks/sandbox/csharp/README.md)
+  - [Go](sdks/sandbox/go/README.md)
 - [cli/README.md](cli/README.md) - OpenSandbox CLI installation and command reference
 - [sdks/mcp/sandbox/python/README.md](sdks/mcp/sandbox/python/README.md) - MCP server installation and client setup
 - [specs/README.md](specs/README.md) - OpenAPI definitions for sandbox lifecycle API and sandbox execution API
@@ -306,7 +293,3 @@ and how roadmap items are managed.
 - Issues: Submit bugs, feature requests, or design discussions through GitHub Issues
 - Discord: Join the [OpenSandbox Discord community](https://discord.gg/g7FuPs8YeD)
 - DingTalk: Join the [OpenSandbox technical discussion group](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
-
-## Star History
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=opensandbox-group/OpenSandbox&type=date&legend=top-left)](https://star-history.dera.page/#opensandbox-group/OpenSandbox&type=date&legend=top-left)

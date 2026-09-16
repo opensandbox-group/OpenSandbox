@@ -48,7 +48,7 @@ def _parse_since_to_timestamp(since: str) -> int:
     """
     m = re.fullmatch(r"(\d+)\s*([smhd])", since.strip().lower())
     if not m:
-        seconds = 600  # default 10m
+        seconds = 600
     else:
         value, unit = int(m.group(1)), m.group(2)
         multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -176,7 +176,6 @@ class DockerDiagnosticsMixin:
         if state.get("Error"):
             lines.append(f"Error:          {state['Error']}")
 
-        # Resource limits
         lines.append("")
         lines.append("Resources:")
         nano_cpus = host_config.get("NanoCpus", 0)
@@ -189,7 +188,6 @@ class DockerDiagnosticsMixin:
         if pids_limit:
             lines.append(f"  PIDs Limit:   {pids_limit}")
 
-        # Network
         lines.append("")
         lines.append("Network:")
         networks = network_settings.get("Networks", {})
@@ -197,7 +195,6 @@ class DockerDiagnosticsMixin:
             ip = (net_info or {}).get("IPAddress", "N/A")
             lines.append(f"  {net_name}: {ip}")
 
-        # Ports
         ports = network_settings.get("Ports", {})
         if ports:
             lines.append("")
@@ -209,7 +206,6 @@ class DockerDiagnosticsMixin:
                 else:
                     lines.append(f"  {port_key} (not bound)")
 
-        # Labels
         labels = config_section.get("Labels", {})
         if labels:
             lines.append("")
@@ -217,7 +213,6 @@ class DockerDiagnosticsMixin:
             for k, v in sorted(labels.items()):
                 lines.append(f"  {k}={v}")
 
-        # Environment (filter sensitive)
         env_list = config_section.get("Env", [])
         if env_list:
             lines.append("")
@@ -260,7 +255,6 @@ class DockerDiagnosticsMixin:
         if state.get("Error"):
             lines.append(f"Event:      Error - {state['Error']}")
 
-        # Health check status if available
         health = state.get("Health", {})
         if health:
             lines.append(f"Health:     {health.get('Status', 'N/A')}")

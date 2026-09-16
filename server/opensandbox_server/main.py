@@ -122,7 +122,7 @@ async def lifespan(app: FastAPI):
         try:
             api_key_confirm(configured_api_key=app_config.server.api_key)
         except Exception as exc:
-            logger.error("API key startup confirmation failed: %s", exc)
+            logger.error(f"API key startup confirmation failed: {exc}")
             os._exit(1)
 
     if tenant_provider is not None:
@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI):
                 core_v1_api = K8sClient(app_config.kubernetes).get_core_v1_api()
                 validate_tenant_namespaces_on_startup(tenant_provider, core_v1_api)
             except Exception as exc:
-                logger.error("Tenant namespace validation failed: %s", exc)
+                logger.error(f"Tenant namespace validation failed: {exc}")
                 os._exit(1)
         else:
             logger.warning(
@@ -153,9 +153,7 @@ async def lifespan(app: FastAPI):
 
     app.state.http_client = httpx.AsyncClient(timeout=180.0)
 
-    # Validate secure runtime configuration at startup
     try:
-        # Determine which runtime client to create based on config
         docker_client = None
         k8s_client = None
         runtime_type = app_config.runtime.type
@@ -178,7 +176,7 @@ async def lifespan(app: FastAPI):
         )
 
     except Exception as exc:
-        logger.error("Secure runtime validation failed: %s", exc)
+        logger.error(f"Secure runtime validation failed: {exc}")
         raise
 
     ext = require_extension_service(sandbox_service)
@@ -213,7 +211,6 @@ async def lifespan(app: FastAPI):
     await app.state.http_client.aclose()
 
 
-# Initialize FastAPI application
 app = _DateHeaderFastAPI(
     title="OpenSandbox Lifecycle API",
     version=API_CONTRACT_VERSION,
@@ -224,7 +221,6 @@ app = _DateHeaderFastAPI(
     lifespan=lifespan,
 )
 
-# Attach global config for runtime access
 app.state.config = app_config
 app.state.tenant_provider = tenant_provider
 
@@ -317,7 +313,6 @@ async def version_info():
 if __name__ == "__main__":
     import uvicorn
 
-    # Run the application
     uvicorn.run(
         "opensandbox_server.main:app",
         host=app_config.server.host,

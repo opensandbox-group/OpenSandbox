@@ -31,28 +31,22 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// isolatedRunner is set by InitIsolatedRunner during startup.
 var isolatedRunner *runtime.IsolatedRunner
 
-// isolatedProbeResult stores the probe result for capabilities reporting.
 var isolatedProbeResult *isolation.ProbeResult
 
-// InitIsolatedRunner wires the isolated session runner.
 func InitIsolatedRunner(r *runtime.IsolatedRunner) {
 	isolatedRunner = r
 }
 
-// InitIsolatedProbe stores the probe result for the capabilities endpoint.
 func InitIsolatedProbe(p *isolation.ProbeResult) {
 	isolatedProbeResult = p
 }
 
-// IsolatedSessionController handles /v1/isolated/* endpoints.
 type IsolatedSessionController struct {
 	*basicController
 }
 
-// NewIsolatedSessionController creates a controller bound to ctx.
 func NewIsolatedSessionController(ctx *gin.Context) *IsolatedSessionController {
 	return &IsolatedSessionController{
 		basicController: newBasicController(ctx),
@@ -67,7 +61,6 @@ func (c *IsolatedSessionController) initialized() bool {
 	return isolatedRunner != nil
 }
 
-// Create handles POST /v1/isolated/session.
 func (c *IsolatedSessionController) Create() {
 	if !c.probed() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
@@ -203,7 +196,6 @@ func (c *IsolatedSessionController) Get() {
 	c.RespondSuccess(resp)
 }
 
-// List handles GET /v1/isolated/sessions.
 func (c *IsolatedSessionController) List() {
 	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
@@ -225,7 +217,6 @@ func (c *IsolatedSessionController) List() {
 	c.RespondSuccess(model.ListIsolatedSessionsResponse{Sessions: items})
 }
 
-// Run handles POST /v1/isolated/session/:sessionId/run (SSE streaming).
 func (c *IsolatedSessionController) Run() {
 	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
@@ -272,7 +263,6 @@ func (c *IsolatedSessionController) Run() {
 		return
 	}
 
-	// SSE stdout callback.
 	onStdout := func(line string) {
 		if line == "" {
 			return
@@ -321,7 +311,6 @@ func (c *IsolatedSessionController) Run() {
 	c.writeSingleEvent("IsolatedComplete", event.ToJSON(), true, event.Summary())
 }
 
-// respondRunError maps background-run start and query errors to HTTP responses.
 func (c *IsolatedSessionController) respondRunError(err error) {
 	if errors.Is(err, runtime.ErrContextNotFound) {
 		c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
@@ -334,7 +323,6 @@ func (c *IsolatedSessionController) respondRunError(err error) {
 	c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
 }
 
-// GetRunStatus handles GET /v1/isolated/session/:sessionId/runs/:runId.
 func (c *IsolatedSessionController) GetRunStatus() {
 	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
@@ -363,7 +351,6 @@ func (c *IsolatedSessionController) GetRunStatus() {
 	c.RespondSuccess(resp)
 }
 
-// GetRunLogs handles GET /v1/isolated/session/:sessionId/runs/:runId/logs.
 // The body is the combined stdout/stderr of the run as plain text; the
 // EXECD-ISOLATED-TAIL-CURSOR response header carries the next byte cursor for
 // incremental polling.
@@ -400,7 +387,6 @@ func (c *IsolatedSessionController) GetRunLogs() {
 	c.ctx.String(http.StatusOK, "%s", output)
 }
 
-// Delete handles DELETE /v1/isolated/session/:sessionId.
 func (c *IsolatedSessionController) Delete() {
 	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
@@ -431,17 +417,14 @@ func classifyIsolatedDeleteError(err error) (int, model.ErrorCode) {
 	return http.StatusInternalServerError, model.ErrorCodeRuntimeError
 }
 
-// Diff handles GET /v1/isolated/session/:sessionId/diff.
 func (c *IsolatedSessionController) Diff() {
 	c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeNotSupported, "diff not implemented yet (phase 2)")
 }
 
-// Commit handles POST /v1/isolated/session/:sessionId/commit.
 func (c *IsolatedSessionController) Commit() {
 	c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeNotSupported, "commit not implemented yet (phase 2)")
 }
 
-// Capabilities handles GET /v1/isolated/capabilities.
 func (c *IsolatedSessionController) Capabilities() {
 	hardeningReport := runtime.ReportHardening()
 	hardening := &model.HardeningStatus{

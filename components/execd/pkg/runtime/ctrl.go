@@ -68,7 +68,6 @@ type commandKernel struct {
 	content      string
 }
 
-// NewController creates a runtime controller.
 func NewController(baseURL, token string) *Controller {
 	return &Controller{
 		baseURL: baseURL,

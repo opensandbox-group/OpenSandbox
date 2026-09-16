@@ -89,7 +89,9 @@ class DockerRuntimeMixin:
                 with self._docker_operation("execd cache start container", "execd-cache"):
                     container.start()
                     container.reload()
-                    logger.info("Created sandbox execd archive for container %s", container.id)
+                    logger.info(
+                        f"Created sandbox execd archive for container {container.id}"
+                    )
             except TypeError as exc:
                 if docker_platform is not None:
                     raise HTTPException(
@@ -180,15 +182,14 @@ class DockerRuntimeMixin:
                             container.remove(force=True)
                     except DockerException as cleanup_exc:
                         logger.warning(
-                            "Failed to cleanup temporary execd container: %s", cleanup_exc
+                            f"Failed to cleanup temporary execd container: {cleanup_exc}"
                         )
 
             self._execd_archive_cache[cache_key] = data
-            logger.info("Dumped execd archive to memory for platform key %s", cache_key)
+            logger.info(f"Dumped execd archive to memory for platform key {cache_key}")
             return data
 
     def _ensure_directory(self, container, path: str, sandbox_id: Optional[str] = None) -> None:
-        """Create a directory within the target container if it does not exist."""
         if not path or path == "/":
             return
         normalized_path = path.rstrip("/")
@@ -220,7 +221,6 @@ class DockerRuntimeMixin:
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
     ) -> None:
-        """Copy execd artifacts from the platform container into the sandbox."""
         archive = self._fetch_execd_archive(platform)
         target_parent = posixpath.dirname(EXECED_INSTALL_PATH.rstrip("/")) or "/"
         self._ensure_directory(container, target_parent, sandbox_id)
@@ -289,7 +289,10 @@ class DockerRuntimeMixin:
         cache_key = self._normalize_platform_key(platform)
         archive = self._bwrap_archive_cache.get(cache_key)
         if archive is None:
-            logger.warning("bwrap archive not cached for %s — isolation will be unavailable, upgrade execd image to v1.1.0+", cache_key)
+            logger.warning(
+                f"bwrap archive not cached for {cache_key} — isolation will be "
+                "unavailable, upgrade execd image to v1.1.0+"
+            )
             return
 
         try:
@@ -297,9 +300,8 @@ class DockerRuntimeMixin:
                 container.put_archive(path=OPENSANDBOX_DIR, data=archive)
         except DockerException as exc:
             logger.warning(
-                "Failed to copy bwrap into sandbox %s: %s (isolation will be unavailable)",
-                sandbox_id,
-                exc,
+                f"Failed to copy bwrap into sandbox {sandbox_id}: {exc} "
+                "(isolation will be unavailable)"
             )
 
     def _copy_session_gate_to_container(
@@ -318,9 +320,8 @@ class DockerRuntimeMixin:
         archive = self._session_gate_archive_cache.get(cache_key)
         if archive is None:
             logger.warning(
-                "session workload gate archive not cached for %s — "
-                "gated isolated-session lifecycle will be unavailable",
-                cache_key,
+                f"session workload gate archive not cached for {cache_key} — "
+                "gated isolated-session lifecycle will be unavailable"
             )
             return
 
@@ -354,9 +355,8 @@ class DockerRuntimeMixin:
         archive = self._launcher_archive_cache.get(cache_key)
         if archive is None:
             logger.warning(
-                "hardening launcher archive not cached for %s — "
-                "[hardening] will be unavailable",
-                cache_key,
+                f"hardening launcher archive not cached for {cache_key} — "
+                "[hardening] will be unavailable"
             )
             return
 
@@ -381,7 +381,6 @@ class DockerRuntimeMixin:
         sandbox_id: str,
         platform: Optional[PlatformSpec] = None,
     ) -> None:
-        """Copy execd artifacts and bootstrap launcher into the sandbox container."""
         self._copy_execd_to_container(container, sandbox_id, platform)
         self._install_bootstrap_script(container, sandbox_id, platform)
         self._copy_bwrap_to_container(container, sandbox_id, platform)

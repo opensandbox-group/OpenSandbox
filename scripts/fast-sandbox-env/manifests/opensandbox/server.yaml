@@ -47,6 +47,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # The composite list fans out to the kubernetes backend, which lists
+  # BatchSandboxes; a missing rule fails the whole list with 503.
+  - apiGroups: ["sandbox.opensandbox.io"]
+    resources: ["batchsandboxes"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -182,7 +187,7 @@ metadata:
     app.kubernetes.io/name: opensandbox-server
 spec:
   # NodePort is mapped to the host by the kind extraPortMappings rendered
-  # from SERVER_HOST_PORT (default 127.0.0.1:8080 -> node port 30880).
+  # from SERVER_HOST_PORT (default 127.0.0.1:18080 -> node port 30880).
   type: NodePort
   ports:
     - port: 80

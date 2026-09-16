@@ -16,7 +16,6 @@ package model
 
 import "time"
 
-// FileInfo represents file metadata including path and permissions
 type FileInfo struct {
 	Path       string    `json:"path,omitempty"`
 	Type       string    `json:"type,omitempty"`
@@ -31,26 +30,22 @@ type FileMetadata struct {
 	Permission `json:",inline"`
 }
 
-// Permission represents file ownership and mode
 type Permission struct {
 	Owner string `json:"owner"`
 	Group string `json:"group"`
 	Mode  int    `json:"mode"`
 }
 
-// RenameFileItem represents a file rename operation
 type RenameFileItem struct {
 	Src  string `json:"src,omitempty"`
 	Dest string `json:"dest,omitempty"`
 }
 
-// ReplaceFileContentItem represents a content replacement operation
 type ReplaceFileContentItem struct {
 	Old string `json:"old,omitempty"`
 	New string `json:"new,omitempty"`
 }
 
-// ReplaceFileContentResult represents the result of a content replacement on a single file
 type ReplaceFileContentResult struct {
 	ReplacedCount int `json:"replacedCount"`
 }

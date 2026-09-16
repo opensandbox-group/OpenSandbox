@@ -32,7 +32,6 @@ func setupMetricController(method, path string) (*MetricController, *httptest.Re
 	return ctrl, w
 }
 
-// TestReadMetrics exercises readMetrics end-to-end.
 func TestReadMetrics(t *testing.T) {
 	ctrl := &MetricController{}
 
@@ -41,26 +40,21 @@ func TestReadMetrics(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, metrics)
 
-	// Validate CPU count
 	assert.Greater(t, metrics.CpuCount, 0.0)
 
-	// Validate CPU utilization
 	assert.GreaterOrEqual(t, metrics.CpuUsedPct, 0.0)
 	assert.Less(t, metrics.CpuUsedPct, 100.1) // CPU usage should be under 100% with small float tolerance
 
-	// Validate memory information
 	assert.Greater(t, metrics.MemTotalMiB, 0.0)
 	assert.GreaterOrEqual(t, metrics.MemUsedMiB, 0.0)
-	assert.LessOrEqual(t, metrics.MemUsedMiB, metrics.MemTotalMiB) // Used memory should not exceed total
+	assert.LessOrEqual(t, metrics.MemUsedMiB, metrics.MemTotalMiB)
 
-	// Validate timestamps
 	currentTime := time.Now().UnixMilli()
 	oneMinuteAgo := currentTime - 60*1000
-	assert.GreaterOrEqual(t, metrics.Timestamp, oneMinuteAgo) // Should be within the last minute
-	assert.LessOrEqual(t, metrics.Timestamp, currentTime)     // Should not be in the future
+	assert.GreaterOrEqual(t, metrics.Timestamp, oneMinuteAgo)
+	assert.LessOrEqual(t, metrics.Timestamp, currentTime)
 }
 
-// TestGetMetricsEndpoint covers the happy path.
 func TestGetMetricsEndpoint(t *testing.T) {
 	ctrl, w := setupMetricController("GET", "/api/metrics")
 
@@ -79,7 +73,6 @@ func TestGetMetricsEndpoint(t *testing.T) {
 	assert.NotZero(t, metrics.Timestamp)
 }
 
-// TestWatchMetricsHeaders verifies SSE header defaults.
 func TestWatchMetricsHeaders(t *testing.T) {
 	ctrl, w := setupMetricController("GET", "/api/watch-metrics")
 
@@ -98,7 +91,6 @@ func TestWatchMetricsHeaders(t *testing.T) {
 	assert.Equal(t, "no", buffering)
 }
 
-// TestMetricSerialization ensures metrics marshal and unmarshal cleanly.
 func TestMetricSerialization(t *testing.T) {
 	metrics := &model.Metrics{
 		CpuCount:    4,

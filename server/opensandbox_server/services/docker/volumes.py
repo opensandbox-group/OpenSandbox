@@ -52,13 +52,6 @@ class DockerVolumesMixin:
         """
         Validate volume definitions for Docker runtime.
 
-        Performs comprehensive validation:
-        - Calls shared volume validation (name, mount path, sub path, backend count)
-        - Delegates to backend-specific validators for Docker-level checks
-
-        Args:
-            request: Sandbox creation request.
-
         Returns:
             A tuple of:
             - A dict mapping PVC volume names (``pvc.claimName``) to their
@@ -75,7 +68,6 @@ class DockerVolumesMixin:
         if not request.volumes:
             return {}, []
 
-        # Shared validation: names, mount paths, sub paths, backend count, host path allowlist
         allowed_prefixes = self.app_config.storage.allowed_host_paths
         ensure_volumes_valid(request.volumes, allowed_host_prefixes=allowed_prefixes)
 
@@ -110,10 +102,6 @@ class DockerVolumesMixin:
         remains within allowed prefixes — including symlink resolution — then
         ensures the directory exists on the filesystem, creating it automatically
         if it does not.
-
-        Args:
-            volume: Volume with host backend.
-            allowed_prefixes: Optional allowlist of host path prefixes.
 
         Raises:
             HTTPException: When the resolved path is invalid or cannot be created.
@@ -175,9 +163,6 @@ class DockerVolumesMixin:
         safety but *not* for existence, because the Mountpoint directory is
         typically owned by root and may not be stat-able by the server process.
 
-        Args:
-            volume: Volume with pvc backend.
-
         Returns:
             A tuple of:
             - The ``docker volume inspect`` result dict for the named volume.
@@ -193,13 +178,12 @@ class DockerVolumesMixin:
             vol_info = self.docker_client.api.inspect_volume(volume_name)
         except DockerNotFound:
             if volume.pvc.create_if_not_exists:
-                # Auto-create the Docker named volume
                 try:
                     self.docker_client.api.create_volume(
                         name=volume_name,
                         labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
                     )
-                    logger.info("Auto-created Docker named volume '%s'", volume_name)
+                    logger.info(f"Auto-created Docker named volume '{volume_name}'")
                     vol_info = self.docker_client.api.inspect_volume(volume_name)
                     auto_created = True
                 except DockerException as create_exc:
@@ -237,7 +221,6 @@ class DockerVolumesMixin:
                 },
             ) from exc
 
-        # --- subPath validation for Docker named volumes ---
         if volume.sub_path:
             driver = vol_info.get("Driver", "")
             if driver != "local":
@@ -370,7 +353,6 @@ class DockerVolumesMixin:
         (default).
 
         Args:
-            volumes: List of Volume objects from the creation request.
             pvc_inspect_cache: Dict mapping PVC claimNames to their
                 ``docker volume inspect`` results, populated by
                 ``_validate_volumes``.  Avoids a redundant API call and
@@ -390,7 +372,6 @@ class DockerVolumesMixin:
             mode = "ro" if volume.read_only else "rw"
 
             if volume.host is not None:
-                # Resolve the concrete host path (host.path + optional subPath)
                 host_path = volume.host.path
                 if volume.sub_path:
                     host_path = os.path.normpath(
@@ -439,10 +420,8 @@ class DockerVolumesMixin:
             return
         except DockerException as exc:
             logger.warning(
-                "sandbox=%s | failed to remove windows OEM volume %s: %s",
-                sandbox_id,
-                volume_name,
-                exc,
+                f"sandbox={sandbox_id} | failed to remove windows OEM "
+                f"volume {volume_name}: {exc}"
             )
 
     def _cleanup_managed_volumes(self, sandbox_id: str, volume_names: list[str]) -> None:
@@ -459,18 +438,17 @@ class DockerVolumesMixin:
                 vol_labels = vol_info.get("Labels") or {}
                 if vol_labels.get(SANDBOX_MANAGED_VOLUMES_LABEL) != "server":
                     logger.debug(
-                        "sandbox=%s | volume '%s' not managed by server, skipping removal",
-                        sandbox_id, name,
+                        f"sandbox={sandbox_id} | volume '{name}' not managed "
+                        "by server, skipping removal"
                     )
                     continue
                 self.docker_client.api.remove_volume(name)
-                logger.info("sandbox=%s | removed managed volume '%s'", sandbox_id, name)
+                logger.info(f"sandbox={sandbox_id} | removed managed volume '{name}'")
             except DockerNotFound:
                 logger.debug(
-                    "sandbox=%s | managed volume '%s' already removed", sandbox_id, name,
+                    f"sandbox={sandbox_id} | managed volume '{name}' already removed"
                 )
             except DockerException as exc:
                 logger.warning(
-                    "sandbox=%s | failed to remove managed volume '%s': %s",
-                    sandbox_id, name, exc,
+                    f"sandbox={sandbox_id} | failed to remove managed volume '{name}': {exc}"
                 )

@@ -16,7 +16,6 @@ package model
 
 import "time"
 
-// Metrics represents system resource usage metrics
 type Metrics struct {
 	CpuCount    float64 `json:"cpu_count"`
 	CpuUsedPct  float64 `json:"cpu_used_pct"`

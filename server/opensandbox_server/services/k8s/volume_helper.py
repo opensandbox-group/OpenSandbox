@@ -88,11 +88,9 @@ def apply_volumes_to_pod_spec(
             mounts.append(mount)
 
             logger.info(
-                "Added PVC volume '%s' (claim: %s, read_only=%s) mounted at '%s' for sandbox",
-                pvc_to_volume_name[pvc_claim_name],
-                pvc_claim_name,
-                vol.read_only,
-                vol.mount_path,
+                f"Added PVC volume '{pvc_to_volume_name[pvc_claim_name]}' "
+                f"(claim: {pvc_claim_name}, read_only={vol.read_only}) mounted "
+                f"at '{vol.mount_path}' for sandbox"
             )
         elif vol.host is not None:
             host_path = vol.host.path

@@ -96,11 +96,11 @@ func ProxyMiddleware() gin.HandlerFunc {
 		}
 
 		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-			log.Error("Proxy error: %v, request: %s %s", err, req.Method, req.RequestURI)
+			log.Error("proxy: %v (request: %s %s)", err, req.Method, req.RequestURI)
 			http.Error(rw, "Bad Gateway", http.StatusBadGateway)
 		}
 
-		log.Info("Proxy: %s %s -> %s (WebSocket: %v)", r.Method, r.RequestURI, target.Host, isWebSocket)
+		log.Info("proxy: %s %s -> %s (websocket=%v)", r.Method, r.RequestURI, target.Host, isWebSocket)
 
 		proxy.ServeHTTP(w, r)
 		c.Abort()

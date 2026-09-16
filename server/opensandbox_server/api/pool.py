@@ -70,10 +70,6 @@ def _get_pool_service():
     return PoolService(k8s_client, namespace=config.kubernetes.namespace)
 
 
-# ============================================================================
-# Pool CRUD Endpoints
-# ============================================================================
-
 @router.post(
     "/pools",
     response_model=PoolResponse,

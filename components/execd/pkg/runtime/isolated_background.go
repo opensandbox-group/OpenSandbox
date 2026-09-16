@@ -254,7 +254,7 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 	}
 
 	go r.watchBackgroundRun(s, run)
-	log.Info("started background run %s in session %s", runID, id)
+	log.Info("isolated session: started background run %s (session=%s)", runID, id)
 	return runID, startedAt, nil
 }
 

@@ -19,7 +19,6 @@ import (
 	"testing"
 )
 
-// requireBash skips the test when bash is not on PATH.
 func requireBash(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {

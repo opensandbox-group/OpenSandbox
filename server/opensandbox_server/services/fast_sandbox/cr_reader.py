@@ -16,6 +16,7 @@ import logging
 from threading import Lock
 
 from fastapi import HTTPException
+from kubernetes.client import ApiException
 
 from opensandbox_server.config import KubernetesRuntimeConfig
 from opensandbox_server.services.k8s.client import K8sClient
@@ -60,21 +61,26 @@ class SandboxCRReader:
     def list(self, namespace: str) -> list[dict]:
         try:
             client = self._kubernetes()
-            if not client.custom_resource_exists(GROUP, VERSION, PLURAL):
+            objs = client.list_custom_objects(
+                GROUP, VERSION, namespace, PLURAL, ignore_not_found=False
+            )
+        except ApiException as exc:
+            # An uninstalled CRD is an empty list, not a read failure; every
+            # other error surfaces as 503.
+            if exc.status == 404:
                 return []
-            return [
-                obj
-                for obj in client.list_custom_objects(
-                    GROUP, VERSION, namespace, PLURAL, ignore_not_found=False
-                )
-                if obj.get("metadata", {}).get("name", "").startswith("fsb-")
-            ]
+            raise self._read_error(exc) from exc
         except Exception as exc:
             raise self._read_error(exc) from exc
+        return [
+            obj
+            for obj in objs
+            if obj.get("metadata", {}).get("name", "").startswith("fsb-")
+        ]
 
     @staticmethod
     def _read_error(exc: Exception) -> HTTPException:
-        logger.warning("Fsb Sandbox CR read failed: %s", exc)
+        logger.warning(f"Fsb Sandbox CR read failed: {exc}")
         return HTTPException(
             503,
             detail={

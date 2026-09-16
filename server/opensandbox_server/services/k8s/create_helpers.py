@@ -106,10 +106,9 @@ def _build_create_workload_context(
     if egress_env and not request.network_policy:
         dropped_keys = sorted(egress_env.keys())
         logger.warning(
-            "Sandbox %s has OPENSANDBOX_EGRESS_ env vars %s but no networkPolicy; "
-            "these variables will be ignored because no egress sidecar is created",
-            sandbox_id,
-            dropped_keys,
+            f"Sandbox {sandbox_id} has OPENSANDBOX_EGRESS_ env vars {dropped_keys} "
+            "but no networkPolicy; these variables will be ignored because no "
+            "egress sidecar is created"
         )
         egress_env = {}
 

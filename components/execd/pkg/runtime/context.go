@@ -34,7 +34,6 @@ import (
 // CreateContext provisions a kernel-backed session and returns its ID.
 // Bash language uses Jupyter kernel like other languages; for pipe-based bash sessions use CreateBashSession (session API).
 func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
-	// Create a new Jupyter session.
 	var (
 		client  *jupyter.Client
 		session *jupytersession.Session
@@ -42,7 +41,7 @@ func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
 	)
 
 	err = retry.OnError(kernelWaitingBackoff, func(err error) bool {
-		log.Error("failed to create session, retrying: %v", err)
+		log.Error("jupyter: create session failed, retrying: %v", err)
 		return err != nil
 	}, func() error {
 		client, session, err = c.createJupyterContext(*req)
@@ -151,7 +150,7 @@ func (c *Controller) createDefaultLanguageJupyterContext(language Language) erro
 		err     error
 	)
 	err = retry.OnError(kernelWaitingBackoff, func(err error) bool {
-		log.Error("failed to create context, retrying: %v", err)
+		log.Error("jupyter: create default context failed, retrying: %v", err)
 		return err != nil
 	}, func() error {
 		client, session, err = c.createJupyterContext(CreateContextRequest{
@@ -212,7 +211,6 @@ func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyte
 	return client, jupyterSession, nil
 }
 
-// storeJupyterKernel caches a session -> kernel mapping.
 func (c *Controller) storeJupyterKernel(sessionID string, kernel *jupyterKernel) {
 	c.jupyterClientMap.Store(sessionID, kernel)
 }

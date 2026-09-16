@@ -31,10 +31,6 @@ from opensandbox_server.services.signing import (
     encode_expires_b36,
 )
 
-# ============================================================
-# encode_expires_b36
-# ============================================================
-
 
 class TestEncodeExpiresB36:
     def test_zero_returns_literal_zero(self) -> None:
@@ -60,7 +56,7 @@ class TestEncodeExpiresB36:
     def test_no_leading_zeros(self) -> None:
         for n in [0, 1, 36, 1000, 2**63]:
             s = encode_expires_b36(n)
-            assert s == s.lstrip("0") or "0"
+            assert s == (s.lstrip("0") or "0")
 
     def test_negative_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="non-negative"):
@@ -69,11 +65,6 @@ class TestEncodeExpiresB36:
     def test_overflow_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="exceeds uint64"):
             encode_expires_b36(MAX_UINT64 + 1)
-
-
-# ============================================================
-# decode_expires_b36
-# ============================================================
 
 
 class TestDecodeExpiresB36:
@@ -122,11 +113,6 @@ class TestDecodeExpiresB36:
     def test_uint64_overflow_raises(self) -> None:
         with pytest.raises(ValueError, match="overflows uint64"):
             decode_expires_b36("3w5e11264sgsg")  # MAX_UINT64 + 1 in base36
-
-
-# ============================================================
-# build_canonical_bytes
-# ============================================================
 
 
 class TestBuildCanonicalBytes:

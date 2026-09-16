@@ -108,7 +108,7 @@ def validate_tenant_namespaces(
             "and be accessible at startup:\n  - " + "\n  - ".join(failures)
         )
 
-    logger.info("Validated %d tenant namespace(s) at startup", len(checked))
+    logger.info(f"Validated {len(checked)} tenant namespace(s) at startup")
 
 
 def validate_tenant_namespaces_on_startup(provider, core_v1_api) -> None:

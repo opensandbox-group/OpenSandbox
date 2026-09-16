@@ -68,12 +68,10 @@ func TestMergedView_WriteFile(t *testing.T) {
 	err := mv.WriteFile("new.txt", []byte("session-data"), 0o644)
 	require.NoError(t, err)
 
-	// Verify in upper.
 	data, err := os.ReadFile(filepath.Join(mv.UpperDir, "new.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, []byte("session-data"), data)
 
-	// Verify NOT in lower.
 	_, err = os.ReadFile(filepath.Join(mv.LowerDir, "new.txt"))
 	assert.True(t, os.IsNotExist(err))
 }
@@ -103,12 +101,10 @@ func TestMergedView_Remove_LowerOnly(t *testing.T) {
 	err := mv.Remove("lower-only.txt")
 	require.NoError(t, err)
 
-	// Whiteout should be created
 	whPath := filepath.Join(mv.UpperDir, ".wh.lower-only.txt")
 	_, err = os.Stat(whPath)
 	assert.NoError(t, err, "whiteout marker should exist")
 
-	// File should no longer be visible via Stat
 	_, err = mv.Stat("lower-only.txt")
 	assert.True(t, os.IsNotExist(err))
 }
@@ -140,11 +136,9 @@ func TestMergedView_Rename(t *testing.T) {
 
 	require.NoError(t, mv.Rename("old.txt", "new.txt"))
 
-	// Old gone.
 	_, err := mv.Stat("old.txt")
 	assert.True(t, os.IsNotExist(err))
 
-	// New exists.
 	data, err := mv.ReadFile("new.txt")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("renamed"), data)

@@ -24,7 +24,10 @@
 # with the OpenSandbox egress sidecar attached through the Sandbox Actions
 # channel → the source-built OpenSandbox lifecycle server (fsb runtime)
 # and ingress gateway → an end-to-end verify (create through the server
-# API, execd /ping through the signed gateway route, delete).
+# API, execd /ping through the signed gateway route, delete); then
+# pause/resume (checkpoint to the artifact store, capacity released,
+# resume) and a public-snapshot verify (snapshot a Running sandbox, watch
+# it to Ready, restore a NEW sandbox from the snapshotId and boot it).
 #
 # Everything is source-built from this repository plus fast-sandbox@master,
 # except the execd image baked into the SandboxTemplate golden image
@@ -42,13 +45,14 @@
 #   FSB_DIR              fast-sandbox checkout  (default $WORK/fast-sandbox —
 #                        env-owned clone, created from FSB_GIT_URL when missing)
 #   FSB_GIT_URL / FSB_REF                       (default opensandbox-group/fast-sandbox, master)
+#   WORK                  workspace root        (default /data/fast-sandbox-env when /data exists, else $PWD/.fast-sandbox-env)
 #   KIND_CLUSTER / KIND_NODE_IMAGE / KIND_RETAIN / KIND_SINGLE
 #   DOCKER_MIRROR        comma list injected as docker.io containerd mirrors
-#   MINIO_PORT / MINIO_CONSOLE_PORT / MINIO_AK / MINIO_SK / MINIO_IMAGE / MINIO_ENDPOINT
+#   MINIO_PORT / MINIO_CONSOLE_PORT / MINIO_AK / MINIO_SK / MINIO_IMAGE / MC_IMAGE / MINIO_ENDPOINT
 #   IMAGE_<NAME>         fast-sandbox component image tags
 #   EGRESS_IMAGE         egress image tag        (default docker.io/opensandbox/egress:latest)
 #   SERVER_IMAGE / INGRESS_IMAGE  OpenSandbox server/ingress image tags
-#   SERVER_HOST_PORT / GATEWAY_HOST_PORT  host-side publishes (default 8080/8081)
+#   SERVER_HOST_PORT / GATEWAY_HOST_PORT  host-side publishes (default 18080/18081)
 #   WARM_IMAGES=1        preheat pool warmImages (default: on-demand first-sandbox pull)
 #   SBX_IMAGE / EXECD    template build inputs   (default alpine:3.19 / opensandbox/execd:1.1.0)
 #   POOL_MIN / POOL_MAX  pool capacity           (default 2/2; auto 1/1 when KIND_SINGLE=1)
@@ -63,7 +67,12 @@ set -euo pipefail
 OSB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFESTS_DIR="$SCRIPT_DIR/manifests"
-WORK="${WORK:-$PWD/.fast-sandbox-env}"
+# Heavy run-state belongs on a data volume, not the repo/root disk.
+if [[ -d /data ]] && [[ -z "${WORK:-}" ]]; then
+	WORK="/data/fast-sandbox-env"
+else
+	WORK="${WORK:-$PWD/.fast-sandbox-env}"
+fi
 LOGS_DIR="$WORK/logs"
 GEN_DIR="$WORK/gen"
 
@@ -79,14 +88,15 @@ KIND_RETAIN="${KIND_RETAIN:-0}"
 NS="fast-sandbox-system"
 
 MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
-MINIO_PORT="${MINIO_PORT:-9000}"
+MC_IMAGE="${MC_IMAGE:-minio/mc:latest}"
+MINIO_PORT="${MINIO_PORT:-19000}"
 # The container always LISTENS on 9000 (guest side of the publish map and
 # the port kind-network clients use via the container IP); MINIO_PORT only
 # moves the host-side 127.0.0.1 publish.
 MINIO_CONTAINER_PORT=9000
 # Console (human-only UI) listens on 9001 in-container; the host-side
-# publish is overridable because 9001 is a common host-port collision.
-MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
+# publish defaults to 19001: 9000/9001 are common host-port collisions.
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-19001}"
 MINIO_AK="${MINIO_AK:-integration-env}"
 MINIO_SK="${MINIO_SK:-integration-env-secret}"
 MINIO_BUCKET="sandbox-images"
@@ -139,8 +149,8 @@ SIGNING_KEY_FILE="$WORK/opensandbox-signing-key"
 # Host-side publish (kind extraPortMappings on the control-plane node, bound
 # to 127.0.0.1 only): Service NodePorts -> server :80 / gateway :28888.
 # Overridable because host port collisions are environment-specific.
-SERVER_HOST_PORT="${SERVER_HOST_PORT:-8080}"
-GATEWAY_HOST_PORT="${GATEWAY_HOST_PORT:-8081}"
+SERVER_HOST_PORT="${SERVER_HOST_PORT:-18080}"
+GATEWAY_HOST_PORT="${GATEWAY_HOST_PORT:-18081}"
 SERVER_NODEPORT=30880
 GATEWAY_NODEPORT=30881
 GATEWAY_ADDRESS="127.0.0.1:$GATEWAY_HOST_PORT"
@@ -158,6 +168,10 @@ SKIP_TOOL_INSTALL="${SKIP_TOOL_INSTALL:-0}"
 SKIP_LEFTOVER_CLEAN="${SKIP_LEFTOVER_CLEAN:-0}"
 KIND_VERSION="${KIND_VERSION:-v0.24.0}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.31.0}"
+
+# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
+FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+export GOPROXY="$FSB_GOPROXY"
 
 AUTO_CLEAN=0
 ACTION=""
@@ -242,7 +256,7 @@ kind_network() { # docker network of the first node container
 	docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$node" | tr ' ' '\n' | grep -v '^$' | head -1
 }
 
-mc() { docker run --rm --network host -v "$WORK/mc-config:/root/.mc" minio/mc "$@"; }
+mc() { docker run --rm --network host -v "$WORK/mc-config:/root/.mc" "$MC_IMAGE" "$@"; }
 
 # --- failure dump ------------------------------------------------------------------
 
@@ -353,6 +367,12 @@ host_port_busy() { # port -> 0 when something already listens on 127.0.0.1:<port
 	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
 
+# Pull only when absent locally (*_IMAGE overrides cover private registries).
+ensure_image() { # image -> pull only when missing locally
+	docker image inspect "$1" >/dev/null 2>&1 && return 0
+	docker pull -q "$1" >/dev/null || die "image $1 is not available locally and the pull failed (pre-load it with docker load, or override the *_IMAGE variable)"
+}
+
 preflight() {
 	[[ "$(uname -s)" == "Linux" ]] \
 		|| die "this environment requires a Linux host with KVM (run it on the remote development VM)"
@@ -371,16 +391,19 @@ preflight() {
 		die "docker cgroup Version is 1; kind requires cgroup v2. Enable it with the kernel cmdline 'systemd.unified_cgroup_hierarchy=1' and reboot"
 	fi
 	[[ -e /dev/kvm ]] || die "/dev/kvm is missing on this host (KVM required)"
-	# The workspace filesystem carries docker images (built), the XFS
-	# StateRoot loop file (sparse, up to 24G), MinIO artifacts (~4G per
-	# template build) and node snapshot caches; MinIO refuses writes
-	# below its free-disk threshold, so guard it here with a clear error.
-	local min_free_kb=$((30 * 1024 * 1024)) free_kb
-	free_kb="$(df -Pk "$WORK" 2>/dev/null | awk 'NR==2 {print $4}')"
-	[[ "$free_kb" =~ ^[0-9]+$ ]] || die "cannot determine free disk space on $WORK"
-	if (( free_kb < min_free_kb )); then
-		die "only $((free_kb / 1024 / 1024))G free on $WORK (need 30G: images + XFS StateRoot + MinIO artifacts); free space (docker system prune / old kind clusters) or point WORK at a bigger volume"
-	fi
+	# Fail fast per heavy-data target instead of ENOSPC mid-run.
+	local min_free_kb=$((20 * 1024 * 1024)) avail_kb target xfs_dir
+	xfs_dir="${XFS_LOOP_FILE%/*}"
+	mkdir -p "$WORK" "$MINIO_DATA" "$xfs_dir" 2>/dev/null || true
+	local -a targets=("$WORK" "$MINIO_DATA" "$xfs_dir")
+	for target in "${targets[@]}"; do
+		avail_kb="$(df -Pk "$target" 2>/dev/null | awk 'NR==2 {print $4}')"
+		[[ "$avail_kb" =~ ^[0-9]+$ ]] || die "cannot determine free disk space on $target"
+		if (( avail_kb < min_free_kb )); then
+			die "$target has $((avail_kb / 1024 / 1024))G free; at least 20G is required (built images, XFS StateRoot, MinIO artifacts). Free space (docker system prune / old kind clusters) or point WORK / MINIO_DATA / XFS_LOOP_FILE at a bigger volume"
+		fi
+		log "disk headroom: $target has $((avail_kb / 1024 / 1024 / 1024))G free"
+	done
 	# Fail fast on busy host ports instead of dying at the docker bind or
 	# kind create. MinIO culprits: a leftover MinIO container; 8080/8081 are
 	# published by the kind node for the server / ingress gateway.
@@ -390,8 +413,8 @@ preflight() {
 			die "127.0.0.1:$port is already in use (check 'ss -ltnp' / 'docker ps'); free it, or set MINIO_PORT / MINIO_CONSOLE_PORT / SERVER_HOST_PORT / GATEWAY_HOST_PORT"
 		fi
 	done
-	docker pull -q "$MINIO_IMAGE" >/dev/null
-	docker pull -q minio/mc >/dev/null
+	ensure_image "$MINIO_IMAGE"
+	ensure_image "$MC_IMAGE"
 	pass "preflight"
 }
 
@@ -617,7 +640,7 @@ kind_up() {
 	else
 		if [[ -n "${KIND_NODE_IMAGE:-}" ]]; then
 			log "pulling kind node image $KIND_NODE_IMAGE (this can take minutes)"
-			docker pull -q "$KIND_NODE_IMAGE" || die "kind node image pull failed (KIND_NODE_IMAGE=$KIND_NODE_IMAGE)"
+			ensure_image "$KIND_NODE_IMAGE" || die "kind node image unavailable locally and pull failed (KIND_NODE_IMAGE=$KIND_NODE_IMAGE)"
 			kind create cluster --name "$KIND_CLUSTER" --image "$KIND_NODE_IMAGE" \
 				${create_args+"${create_args[@]}"} --config "$kind_config" > "$LOGS_DIR/kind-create.log" 2>&1 \
 				|| fail "kind create failed (full log: $LOGS_DIR/kind-create.log)"
@@ -702,9 +725,9 @@ resolve_minio_endpoint() {
 	pass "MinIO reachable from the kind network"
 }
 
-# gen_registry compiles the agent pull credentials through fast-sandbox's
-# own registryconfig package (same pattern as its scripts/integration-env.sh).
-gen_registry() { # host username password endpoint > registry.json
+# gen_registry compiles the agent registry via fast-sandbox's registryconfig
+# package; the optional write pair covers checkpoint/snapshot publication.
+gen_registry() { # host username password endpoint [write-username write-password] > registry.json
 	mkdir -p "$FSB_GEN_DIR"
 	cat > "$FSB_GEN_DIR/gen-registry.go" <<'EOF'
 package main
@@ -717,13 +740,18 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 5 {
-		fmt.Fprintln(os.Stderr, "usage: gen-registry <host> <username> <password> <endpoint>")
+	if len(os.Args) != 5 && len(os.Args) != 7 {
+		fmt.Fprintln(os.Stderr, "usage: gen-registry <host> <username> <password> <endpoint> [write-username write-password]")
 		os.Exit(1)
 	}
-	compiled, err := registryconfig.NewCompiled([]registryconfig.Credential{{
+	credential := registryconfig.Credential{
 		Host: os.Args[1], Username: os.Args[2], Password: os.Args[3], Endpoint: os.Args[4],
-	}})
+	}
+	if len(os.Args) == 7 {
+		// Optional publish (write) pair: empty keeps the store read-only.
+		credential.WriteUsername, credential.WritePassword = os.Args[5], os.Args[6]
+	}
+	compiled, err := registryconfig.NewCompiled([]registryconfig.Credential{credential})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -753,15 +781,18 @@ credentials_up() {
 		--from-literal=endpoint="$MINIO_ENDPOINT" \
 		--from-literal=region=us-east-1 \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
-	# Pull credentials for the runtime-agent (compiled registryconfig).
-	gen_registry "$host" "$MINIO_AK" "$MINIO_SK" "$MINIO_ENDPOINT" > "$WORK/agent-registry.json"
-	jq -e . "$WORK/agent-registry.json" >/dev/null || die "generated agent registry.json is invalid"
+	# Agent pull+publish credentials (the write pair covers checkpoints).
+	gen_registry "$host" "$MINIO_AK" "$MINIO_SK" "$MINIO_ENDPOINT" "$MINIO_AK" "$MINIO_SK" \
+		> "$WORK/agent-registry.json"
+	jq -e '.credentials[0].writeUsername' "$WORK/agent-registry.json" >/dev/null \
+		|| die "generated agent registry carries no write credential"
 	kubectl -n "$NS" create secret generic fast-sandbox-agent-registry \
 		--from-file=registry.json="$WORK/agent-registry.json" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
-	# Agent endpoint override (connection address for SigV4 signing).
-	kubectl -n "$NS" create configmap fast-sandbox-agent-config \
-		--from-literal=artifact-endpoint="$MINIO_ENDPOINT" \
+	# Pin the shared artifact-store ConfigMap to the live MinIO endpoint.
+	kubectl -n "$NS" create configmap fast-sandbox-artifact-store \
+		--from-literal=store="s3://$MINIO_BUCKET/publish" \
+		--from-literal=endpoint="$MINIO_ENDPOINT" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	# Pull credentials for the fastlet (pool-compiled registry).
 	kubectl -n "$NS" create secret docker-registry registry-minio \
@@ -794,9 +825,14 @@ control_plane_up() {
 	wait_for "controller deployment ready" 120 \
 		kubectl -n "$NS" rollout status deploy/fast-sandbox-controller --timeout=10s
 	local crd
+	# The OpenSandbox server's composite list also reads BatchSandboxes:
+	# install the kubernetes-backend CRD alongside the fast-sandbox ones.
+	kubectl apply -f "$OSB_ROOT/kubernetes/config/crd/bases/sandbox.opensandbox.io_batchsandboxes.yaml" >/dev/null
 	for crd in sandboxpools sandboxtemplates sandboxes; do
 		kubectl get crd "$crd.sandbox.fast.io" >/dev/null 2>&1 || die "CRD $crd missing"
 	done
+	kubectl get crd batchsandboxes.sandbox.opensandbox.io >/dev/null 2>&1 \
+		|| die "CRD batchsandboxes.sandbox.opensandbox.io missing"
 	pass "CRDs + control plane ready (fast-sandbox $FSB_COMMIT)"
 }
 
@@ -1178,6 +1214,13 @@ server_api() { # method path [json-body]
 # The server assigns the sandbox id (CreateSandboxRequest carries none);
 # the verify probes share it through VERIFY_ID.
 VERIFY_ID=""
+# The snapshot verify stage shares the created snapshot ids through
+# SNAPSHOT_ID / SNAPSHOT_ID2.
+SNAPSHOT_ID=""
+SNAPSHOT_ID2=""
+# A re-entry snapshot accepted during fence cache lag (202) is tracked here
+# so its terminal outcome is asserted and it is cleaned up.
+SNAPSHOT_EXTRA=""
 
 verify_sandbox_gone() {
 	! server_api GET "/sandboxes/$VERIFY_ID" >/dev/null 2>&1
@@ -1285,7 +1328,16 @@ verify_lifecycle_ops() { # <sandbox-id>
 	[[ "$(printf '%s' "$out" | jq -r '.id')" == "$id" ]] || fail "GET returned wrong id: $out"
 	pass "lifecycle: GET /sandboxes/{id}"
 
-	out="$(server_api GET "/sandboxes?page=1&pageSize=50")" || fail "GET /sandboxes failed"
+	# Capture the body: a 503 here carries the backend error code that
+	# names the failing list source.
+	local list_code
+	list_code="$(curl -sS -m 60 -o "$WORK/last-list.json" -w '%{http_code}' \
+		-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+		"$SERVER_URL/sandboxes?page=1&pageSize=50")"
+	if [[ "$list_code" != "200" ]] || ! jq -e '.items' "$WORK/last-list.json" >/dev/null 2>&1; then
+		fail "GET /sandboxes returned $list_code: $(head -c 400 "$WORK/last-list.json" 2>/dev/null)"
+	fi
+	out="$(cat "$WORK/last-list.json")"
 	[[ "$(printf '%s' "$out" | jq -r --arg id "$id" '.items[]?.id | select(. == $id)' | head -1)" == "$id" ]] \
 		|| fail "list does not contain $id: $(printf '%s' "$out" | jq -c '.pagination')"
 	pass "lifecycle: GET /sandboxes (list contains the verify sandbox)"
@@ -1348,6 +1400,244 @@ opensandbox_verify() {
 		wait_for "verify sandbox $id deleted" 120 verify_sandbox_gone
 	done
 	pass "verify sandboxes cleaned up"
+}
+
+# --- stage: pause / resume (server API -> FastPath checkpoint) ------------------
+
+# Fresh signed route + one GET: doubles as the "runtime actually serving" probe.
+execd_ping_ok() {
+	local route code
+	route="$(server_api GET "/sandboxes/$VERIFY_ID/endpoints/44772" 2>/dev/null \
+		| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
+	[[ -n "$route" ]] || return 1
+	code="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
+		-H "OpenSandbox-Ingress-To: $route" "$GATEWAY_URL/ping" 2>/dev/null || true)"
+	[[ "$code" == "200" ]]
+}
+
+sandbox_state_is() { # <state>
+	[[ "$(server_api GET "/sandboxes/$VERIFY_ID" 2>/dev/null | jq -r '.status.state // empty')" == "$1" ]]
+}
+
+sandbox_running() { sandbox_state_is Running; }
+sandbox_paused() { sandbox_state_is Paused; }
+
+pause_resume_verify() {
+	# 202 + poll GET: Paused == checkpoint durable + capacity released;
+	# resume advances the route generation, so /ping needs a fresh route.
+	local body created t0 t1 t2 t3
+	body="$(jq -n --arg template "$TEMPLATE_ID" '{
+		templateId: $template,
+		timeout: 3600,
+		metadata: {origin: "fast-sandbox-env-pause"}
+	}')"
+	log "verify (pause): creating a sandbox via the server API (templateId=$TEMPLATE_ID)"
+	t0="$(now_ms)"
+	created="$(server_api POST /sandboxes "$body" 2>/dev/null)" \
+		|| fail "POST /sandboxes failed against $SERVER_URL"
+	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
+	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "create response carried no id"
+	wait_for "pause target Running" 150 sandbox_running
+	t1="$(now_ms)"
+	log "verify (pause): $VERIFY_ID create->Running $(( (t1 - t0) / 1000000 ))ms"
+
+	wait_for "pre-pause execd /ping 200 through the gateway" 100 execd_ping_ok
+
+	log "verify (pause): POST /sandboxes/$VERIFY_ID/pause"
+	server_api POST "/sandboxes/$VERIFY_ID/pause" >/dev/null \
+		|| fail "POST pause failed for $VERIFY_ID"
+	# Paused is durable-first: the checkpoint must be complete in the artifact
+	# store before the state is reported; the dump itself keeps serving.
+	wait_for "poll GET until Paused (checkpoint durable, capacity released)" 240 sandbox_paused
+	t2="$(now_ms)"
+	log "verify (pause): $VERIFY_ID pause POST->Paused (checkpoint durable) $(( (t2 - t1) / 1000000 ))ms"
+	if execd_ping_ok; then
+		fail "paused sandbox still serves /ping through the gateway"
+	fi
+	pass "paused: execd /ping no longer served (runtime released, signed route rejected at the gateway)"
+
+	log "verify (pause): POST /sandboxes/$VERIFY_ID/resume"
+	t2="$(now_ms)"
+	server_api POST "/sandboxes/$VERIFY_ID/resume" >/dev/null \
+		|| fail "POST resume failed for $VERIFY_ID"
+	wait_for "poll GET until Running (checkpoint restored)" 240 sandbox_running
+	t3="$(now_ms)"
+	log "verify (pause): $VERIFY_ID resume POST->Running (checkpoint restored) $(( (t3 - t2) / 1000000 ))ms"
+	wait_for "post-resume execd /ping 200 through a fresh route" 100 execd_ping_ok
+	pass "pause/resume round-trip timings: pause->Paused $(( (t2 - t1) / 1000000 ))ms, resume->Running $(( (t3 - t2) / 1000000 ))ms (server API -> FastPath -> artifact store)"
+
+	server_api DELETE "/sandboxes/$VERIFY_ID" >/dev/null \
+		|| log "verify cleanup: DELETE failed; remove $VERIFY_ID manually"
+	wait_for "pause/resume sandbox deleted" 120 verify_sandbox_gone
+}
+
+# --- stage: snapshot (server API -> SandboxSnapshot CR -> restore) --------------
+
+# Ready when the server watcher has converged the snapshot row from the
+# fast-sandbox SandboxSnapshot CR (Succeeded + template index published).
+snapshot_ready() { # <snapshot-id>
+	[[ "$(server_api GET "/snapshots/$1" 2>/dev/null | jq -r '.status.state // empty')" == "Ready" ]]
+}
+
+# Terminal (Ready or Failed): the fastlet pause-window fence resolves an
+# accepted-but-conflicting snapshot one way or the other.
+snapshot_terminal() { # <snapshot-id>
+	local state
+	state="$(server_api GET "/snapshots/$1" 2>/dev/null | jq -r '.status.state // empty')"
+	[[ "$state" == "Ready" || "$state" == "Failed" ]]
+}
+
+snapshot_verify() {
+	# Full public-snapshot round trip on the live stack: create a sandbox,
+	# POST a snapshot (202 + Creating), let the server watcher converge the
+	# row from the SandboxSnapshot CR, restore a NEW sandbox from the
+	# snapshotId (the published template index becomes its rootfs artifact
+	# set), and prove the restored sandbox boots by execd /ping through the
+	# signed gateway route. Also covers: re-entry rejection while the dump
+	# window holds the sandbox, source-sandbox survival across the pause
+	# window, and a second (terminal-fenced) snapshot of the same sandbox.
+	local body created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
+	local t0 t1 t2 t3 t4
+	body="$(jq -n --arg template "$TEMPLATE_ID" '{
+		templateId: $template,
+		timeout: 3600,
+		metadata: {origin: "fast-sandbox-env-snapshot"}
+	}')"
+	t0="$(now_ms)"
+	log "verify (snapshot): creating the source sandbox via the server API (templateId=$TEMPLATE_ID)"
+	created="$(server_api POST /sandboxes "$body" 2>/dev/null)" \
+		|| fail "POST /sandboxes failed against $SERVER_URL"
+	source_id="$(printf '%s' "$created" | jq -r '.id')"
+	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
+	VERIFY_ID="$source_id"
+	wait_for "snapshot source sandbox Running" 300 sandbox_running
+	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
+	t1="$(now_ms)"
+	log "verify (snapshot): source sandbox $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
+
+	# 1. Snapshot create: 202 + Creating; the dump holds the runtime pause
+	# window, artifacts publish after it; the server row converges from the
+	# SandboxSnapshot CR via its watcher.
+	log "verify (snapshot): POST /sandboxes/$source_id/snapshots"
+	t1="$(now_ms)"
+	out="$(server_api POST "/sandboxes/$source_id/snapshots" '{"name":"env-verify"}' 2>/dev/null)" \
+		|| fail "POST snapshots failed for $source_id"
+	SNAPSHOT_ID="$(printf '%s' "$out" | jq -r '.id')"
+	[[ -n "$SNAPSHOT_ID" && "$SNAPSHOT_ID" != "null" ]] || fail "snapshot create carried no id"
+	[[ "$(printf '%s' "$out" | jq -r '.status.state')" == "Creating" ]] \
+		|| fail "snapshot create did not return Creating: $(printf '%s' "$out" | head -c 300)"
+
+	# 2. Re-entry: a second snapshot POST while the first holds the dump
+	# window is fenced by FastPath (FailedPrecondition -> 409) once the CR
+	# is cache-visible; with watcher cache lag the POST is accepted (202)
+	# and the fastlet pause window — the authoritative fence — resolves the
+	# extra snapshot to a terminal phase after the first completes.
+	reentry_out="$(curl -sS -m 60 -w '\n%{http_code}' -X POST \
+		-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" -H "Content-Type: application/json" \
+		-d '{"name":"env-verify-reentry"}' "$SERVER_URL/sandboxes/$source_id/snapshots" 2>/dev/null || true)"
+	reentry_code="$(printf '%s' "$reentry_out" | tail -n1)"
+	reentry_out="$(printf '%s' "$reentry_out" | sed '$d')"
+	case "$reentry_code" in
+		409)
+			pass "snapshot: re-entry rejected by the fence (409)"
+			;;
+		202)
+			SNAPSHOT_EXTRA="$(printf '%s' "$reentry_out" | jq -r '.id' 2>/dev/null || true)"
+			[[ -n "$SNAPSHOT_EXTRA" && "$SNAPSHOT_EXTRA" != "null" ]] \
+				|| fail "re-entry snapshot POST returned 202 without an id: $(printf '%s' "$reentry_out" | head -c 300)"
+			log "verify (snapshot): re-entry accepted during fence cache lag ($SNAPSHOT_EXTRA); terminal outcome asserted below"
+			;;
+		*)
+			fail "re-entry snapshot POST returned unexpected HTTP ${reentry_code:-none}: $(printf '%s' "$reentry_out" | head -c 300)"
+			;;
+	esac
+
+	wait_for "poll GET /snapshots/$SNAPSHOT_ID until Ready (watcher -> SandboxSnapshot CR -> store index)" 300 snapshot_ready "$SNAPSHOT_ID"
+	t2="$(now_ms)"
+	log "verify (snapshot): $SNAPSHOT_ID snapshot POST->Ready $(( (t2 - t1) / 1000000 ))ms"
+	pass "snapshot: POST 202 Creating -> watcher -> Ready"
+
+	# 3. Source survival: the pause window must be released and the sandbox
+	# back to serving after the snapshot reached its terminal phase.
+	VERIFY_ID="$source_id"
+	wait_for "source sandbox Running again after the snapshot" 120 sandbox_running
+	wait_for "source sandbox execd /ping 200 after the snapshot" 100 execd_ping_ok
+	pass "snapshot: source sandbox survived (Running + /ping 200)"
+
+	# 3b. An accepted re-entry snapshot (fence cache lag) must reach a
+	# terminal phase once the first snapshot releases the pause window — a
+	# stuck non-terminal snapshot would block every future snapshot of the
+	# sandbox through the re-entry fence.
+	if [[ -n "$SNAPSHOT_EXTRA" ]]; then
+		wait_for "re-entry snapshot $SNAPSHOT_EXTRA reaches a terminal phase" 150 snapshot_terminal "$SNAPSHOT_EXTRA"
+		log "verify (snapshot): re-entry snapshot $SNAPSHOT_EXTRA terminal: $(server_api GET "/snapshots/$SNAPSHOT_EXTRA" 2>/dev/null | jq -r '.status.state')"
+		pass "snapshot: accepted re-entry snapshot resolved to a terminal phase"
+	fi
+
+	# 4. Second snapshot after the first is terminal: a fresh id, fenced in
+	# by re-entry only while non-terminal.
+	t3="$(now_ms)"
+	out="$(server_api POST "/sandboxes/$source_id/snapshots" '{"name":"env-verify-2"}' 2>/dev/null)" \
+		|| fail "second snapshot POST failed for $source_id"
+	snapshot_id2="$(printf '%s' "$out" | jq -r '.id')"
+	[[ -n "$snapshot_id2" && "$snapshot_id2" != "null" && "$snapshot_id2" != "$SNAPSHOT_ID" ]] \
+		|| fail "second snapshot did not produce a distinct id: $snapshot_id2"
+	SNAPSHOT_ID2="$snapshot_id2"
+	wait_for "poll GET /snapshots/$snapshot_id2 until Ready" 300 snapshot_ready "$snapshot_id2"
+	t4="$(now_ms)"
+	log "verify (snapshot): $snapshot_id2 second snapshot POST->Ready $(( (t4 - t3) / 1000000 ))ms"
+	pass "snapshot: repeated snapshot of the same sandbox -> Ready (distinct id)"
+
+	# 5. Listing: sandboxId scoping returns both required snapshots, both
+	# Ready (an accepted re-entry snapshot may add a third, terminal row).
+	out="$(server_api GET "/snapshots?sandboxId=$source_id&pageSize=50")"
+	[[ "$(printf '%s' "$out" | jq -r --arg id "$SNAPSHOT_ID" --arg id2 "$snapshot_id2" \
+		'[.items[] | select((.id == $id or .id == $id2) and .status.state == "Ready")] | length')" == "2" ]] \
+		|| fail "snapshot list does not contain both required snapshots as Ready: $(printf '%s' "$out" | head -c 400)"
+	if [[ -n "$SNAPSHOT_EXTRA" ]]; then
+		[[ "$(printf '%s' "$out" | jq -r --arg id "$SNAPSHOT_EXTRA" \
+			'[.items[] | select(.id == $id)] | length')" == "1" ]] \
+			|| fail "accepted re-entry snapshot $SNAPSHOT_EXTRA missing from the list"
+	fi
+	pass "snapshot: list scoped by sandboxId contains the snapshots (Ready)"
+
+	# 6. Restore: the snapshot row resolves to the published template index
+	# key (osb-snap-<uuid hex>); the restored sandbox boots that artifact
+	# set. resourceLimits must restate the pool profile (firecracker pool).
+	local restore_body restored
+	restore_body="$(jq -n --arg snapshot "$SNAPSHOT_ID" '{
+		snapshotId: $snapshot,
+		timeout: 3600,
+		resourceLimits: {cpu: "1", memory: "512Mi", pids: "128"}
+	}')"
+	log "verify (snapshot): POST /sandboxes with snapshotId=$SNAPSHOT_ID"
+	t3="$(now_ms)"
+	restored="$(server_api POST /sandboxes "$restore_body" 2>/dev/null)" \
+		|| fail "POST /sandboxes (snapshotId=$SNAPSHOT_ID) failed"
+	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
+	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
+	VERIFY_ID="$restore_id"
+	wait_for "restored sandbox Running" 600 sandbox_running
+	t4="$(now_ms)"
+	wait_for "restored execd /ping 200 through the gateway" 300 execd_ping_ok
+	log "verify (snapshot): restored $restore_id POST->Running $(( (t4 - t3) / 1000000 ))ms"
+	pass "snapshot: restore -> sandbox boots the published artifact set -> execd /ping OK"
+
+	# 7. Cleanup: restored sandbox, source sandbox, then the snapshot rows
+	# (the server forwards artifact deletion through DeleteSandboxSnapshot).
+	server_api DELETE "/sandboxes/$restore_id" >/dev/null \
+		|| log "verify cleanup: DELETE $restore_id failed"
+	wait_for "restored sandbox deleted" 120 verify_sandbox_gone
+	VERIFY_ID="$source_id"
+	server_api DELETE "/sandboxes/$source_id" >/dev/null \
+		|| log "verify cleanup: DELETE $source_id failed"
+	wait_for "snapshot source sandbox deleted" 120 verify_sandbox_gone
+	for snapshot_id in "$SNAPSHOT_ID" "$SNAPSHOT_ID2" "$SNAPSHOT_EXTRA"; do
+		[[ -n "$snapshot_id" ]] || continue
+		server_api DELETE "/snapshots/$snapshot_id" >/dev/null \
+			|| log "verify cleanup: DELETE snapshot $snapshot_id failed"
+	done
+	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
 }
 
 # --- status / summary ---------------------------------------------------------------------
@@ -1472,8 +1762,9 @@ usage: fast-sandbox-env.sh [--auto-clean] {up|down|status|pool}
            two-node kind cluster (KVM), MinIO, control plane, firecracker
            node assets, runtime-agent + DART (P2P), SandboxTemplate golden
            image, firecracker-egress-pool (egress attached), the
-           source-built OpenSandbox server + ingress gateway, and an
-           end-to-end verify (create -> gateway route -> execd /ping).
+           source-built OpenSandbox server + ingress gateway, and
+           end-to-end verifies (create -> gateway route -> execd /ping,
+           plus a pause/resume round-trip through the checkpoint).
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / MinIO / OpenSandbox health
   down     teardown: kind cluster + MinIO + sysctl + XFS StateRoot + caches
@@ -1482,6 +1773,8 @@ usage: fast-sandbox-env.sh [--auto-clean] {up|down|status|pool}
 
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, MINIO_*, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
+FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
+when the host cannot reach module VCS hosts directly),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1.
 See the header of this script.
@@ -1543,6 +1836,8 @@ case "$ACTION" in
 		run_stage "SandboxTemplate build (server API)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
 		run_stage "end-to-end verify (templateId create -> gateway -> execd /ping)" opensandbox_verify
+		run_stage "pause/resume verify (server API -> FastPath checkpoint)" pause_resume_verify
+		run_stage "snapshot verify (server API -> SandboxSnapshot -> restore)" snapshot_verify
 		trap - ERR
 		stage_summary
 		env_summary

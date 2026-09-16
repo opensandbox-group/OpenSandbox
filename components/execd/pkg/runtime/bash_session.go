@@ -72,7 +72,7 @@ func (c *Controller) createBashSession(req *CreateContextRequest) (string, error
 	}
 
 	c.bashSessionClientMap.Store(session.config.Session, session)
-	log.Info("created bash session %s", session.config.Session)
+	log.Info("bash session: created %s", session.config.Session)
 	return session.config.Session, nil
 }
 
@@ -181,7 +181,6 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	envSnapshot := copyEnvMap(s.env)
 
 	cwd := s.cwd
-	// override original cwd if specified
 	if request.Cwd != "" {
 		expandedCwd, err := pathutil.ExpandPath(request.Cwd)
 		if err != nil {
@@ -200,7 +199,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 
 	wait := request.Timeout
 	if wait <= 0 {
-		wait = 24 * 3600 * time.Second // max to 24 hours
+		wait = 24 * 3600 * time.Second
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, wait)
@@ -237,7 +236,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	if err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
-		log.Error("start %s session failed: %v (command: %q)", shell, err, log.SanitizeCommand(request.Code))
+		log.Error("bash session: start %s: %v (command: %q)", shell, err, log.SanitizeCommand(request.Code))
 		return fmt.Errorf("start %s: %w", shell, err)
 	}
 	// The child holds its own copy of the write end; closing ours lets the
@@ -286,12 +285,12 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	waitErr := mp.Wait()
 
 	if scanErr != nil {
-		log.Error("read stdout failed: %v (command: %q)", scanErr, log.SanitizeCommand(request.Code))
+		log.Error("bash session: read stdout: %v (command: %q)", scanErr, log.SanitizeCommand(request.Code))
 		return fmt.Errorf("read stdout: %w", scanErr)
 	}
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		log.Error("timeout after %s while running command: %q", wait, log.SanitizeCommand(request.Code))
+		log.Error("bash session: timeout after %s (command: %q)", wait, log.SanitizeCommand(request.Code))
 		return fmt.Errorf("timeout after %s", wait)
 	}
 
@@ -312,7 +311,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 
 	var exitCodeErr exitCoder
 	if waitErr != nil && !errors.As(waitErr, &exitCodeErr) {
-		log.Error("command wait failed: %v (command: %q)", waitErr, log.SanitizeCommand(request.Code))
+		log.Error("bash session: wait: %v (command: %q)", waitErr, log.SanitizeCommand(request.Code))
 		return waitErr
 	}
 
@@ -333,7 +332,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 				Traceback: []string{errMsg},
 			})
 		}
-		log.Error("CommandExecError: %s (command: %q)", errMsg, log.SanitizeCommand(request.Code))
+		log.Error("bash session: command error: %s (command: %q)", errMsg, log.SanitizeCommand(request.Code))
 		return nil
 	}
 
@@ -565,7 +564,7 @@ func (s *bashSession) close() error {
 
 	if pid != 0 {
 		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-			log.Warn("kill session process group %d: %v (process may have already exited)", pid, err)
+			log.Warn("bash session: kill process group %d: %v (process may have already exited)", pid, err)
 		}
 	}
 	return nil

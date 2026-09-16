@@ -69,13 +69,13 @@ def parse_memory_limit(value: Optional[str]) -> Optional[int]:
         return None
     match = MEMORY_PATTERN.match(value)
     if not match:
-        logger.warning("Invalid memory limit format '%s'; ignoring.", value)
+        logger.warning(f"Invalid memory limit format '{value}'; ignoring.")
         return None
     amount = int(match.group(1))
     unit = (match.group(2) or "").lower()
     multiplier = MEMORY_MULTIPLIERS.get(unit)
     if not multiplier:
-        logger.warning("Unsupported memory unit '%s'; ignoring.", unit)
+        logger.warning(f"Unsupported memory unit '{unit}'; ignoring.")
         return None
     return amount * multiplier
 
@@ -91,21 +91,21 @@ def parse_nano_cpus(value: Optional[str]) -> Optional[int]:
         else:
             cpus = float(cpu_str)
     except ValueError:
-        logger.warning("Invalid CPU limit format '%s'; ignoring.", value)
+        logger.warning(f"Invalid CPU limit format '{value}'; ignoring.")
         return None
     if not math.isfinite(cpus):
-        logger.warning("CPU limit must be finite. Got '%s'. Ignoring.", value)
+        logger.warning(f"CPU limit must be finite. Got '{value}'. Ignoring.")
         return None
     if cpus <= 0:
-        logger.warning("CPU limit must be positive. Got '%s'. Ignoring.", value)
+        logger.warning(f"CPU limit must be positive. Got '{value}'. Ignoring.")
         return None
     nano_cpus = cpus * 1_000_000_000
     if not math.isfinite(nano_cpus):
-        logger.warning("CPU limit is too large. Got '%s'. Ignoring.", value)
+        logger.warning(f"CPU limit is too large. Got '{value}'. Ignoring.")
         return None
     nano_cpus = int(nano_cpus)
     if nano_cpus > (1 << 63) - 1:
-        logger.warning("CPU limit is too large. Got '%s'. Ignoring.", value)
+        logger.warning(f"CPU limit is too large. Got '{value}'. Ignoring.")
         return None
     return nano_cpus
 
@@ -127,10 +127,10 @@ def parse_gpu_request(value: Optional[str]) -> Optional[int]:
     try:
         count = int(gpu_str)
     except ValueError:
-        logger.warning("Invalid GPU limit format '%s'; ignoring.", value)
+        logger.warning(f"Invalid GPU limit format '{value}'; ignoring.")
         return None
     if count <= 0:
-        logger.warning("GPU limit must be positive. Got '%s'. Ignoring.", value)
+        logger.warning(f"GPU limit must be positive. Got '{value}'. Ignoring.")
         return None
     return count
 
@@ -170,7 +170,7 @@ def parse_timestamp(timestamp: Optional[str]) -> datetime:
     try:
         return datetime.fromisoformat(normalized)
     except ValueError:
-        logger.warning("Invalid timestamp '%s'; defaulting to current time.", timestamp)
+        logger.warning(f"Invalid timestamp '{timestamp}'; defaulting to current time.")
         return datetime.now(timezone.utc)
 
 

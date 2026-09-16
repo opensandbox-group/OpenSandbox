@@ -36,12 +36,7 @@ logger = logging.getLogger(__name__)
 class OSSFSMixin:
     @staticmethod
     def _validate_bucket_name(bucket: str) -> None:
-        """
-        Validate OSS bucket name to prevent command injection.
-        
-        Bucket names must follow OSS naming rules: lowercase letters, numbers, hyphens.
-        Length: 3-63 characters. Cannot start/end with hyphen.
-        """
+        """Validate OSS bucket name to prevent command injection."""
         if not bucket or not isinstance(bucket, str):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -50,9 +45,6 @@ class OSSFSMixin:
                     "message": "OSSFS bucket name cannot be empty.",
                 },
             )
-        
-        # OSS bucket naming: 3-63 chars, lowercase alphanumeric and hyphens only
-        # Must start and end with lowercase letter or digit
         if not re.match(r'^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$', bucket):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -68,12 +60,7 @@ class OSSFSMixin:
 
     @staticmethod
     def _validate_ossfs_option(option: str) -> None:
-        """
-        Validate OSSFS option to prevent command injection.
-        
-        Options should not contain shell metacharacters or command separators.
-        """
-        # Check for dangerous characters that could be used for command injection
+        """Validate OSSFS option to prevent command injection."""
         dangerous_chars = [';', '&', '|', '`', '$', '(', ')', '<', '>', '\n', '\r']
         for char in dangerous_chars:
             if char in option:
@@ -90,11 +77,7 @@ class OSSFSMixin:
 
     @staticmethod
     def _validate_mount_path(path: str) -> None:
-        """
-        Validate mount path to prevent command injection in unmount operations.
-        
-        Path must be absolute and not contain dangerous characters.
-        """
+        """Validate mount path to prevent command injection in unmount operations."""
         if not path or not isinstance(path, str):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -103,8 +86,6 @@ class OSSFSMixin:
                     "message": "Mount path cannot be empty.",
                 },
             )
-        
-        # Path must be absolute
         if not path.startswith('/'):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -131,11 +112,7 @@ class OSSFSMixin:
 
     @staticmethod
     def _validate_endpoint_url(endpoint_url: str) -> None:
-        """
-        Validate endpoint URL to prevent command injection.
-        
-        URL should not contain dangerous shell metacharacters.
-        """
+        """Validate endpoint URL to prevent command injection."""
         if not endpoint_url or not isinstance(endpoint_url, str):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -144,8 +121,6 @@ class OSSFSMixin:
                     "message": "Endpoint URL cannot be empty.",
                 },
             )
-        
-        # Check for dangerous characters
         dangerous_chars = [';', '&', '|', '`', '$', '(', ')', '<', '>', '\n', '\r', ' ']
         for char in dangerous_chars:
             if char in endpoint_url:
@@ -214,11 +189,10 @@ class OSSFSMixin:
         endpoint_url: str,
         passwd_file: str,
     ) -> list[str]:
-        # Validate inputs for security
         self._validate_bucket_name(volume.ossfs.bucket)
         self._validate_endpoint_url(endpoint_url)
         self._validate_mount_path(backend_path)
-        
+
         cmd: list[str] = [
             "ossfs",
             source,
@@ -232,7 +206,6 @@ class OSSFSMixin:
             for raw_opt in volume.ossfs.options:
                 opt = self._normalize_ossfs_option(raw_opt)
                 if opt:
-                    # Validate each option for dangerous characters
                     self._validate_ossfs_option(opt)
                     cmd.extend(["-o", opt])
         return cmd
@@ -243,10 +216,9 @@ class OSSFSMixin:
         endpoint_url: str,
         prefix: str,
     ) -> list[str]:
-        # Validate inputs for security
         self._validate_bucket_name(volume.ossfs.bucket)
         self._validate_endpoint_url(endpoint_url)
-        
+
         conf_lines: list[str] = [
             f"--oss_endpoint={endpoint_url}",
             f"--oss_bucket={volume.ossfs.bucket}",
@@ -260,13 +232,11 @@ class OSSFSMixin:
             for raw_opt in volume.ossfs.options:
                 opt = self._normalize_ossfs_option(raw_opt)
                 if opt:
-                    # Validate each option for dangerous characters
                     self._validate_ossfs_option(opt)
                     conf_lines.append(f"--{opt}")
         return conf_lines
 
     def _build_ossfs_v2_mount_command(self, backend_path: str, conf_file: str) -> list[str]:
-        # Validate backend path for security
         self._validate_mount_path(backend_path)
         return ["ossfs2", "mount", backend_path, "-c", conf_file]
 
@@ -426,15 +396,13 @@ class OSSFSMixin:
 
     def _release_ossfs_mount(self, mount_key: str) -> None:
         """Release one reference and unmount when ref count reaches zero."""
-        # Validate mount path before using in unmount commands
         self._validate_mount_path(mount_key)
-        
+
         with self._ossfs_mount_lock:
             current = self._ossfs_mount_ref_counts.get(mount_key, 0)
             if current <= 0:
                 logger.warning(
-                    "Skipping OSSFS unmount for untracked mount key '%s'.",
-                    mount_key,
+                    f"Skipping OSSFS unmount for untracked mount key '{mount_key}'."
                 )
                 return
             if current == 1:
@@ -473,7 +441,7 @@ class OSSFSMixin:
             try:
                 self._release_ossfs_mount(key)
             except HTTPException as exc:
-                logger.warning("Failed to release OSSFS mount %s: %s", key, exc.detail)
+                logger.warning(f"Failed to release OSSFS mount {key}: {exc.detail}")
 
     def _prepare_ossfs_mounts(self, volumes: Optional[list]) -> list[str]:
         if not volumes:
@@ -496,11 +464,7 @@ class OSSFSMixin:
             raise
 
     def _validate_ossfs_volume(self, volume) -> None:
-        """
-        Docker-specific validation for OSSFS backend.
-
-        Ensures inline credentials and path semantics are valid.
-        """
+        """Docker-specific validation for OSSFS backend."""
         if os.name == "nt":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

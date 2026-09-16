@@ -44,14 +44,14 @@ func (c *Controller) runSQL(ctx context.Context, request *ExecuteCodeRequest) er
 	err := c.initDB()
 	if err != nil {
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "DBInitError", EValue: err.Error()})
-		log.Error("DBInitError: error initializing db server: %v", err)
+		log.Error("sql: init db server: %v", err)
 		return err
 	}
 
 	err = c.db.PingContext(ctx)
 	if err != nil {
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "DBPingError", EValue: err.Error()})
-		log.Error("DBPingError: error pinging db server: %v", err)
+		log.Error("sql: ping db server: %v", err)
 		return err
 	}
 
@@ -63,7 +63,6 @@ func (c *Controller) runSQL(ctx context.Context, request *ExecuteCodeRequest) er
 	}
 }
 
-// executeSelectSQLQuery handles SELECT statements.
 func (c *Controller) executeSelectSQLQuery(ctx context.Context, request *ExecuteCodeRequest) error {
 	startAt := time.Now()
 

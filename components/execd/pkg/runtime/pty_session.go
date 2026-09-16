@@ -58,7 +58,6 @@ type PTYSession interface {
 	ResizePTY(cols, rows uint16) error
 }
 
-// IsPTYSessionSupported reports whether PTY sessions are supported on this platform.
 func IsPTYSessionSupported() bool { return true }
 
 func NewPTYSessionID() string {
@@ -133,7 +132,6 @@ func (s *ptySession) LockWS() bool {
 	return s.wsConnected.CompareAndSwap(false, true)
 }
 
-// UnlockWS releases the WebSocket connection lock.
 func (s *ptySession) UnlockWS() {
 	s.wsConnected.Store(false)
 }
@@ -286,7 +284,7 @@ func (s *ptySession) StartPTY() error {
 	s.doneCh = make(chan struct{})
 	outputDoneCh := make(chan struct{})
 	s.outputDoneCh = outputDoneCh
-	s.stdin = ptmx // write to the PTY master to feed stdin
+	s.stdin = ptmx
 
 	safego.Go(func() {
 		defer close(outputDoneCh)
@@ -432,7 +430,7 @@ func (s *ptySession) writeAndFanout(chunk []byte, isStdout bool) {
 	if w != nil {
 		if _, err := w.Write(chunk); err != nil {
 			// Pipe was closed (client detached) — ignore.
-			log.Warn("pty fanout write: %v", err)
+			log.Warn("pty: fanout write: %v", err)
 		}
 	}
 }
@@ -581,7 +579,7 @@ func (s *ptySession) SendSignal(name string) {
 
 	sig := parseSignalName(name)
 	if sig == 0 {
-		log.Warn("ptySession.SendSignal: unknown signal %q", name)
+		log.Warn("pty: send signal: unknown signal %q", name)
 		return
 	}
 
@@ -589,7 +587,7 @@ func (s *ptySession) SendSignal(name string) {
 	// In pipe mode (Setpgid), pgid is also == pid.
 	// Either way, Kill(-pid, sig) sends to the process group.
 	if err := syscall.Kill(-pid, sig); err != nil {
-		log.Warn("ptySession.SendSignal kill(-%d, %v): %v", pid, sig, err)
+		log.Warn("pty: send signal kill(-%d, %v): %v", pid, sig, err)
 	}
 }
 
@@ -673,7 +671,7 @@ func (c *Controller) CreatePTYSession(id, cwd, command string) (PTYSession, erro
 	}
 	s := newPTYSession(id, resolvedCwd, command)
 	c.ptySessionMap.Store(id, s)
-	log.Info("created pty session %s", id)
+	log.Info("pty: created session %s", id)
 	return s, nil
 }
 
@@ -706,11 +704,10 @@ func (c *Controller) DeletePTYSession(id string) error {
 	}
 	s.close()
 	c.ptySessionMap.Delete(id)
-	log.Info("deleted pty session %s", id)
+	log.Info("pty: deleted session %s", id)
 	return nil
 }
 
-// GetPTYSessionStatus returns status information for a PTY session.
 func (c *Controller) GetPTYSessionStatus(id string) (running bool, outputOffset int64, err error) {
 	s := c.getPTYSession(id)
 	if s == nil {

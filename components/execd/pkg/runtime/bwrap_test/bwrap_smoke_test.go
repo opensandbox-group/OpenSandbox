@@ -258,7 +258,6 @@ func TestIdleGC(t *testing.T) {
 	defer cancel()
 	require.NoError(t, r.RunInIsolatedSession(ctx, id, "true", nil, nil))
 
-	// Session should exist immediately after run.
 	_, err = r.GetIsolatedSession(id)
 	require.NoError(t, err)
 
@@ -274,7 +273,6 @@ func TestIdleGC(t *testing.T) {
 	// Wait past the idle timeout.
 	time.Sleep(3 * time.Second)
 
-	// Trigger GC again — now it should be collected.
 	r.CollectIdle()
 
 	_, err = r.GetIsolatedSession(id)
@@ -294,7 +292,6 @@ func TestIdleGC_Disabled(t *testing.T) {
 	require.NoError(t, err)
 	defer r.DeleteIsolatedSession(id)
 
-	// CollectIdle should not delete sessions with timeout=0.
 	r.CollectIdle()
 
 	_, err = r.GetIsolatedSession(id)

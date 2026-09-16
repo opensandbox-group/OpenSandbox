@@ -44,7 +44,6 @@ class PoolService:
     """Service for managing Pool CRD resources in Kubernetes."""
 
     def __init__(self, k8s_client: K8sClient, namespace: str) -> None:
-        """Initialize PoolService."""
         self._custom_api = k8s_client.get_custom_objects_api()
         self._namespace = namespace
 

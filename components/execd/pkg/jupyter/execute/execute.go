@@ -30,36 +30,26 @@ import (
 	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
 )
 
-// HTTPClient defines the HTTP client interface
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// Client is the client for code execution
 type Client struct {
-	// Internal HTTP client for sending HTTP requests
 	httpClient HTTPClient
 
-	// WebSocket connection
 	conn *websocket.Conn
 
-	// Message handler mappings
 	handlers map[MessageType]func(*Message)
 
-	// Session ID
 	session string
 
-	// Message ID counter
 	msgCounter int
 
-	// Mutex for protecting concurrent access
 	mu sync.Mutex
 
-	// WebSocket URL for kernel connection
 	wsURL string
 }
 
-// NewClient creates a new code execution client
 func NewClient(baseURL string, httpClient HTTPClient) *Client {
 	return &Client{
 		httpClient: httpClient,
@@ -69,15 +59,12 @@ func NewClient(baseURL string, httpClient HTTPClient) *Client {
 	}
 }
 
-// Connect connects to the WebSocket of the specified kernel
 func (c *Client) Connect(wsURL string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Save WebSocket URL
 	c.wsURL = wsURL
 
-	// Connect to WebSocket
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if resp != nil && err != nil {
 		resp.Body.Close()
@@ -87,16 +74,13 @@ func (c *Client) Connect(wsURL string) error {
 	}
 	c.conn = conn
 
-	// Register default message handlers
 	c.registerDefaultHandlers()
 
-	// Start message receiving goroutine
 	safego.Go(func() { c.receiveMessages() })
 
 	return nil
 }
 
-// Disconnect disconnects the WebSocket connection to the kernel
 func (c *Client) Disconnect() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -107,7 +91,6 @@ func (c *Client) Disconnect() {
 	}
 }
 
-// IsConnected checks if connected to the kernel
 func (c *Client) IsConnected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -165,7 +148,6 @@ func (state *streamExecutionState) closeResultChan(resultChan chan *ExecutionRes
 	close(resultChan)
 }
 
-// ExecuteCodeStream executes code in streaming mode, sending results to the provided channel
 func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult) error {
 	if !c.IsConnected() {
 		return errors.New("not connected to kernel, please call Connect method")
@@ -178,7 +160,6 @@ func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult
 
 	state := newStreamExecutionState(time.Now())
 
-	// Clear temporary handlers
 	c.clearTemporaryHandlers()
 	c.registerExecuteCodeStreamHandlers(state, resultChan)
 
@@ -373,13 +354,11 @@ func (c *Client) writeMessage(msg *Message) error {
 	return c.conn.WriteJSON(msg)
 }
 
-// ExecuteCodeWithCallback executes code using callback functions
 func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) error {
 	if !c.IsConnected() {
 		return errors.New("not connected to kernel, please call Connect method")
 	}
 
-	// prepare execution request
 	msgID := c.nextMessageID()
 	request := &ExecuteRequest{
 		Code:            code,
@@ -390,13 +369,11 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 		StopOnError:     true,
 	}
 
-	// serialize request content
 	content, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("failed to serialize request: %w", err)
 	}
 
-	// create message
 	msg := &Message{
 		Header: Header{
 			MessageID:   msgID,
@@ -412,72 +389,56 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 		Channel:      "shell",
 	}
 
-	// register execution result handler
 	if handler.OnExecuteResult != nil {
 		c.registerHandler(MsgExecuteResult, func(msg *Message) {
 			var execResult ExecuteResult
 			if err := json.Unmarshal(msg.Content, &execResult); err != nil {
 				return
 			}
-
-			// calls callback functions
 			handler.OnExecuteResult(&execResult)
 		})
 	}
 
-	// Register stream output handler
 	if handler.OnStream != nil {
 		c.registerHandler(MsgStream, func(msg *Message) {
 			var stream StreamOutput
 			if err := json.Unmarshal(msg.Content, &stream); err != nil {
 				return
 			}
-
-			// calls callback functions
 			handler.OnStream(&stream)
 		})
 	}
 
-	// Register display data handler
 	if handler.OnDisplayData != nil {
 		c.registerHandler(MsgDisplayData, func(msg *Message) {
 			var display DisplayData
 			if err := json.Unmarshal(msg.Content, &display); err != nil {
 				return
 			}
-
-			// calls callback functions
 			handler.OnDisplayData(&display)
 		})
 	}
 
-	// register error handler
 	if handler.OnError != nil {
 		c.registerHandler(MsgError, func(msg *Message) {
 			var errOutput ErrorOutput
 			if err := json.Unmarshal(msg.Content, &errOutput); err != nil {
 				return
 			}
-
-			// calls callback functions
 			handler.OnError(&errOutput)
 		})
 	}
 
-	// register status handler
 	if handler.OnStatus != nil {
 		c.registerHandler(MsgStatus, func(msg *Message) {
 			var status StatusUpdate
 			if err := json.Unmarshal(msg.Content, &status); err != nil {
 				return
 			}
-
-			// calls callback functions
 			handler.OnStatus(&status)
 		})
 	}
 
-	// send execution request
 	c.mu.Lock()
 	err = c.conn.WriteJSON(msg)
 	c.mu.Unlock()
@@ -488,19 +449,14 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 	return nil
 }
 
-// Register default message handlers
-func (c *Client) registerDefaultHandlers() {
-	// default message handlers can be registered here
-}
+func (c *Client) registerDefaultHandlers() {}
 
-// Register temporary message handler
 func (c *Client) registerHandler(msgType MessageType, handler func(*Message)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.handlers[msgType] = handler
 }
 
-// Clear temporary message handlers
 func (c *Client) clearTemporaryHandlers() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -508,7 +464,6 @@ func (c *Client) clearTemporaryHandlers() {
 	c.registerDefaultHandlers()
 }
 
-// Receive WebSocket messages
 func (c *Client) receiveMessages() {
 	for {
 		c.mu.Lock()
@@ -519,7 +474,6 @@ func (c *Client) receiveMessages() {
 			break
 		}
 
-		// Receive message
 		var msg Message
 		err := conn.ReadJSON(&msg)
 		if err != nil {
@@ -527,17 +481,13 @@ func (c *Client) receiveMessages() {
 			break
 		}
 
-		// Process message
 		c.handleMessage(&msg)
 	}
 }
 
-// Handle received messages
 func (c *Client) handleMessage(msg *Message) {
-	// Extract message type
 	msgType := MessageType(msg.Header.MessageType)
 
-	// call the corresponding handler
 	c.mu.Lock()
 	handler, ok := c.handlers[msgType]
 	c.mu.Unlock()
@@ -547,7 +497,6 @@ func (c *Client) handleMessage(msg *Message) {
 	}
 }
 
-// generate next messageID
 func (c *Client) nextMessageID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()

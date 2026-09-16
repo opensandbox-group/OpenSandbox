@@ -125,7 +125,9 @@ class HTTPTenantProvider:
                         f"HTTP tenant endpoint unreachable and cache stale "
                         f"beyond {self._config.max_stale_seconds}s"
                     )
-                logger.warning("HTTP tenant fetch failed, serving stale entry (age=%.1fs)", age)
+                logger.warning(
+                    f"HTTP tenant fetch failed, serving stale entry (age={age:.1f}s)"
+                )
                 return cached.tenant
 
         # Cache miss — sync fetch
@@ -149,13 +151,12 @@ class HTTPTenantProvider:
     def start(self) -> None:
         if self._config.endpoint and not self._config.endpoint.startswith("https://"):
             logger.warning(
-                "HTTP tenant endpoint is not HTTPS (%s). "
-                "API keys will be transmitted in cleartext.",
-                self._config.endpoint,
+                f"HTTP tenant endpoint is not HTTPS ({self._config.endpoint}). "
+                "API keys will be transmitted in cleartext."
             )
         self._client = httpx.Client(timeout=self._config.timeout_seconds)
         self._ready = True
-        logger.info("HTTP tenant provider started, endpoint=%s", self._config.endpoint)
+        logger.info(f"HTTP tenant provider started, endpoint={self._config.endpoint}")
 
     def close(self) -> None:
         with self._lock:

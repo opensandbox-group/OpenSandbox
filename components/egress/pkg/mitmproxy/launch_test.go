@@ -102,10 +102,91 @@ func TestBuildMitmdumpEnvSetsMitmproxyHome(t *testing.T) {
 			"PATH=/usr/bin",
 		},
 		"/home/mitmproxy",
+		nil,
 	)
 
 	require.Contains(t, env, "PATH=/usr/bin")
 	require.Contains(t, env, "HOME=/home/mitmproxy")
+}
+
+func TestBuildMitmdumpEnvHandsOffRevisionIPC(t *testing.T) {
+	cfg := &RevisionIPCConfig{
+		SocketPath:        "/run/opensandbox/revision/receiver.sock",
+		SessionToken:      "0123456789abcdef0123456789abcdef",
+		ControlGeneration: "control-a",
+		SubjectGeneration: "subject-a",
+		MaxSnapshotBytes:  4096,
+	}
+	require.NoError(t, validateRevisionIPCConfig(cfg))
+	env := buildMitmdumpEnv(
+		[]string{
+			"PATH=/usr/bin",
+			revisionIPCTokenEnv + "=stale-secret",
+			revisionIPCSocketEnv + "=/tmp/stale.sock",
+		},
+		"/home/mitmproxy",
+		cfg,
+	)
+	require.Contains(t, env, revisionIPCSocketEnv+"="+cfg.SocketPath)
+	require.Contains(t, env, revisionIPCTokenEnv+"="+cfg.SessionToken)
+	require.Contains(t, env, revisionIPCControlGenerationEnv+"="+cfg.ControlGeneration)
+	require.Contains(t, env, revisionIPCSubjectGenerationEnv+"="+cfg.SubjectGeneration)
+	require.Contains(t, env, revisionIPCMaxSnapshotBytesEnv+"=4096")
+	require.NotContains(t, env, revisionIPCTokenEnv+"=stale-secret")
+	require.NotContains(t, env, revisionIPCSocketEnv+"=/tmp/stale.sock")
+}
+
+func TestBuildMitmdumpEnvScrubsDisabledRevisionIPC(t *testing.T) {
+	env := buildMitmdumpEnv(
+		[]string{
+			"PATH=/usr/bin",
+			revisionIPCTokenEnv + "=stale-secret",
+			revisionIPCSocketEnv + "=/tmp/stale.sock",
+		},
+		"/home/mitmproxy",
+		nil,
+	)
+	for _, name := range revisionIPCEnvNames {
+		for _, value := range env {
+			require.NotRegexp(t, "^"+name+"=", value)
+		}
+	}
+}
+
+func TestRevisionIPCConfigRejectsInvalidValuesWithoutSecrets(t *testing.T) {
+	valid := RevisionIPCConfig{
+		SocketPath:        "/run/opensandbox/revision/receiver.sock",
+		SessionToken:      "0123456789abcdef0123456789abcdef",
+		ControlGeneration: "control-a",
+		SubjectGeneration: "subject-a",
+		MaxSnapshotBytes:  4096,
+	}
+	cases := []RevisionIPCConfig{
+		{},
+		func() RevisionIPCConfig { candidate := valid; candidate.SocketPath = "relative.sock"; return candidate }(),
+		func() RevisionIPCConfig {
+			candidate := valid
+			candidate.SocketPath = "/run/opensandbox/\x00.sock"
+			return candidate
+		}(),
+		func() RevisionIPCConfig { candidate := valid; candidate.SessionToken = "secret"; return candidate }(),
+		func() RevisionIPCConfig { candidate := valid; candidate.ControlGeneration = ""; return candidate }(),
+		func() RevisionIPCConfig {
+			candidate := valid
+			candidate.ControlGeneration = "control\x00a"
+			return candidate
+		}(),
+		func() RevisionIPCConfig { candidate := valid; candidate.SubjectGeneration = ""; return candidate }(),
+		func() RevisionIPCConfig { candidate := valid; candidate.MaxSnapshotBytes = 0; return candidate }(),
+	}
+	for _, candidate := range cases {
+		err := validateRevisionIPCConfig(&candidate)
+		require.Error(t, err)
+		require.Equal(t, "mitmproxy: invalid revision IPC configuration", err.Error())
+		if candidate.SessionToken != "" {
+			require.NotContains(t, err.Error(), candidate.SessionToken)
+		}
+	}
 }
 
 func TestCredentialProxyMessageStripsMitmTimestamp(t *testing.T) {
@@ -118,6 +199,19 @@ func TestCredentialProxyMessageWithoutTimestamp(t *testing.T) {
 	msg, ok := credentialProxyMessage("credential proxy: applied binding=prod")
 	require.True(t, ok)
 	require.Equal(t, "credential proxy: applied binding=prod", msg)
+}
+
+func TestCredentialProxyMessageAcceptsSanitizedFatalRevisionError(t *testing.T) {
+	for _, line := range []string{
+		"mitmdump: credential proxy: invalid revision runtime configuration",
+		"/usr/local/bin/mitmdump: credential proxy: invalid revision runtime configuration",
+	} {
+		msg, ok := credentialProxyMessage(line)
+		require.True(t, ok)
+		require.Equal(t, "credential proxy: invalid revision runtime configuration", msg)
+	}
+	_, ok := credentialProxyMessage("mitmdump: credential proxy: untrusted detail")
+	require.False(t, ok)
 }
 
 func TestCredentialProxyMessageRejectsNonProxyLines(t *testing.T) {

@@ -47,7 +47,6 @@ func TestGenerateSeccompDenyBPF_Override(t *testing.T) {
 	require.NotEmpty(t, bpf)
 	assert.Equal(t, 0, len(bpf)%8)
 
-	// Override with fewer syscalls should produce smaller BPF than default.
 	defaultBPF, err := generateSeccompDenyBPF(nil)
 	require.NoError(t, err)
 	assert.Less(t, len(bpf), len(defaultBPF), "override with 2 syscalls should produce smaller BPF than default")

@@ -22,7 +22,7 @@ for request/response validation and serialization.
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, RootModel, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, RootModel, model_validator
 
 from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
 
@@ -453,6 +453,11 @@ class CreateSandboxRequest(BaseModel):
     """
     Request to create a new sandbox from either a container image or a snapshot.
     """
+
+    # Internal routing hint: set by snapshot restore resolution to the backend
+    # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
+    _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+
     image: Optional[ImageSpec] = Field(
         None,
         description="Container image specification for the sandbox",
@@ -645,6 +650,11 @@ class CreateSandboxRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    @property
+    def resolved_snapshot_backend(self) -> Optional[str]:
+        """Backend that produced the snapshot being restored, if resolved."""
+        return self._resolved_snapshot_backend
 
 
 class CreateSandboxResponse(BaseModel):

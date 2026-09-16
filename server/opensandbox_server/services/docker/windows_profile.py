@@ -188,7 +188,7 @@ def fetch_execd_install_bat(
                         container.remove(force=True)
                 except DockerException as cleanup_exc:
                     logger.warning(
-                        "Failed to cleanup temporary execd install.bat container: %s", cleanup_exc
+                        f"Failed to cleanup temporary execd install.bat container: {cleanup_exc}"
                     )
 
         cache["install_bat"] = data
@@ -269,7 +269,7 @@ def fetch_execd_windows_binary(
                         container.remove(force=True)
                 except DockerException as cleanup_exc:
                     logger.warning(
-                        "Failed to cleanup temporary execd windows bin container: %s", cleanup_exc
+                        f"Failed to cleanup temporary execd windows bin container: {cleanup_exc}"
                     )
 
         cache["windows_execd_bin"] = data

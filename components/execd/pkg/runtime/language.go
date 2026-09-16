@@ -29,7 +29,6 @@ const (
 	BackgroundCommand Language = "background-command"
 )
 
-// String returns the string representation of the language
 func (l Language) String() string {
 	return string(l)
 }

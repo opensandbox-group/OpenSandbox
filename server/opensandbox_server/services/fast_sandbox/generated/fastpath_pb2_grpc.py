@@ -82,6 +82,31 @@ class FastPathServiceStub:
                 request_serializer=fastpath__pb2.ListPoolsRequest.SerializeToString,
                 response_deserializer=fastpath__pb2.ListPoolsResponse.FromString,
                 _registered_method=True)
+        self.CreateSandboxSnapshot = channel.unary_unary(
+                '/fastpath.v2.FastPathService/CreateSandboxSnapshot',
+                request_serializer=fastpath__pb2.CreateSandboxSnapshotRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.CreateSandboxSnapshotResponse.FromString,
+                _registered_method=True)
+        self.GetSandboxSnapshot = channel.unary_unary(
+                '/fastpath.v2.FastPathService/GetSandboxSnapshot',
+                request_serializer=fastpath__pb2.GetSandboxSnapshotRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.GetSandboxSnapshotResponse.FromString,
+                _registered_method=True)
+        self.DeleteSandboxSnapshot = channel.unary_unary(
+                '/fastpath.v2.FastPathService/DeleteSandboxSnapshot',
+                request_serializer=fastpath__pb2.DeleteSandboxSnapshotRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.DeleteSandboxSnapshotResponse.FromString,
+                _registered_method=True)
+        self.PauseSandbox = channel.unary_unary(
+                '/fastpath.v2.FastPathService/PauseSandbox',
+                request_serializer=fastpath__pb2.PauseSandboxRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.PauseSandboxResponse.FromString,
+                _registered_method=True)
+        self.ResumeSandbox = channel.unary_unary(
+                '/fastpath.v2.FastPathService/ResumeSandbox',
+                request_serializer=fastpath__pb2.ResumeSandboxRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.ResumeSandboxResponse.FromString,
+                _registered_method=True)
 
 
 class FastPathServiceServicer:
@@ -141,6 +166,48 @@ class FastPathServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CreateSandboxSnapshot(self, request, context):
+        """CreateSandboxSnapshot snapshots a running Sandbox and publishes the
+        artifact set to the artifact store under the snapshot's template name.
+        It returns after the intent is persisted and the snapshot is triggered;
+        completion is observed via GetSandboxSnapshot.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetSandboxSnapshot(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteSandboxSnapshot(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PauseSandbox(self, request, context):
+        """PauseSandbox checkpoints a Ready Sandbox to the artifact store and
+        releases its runtime. It returns after the desired state is persisted;
+        completion (runtime_state PAUSED with the checkpoint durable) is
+        observed via GetSandbox. Pause is a desired state, not a one-shot
+        object: replaying the call with the same effect is idempotent.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ResumeSandbox(self, request, context):
+        """ResumeSandbox flips the desired state back to Running and schedules the
+        checkpointed Sandbox again, possibly on another Fastlet. Completion
+        (runtime_state READY) is observed via GetSandbox.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FastPathServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -188,6 +255,31 @@ def add_FastPathServiceServicer_to_server(servicer, server):
                     servicer.ListPools,
                     request_deserializer=fastpath__pb2.ListPoolsRequest.FromString,
                     response_serializer=fastpath__pb2.ListPoolsResponse.SerializeToString,
+            ),
+            'CreateSandboxSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateSandboxSnapshot,
+                    request_deserializer=fastpath__pb2.CreateSandboxSnapshotRequest.FromString,
+                    response_serializer=fastpath__pb2.CreateSandboxSnapshotResponse.SerializeToString,
+            ),
+            'GetSandboxSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSandboxSnapshot,
+                    request_deserializer=fastpath__pb2.GetSandboxSnapshotRequest.FromString,
+                    response_serializer=fastpath__pb2.GetSandboxSnapshotResponse.SerializeToString,
+            ),
+            'DeleteSandboxSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteSandboxSnapshot,
+                    request_deserializer=fastpath__pb2.DeleteSandboxSnapshotRequest.FromString,
+                    response_serializer=fastpath__pb2.DeleteSandboxSnapshotResponse.SerializeToString,
+            ),
+            'PauseSandbox': grpc.unary_unary_rpc_method_handler(
+                    servicer.PauseSandbox,
+                    request_deserializer=fastpath__pb2.PauseSandboxRequest.FromString,
+                    response_serializer=fastpath__pb2.PauseSandboxResponse.SerializeToString,
+            ),
+            'ResumeSandbox': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResumeSandbox,
+                    request_deserializer=fastpath__pb2.ResumeSandboxRequest.FromString,
+                    response_serializer=fastpath__pb2.ResumeSandboxResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -433,6 +525,141 @@ class FastPathService:
             '/fastpath.v2.FastPathService/ListPools',
             fastpath__pb2.ListPoolsRequest.SerializeToString,
             fastpath__pb2.ListPoolsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateSandboxSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fastpath.v2.FastPathService/CreateSandboxSnapshot',
+            fastpath__pb2.CreateSandboxSnapshotRequest.SerializeToString,
+            fastpath__pb2.CreateSandboxSnapshotResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSandboxSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fastpath.v2.FastPathService/GetSandboxSnapshot',
+            fastpath__pb2.GetSandboxSnapshotRequest.SerializeToString,
+            fastpath__pb2.GetSandboxSnapshotResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteSandboxSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fastpath.v2.FastPathService/DeleteSandboxSnapshot',
+            fastpath__pb2.DeleteSandboxSnapshotRequest.SerializeToString,
+            fastpath__pb2.DeleteSandboxSnapshotResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PauseSandbox(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fastpath.v2.FastPathService/PauseSandbox',
+            fastpath__pb2.PauseSandboxRequest.SerializeToString,
+            fastpath__pb2.PauseSandboxResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResumeSandbox(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fastpath.v2.FastPathService/ResumeSandbox',
+            fastpath__pb2.ResumeSandboxRequest.SerializeToString,
+            fastpath__pb2.ResumeSandboxResponse.FromString,
             options,
             channel_credentials,
             insecure,

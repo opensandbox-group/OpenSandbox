@@ -23,7 +23,6 @@ const (
 	AuthURLParamKey       = "token"
 )
 
-// NewAuth creates an empty authentication configuration.
 func NewAuth() *Auth {
 	return &Auth{}
 }

@@ -90,7 +90,6 @@ func TestReplayBuffer_CircularEviction(t *testing.T) {
 		size: 8,
 	}
 
-	// Write 6 bytes: "abcdef"
 	rb.write([]byte("abcdef"))
 	require.Equal(t, int64(6), rb.Total())
 
@@ -98,12 +97,10 @@ func TestReplayBuffer_CircularEviction(t *testing.T) {
 	rb.write([]byte("ghij"))
 	require.Equal(t, int64(10), rb.Total())
 
-	// offset 0 should be clamped to oldest=2
 	data, off := rb.ReadFrom(0)
 	require.Equal(t, int64(2), off)
 	require.Equal(t, []byte("cdefghij"), data)
 
-	// Read from offset 5 (within retained range)
 	data, off = rb.ReadFrom(5)
 	require.Equal(t, int64(5), off)
 	require.Equal(t, []byte("fghij"), data)
@@ -117,12 +114,10 @@ func TestReplayBuffer_LargeGap(t *testing.T) {
 	// Write "ABCDEF" — total=6, oldest=2, retained="CDEF"
 	rb.write([]byte("ABCDEF"))
 
-	// Requesting from 0 should clamp to oldest=2
 	data, off := rb.ReadFrom(0)
 	require.Equal(t, int64(2), off)
 	require.Equal(t, []byte("CDEF"), data)
 
-	// Requesting from 1 should also clamp to oldest=2
 	data, off = rb.ReadFrom(1)
 	require.Equal(t, int64(2), off)
 	require.Equal(t, []byte("CDEF"), data)
@@ -176,7 +171,6 @@ func TestReplayBuffer_WriteWrapsCorrectly(t *testing.T) {
 		buf:  make([]byte, 4),
 		size: 4,
 	}
-	// Write "ABCD" — buffer full
 	rb.write([]byte("ABCD"))
 	// Write "EF" — evicts "AB", retained "CDEF"
 	rb.write([]byte("EF"))

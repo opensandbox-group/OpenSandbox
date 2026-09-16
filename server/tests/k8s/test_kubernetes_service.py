@@ -111,7 +111,6 @@ class TestKubernetesSandboxServiceCreate:
     async def test_create_sandbox_with_valid_request_succeeds(
         self, k8s_service, create_sandbox_request, mock_workload
     ):
-        # Mock workload provider
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-sandbox-123",
             "uid": "abc-123",
@@ -128,7 +127,6 @@ class TestKubernetesSandboxServiceCreate:
         
         response = await k8s_service.create_sandbox(create_sandbox_request)
         
-        # CreateSandboxResponse uses 'id' field
         assert response.id is not None
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
@@ -246,7 +244,6 @@ class TestKubernetesSandboxServiceCreate:
             "last_transition_at": datetime.now(timezone.utc),
         }
 
-        # Override config values
         k8s_service.app_config.kubernetes.sandbox_create_timeout_seconds = 120
         k8s_service.app_config.kubernetes.pool_acquisition_timeout_seconds = 15
         k8s_service.app_config.kubernetes.sandbox_create_poll_interval_seconds = 0.5
@@ -324,7 +321,6 @@ class TestKubernetesSandboxServiceCreate:
             "last_transition_at": datetime.now(timezone.utc),
         }
 
-        # Should not raise
         await k8s_service.create_sandbox(create_sandbox_request)
         k8s_service.workload_provider.create_workload.assert_called_once()
 
@@ -884,13 +880,10 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.6:8080"
         k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
 
-        # Should not raise AttributeError on None.auth
         response = await k8s_service.create_sandbox(pool_request)
         assert response.id is not None
 
 class TestWaitForSandboxReady:
-    """_wait_for_sandbox_ready method tests"""
-
     def test_pool_capacity_retry_after_matches_acquisition_window(self, k8s_service):
         error = k8s_service._pool_capacity_exhausted_error(30)
 
@@ -1276,7 +1269,6 @@ class TestKubernetesSandboxServiceRenew:
         )
 
 class TestGetSandbox:
-    """get_sandbox method tests"""
     
     def test_get_existing_sandbox_succeeds(self, k8s_service, mock_workload):
         mock_workload["spec"] = {
@@ -1299,10 +1291,8 @@ class TestGetSandbox:
         k8s_service.workload_provider.get_endpoint_info.return_value = "10.0.0.1:8080"
         k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
         
-        # Use sandbox_id from mock_workload
         sandbox = k8s_service.get_sandbox("test-sandbox-123")
         
-        # Sandbox uses 'id' field
         assert sandbox.id == "test-sandbox-123"
         assert sandbox.status.state == "Running"
         assert sandbox.platform is not None
@@ -1449,7 +1439,6 @@ class TestGetSandbox:
         assert sandbox.platform is None
 
 class TestDeleteSandbox:
-    """delete_sandbox method tests"""
     
     def test_delete_existing_sandbox_succeeds(self, k8s_service, mock_workload):
         k8s_service.workload_provider.get_workload.return_value = mock_workload
@@ -1463,7 +1452,6 @@ class TestDeleteSandbox:
         )
     
     def test_delete_nonexistent_sandbox_raises_404(self, k8s_service):
-        # Mock delete_workload to raise exception containing "not found"
         k8s_service.workload_provider.delete_workload.side_effect = Exception("Sandbox not found")
 
         with pytest.raises(HTTPException) as exc_info:
@@ -2231,7 +2219,6 @@ class TestAttachPvcOwnerReferences:
         # Patch failure must not propagate — the sandbox is already created.
         k8s_service.k8s_client.patch_pvc.side_effect = Exception("forbidden")
 
-        # No exception expected
         k8s_service._attach_pvc_owner_references(
             ["pvc-a"],
             {"name": "s", "uid": "u", "apiVersion": "g/v", "kind": "K"},
@@ -2248,7 +2235,6 @@ class TestAttachPvcOwnerReferences:
 
 
 class TestListSandboxes:
-    """list_sandboxes method tests"""
     
     def test_list_all_sandboxes_succeeds(self, k8s_service, mock_workload):
         k8s_service.workload_provider.list_workloads.return_value = [mock_workload]
@@ -2265,13 +2251,11 @@ class TestListSandboxes:
         request = ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=20))
         response = k8s_service.list_sandboxes(request)
         
-        # Sandbox in items uses 'id' field
         assert len(response.items) == 1
         assert response.items[0].id == "test-sandbox-123"
         assert response.pagination.total_items == 1
     
     def test_list_sandboxes_with_pagination(self, k8s_service, mock_workload):
-        # Create multiple mock workloads using mock_workload as template
         workloads = []
         for i in range(10):
             workload = {
@@ -2310,11 +2294,9 @@ class TestListSandboxes:
         assert response.pagination.total_pages == 2
     
     def test_list_sandboxes_sorted_by_creation_time(self, k8s_service, mock_workload):
-        # Create workloads with different creation times
         base_time = datetime.now(timezone.utc)
         workloads = []
         
-        # Create sandboxes with specific creation times
         # We'll create them in random order to verify sorting works
         creation_times = [
             base_time - timedelta(hours=5),  # Oldest
@@ -2354,18 +2336,14 @@ class TestListSandboxes:
         request = ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=10))
         response = k8s_service.list_sandboxes(request)
         
-        # Verify all items are returned
         assert len(response.items) == 5
         
-        # Verify they are sorted by creation time (newest first)
-        # The order should be: index 4 (newest), 3, 2, 1, 0 (oldest)
         assert response.items[0].id == "sandbox-4"  # Newest
         assert response.items[1].id == "sandbox-3"
         assert response.items[2].id == "sandbox-2"
         assert response.items[3].id == "sandbox-1"
         assert response.items[4].id == "sandbox-0"  # Oldest
         
-        # Also verify the creation times are in descending order
         for i in range(len(response.items) - 1):
             assert response.items[i].created_at >= response.items[i + 1].created_at
 
@@ -2405,7 +2383,6 @@ class TestListSandboxes:
         assert response.items[0].platform is None
 
 class TestRenewExpiration:
-    """renew_sandbox_expiration method tests"""
     
     def test_renew_expiration_succeeds(self, k8s_service, mock_workload):
         new_expiration = datetime.now(timezone.utc) + timedelta(hours=2)
@@ -2567,7 +2544,6 @@ class TestSignedEndpoint:
         assert exc.value.status_code == 400
 
     def test_expires_in_past_rejected(self, k8s_service):
-        """A timestamp in the past must be rejected."""
         k8s_service.workload_provider.get_workload.return_value = {
             "metadata": {"annotations": {}},
         }
@@ -2611,7 +2587,6 @@ class TestSignedEndpoint:
         assert "secure_access" in exc.value.detail["message"].lower()
 
     def test_unsigned_endpoint_no_expires(self, k8s_service):
-        """Without expires, the unsigned endpoint should be returned."""
         self._setup_gateway_with_secure_access(k8s_service)
         k8s_service.workload_provider.get_workload.return_value = {
             "metadata": {"annotations": {}},

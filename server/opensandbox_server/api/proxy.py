@@ -62,7 +62,6 @@ SERVER_GENERATED_RESPONSE_HEADERS = {
     "server",
 }
 
-# Headers that shouldn't be forwarded to untrusted/internal backends
 SENSITIVE_HEADERS = {
     "authorization",
     "cookie",
@@ -520,10 +519,8 @@ async def _proxy_websocket_request(
         )
     except HTTPException as exc:
         logger.warning(
-            "Rejecting websocket proxy request for sandbox=%s port=%s: %s",
-            sandbox_id,
-            port,
-            exc.detail,
+            f"Rejecting websocket proxy request for sandbox={sandbox_id} "
+            f"port={port}: {exc.detail}"
         )
         await _fail_client_websocket(
             websocket,
@@ -586,25 +583,19 @@ async def _proxy_websocket_request(
                 )
     except websockets.InvalidStatus as exc:
         logger.warning(
-            "Backend websocket handshake failed for sandbox=%s port=%s: %s",
-            sandbox_id,
-            port,
-            exc,
+            f"Backend websocket handshake failed for sandbox={sandbox_id} "
+            f"port={port}: {exc}"
         )
         await _fail_client_websocket(websocket, status.WS_1008_POLICY_VIOLATION, "")
     except OSError as exc:
         logger.warning(
-            "Could not connect websocket proxy for sandbox=%s port=%s: %s",
-            sandbox_id,
-            port,
-            exc,
+            f"Could not connect websocket proxy for sandbox={sandbox_id} "
+            f"port={port}: {exc}"
         )
         await _fail_client_websocket(websocket, status.WS_1011_INTERNAL_ERROR, "")
     except Exception:
         logger.exception(
-            "Unexpected websocket proxy failure for sandbox=%s port=%s",
-            sandbox_id,
-            port,
+            f"Unexpected websocket proxy failure for sandbox={sandbox_id} port={port}"
         )
         await _fail_client_websocket(websocket, status.WS_1011_INTERNAL_ERROR, "")
 

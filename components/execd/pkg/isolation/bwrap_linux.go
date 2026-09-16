@@ -42,11 +42,9 @@ var seccompBPF []byte
 //  3. /usr/bin/bwrap               — system package (Alpine apk)
 //  4. /usr/local/bin/bwrap         — manual install
 func findBwrap() string {
-	// First: respect whatever the user has in $PATH.
 	if path, err := exec.LookPath("bwrap"); err == nil {
 		return path
 	}
-	// Fall back to known locations.
 	for _, p := range []string{
 		"/opt/opensandbox/bwrap",
 		"/usr/bin/bwrap",
@@ -64,7 +62,6 @@ func findBwrap() string {
 // buildArgv must skip that flag in userns mode. Detected once at startup.
 var bwrapIsSetuid bool
 
-// isSetuidBinary reports whether the file at path has the setuid bit set.
 func isSetuidBinary(path string) bool {
 	if path == "" {
 		return false
@@ -80,12 +77,10 @@ func currentProcessIDs() (uint32, uint32) {
 	return uint32(os.Getuid()), uint32(os.Getgid())
 }
 
-// bwrapImpl is the Linux bwrap Isolator.
 type bwrapImpl struct {
 	probe ProbeResult
 }
 
-// NewBwrap returns a bwrap Isolator for Linux, configured by cfg.
 func NewBwrap(cfg Config) Isolator {
 	probe := Probe(ProbeConfig{
 		UpperRoot:     cfg.UpperRoot,

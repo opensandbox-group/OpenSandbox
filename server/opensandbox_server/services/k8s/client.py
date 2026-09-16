@@ -141,6 +141,10 @@ class K8sClient:
                     logger.warning(f"Failed to start informer for {plural}/{namespace}: {exc}")
                     self._informers.pop(key, None)
                     return None
+            elif event_handler is not None:
+                # The informer was started lazily by a handler-less read path;
+                # late watch consumers still need their events delivered.
+                informer.add_event_handler(event_handler)
         return informer
 
     def watch_custom_objects(

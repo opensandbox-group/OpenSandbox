@@ -34,6 +34,9 @@ class SnapshotRuntimeStatus:
     image: Optional[str] = None
     reason: Optional[str] = None
     message: Optional[str] = None
+    # Backend marker persisted into restore_config on READY (e.g. "fsb") so
+    # create-time routing can send restores to the owning backend.
+    backend: Optional[str] = None
 
 
 class SnapshotRuntimePreflightError(RuntimeError):
@@ -79,12 +82,29 @@ class SnapshotRuntime(Protocol):
         Return the most recent runtime view for a snapshot if known.
         """
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
+    def delete_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> None:
         """
         Delete runtime-managed artifacts for a snapshot.
+
+        ``source_sandbox_id`` identifies the owning backend for composite
+        dispatch; runtimes that serve one backend only ignore it.
         """
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> SnapshotRuntimeStatus:
         """
         Inspect runtime-managed artifacts for startup recovery.
         """
@@ -123,10 +143,24 @@ class NoopSnapshotRuntime:
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
+    def delete_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> None:
         return None
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> SnapshotRuntimeStatus:
         return SnapshotRuntimeStatus(
             state=SnapshotState.FAILED,
             reason="snapshot_recovery_not_supported",

@@ -68,10 +68,6 @@ func getLogger() slogger.Logger {
 	return l
 }
 
-func Debug(format string, args ...any) {
-	getLogger().Debugf(format, args...)
-}
-
 func Info(format string, args ...any) {
 	getLogger().Infof(format, args...)
 }

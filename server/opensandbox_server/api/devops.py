@@ -192,10 +192,9 @@ def get_sandbox_diagnostics_summary(
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Failed to collect sandbox inspect diagnostics for %s", sandbox_id)
+        logger.exception(f"Failed to collect sandbox inspect diagnostics for {sandbox_id}")
         sections.append("[error] Failed to collect inspect diagnostics.")
 
-    # Events
     sections.append("")
     sections.append("-" * 40)
     sections.append("EVENTS")
@@ -205,20 +204,19 @@ def get_sandbox_diagnostics_summary(
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Failed to collect sandbox event diagnostics for %s", sandbox_id)
+        logger.exception(f"Failed to collect sandbox event diagnostics for {sandbox_id}")
         sections.append("[error] Failed to collect event diagnostics.")
 
-    # Logs
     sections.append("")
     sections.append("-" * 40)
-    sections.append("LOGS (last {} lines)".format(tail))
+    sections.append(f"LOGS (last {tail} lines)")
     sections.append("-" * 40)
     try:
         sections.append(sandbox_service.get_sandbox_logs(sandbox_id, tail=tail))
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Failed to collect sandbox log diagnostics for %s", sandbox_id)
+        logger.exception(f"Failed to collect sandbox log diagnostics for {sandbox_id}")
         sections.append("[error] Failed to collect log diagnostics.")
 
     return PlainTextResponse(content="\n".join(sections) + "\n")

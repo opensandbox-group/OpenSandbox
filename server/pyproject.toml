@@ -107,7 +107,17 @@ src = ["opensandbox_server", "tests"]
 exclude = ["opensandbox_server/services/fast_sandbox/generated"]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    # Logging must use f-strings: ban %-args (G002), str.format (G001), and + concat (G003).
+    # G004 (ban f-strings) is intentionally NOT enabled — it contradicts this policy.
+    "G001",
+    "G002",
+    "G003",
+]
 
 [tool.pyright]
 typeCheckingMode = "standard"

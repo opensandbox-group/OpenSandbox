@@ -124,22 +124,7 @@ def _is_namespace_not_found(exc: Exception) -> bool:
 
 
 class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionService):
-    """
-    Kubernetes-based implementation of SandboxService.
-    
-    This class implements sandbox lifecycle operations using Kubernetes resources.
-    """
-    
     def __init__(self, config: Optional[AppConfig] = None):
-        """
-        Initialize Kubernetes sandbox service.
-        
-        Args:
-            config: Application configuration
-            
-        Raises:
-            HTTPException: If initialization fails
-        """
         self.app_config = config or get_config()
         runtime_config = self.app_config.runtime
         
@@ -189,9 +174,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             ) from e
 
         logger.info(
-            "KubernetesSandboxService initialized: namespace=%s, execd_image=%s",
-            self.namespace,
-            self.execd_image,
+            f"KubernetesSandboxService initialized: "
+            f"namespace={self.namespace}, execd_image={self.execd_image}"
         )
 
     def set_tenant_provider(self, provider: object) -> None:
@@ -249,17 +233,11 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
     ) -> Dict[str, Any]:
         """
         Wait for Pod to be Running and have an IP address.
-        
+
         Args:
-            sandbox_id: Sandbox ID
-            timeout_seconds: Maximum time to wait in seconds
-            poll_interval_seconds: Time between polling attempts
             pool_acquisition_timeout_seconds: Maximum cumulative time to wait
                 while the controller reports exhausted Pool capacity
-            
-        Returns:
-            Workload dict when Pod is Running with IP
-            
+
         Raises:
             HTTPException: If timeout or Pod fails
         """
@@ -503,7 +481,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 name=pool_ref,
             )
         except Exception as e:
-            logger.exception("Failed to validate poolRef %s", pool_ref)
+            logger.exception(f"Failed to validate poolRef {pool_ref}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={
@@ -837,15 +815,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         Create a new sandbox using Kubernetes Pod.
 
         Wait for the Pod to be Running and have an IP address before returning.
-        
-        Args:
-            request: Sandbox creation request.
-            
-        Returns:
-            CreateSandboxResponse: Created sandbox information with Running state
-            
-        Raises:
-            HTTPException: If creation fails, timeout, or invalid parameters
         """
         pool_ref = (request.extensions or {}).get("poolRef", "").strip()
         has_pool_ref = bool(pool_ref)
@@ -922,7 +891,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
                 await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)
 
-            # Auto-create PVCs that don't exist yet
             if request.volumes:
                 managed_pvcs_may_exist = True
                 created_managed_pvcs = await asyncio.to_thread(
@@ -1008,9 +976,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 raise
 
             logger.info(
-                "Created sandbox: id=%s, workload=%s",
-                sandbox_id,
-                workload_info.get("name"),
+                f"Created sandbox: id={sandbox_id}, workload={workload_info.get('name')}"
             )
 
             # Attach ownerReferences so K8s GC removes PVCs whenever the CR is
@@ -1144,18 +1110,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     await asyncio.to_thread(self._cleanup_managed_pvcs, sandbox_id)
 
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
-        """
-        Get sandbox by ID.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Returns:
-            Sandbox: Sandbox information
-
-        Raises:
-            HTTPException: If sandbox not found
-        """
         try:
             ns = self._resolve_namespace_for_lookup(sandbox_id)
             workload = _get_workload_or_404(
@@ -1181,15 +1135,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         ]
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
-        """
-        List sandboxes with filtering and pagination.
-        
-        Args:
-            request: List request with filters and pagination
-            
-        Returns:
-            ListSandboxesResponse: Paginated list of sandboxes
-        """
         try:
             return _build_list_sandboxes_response(self.list_sandbox_objects(), request)
             
@@ -1204,15 +1149,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             ) from e
     
     def delete_sandbox(self, sandbox_id: str) -> None:
-        """
-        Delete a sandbox.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Raises:
-            HTTPException: If deletion fails
-        """
         try:
             _delete_workload_or_404(
                 self.workload_provider,
@@ -1297,9 +1233,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 )
     
     def pause_sandbox(self, sandbox_id: str) -> None:
-        """
-        Pause sandbox by delegating to the workload provider.
-        """
         try:
             self.workload_provider.pause_sandbox(sandbox_id, self._resolve_namespace())
         except NotImplementedError:
@@ -1328,7 +1261,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 },
             )
         except Exception as e:
-            logger.error("Failed to pause sandbox %s: %s", sandbox_id, e)
+            logger.error(f"Failed to pause sandbox {sandbox_id}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={
@@ -1338,9 +1271,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             )
 
     def resume_sandbox(self, sandbox_id: str) -> None:
-        """
-        Resume sandbox by delegating to the workload provider.
-        """
         try:
             self.workload_provider.resume_sandbox(sandbox_id, self._resolve_namespace())
         except NotImplementedError:
@@ -1369,7 +1299,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 },
             )
         except Exception as e:
-            logger.error("Failed to resume sandbox %s: %s", sandbox_id, e)
+            logger.error(f"Failed to resume sandbox {sandbox_id}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={
@@ -1407,18 +1337,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
     ) -> RenewSandboxExpirationResponse:
         """
         Renew sandbox expiration time.
-        
+
         Updates both the BatchSandbox spec.expireTime and label for consistency.
-        
-        Args:
-            sandbox_id: Unique sandbox identifier
-            request: Renewal request with new expiration time
-            
-        Returns:
-            RenewSandboxExpirationResponse: Updated expiration time
-            
-        Raises:
-            HTTPException: If renewal fails
         """
         new_expiration = ensure_future_expiration(request.expires_at)
 
@@ -1493,7 +1413,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 labels=label_patch,
             )
         except Exception as e:
-            logger.error("Error patching labels for sandbox %s: %s", sandbox_id, e)
+            logger.error(f"Error patching labels for sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("patch sandbox labels", e) from e
 
         return _build_sandbox_from_workload(updated, self.workload_provider)
@@ -1510,17 +1430,12 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         Get sandbox access endpoint.
 
         Args:
-            sandbox_id: Unique sandbox identifier
-            port: Port number
             resolve_internal: If True, bypass ingress and return the provider's
                 internal workload endpoint for use by the server-side proxy.
             expires: Unix epoch seconds for a signed route token.
                 Requires ingress gateway mode with secure_access keys configured.
             use_proxy_host: Accepted for interface consistency with the Docker
                 runtime. The Kubernetes runtime currently ignores it.
-
-        Returns:
-            Endpoint: Endpoint information
 
         Raises:
             HTTPException: If endpoint not available or signed routes unsupported

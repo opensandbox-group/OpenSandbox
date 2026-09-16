@@ -54,7 +54,6 @@ func (c *Controller) tailStdPipe(file string, onExecute func(text string), done 
 	}
 }
 
-// getCommandKernel retrieves a command execution context.
 func (c *Controller) getCommandKernel(sessionID string) *commandKernel {
 	if v, ok := c.commandClientMap.Load(sessionID); ok {
 		if kernel, ok := v.(*commandKernel); ok {
@@ -64,7 +63,6 @@ func (c *Controller) getCommandKernel(sessionID string) *commandKernel {
 	return nil
 }
 
-// storeCommandKernel registers a command execution context.
 func (c *Controller) storeCommandKernel(sessionID string, kernel *commandKernel) {
 	c.commandClientMap.Store(sessionID, kernel)
 }
@@ -104,12 +102,10 @@ func (c *Controller) commandOutputDir() string {
 	return filepath.Join(os.TempDir(), commandOutputDirName)
 }
 
-// stdoutFileName constructs the stdout log path.
 func (c *Controller) stdoutFileName(session string) string {
 	return filepath.Join(c.commandOutputDir(), session+".stdout")
 }
 
-// stderrFileName constructs the stderr log path.
 func (c *Controller) stderrFileName(session string) string {
 	return filepath.Join(c.commandOutputDir(), session+".stderr")
 }
@@ -129,7 +125,7 @@ func removeCommandOutputFiles(paths ...string) {
 		}
 		seen[path] = struct{}{}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Warn("remove command output %s: %v", path, err)
+			log.Warn("command output: remove %s: %v", path, err)
 		}
 	}
 }
@@ -138,7 +134,7 @@ func cleanupStaleCommandOutputFiles(dir string, cutoff time.Time, match func(str
 	directory, err := os.Open(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Warn("read command output directory %s: %v", dir, err)
+			log.Warn("command output: read dir %s: %v", dir, err)
 		}
 		return
 	}
@@ -158,7 +154,7 @@ func cleanupStaleCommandOutputFiles(dir string, cutoff time.Time, match func(str
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
-				log.Warn("read command output directory %s: %v", dir, readErr)
+				log.Warn("command output: read dir %s: %v", dir, readErr)
 			}
 			return
 		}
@@ -205,7 +201,7 @@ func (c *Controller) cleanupOrphanedCommandOutputs(now time.Time) {
 	cutoff := now.Add(-commandOutputRetention)
 	protected := c.protectedCommandOutputPaths()
 	if err := ensurePrivateCommandOutputDir(c.commandOutputDir()); err != nil {
-		log.Warn("skip private command output cleanup: %v", err)
+		log.Warn("command output: skip private cleanup: %v", err)
 	} else {
 		cleanupStaleCommandOutputFiles(c.commandOutputDir(), cutoff, legacyCommandOutputPattern.MatchString, protected)
 	}

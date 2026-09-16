@@ -51,7 +51,6 @@ func TestRenameFile(t *testing.T) {
 	_, err = os.Stat(src)
 	require.True(t, os.IsNotExist(err), "expected source removed, got err=%v", err)
 
-	// destination exists -> expect error
 	require.NoError(t, os.WriteFile(src, []byte("data"), 0o644))
 	require.Error(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}), "expected error when destination already exists")
 }
@@ -160,21 +159,6 @@ func TestSetFileOwnership_InvalidOwner(t *testing.T) {
 
 	err := SetFileOwnership(file, "nonexistent_user_xyz", "")
 	require.Error(t, err, "invalid owner should return error")
-}
-
-func TestSearchFileMetadata(t *testing.T) {
-	metadata := map[string]model.FileMetadata{
-		"/tmp/a/notes.txt": {Path: "/tmp/a/notes.txt"},
-		"/tmp/b/readme.md": {Path: "/tmp/b/readme.md"},
-	}
-
-	path, info, ok := SearchFileMetadata(metadata, "/any/notes.txt")
-	require.True(t, ok, "expected metadata entry")
-	require.Equal(t, "/tmp/a/notes.txt", path)
-	require.Equal(t, "/tmp/a/notes.txt", info.Path)
-
-	_, _, ok = SearchFileMetadata(metadata, "/foo/unknown.txt")
-	require.False(t, ok, "expected no match")
 }
 
 func TestParseRange(t *testing.T) {

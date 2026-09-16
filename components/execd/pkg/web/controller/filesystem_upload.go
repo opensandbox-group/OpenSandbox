@@ -41,7 +41,6 @@ func newUploadError(status int, code model.ErrorCode, message string) *uploadErr
 	return &uploadError{status: status, code: code, message: message}
 }
 
-// UploadFile uploads files with metadata to specified paths
 func (c *FilesystemController) UploadFile() {
 	rec := beginFilesystemMetric("upload")
 	defer rec.Finish(c.basicController)
@@ -193,10 +192,10 @@ func writeUploadFile(resolvedPath string, fileHeader *multipart.FileHeader) *upl
 	}
 
 	if err := dst.Sync(); err != nil {
-		log.Error("failed to sync target file: %v", err)
+		log.Error("upload: sync target file: %v", err)
 	}
 	if err := dst.Close(); err != nil {
-		log.Error("failed to close target file: %v", err)
+		log.Error("upload: close target file: %v", err)
 	}
 
 	// fsync parent directory so the new dirent is durable and visible on
@@ -205,7 +204,7 @@ func writeUploadFile(resolvedPath string, fileHeader *multipart.FileHeader) *upl
 	targetDir := filepath.Dir(resolvedPath)
 	if d, err := os.Open(targetDir); err == nil {
 		if err := d.Sync(); err != nil {
-			log.Warn("failed to sync parent dir %s: %v", targetDir, err)
+			log.Warn("upload: sync parent dir %s: %v", targetDir, err)
 		}
 		_ = d.Close()
 	}

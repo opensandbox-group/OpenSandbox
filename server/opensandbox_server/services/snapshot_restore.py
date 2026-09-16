@@ -36,22 +36,27 @@ async def resolve_sandbox_image_from_request(
     Normalize a sandbox create request to an effective image-backed request.
 
     When `snapshotId` is used, this resolves the snapshot from server
-    persistence and injects `request.image` from `restore_config.image`.
+    persistence and injects `request.image` from `restore_config.image`, and
+    records the owning backend so composite routing can dispatch the create.
+    Requests without a snapshotId (image-backed, pool-only, template-mode)
+    pass through unchanged: image-or-snapshotId validity is the schema
+    validator's job.
     """
+
+    if (request.template_id or "").strip():
+        # Template mode fixes the workload shape; nothing to resolve.
+        return request
+
+    if not (request.snapshot_id or "").strip():
+        # Image-backed and pool-only (extensions.poolRef) creates have no
+        # snapshot to resolve; the schema validator owns their validation.
+        return request
 
     has_image = request.image is not None and bool(request.image.uri.strip())
     if has_image:
         return request
 
     snapshot_id = (request.snapshot_id or "").strip()
-    if not snapshot_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "SANDBOX::INVALID_PARAMETER",
-                "message": "Either image or snapshotId must be provided.",
-            },
-        )
 
     snapshot_repository = get_snapshot_repository()
     snapshot = await run_in_threadpool(snapshot_repository.get, snapshot_id)
@@ -95,6 +100,7 @@ async def resolve_sandbox_image_from_request(
 
     request.image = ImageSpec(uri=restore_image)
     request.snapshot_id = snapshot_id
+    request._resolved_snapshot_backend = (snapshot.restore_config.backend or "").strip() or None
     if not request.entrypoint:
         request.entrypoint = list(DEFAULT_SNAPSHOT_RESTORE_ENTRYPOINT)
     return request

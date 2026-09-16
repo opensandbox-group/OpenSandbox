@@ -536,3 +536,63 @@ class TestWorkloadInformerStartStop:
 
         assert watch_timeouts == [2, 2, 1, 2]
         assert list_counts == [1, 1, 1, 2]
+
+
+class TestWorkloadInformerEventHandlers:
+    """Late-attached reactor handlers (add_event_handler)."""
+
+    def test_late_handler_receives_resync_events(self):
+        """A handler attached after construction gets SYNC events from a resync."""
+        list_fn = MagicMock(return_value=_list_response("snap-1"))
+        informer = _make_informer(list_fn=list_fn)
+
+        events = []
+        informer.add_event_handler(lambda event_type, obj: events.append((event_type, obj)))
+        informer._full_resync()
+
+        assert [event_type for event_type, _ in events] == ["SYNC"]
+        assert events[0][1]["metadata"]["name"] == "snap-1"
+
+    def test_constructor_and_late_handlers_both_fire(self):
+        """Constructor-supplied and late-attached handlers both receive events."""
+        primary = []
+        late = []
+        informer = WorkloadInformer(
+            list_fn=MagicMock(return_value=_list_response("snap-1")),
+            enable_watch=False,
+            event_handler=lambda event_type, obj: primary.append(event_type),
+        )
+        informer.add_event_handler(lambda event_type, obj: late.append(event_type))
+
+        informer._dispatch_event("MODIFIED", {"metadata": {"name": "snap-1"}})
+
+        assert primary == ["MODIFIED"]
+        assert late == ["MODIFIED"]
+
+    def test_add_event_handler_ignores_none(self):
+        """Adding None is a no-op."""
+        informer = _make_informer()
+        informer.add_event_handler(None)
+        assert informer._event_handlers == []
+
+    def test_add_event_handler_is_idempotent(self):
+        """The same handler instance is registered only once."""
+        informer = _make_informer()
+        handler = lambda event_type, obj: None  # noqa: E731
+        informer.add_event_handler(handler)
+        informer.add_event_handler(handler)
+        assert informer._event_handlers == [handler]
+
+    def test_handler_failure_does_not_block_other_handlers(self):
+        """A raising handler never prevents later handlers from firing."""
+        informer = _make_informer()
+
+        seen = []
+        def bad(event_type, obj):
+            raise RuntimeError("boom")
+
+        informer.add_event_handler(bad)
+        informer.add_event_handler(lambda event_type, obj: seen.append(event_type))
+        informer._dispatch_event("ADDED", {"metadata": {"name": "snap-1"}})
+
+        assert seen == ["ADDED"]

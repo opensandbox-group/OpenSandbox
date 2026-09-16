@@ -16,7 +16,6 @@ package model
 
 import "time"
 
-// CommandStatusResponse represents command status for REST APIs.
 type CommandStatusResponse struct {
 	ID         string     `json:"id"`
 	Content    string     `json:"content,omitempty"`

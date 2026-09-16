@@ -111,7 +111,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             tenant = await asyncio.to_thread(self.tenant_provider.lookup, api_key)
         except TenantProviderUnavailable as e:
-            logger.error("Tenant provider unavailable: %s", e)
+            logger.error(f"Tenant provider unavailable: {e}")
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={

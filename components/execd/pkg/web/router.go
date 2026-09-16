@@ -24,7 +24,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// NewRouter builds a Gin engine with all execd routes.
 func NewRouter(accessToken string) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -171,7 +170,7 @@ func accessTokenMiddleware(token string) gin.HandlerFunc {
 
 func logMiddleware() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		log.Info("Requested: %v - %v", ctx.Request.Method, ctx.Request.URL.String())
+		log.Info("http: %s %s", ctx.Request.Method, ctx.Request.URL.String())
 		ctx.Next()
 	}
 }

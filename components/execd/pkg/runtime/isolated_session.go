@@ -417,7 +417,7 @@ func (s *isolatedSession) stop() error {
 		// leader and return EPERM on some kernels. Once both cmd.Wait and the
 		// trusted lifecycle drain are complete, teardown is confirmed and the
 		// transient signal error must not turn a successful delete into 500.
-		log.Warn("%v; session process and lifecycle are fully reaped", processGroupKillErr)
+		log.Warn("isolated session: %v; process and lifecycle fully reaped", processGroupKillErr)
 	}
 	namespaceErr := s.closeNamespacePins()
 	lifecycleErr := s.closeLifecycle()
@@ -526,7 +526,7 @@ func (s *isolatedSession) markProcessExitedBeforeReap(barrierErr error) {
 	defer s.processSignalMu.Unlock()
 
 	if barrierErr != nil {
-		log.Error("isolated session exit barrier failed: %v", barrierErr)
+		log.Error("isolated session: exit barrier failed: %v", barrierErr)
 	}
 	s.processExited = true
 }

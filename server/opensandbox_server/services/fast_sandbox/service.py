@@ -45,6 +45,7 @@ from opensandbox_server.api.schema import (
     SandboxStatus,
 )
 from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
+from opensandbox_server.middleware.request_id import get_request_id
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
     DiagnosticResult,
@@ -60,6 +61,7 @@ from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
     FastPathConflict,
     FastPathError,
+    FastPathFailedPrecondition,
     FastPathInvalidArgument,
     FastPathNotFound,
     FastPathResourceExhausted,
@@ -112,7 +114,6 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._fastpath.close()
 
     def resolve_template_service(self) -> FastSandboxTemplateService:
-        """Lazily create the shared template service."""
         if self._template_service is None:
             self._template_service = FastSandboxTemplateService(self._app_config)
             # Keep template rows converged even without /templates traffic
@@ -378,10 +379,37 @@ class FastSandboxService(SandboxService, ExtensionService):
             self._cr_reader.invalidate(namespace)
 
     def pause_sandbox(self, sandbox_id: str) -> None:
-        raise self._unsupported("pause", status.HTTP_501_NOT_IMPLEMENTED)
+        """Persist the pause intent; PAUSING -> PAUSED completes asynchronously."""
+        metadata = self._get_cr(sandbox_id)["metadata"]
+        namespace = metadata["namespace"]
+        try:
+            self._fastpath.pause_sandbox(
+                namespace,
+                sandbox_id,
+                expected_uid=metadata["uid"],
+                request_id=get_request_id() or "",
+            )
+        except FastPathError as exc:
+            raise self._fastpath_http_error(exc) from exc
+        finally:
+            self._cr_reader.invalidate(namespace)
 
     def resume_sandbox(self, sandbox_id: str) -> None:
-        raise self._unsupported("resume", status.HTTP_501_NOT_IMPLEMENTED)
+        """Persist the resume intent; fast-sandbox restores the checkpoint
+        (possibly on another Fastlet) and routes must be re-resolved."""
+        metadata = self._get_cr(sandbox_id)["metadata"]
+        namespace = metadata["namespace"]
+        try:
+            self._fastpath.resume_sandbox(
+                namespace,
+                sandbox_id,
+                expected_uid=metadata["uid"],
+                request_id=get_request_id() or "",
+            )
+        except FastPathError as exc:
+            raise self._fastpath_http_error(exc) from exc
+        finally:
+            self._cr_reader.invalidate(namespace)
 
     def renew_expiration(
         self,
@@ -599,6 +627,14 @@ class FastSandboxService(SandboxService, ExtensionService):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": exc.message,
+                },
+            )
+        if isinstance(exc, FastPathFailedPrecondition):
+            return HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": SandboxErrorCodes.FSB_API_ERROR,
                     "message": exc.message,
                 },
             )

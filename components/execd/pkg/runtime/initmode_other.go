@@ -24,7 +24,7 @@ import "github.com/alibaba/opensandbox/execd/pkg/log"
 
 // PrepareInitMode is unsupported off Linux; execd keeps today's behavior.
 func PrepareInitMode() func([]string) error {
-	log.Warn("init mode is unsupported on this platform; continuing without init duties")
+	log.Warn("init: mode unsupported on this platform; continuing without init duties")
 	return func([]string) error { return nil }
 }
 

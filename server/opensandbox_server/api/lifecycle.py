@@ -50,14 +50,15 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.factory import create_sandbox_service
+from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 from opensandbox_server.services.snapshot_service import create_snapshot_service
 
-# Initialize router
 router = APIRouter(tags=["Sandboxes"])
 
-# Initialize service based on configuration from config.toml (defaults to docker)
 sandbox_service = create_sandbox_service()
 snapshot_service = create_snapshot_service(sandbox_service)
+# React to snapshot status changes so rows converge without waiting on reads
+snapshot_service.start_background_sync()
 
 
 # ============================================================================
@@ -110,10 +111,13 @@ async def create_sandbox(
         HTTPException: If sandbox creation scheduling fails
     """
     validate_extensions(request.extensions)
+    # Resolve snapshotId before backend routing: the owning backend recorded
+    # on the snapshot row selects the fsb vs pod backend for restores.
+    if not (request.template_id or "").strip():
+        request = await resolve_sandbox_image_from_request(request)
     return await sandbox_service.create_sandbox(request)
 
 
-# Search endpoint
 @router.get(
     "/sandboxes",
     response_model=ListSandboxesResponse,
@@ -148,12 +152,10 @@ def list_sandboxes(
     Returns:
         ListSandboxesResponse: Paginated list of sandboxes
     """
-    # Parse metadata query string into dictionary
     metadata_dict = {}
     if metadata:
         from urllib.parse import parse_qsl
         try:
-            # Parse query string format: key=value&key2=value2
             # strict_parsing=True rejects malformed segments like "a=1&broken"
             parsed = parse_qsl(metadata, keep_blank_values=True, strict_parsing=True)
             metadata_dict = dict(parsed)
@@ -164,7 +166,6 @@ def list_sandboxes(
                 detail={"code": "INVALID_METADATA_FORMAT", "message": f"Invalid metadata format: {str(e)}"}
             )
 
-    # Construct request object
     request = ListSandboxesRequest(
         filter=SandboxFilter(state=state, metadata=metadata_dict if metadata_dict else None),
         pagination=PaginationRequest(page=page, pageSize=page_size)
@@ -172,9 +173,8 @@ def list_sandboxes(
 
     import logging
     logger = logging.getLogger(__name__)
-    logger.info("ListSandboxes: %s", request.filter)
+    logger.info(f"ListSandboxes: {request.filter}")
 
-    # Delegate to the service layer for filtering and pagination
     return sandbox_service.list_sandboxes(request)
 
 
@@ -210,7 +210,6 @@ def get_sandbox(
     Raises:
         HTTPException: If sandbox not found or access denied
     """
-    # Delegate to the service layer for sandbox lookup
     return sandbox_service.get_sandbox(sandbox_id)
 
 
@@ -272,7 +271,6 @@ def delete_sandbox(
     Raises:
         HTTPException: If sandbox not found or deletion fails
     """
-    # Delegate to the service layer for deletion
     sandbox_service.delete_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -313,7 +311,6 @@ def pause_sandbox(
     Raises:
         HTTPException: If sandbox not found or cannot be paused
     """
-    # Delegate to the service layer for pause orchestration
     sandbox_service.pause_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
@@ -350,7 +347,6 @@ def resume_sandbox(
     Raises:
         HTTPException: If sandbox not found or cannot be resumed
     """
-    # Delegate to the service layer for resume orchestration
     sandbox_service.resume_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
@@ -391,7 +387,6 @@ def renew_sandbox_expiration(
     Raises:
         HTTPException: If sandbox not found or renewal fails
     """
-    # Delegate to the service layer for expiration updates
     return sandbox_service.renew_expiration(sandbox_id, request)
 
 
@@ -575,7 +570,6 @@ def get_sandbox_endpoint(
             },
         )
 
-    # Delegate to the service layer for endpoint resolution
     endpoint = sandbox_service.get_endpoint(sandbox_id, port, expires=expires)
 
     if use_server_proxy:

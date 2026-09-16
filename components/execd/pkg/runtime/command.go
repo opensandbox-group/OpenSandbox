@@ -116,10 +116,8 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 	cred := &syscall.Credential{}
 	if uid != nil {
 		cred.Uid = *uid
-		// Load user info to get primary GID and supplemental groups
 		u, err := user.LookupId(strconv.FormatUint(uint64(*uid), 10))
 		if err == nil {
-			// Set primary GID if not explicitly provided
 			if gid == nil {
 				primaryGid, err := strconv.ParseUint(u.Gid, 10, 32)
 				if err == nil {
@@ -127,7 +125,6 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 				}
 			}
 
-			// Load supplemental groups
 			gids, err := u.GroupIds()
 			if err == nil {
 				for _, g := range gids {
@@ -140,7 +137,6 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 		}
 	}
 
-	// Override Gid if explicitly provided
 	if gid != nil {
 		cred.Gid = *gid
 	}
@@ -236,13 +232,12 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
 	}
 
-	// Configure credentials and process group
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		return fmt.Errorf("failed to build credential: %w", err)
@@ -278,7 +273,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EValue:    startErr.Error(),
 			Traceback: []string{startErr.Error()},
 		})
-		log.Error("CommandExecError: error starting commands: %v", startErr)
+		log.Error("command: start failed: %v", startErr)
 		return nil
 	}
 
@@ -363,7 +358,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			Traceback: traceback,
 		})
 
-		log.Error("CommandExecError: error running commands: %v", err)
+		log.Error("command: run failed: %v", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
@@ -392,14 +387,13 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer stopSignals()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
-	// Configure credentials and process group
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		cancel()
@@ -433,7 +427,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	if err != nil {
 		cancel()
 		startErr := credentialStartHint(err, cred)
-		log.Error("CommandExecError: error starting commands: %v", startErr)
+		log.Error("command: start failed: %v", startErr)
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
 		c.markCommandFinished(session, 255, startErr.Error())
@@ -453,7 +447,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		err = mp.Wait()
 		cancel()
 		if err != nil {
-			log.Error("CommandExecError: error running commands: %v", err)
+			log.Error("command: run failed: %v", err)
 			exitCode := 1
 			var exitCodeErr exitCoder
 			if errors.As(err, &exitCodeErr) {

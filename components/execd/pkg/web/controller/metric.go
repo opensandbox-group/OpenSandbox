@@ -29,7 +29,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// MetricController handles system metrics requests
 type MetricController struct {
 	*basicController
 }
@@ -38,7 +37,6 @@ func NewMetricController(ctx *gin.Context) *MetricController {
 	return &MetricController{basicController: newBasicController(ctx)}
 }
 
-// GetMetrics returns current system metrics
 func (c *MetricController) GetMetrics() {
 	metrics, err := c.readMetrics()
 	if err != nil {
@@ -53,7 +51,6 @@ func (c *MetricController) GetMetrics() {
 	c.RespondSuccess(metrics)
 }
 
-// WatchMetrics streams system metrics via SSE
 func (c *MetricController) WatchMetrics() {
 	c.setupSSEResponse()
 
@@ -73,13 +70,13 @@ func (c *MetricController) WatchMetrics() {
 					})
 					_, err = c.ctx.Writer.Write(append(msg, '\n'))
 					if err != nil {
-						log.Error("WatchMetrics write data %s error: %v", string(msg), err)
+						log.Error("metrics: write %s: %v", string(msg), err)
 					}
 				} else {
 					msg, _ := json.Marshal(metrics) //nolint:errchkjson
 					_, err = c.ctx.Writer.Write(append(msg, '\n'))
 					if err != nil {
-						log.Error("WatchMetrics write data %s error: %v", string(msg), err)
+						log.Error("metrics: write %s: %v", string(msg), err)
 					}
 				}
 			}()
@@ -87,7 +84,6 @@ func (c *MetricController) WatchMetrics() {
 	}
 }
 
-// readMetrics collects current CPU and memory metrics
 func (c *MetricController) readMetrics() (*model.Metrics, error) {
 	metric := model.NewMetrics()
 

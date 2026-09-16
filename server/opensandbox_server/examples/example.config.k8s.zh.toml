@@ -81,10 +81,6 @@ workload_provider = "batchsandbox"
 # 可选值："Always"、"IfNotPresent"、"Never"。
 image_pull_policy = "IfNotPresent"
 
-# public snapshot 等待超时时间。应大于 Kubernetes controller 的
-# snapshot commit-job-timeout。
-snapshot_create_timeout_seconds = 900
-
 # Path to the BatchSandbox template file
 # Replace with your path
 batchsandbox_template_file = "~/batchsandbox-template.yaml"

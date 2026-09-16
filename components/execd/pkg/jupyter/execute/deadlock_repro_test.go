@@ -20,27 +20,16 @@ import (
 	"time"
 )
 
-// TestResultMutexNotHeldAcrossBlockingChannelSend is a minimal reproduction of a deadlock in
-// handleStreamOutput (and, identically, handleExecuteResult / handleExecutionError /
-// finalizeExecution): each sends into resultChan while still holding state.resultMutex.
+// TestResultMutexNotHeldAcrossBlockingChannelSend reproduces a former deadlock: the result
+// handlers used to send into resultChan while holding state.resultMutex, so once the bounded
+// channel filled, the blocked send starved finalizeExecution's poll loop -- the only thing that
+// ever closes resultChan -- and since receiveMessages dispatches every kernel message
+// synchronously through the same path, the kernel's completion signal could never be read and
+// the execution hung until an external timeout.
 //
-// resultChan is a bounded buffer (capacity 10 in production, via runtime.runJupyterCode). If its
-// consumer falls behind -- entirely realistic under bursty stdout (module imports, logging
-// setup, an LLM streaming its output) compounded by node/network contention from concurrent
-// sandboxes -- a handler's send blocks. Because that send happens *while holding the mutex*, it
-// wedges every other goroutine that needs the same mutex, including finalizeExecution's poll
-// loop, which is the only thing that ever closes resultChan and lets the request complete.
-// receiveMessages() dispatches every incoming kernel message through this same synchronous path,
-// so once one handler is stuck, no further message -- including the kernel's real completion
-// signal -- can ever be read off the websocket again. The kernel connection is now permanently
-// wedged for the rest of that execution, exactly matching the intermittent stuck-sandbox
-// behavior this reproduces: the run just goes silent forever until an external timeout tears the
-// pod down.
-//
-// This test proves the defect directly and deterministically, without a real websocket: a
-// second, logically independent goroutine that only needs the mutex to check completion state
-// (exactly what finalizeExecution's poll loop does) must not be blocked by a handler stuck
-// mid-send on a full channel.
+// This test asserts the invariant directly: a goroutine needing only resultMutex (exactly what
+// finalizeExecution's poll loop does) must not be starved while a handler blocks mid-send on a
+// full channel.
 func TestResultMutexNotHeldAcrossBlockingChannelSend(t *testing.T) {
 	c := &Client{handlers: make(map[MessageType]func(*Message))}
 	state := newStreamExecutionState(time.Now())

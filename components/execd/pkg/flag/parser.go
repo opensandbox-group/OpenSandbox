@@ -35,7 +35,6 @@ const (
 
 // InitFlags registers CLI flags and env overrides.
 func InitFlags() {
-	// Set default values
 	ServerPort = 44772
 	ServerLogLevel = 6
 	ServerAccessToken = ""
@@ -91,7 +90,6 @@ func InitFlags() {
 	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 200ms)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
 
-	// Isolation config
 	if v := os.Getenv(isolationConfigEnv); v != "" {
 		IsolationConfigPath = v
 	}
@@ -109,9 +107,8 @@ func InitFlags() {
 		JupyterIdlePollInterval = 100 * time.Millisecond
 	}
 
-	// Log final values
-	log.Info("Jupyter server host is: %s", JupyterServerHost)
-	log.Info("Jupyter server token is: %s", log.MaskToken(JupyterServerToken))
+	log.Info("jupyter: server host=%s", JupyterServerHost)
+	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))
 }
 
 // Args returns the non-flag arguments after flag.Parse — in init mode this is

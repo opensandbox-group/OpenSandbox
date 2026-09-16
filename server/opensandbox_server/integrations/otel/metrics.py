@@ -160,9 +160,8 @@ def setup_otel_metrics(config: OtelConfig) -> None:
     _create_duration_histogram = _histogram_from_provider(provider)
     _http_request_duration_histogram = _http_request_histogram_from_provider(provider)
     logger.info(
-        "OpenTelemetry metrics enabled (service=%s, endpoint=%s)",
-        config.service_name,
-        endpoint or "(default from OTEL_EXPORTER_OTLP_* env)",
+        f"OpenTelemetry metrics enabled (service={config.service_name}, "
+        f"endpoint={endpoint or '(default from OTEL_EXPORTER_OTLP_* env)'})"
     )
 
 

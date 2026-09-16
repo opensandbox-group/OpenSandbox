@@ -205,7 +205,74 @@ const { endpoint } = await sandbox.getEndpoint(44772);
 const url = await sandbox.getEndpointUrl(44772);
 ```
 
-### 6. Volume Mounts
+### 6. Snapshots (Manager)
+
+`SandboxManager` administers sandbox snapshots — capture a sandbox's
+state and restore new sandboxes from it via `snapshotId`:
+
+```ts
+import { SandboxManager } from "@alibaba-group/opensandbox";
+
+const manager = SandboxManager.create({ connectionConfig: config });
+
+// Create a snapshot from a running sandbox, then wait until it is Ready
+const snapshot = await manager.createSnapshot(sandboxId, {
+  name: "pre-migration",
+});
+let info = await manager.getSnapshot(snapshot.id);
+while (info.status.state === "Creating") {
+  await new Promise((r) => setTimeout(r, 2000));
+  info = await manager.getSnapshot(snapshot.id);
+}
+
+// List all snapshots
+const page = await manager.listSnapshots();
+
+// Restore: create a new sandbox FROM a snapshot (exactly one of
+// image / snapshotId must be provided)
+const restored = await Sandbox.create({
+  connectionConfig: config,
+  snapshotId: snapshot.id,
+});
+
+// Only delete the snapshot after the restore has succeeded
+await manager.deleteSnapshot(snapshot.id);
+```
+
+### 7. Isolated Sessions
+
+Isolated sessions run multi-step code in a hardened, resource-bounded
+environment with bind mounts — reachable through `sandbox.isolation`:
+
+```ts
+const session = await sandbox.isolation.create({
+  workspace: { path: "/workspace", mode: "rw" },
+  profile: "strict",
+  // Optional bind mounts (source on host, dest inside the session)
+  binds: [{ source: "/data", dest: "/data", readonly: true }],
+});
+
+const run = await session.run("python -c 'print(1+1)'", {
+  // timeout_seconds: 30, // seconds; applies to run() only —
+  // runBackground() deliberately ignores it (background runs are not time-limited)
+});
+console.log(run.logs.stdout[0]?.text);
+
+// Background runs: start, poll until finished, then fetch logs.
+// NOTE: field names are snake_case (run_id) — they mirror the raw API
+// response and are NOT converted to camelCase.
+const bg = await session.runBackground("make build");
+let status = await session.getRunStatus(bg.run_id);
+while (status.running) {
+  await new Promise((r) => setTimeout(r, 2000));
+  status = await session.getRunStatus(bg.run_id);
+}
+const logs = await session.getRunLogs(bg.run_id);
+
+await session.delete();
+```
+
+### 8. Volume Mounts
 
 `volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must specify exactly one backend.
 
@@ -230,7 +297,7 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-### 7. Sandbox Management (Admin)
+### 9. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 

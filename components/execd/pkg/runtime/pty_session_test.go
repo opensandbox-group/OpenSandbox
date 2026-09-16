@@ -30,7 +30,6 @@ import (
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
-// replayContains polls the replay buffer until it contains substr or timeout expires.
 func replayContains(t *testing.T, s *ptySession, substr string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -164,7 +163,6 @@ func TestPTYSession_ANSISequences(t *testing.T) {
 	defer detach()
 	safego.Go(func() { _, _ = io.Copy(io.Discard, stdoutR) }) //nolint:errcheck
 
-	// Send printf with explicit ESC bytes via $'\033'.
 	_, err := s.WriteStdin([]byte("printf $'\\033[1;32mGREEN\\033[0m\\n'\n"))
 	require.NoError(t, err)
 
@@ -222,7 +220,6 @@ func TestPTYSession_ReconnectReplay(t *testing.T) {
 	require.NoError(t, s.StartPTY())
 	t.Cleanup(func() { s.close() })
 
-	// First connection — drain output so replay buffer fills.
 	stdoutR1, _, detach1 := s.AttachOutput()
 	safego.Go(func() { _, _ = io.Copy(io.Discard, stdoutR1) }) //nolint:errcheck
 
@@ -236,14 +233,12 @@ func TestPTYSession_ReconnectReplay(t *testing.T) {
 	detach1()
 	time.Sleep(50 * time.Millisecond)
 
-	// Reconnect — replay from offset 0 should return the same bytes we snapshotted.
 	replay, replayOff := s.replay.ReadFrom(0)
 	require.Equal(t, snapshotOff, replayOff)
 	// The new snapshot may be larger (more output arrived), but must contain snapshot.
 	require.True(t, strings.HasPrefix(string(replay), string(snapshot)) || len(replay) >= len(snapshot),
 		"replay should contain at least the original snapshot bytes")
 
-	// Second connection.
 	stdoutR2, _, detach2 := s.AttachOutput()
 	defer detach2()
 	safego.Go(func() { _, _ = io.Copy(io.Discard, stdoutR2) }) //nolint:errcheck
@@ -256,7 +251,6 @@ func TestPTYSession_ReconnectReplay(t *testing.T) {
 	require.True(t, replayContains(t, s, "second_output", 5*time.Second),
 		"expected 'second_output' in replay buffer")
 
-	// Delta replay from offset-after-first should contain only new bytes.
 	newData, _ := s.replay.ReadFrom(offsetAfterFirst)
 	require.True(t, strings.Contains(string(newData), "second_output"),
 		"delta replay should contain 'second_output', got %q", string(newData))
@@ -273,7 +267,6 @@ func TestPTYSession_SendSIGINT(t *testing.T) {
 	defer detach()
 	safego.Go(func() { _, _ = io.Copy(io.Discard, stdoutR) }) //nolint:errcheck
 
-	// Start a sleep inside the PTY.
 	_, err := s.WriteStdin([]byte("sleep 30\n"))
 	require.NoError(t, err)
 	time.Sleep(200 * time.Millisecond)
@@ -281,7 +274,6 @@ func TestPTYSession_SendSIGINT(t *testing.T) {
 	// SIGINT interrupts the sleep; bash continues.
 	s.SendSignal("SIGINT")
 
-	// Bash itself should still be alive.
 	require.Eventually(t, func() bool {
 		return s.IsRunning()
 	}, 2*time.Second, 50*time.Millisecond, "bash should still be running after SIGINT")
@@ -360,7 +352,6 @@ func TestPTYSession_CustomCommand(t *testing.T) {
 	require.True(t, waitForLine(stdoutCh, "hello_command", 5*time.Second),
 		"expected 'hello_command' from custom command on stdout")
 
-	// After the command exits, the session should no longer be running.
 	require.Eventually(t, func() bool {
 		return !s.IsRunning()
 	}, 3*time.Second, 50*time.Millisecond, "session should exit after custom command completes")
@@ -388,7 +379,6 @@ func TestPTYSession_ControllerCRUD(t *testing.T) {
 	require.ErrorIs(t, c.DeletePTYSession(id), ErrContextNotFound)
 }
 
-// waitForLine reads from ch until target is found or timeout expires.
 func waitForLine(ch <-chan string, target string, timeout time.Duration) bool {
 	deadline := time.After(timeout)
 	for {

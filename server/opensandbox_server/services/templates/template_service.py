@@ -112,7 +112,7 @@ class FastSandboxTemplateService:
         try:
             namespaces.update(self._repo().namespaces())
         except Exception as exc:  # noqa: BLE001 - catalog may be empty/unavailable
-            logger.warning("Template catalog scan failed while starting watches: %s", exc)
+            logger.warning(f"Template catalog scan failed while starting watches: {exc}")
         for namespace in sorted(namespaces):
             self._ensure_namespace_watch(namespace)
 
@@ -249,7 +249,7 @@ class FastSandboxTemplateService:
                         "message": f"SandboxTemplate rejected: {exc.reason}",
                     },
                 ) from exc
-            logger.warning("SandboxTemplate CRD create failed: %s", exc)
+            logger.warning(f"SandboxTemplate CRD create failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -261,7 +261,7 @@ class FastSandboxTemplateService:
             # Transport failures (connection refused, DNS, timeout) are not
             # ApiException; the catalog row must roll back all the same.
             self._repo().delete(template_id, namespace)
-            logger.warning("SandboxTemplate CRD create failed: %s", exc)
+            logger.warning(f"SandboxTemplate CRD create failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -311,7 +311,7 @@ class FastSandboxTemplateService:
             )
         except ApiException as exc:
             if exc.status != 404:
-                logger.warning("SandboxTemplate CRD delete failed: %s", exc)
+                logger.warning(f"SandboxTemplate CRD delete failed: {exc}")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail={
@@ -428,7 +428,7 @@ class FastSandboxTemplateService:
                 GROUP, VERSION, namespace, PLURAL, ignore_not_found=True
             ) or []
         except Exception as exc:  # noqa: BLE001 - reads converge on the next request
-            logger.warning("SandboxTemplate CR list failed during sync: %s", exc)
+            logger.warning(f"SandboxTemplate CR list failed during sync: {exc}")
             return
         by_name = {crd.get("metadata", {}).get("name", ""): crd for crd in crds}
         for record in records:
@@ -472,7 +472,7 @@ class FastSandboxTemplateService:
                 message=message,
             )
         except Exception as exc:  # noqa: BLE001 - reads converge on the next request
-            logger.warning("Template status persist failed: %s", exc)
+            logger.warning(f"Template status persist failed: {exc}")
 
     def _read_crd(self, namespace: str, crd_name: str) -> Optional[dict]:
         try:
@@ -480,7 +480,7 @@ class FastSandboxTemplateService:
                 GROUP, VERSION, namespace, PLURAL, crd_name
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("SandboxTemplate CR read failed: %s", exc)
+            logger.warning(f"SandboxTemplate CR read failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={

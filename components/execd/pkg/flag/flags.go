@@ -17,16 +17,12 @@ package flag
 import "time"
 
 var (
-	// JupyterServerHost points to the target Jupyter instance.
 	JupyterServerHost string
 
-	// JupyterServerToken authenticates requests to the Jupyter server.
 	JupyterServerToken string
 
-	// ServerPort controls the HTTP listener port.
 	ServerPort int
 
-	// ServerLogLevel controls the server log verbosity.
 	ServerLogLevel int
 
 	// ServerAccessToken guards API entrypoints when set.

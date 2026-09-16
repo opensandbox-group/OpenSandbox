@@ -16,15 +16,18 @@ package mitmproxy
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -33,6 +36,27 @@ import (
 )
 
 const RunAsUser = "mitmproxy"
+
+const revisionRuntimeErrorMessage = "credential proxy: invalid revision runtime configuration"
+
+const (
+	revisionIPCSocketEnv            = "OPENSANDBOX_EGRESS_REVISION_IPC_SOCKET"
+	revisionIPCTokenEnv             = "OPENSANDBOX_EGRESS_REVISION_IPC_TOKEN"
+	revisionIPCControlGenerationEnv = "OPENSANDBOX_EGRESS_REVISION_CONTROL_GENERATION"
+	revisionIPCSubjectGenerationEnv = "OPENSANDBOX_EGRESS_REVISION_SUBJECT_GENERATION"
+	revisionIPCMaxSnapshotBytesEnv  = "OPENSANDBOX_EGRESS_REVISION_MAX_SNAPSHOT_BYTES"
+)
+
+var (
+	errInvalidRevisionIPCConfig = errors.New("mitmproxy: invalid revision IPC configuration")
+	revisionIPCEnvNames         = []string{
+		revisionIPCSocketEnv,
+		revisionIPCTokenEnv,
+		revisionIPCControlGenerationEnv,
+		revisionIPCSubjectGenerationEnv,
+		revisionIPCMaxSnapshotBytesEnv,
+	}
+)
 
 // Loopback: transparent mode receives via REDIRECT; do not listen on 0.0.0.0 in the netns.
 // Kept as a Go constant only for the startup log line; the actual listen_host is set in
@@ -62,6 +86,21 @@ type Config struct {
 	ScriptPaths []string
 	// OnExit is called (if non-nil) when mitmdump exits. Called from a background goroutine.
 	OnExit func(error)
+	// RevisionIPC is an internal, per-process receiver session. Callers own the
+	// private socket parent and must not reuse this configuration after the
+	// child exits. Nil keeps the receiver disabled and removes inherited values.
+	RevisionIPC *RevisionIPCConfig
+}
+
+// RevisionIPCConfig is handed only to the mitmdump child. The bearer token is
+// transport authentication; the generation pair independently fences stale
+// sessions. Public configuration must not populate this structure directly.
+type RevisionIPCConfig struct {
+	SocketPath        string
+	SessionToken      string
+	ControlGeneration string
+	SubjectGeneration string
+	MaxSnapshotBytes  int
 }
 
 // Running: child mitmdump; use GracefulShutdown to SIGTERM+reap before process exit.
@@ -98,6 +137,9 @@ func Launch(cfg Config) (*Running, error) {
 	if cfg.ListenPort <= 0 {
 		return nil, fmt.Errorf("mitmproxy: invalid listen port")
 	}
+	if err := validateRevisionIPCConfig(cfg.RevisionIPC); err != nil {
+		return nil, err
+	}
 	uname := cfg.UserName
 	if strings.TrimSpace(uname) == "" {
 		uname = RunAsUser
@@ -118,7 +160,7 @@ func Launch(cfg Config) (*Running, error) {
 	}
 	// HOME determines mitm's confdir (~/.mitmproxy) which holds both the CA
 	// and the baked-in config.yaml.
-	cmd.Env = buildMitmdumpEnv(os.Environ(), home)
+	cmd.Env = buildMitmdumpEnv(os.Environ(), home, cfg.RevisionIPC)
 
 	if err := cmd.Start(); err != nil {
 		_ = mitmIn.Close()
@@ -169,11 +211,61 @@ func buildMitmdumpArgs(cfg Config) []string {
 	return args
 }
 
-func buildMitmdumpEnv(base []string, home string) []string {
-	env := make([]string, 0, len(base)+1)
-	env = append(env, base...)
+func buildMitmdumpEnv(base []string, home string, revisionIPC *RevisionIPCConfig) []string {
+	blocked := make(map[string]struct{}, len(revisionIPCEnvNames))
+	for _, name := range revisionIPCEnvNames {
+		blocked[name] = struct{}{}
+	}
+	env := make([]string, 0, len(base)+1+len(revisionIPCEnvNames))
+	for _, value := range base {
+		name, _, found := strings.Cut(value, "=")
+		if _, remove := blocked[name]; found && remove {
+			continue
+		}
+		env = append(env, value)
+	}
 	env = append(env, "HOME="+home)
+	if revisionIPC != nil {
+		env = append(env,
+			revisionIPCSocketEnv+"="+revisionIPC.SocketPath,
+			revisionIPCTokenEnv+"="+revisionIPC.SessionToken,
+			revisionIPCControlGenerationEnv+"="+revisionIPC.ControlGeneration,
+			revisionIPCSubjectGenerationEnv+"="+revisionIPC.SubjectGeneration,
+			revisionIPCMaxSnapshotBytesEnv+"="+strconv.Itoa(revisionIPC.MaxSnapshotBytes),
+		)
+	}
 	return env
+}
+
+func validateRevisionIPCConfig(cfg *RevisionIPCConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if !filepath.IsAbs(cfg.SocketPath) || strings.IndexByte(cfg.SocketPath, 0) >= 0 ||
+		!validRevisionIPCToken(cfg.SessionToken) ||
+		!validRevisionIPCGeneration(cfg.ControlGeneration) ||
+		!validRevisionIPCGeneration(cfg.SubjectGeneration) || cfg.MaxSnapshotBytes <= 0 {
+		return errInvalidRevisionIPCConfig
+	}
+	return nil
+}
+
+func validRevisionIPCToken(value string) bool {
+	if len(value) < 32 || len(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validRevisionIPCGeneration(value string) bool {
+	return value != "" && strings.IndexByte(value, 0) < 0 && utf8.ValidString(value) &&
+		utf8.RuneCountInString(value) <= 128
 }
 
 // forwardMitmdumpOutput relays credential proxy log lines from mitmdump
@@ -210,6 +302,10 @@ func credentialProxyMessage(line string) (string, bool) {
 		if end := strings.Index(line, "] "); end != -1 {
 			line = line[end+2:]
 		}
+	}
+	if executable, message, found := strings.Cut(line, ": "); found &&
+		filepath.Base(executable) == "mitmdump" && message == revisionRuntimeErrorMessage {
+		return message, true
 	}
 	if !strings.HasPrefix(line, "credential proxy:") {
 		return "", false

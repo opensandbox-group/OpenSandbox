@@ -29,8 +29,6 @@ import (
 
 func uidPtr(n uint32) *uint32 { return &n }
 
-// Argv builder tests (platform-independent)
-
 func TestBuildArgv_NamespaceFlags(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -424,7 +422,6 @@ func TestBuildArgv_Userns(t *testing.T) {
 		u, g := uint32(1000), uint32(1000)
 		opts.Uid = &u
 		opts.Gid = &g
-		// UidMode is empty string — should behave like setpriv.
 		argv, err := buildArgv(opts, "")
 		require.NoError(t, err)
 		s := strings.Join(argv, " ")
@@ -592,8 +589,6 @@ func TestBuildArgv_Validation(t *testing.T) {
 	}
 }
 
-// Env pattern match tests
-
 func TestMatchEnvPattern(t *testing.T) {
 	tests := []struct {
 		testName string
@@ -621,8 +616,6 @@ func TestMatchEnvPattern(t *testing.T) {
 		})
 	}
 }
-
-// WrapWithArgv test
 
 func TestWrapWithArgv(t *testing.T) {
 	cmd := exec.Command("bash", "-c", "echo hello")
@@ -655,8 +648,6 @@ func TestWrapWithArgv(t *testing.T) {
 		t.Errorf("original args not preserved at end: %v", cmd.Args)
 	}
 }
-
-// Profile / WorkspaceMode / EnvMode Valid tests
 
 func TestProfile_Valid(t *testing.T) {
 	if !ProfileStrict.Valid() {
@@ -704,8 +695,6 @@ func TestUidMode_Valid(t *testing.T) {
 		t.Error("bogus should be invalid")
 	}
 }
-
-// Helpers
 
 func basicWrapOpts() WrapOptions {
 	return WrapOptions{

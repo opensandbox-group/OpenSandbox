@@ -34,7 +34,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// FilesystemController handles file system operations.
 type FilesystemController struct {
 	*basicController
 }
@@ -59,7 +58,6 @@ func (c *FilesystemController) handleFileError(err error) {
 	}
 }
 
-// GetFilesInfo retrieves metadata for specified file paths
 func (c *FilesystemController) GetFilesInfo() {
 	rec := beginFilesystemMetric("info")
 	defer rec.Finish(c.basicController)
@@ -85,7 +83,6 @@ func (c *FilesystemController) GetFilesInfo() {
 	c.RespondSuccess(resp)
 }
 
-// RemoveFiles deletes specified files
 func (c *FilesystemController) RemoveFiles() {
 	rec := beginFilesystemMetric("delete")
 	defer rec.Finish(c.basicController)
@@ -106,7 +103,6 @@ func (c *FilesystemController) RemoveFiles() {
 	c.RespondSuccess(nil)
 }
 
-// ChmodFiles changes file permissions for specified files
 func (c *FilesystemController) ChmodFiles() {
 	rec := beginFilesystemMetric("chmod")
 	defer rec.Finish(c.basicController)
@@ -137,7 +133,6 @@ func (c *FilesystemController) ChmodFiles() {
 	c.RespondSuccess(nil)
 }
 
-// RenameFiles renames or moves files to new paths
 func (c *FilesystemController) RenameFiles() {
 	rec := beginFilesystemMetric("rename")
 	defer rec.Finish(c.basicController)
@@ -163,7 +158,6 @@ func (c *FilesystemController) RenameFiles() {
 	c.RespondSuccess(nil)
 }
 
-// MakeDirs creates directories with specified permissions
 func (c *FilesystemController) MakeDirs() {
 	rec := beginFilesystemMetric("mkdir")
 	defer rec.Finish(c.basicController)
@@ -189,7 +183,6 @@ func (c *FilesystemController) MakeDirs() {
 	c.RespondSuccess(nil)
 }
 
-// RemoveDirs recursively removes directories
 func (c *FilesystemController) RemoveDirs() {
 	rec := beginFilesystemMetric("rmdir")
 	defer rec.Finish(c.basicController)
@@ -219,7 +212,6 @@ func (c *FilesystemController) RemoveDirs() {
 	c.RespondSuccess(nil)
 }
 
-// ListDirectory lists directory contents with optional depth control
 func (c *FilesystemController) ListDirectory() {
 	rec := beginFilesystemMetric("listdir")
 	defer rec.Finish(c.basicController)
@@ -336,7 +328,6 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 	return entries, walk(root, 0)
 }
 
-// SearchFiles searches for files matching a pattern in a directory
 func (c *FilesystemController) SearchFiles() {
 	rec := beginFilesystemMetric("search")
 	defer rec.Finish(c.basicController)
@@ -413,7 +404,6 @@ func (c *FilesystemController) SearchFiles() {
 	c.RespondSuccess(files)
 }
 
-// ReplaceContent replaces text content in specified files
 func (c *FilesystemController) ReplaceContent() {
 	rec := beginFilesystemMetric("replace")
 	defer rec.Finish(c.basicController)

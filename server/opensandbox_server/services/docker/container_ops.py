@@ -113,7 +113,7 @@ class DockerContainerOpsMixin:
         try:
             info = self.docker_client.info() or {}
         except DockerException as exc:
-            logger.debug("Failed to inspect Docker daemon platform: %s", exc)
+            logger.debug(f"Failed to inspect Docker daemon platform: {exc}")
             return None
         os_value = info.get("OSType") or info.get("Os") or info.get("os")
         arch_value = info.get("Architecture") or info.get("architecture")
@@ -232,9 +232,8 @@ class DockerContainerOpsMixin:
                 image = self.docker_client.images.get(image_uri)
                 if expected_platform is None:
                     logger.debug(
-                        "Sandbox %s using cached image %s without platform check (daemon platform unavailable)",
-                        sandbox_id,
-                        image_uri,
+                        f"Sandbox {sandbox_id} using cached image {image_uri} "
+                        "without platform check (daemon platform unavailable)"
                     )
                     return
                 image_attrs = getattr(image, "attrs", {}) or {}
@@ -252,13 +251,9 @@ class DockerContainerOpsMixin:
                 )
                 if image_os != requested_os or image_arch != requested_arch:
                     logger.info(
-                        "Sandbox %s cached image %s platform mismatch (cached=%s/%s, requested=%s/%s); repulling",
-                        sandbox_id,
-                        image_uri,
-                        image_os or "unknown",
-                        image_arch or "unknown",
-                        requested_os,
-                        requested_arch,
+                        f"Sandbox {sandbox_id} cached image {image_uri} platform "
+                        f"mismatch (cached={image_os or 'unknown'}/{image_arch or 'unknown'}, "
+                        f"requested={requested_os}/{requested_arch}); repulling"
                     )
                     self._pull_image(
                         image_uri,
@@ -267,7 +262,7 @@ class DockerContainerOpsMixin:
                         expected_platform,
                     )
                     return
-                logger.debug("Sandbox %s using cached image %s", sandbox_id, image_uri)
+                logger.debug(f"Sandbox {sandbox_id} using cached image {image_uri}")
         except ImageNotFound:
             self._pull_image(
                 image_uri,
@@ -307,7 +302,6 @@ class DockerContainerOpsMixin:
         apply_access_renew_extend_seconds_to_mapping(labels, request.extensions)
         apply_extensions_to_mapping(labels, request.extensions)
 
-        # Config-level defaults apply to every sandbox; request keys win.
         env_dict = {**(self.app_config.docker.sandbox_env or {}), **(request.env or {})}
         environment = []
         for key, value in env_dict.items():
@@ -376,7 +370,7 @@ class DockerContainerOpsMixin:
         security_opts: list[str] = []
         docker_cfg = self.app_config.docker
         if docker_cfg.no_new_privileges:
-            security_opts.append("no-new-privileges:true")
+            security_opts.append("no-new-privileges=true")
         if docker_cfg.apparmor_profile:
             security_opts.append(f"apparmor={docker_cfg.apparmor_profile}")
         if docker_cfg.seccomp_profile:
@@ -398,11 +392,9 @@ class DockerContainerOpsMixin:
             host_config_kwargs["device_requests"] = [
                 DeviceRequest(count=gpu_count, capabilities=[["gpu"]])
             ]
-        # Inject secure runtime into host_config
         if self.docker_runtime:
             logger.info(
-                "Using Docker runtime '%s' for container creation",
-                self.docker_runtime,
+                f"Using Docker runtime '{self.docker_runtime}' for container creation"
             )
             host_config_kwargs["runtime"] = self.docker_runtime
         return host_config_kwargs
@@ -490,8 +482,8 @@ class DockerContainerOpsMixin:
                     docker_operation=self._docker_operation,
                 )
                 logger.info(
-                    "sandbox=%s | skip linux bootstrap/runtime injection for windows profile",
-                    sandbox_id,
+                    f"sandbox={sandbox_id} | skip linux bootstrap/runtime "
+                    "injection for windows profile"
                 )
             else:
                 self._prepare_sandbox_runtime(container, sandbox_id, runtime_platform)
@@ -505,9 +497,7 @@ class DockerContainerOpsMixin:
                         container.remove(force=True)
                 except DockerException as cleanup_exc:
                     logger.warning(
-                        "Failed to cleanup container for sandbox %s: %s",
-                        sandbox_id,
-                        cleanup_exc,
+                        f"Failed to cleanup container for sandbox {sandbox_id}: {cleanup_exc}"
                     )
             elif container_id:
                 try:
@@ -515,9 +505,7 @@ class DockerContainerOpsMixin:
                         self.docker_client.api.remove_container(container_id, force=True)
                 except DockerException as cleanup_exc:
                     logger.warning(
-                        "Failed to cleanup container for sandbox %s: %s",
-                        sandbox_id,
-                        cleanup_exc,
+                        f"Failed to cleanup container for sandbox {sandbox_id}: {cleanup_exc}"
                     )
 
             if isinstance(exc, HTTPException):

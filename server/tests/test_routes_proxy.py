@@ -792,7 +792,6 @@ def test_proxy_rejects_missing_secure_access_header(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Regression test: requests without the required secure-access token are rejected."""
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
@@ -828,7 +827,6 @@ def test_proxy_rejects_mismatched_secure_access_header(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Regression test: requests with a wrong secure-access token are rejected."""
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
@@ -911,8 +909,7 @@ def test_proxy_forwards_get_request_with_query_params(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Test that GET requests with query parameters are forwarded correctly.
-
+    """
     This test verifies the fix for issue #484 where GET requests with query
     parameters were failing with 400 MISSING_QUERY when using use_server_proxy.
     The query string should be passed via httpx params, not embedded in URL.
@@ -954,11 +951,6 @@ def test_proxy_forwards_delete_request_with_body(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Test that DELETE requests with body payload are forwarded correctly.
-
-    This verifies that DELETE requests with JSON/body payload are not
-    incorrectly stripped when proxying.
-    """
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:

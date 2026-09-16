@@ -109,7 +109,6 @@ func TestGetContext_NotFound(t *testing.T) {
 func TestDeleteContext_RemovesCacheOnSuccess(t *testing.T) {
 	sessionID := "sess-123"
 
-	// mock jupyter server that accepts DELETE
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodDelete, r.Method, "unexpected method")
 		require.True(t, strings.HasSuffix(r.URL.Path, "/api/sessions/"+sessionID), "unexpected path: %s", r.URL.Path)
@@ -133,7 +132,6 @@ func TestDeleteLanguageContext_RemovesCacheOnSuccess(t *testing.T) {
 	session1 := "sess-1"
 	session2 := "sess-2"
 
-	// mock jupyter server to accept two deletes
 	deleteCalls := make(map[string]int)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodDelete, r.Method, "unexpected method")

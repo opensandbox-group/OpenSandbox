@@ -55,7 +55,6 @@ _REQUEST_ID_FILTER = {"()": "opensandbox_server.middleware.request_id.RequestIdF
 
 
 def _rotating_file_handler(filename: str, log_cfg: LogConfig) -> dict:
-    """Return a dictConfig handler entry for a RotatingFileHandler."""
     return {
         "class": "logging.handlers.RotatingFileHandler",
         "formatter": "file",
@@ -95,7 +94,6 @@ def _apply_file_config(log_config: dict, log_cfg: LogConfig, level: str) -> None
     file_path = log_cfg.resolved_file_path()
     access_file_path = log_cfg.resolved_access_file_path()
 
-    # Ensure parent directories exist.
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)
 
     log_config["formatters"]["file"] = {"format": _FILE_FMT, "datefmt": _DATEFMT}

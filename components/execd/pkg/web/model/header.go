@@ -15,6 +15,5 @@
 package model
 
 const (
-	// ApiAccessTokenHeader carries the auth token.
 	ApiAccessTokenHeader = "X-EXECD-ACCESS-TOKEN"
 )

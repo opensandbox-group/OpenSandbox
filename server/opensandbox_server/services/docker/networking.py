@@ -212,8 +212,6 @@ class DockerNetworkingMixin:
         Get sandbox access endpoint.
 
         Args:
-            sandbox_id: Unique sandbox identifier
-            port: Port number where the service is listening inside the sandbox
             resolve_internal: If True, return the internal container IP (for proxy), ignoring router config.
             expires: Not supported by Docker runtime.
             use_proxy_host: When True and resolve_internal is False, build the
@@ -407,7 +405,7 @@ class DockerNetworkingMixin:
                 all=True, filters={"label": f"{EGRESS_SIDECAR_LABEL}={sandbox_id}"}
             )
         except DockerException as exc:
-            logger.warning("sandbox=%s | failed to list egress sidecar: %s", sandbox_id, exc)
+            logger.warning(f"sandbox={sandbox_id} | failed to list egress sidecar: {exc}")
             return
 
         for container in containers:
@@ -419,16 +417,13 @@ class DockerNetworkingMixin:
                     except DockerNotFound:
                         continue
                     except (DockerException, RequestException) as exc:
-                        logger.warning("sandbox=%s | sidecar stop failed; forcing removal: %s", sandbox_id, exc)
+                        logger.warning(f"sandbox={sandbox_id} | sidecar stop failed; forcing removal: {exc}")
                     container.remove(force=True)
             except DockerNotFound:
                 continue
             except (DockerException, RequestException) as exc:
                 logger.warning(
-                    "sandbox=%s | failed to remove egress sidecar %s: %s",
-                    sandbox_id,
-                    container.id,
-                    exc,
+                    f"sandbox={sandbox_id} | failed to remove egress sidecar {container.id}: {exc}"
                 )
 
         # The shared runtime volume can outlive a successfully removed app.
@@ -538,9 +533,8 @@ class DockerNetworkingMixin:
                 ):
                     raise
                 logger.warning(
-                    "sandbox=%s | retry egress sidecar without IPv6 sysctls after daemon rejection: %s",
-                    sandbox_id,
-                    exc,
+                    f"sandbox={sandbox_id} | retry egress sidecar without "
+                    f"IPv6 sysctls after daemon rejection: {exc}"
                 )
                 sidecar_host_config = build_sidecar_host_config(include_ipv6_sysctls=False)
                 with self._docker_operation("create egress sidecar", sandbox_id):
@@ -582,9 +576,7 @@ class DockerNetworkingMixin:
                         sidecar_container.remove(force=True)
                 except DockerException as cleanup_exc:
                     logger.warning(
-                        "Failed to cleanup egress sidecar for sandbox %s: %s",
-                        sandbox_id,
-                        cleanup_exc,
+                        f"Failed to cleanup egress sidecar for sandbox {sandbox_id}: {cleanup_exc}"
                     )
             elif sidecar_container_id:
                 try:
@@ -592,9 +584,7 @@ class DockerNetworkingMixin:
                         self.docker_client.api.remove_container(sidecar_container_id, force=True)
                 except DockerException as cleanup_exc:
                     logger.warning(
-                        "Failed to cleanup egress sidecar for sandbox %s: %s",
-                        sandbox_id,
-                        cleanup_exc,
+                        f"Failed to cleanup egress sidecar for sandbox {sandbox_id}: {cleanup_exc}"
                     )
             if isinstance(exc, HTTPException):
                 raise exc
@@ -655,7 +645,7 @@ class DockerNetworkingMixin:
                 raise ValueError
             return port
         except ValueError:
-            logger.warning("Invalid port label %s=%s", label_name, value)
+            logger.warning(f"Invalid port label {label_name}={value}")
             return None
 
     def _extract_bridge_ip(self, container) -> str:
