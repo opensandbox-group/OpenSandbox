@@ -197,6 +197,8 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 			}, 2*time.Minute).Should(Succeed())
 		})
 
+		It("should preserve allocated pods when poolRef changes", testPoolRefGuard)
+
 		It("should handle pod eviction correctly", func() {
 			const poolName = "test-pool-eviction"
 			const testNamespace = "default"

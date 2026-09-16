@@ -407,6 +407,21 @@ spec:
   poolRef: example-pool
 ```
 
+::: warning Changing an allocated sandbox's pool
+After allocation, the controller keeps using the Pool recorded in
+`sandbox.opensandbox.io/alloc-status`. Changing `spec.poolRef` to another Pool
+(or back to `"*"`) does not migrate the sandbox: the existing Pods remain assigned
+to their original Pool, and the controller reports a `PoolRefUpdateRejected`
+condition and Warning event. Restore `spec.poolRef` to the recorded Pool to clear
+the condition. The API update itself is accepted; this guard works on Kubernetes
+1.22 without CEL admission rules or a validating webhook.
+
+Initial binding and `"*"` auto-assignment remain supported. Clearing `poolRef`
+continues to detach the sandbox for the existing pause/resume flow; it is not a
+live migration mechanism. Legacy allocation records without a Pool reference
+retain their existing behavior until the Pool controller backfills them.
+:::
+
 ::: warning Lifecycle Pool requests start an execd task
 The example above allocates warm `nginx` pods and is useful when the container's
 own service is the workload. A BatchSandbox created directly without a

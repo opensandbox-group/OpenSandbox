@@ -41,10 +41,12 @@ const (
 )
 
 // BatchSandboxConditionType represents the type of BatchSandbox condition.
-// +kubebuilder:validation:Enum=Ready;Progressing;Paused;PauseFailed;ResumeFailed;PodFailed;PoolAllocationPending
+// +kubebuilder:validation:Enum=Ready;Progressing;Paused;PauseFailed;ResumeFailed;PodFailed;PoolAllocationPending;PoolRefUpdateRejected
 type BatchSandboxConditionType string
 
 const (
+	// BatchSandboxConditionPoolRefUpdateRejected reports a requested change away from the allocated Pool.
+	BatchSandboxConditionPoolRefUpdateRejected BatchSandboxConditionType = "PoolRefUpdateRejected"
 	// BatchSandboxConditionReady reflects whether the sandbox is currently available.
 	BatchSandboxConditionReady BatchSandboxConditionType = "Ready"
 	// BatchSandboxConditionProgressing reflects whether the sandbox is transitioning between states.

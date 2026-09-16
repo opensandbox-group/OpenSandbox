@@ -178,6 +178,7 @@ spec:
                       - ResumeFailed
                       - PodFailed
                       - PoolAllocationPending
+                      - PoolRefUpdateRejected
                       type: string
                   required:
                   - status

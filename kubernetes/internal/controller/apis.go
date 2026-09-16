@@ -16,6 +16,7 @@ package controller
 
 import (
 	"encoding/json"
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -23,7 +24,7 @@ import (
 )
 
 const (
-	annoAllocStatusKey           = "sandbox.opensandbox.io/alloc-status"
+	annoAllocStatusKey           = utils.AnnotationAllocationStatus
 	annoAllocReleaseKey          = "sandbox.opensandbox.io/alloc-release"
 	annoAllocReleasedKey         = "sandbox.opensandbox.io/alloc-released"
 	labelBatchSandboxPodIndexKey = "batch-sandbox.sandbox.opensandbox.io/pod-index"
