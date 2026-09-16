@@ -38,6 +38,7 @@ from opensandbox_server.api.schema import (
     ListSandboxesRequest,
     ListSandboxesResponse,
     NetworkPolicy,
+    NetworkRule,
     PatchSandboxMetadataRequest,
     RenewSandboxExpirationRequest,
     RenewSandboxExpirationResponse,
@@ -70,7 +71,12 @@ from opensandbox_server.services.fast_sandbox.fastpath_client import (
 from opensandbox_server.services.fast_sandbox.endpoint import build_endpoint
 from opensandbox_server.services.fast_sandbox.cr_reader import SandboxCRReader
 from opensandbox_server.services.fast_sandbox.cr_mapping import sandbox_from_cr
-from opensandbox_server.services.fast_sandbox.network_policy import normalized_policy, policy_status
+from opensandbox_server.services.fast_sandbox.network_policy import (
+    delete_policy_rules,
+    merge_policy_rules,
+    normalized_policy,
+    policy_status,
+)
 from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -548,7 +554,21 @@ class FastSandboxService(SandboxService, ExtensionService):
         return policy_status(policy)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
-        normalized = normalized_policy(policy)
+        return self._commit_network_policy(sandbox_id, normalized_policy(policy))
+
+    def patch_network_policy(self, sandbox_id: str, rules: list[NetworkRule]) -> dict:
+        """Merge rules into the persisted egress binding (sidecar PATCH semantics)."""
+        current = self.get_network_policy(sandbox_id)
+        merged = merge_policy_rules(current["policy"], rules)
+        return self._commit_network_policy(sandbox_id, normalized_policy(NetworkPolicy.model_validate(merged)))
+
+    def delete_network_policy_rules(self, sandbox_id: str, targets: list[str]) -> dict:
+        """Remove rules by target from the persisted egress binding (idempotent)."""
+        current = self.get_network_policy(sandbox_id)
+        kept = delete_policy_rules(current["policy"], targets)
+        return self._commit_network_policy(sandbox_id, normalized_policy(NetworkPolicy.model_validate(kept)))
+
+    def _commit_network_policy(self, sandbox_id: str, normalized: dict) -> dict:
         current = self._cr_reader.get(self._resolve_namespace(), sandbox_id)
         metadata = current["metadata"]
         bindings = [dict(b) for b in current["spec"].get("actionBindings", [])]

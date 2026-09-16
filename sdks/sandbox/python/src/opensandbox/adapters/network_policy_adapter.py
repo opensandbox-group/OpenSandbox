@@ -21,8 +21,10 @@ Implements the Egress protocol against the lifecycle server
 egress sidecar. Used for sandboxes created from fsb templates, where the
 policy intent is persisted on the Sandbox CR.
 
-The lifecycle API only exposes read/replace operations, so rule merge and
-delete semantics are emulated client-side (read, merge, replace).
+The lifecycle server exposes the same merge/delete rule semantics as the
+sidecar policy API (PATCH merges with first-wins-per-target; DELETE
+removes by target idempotently), so no client-side read-modify-write is
+needed.
 """
 
 import logging
@@ -60,46 +62,6 @@ _CREDENTIAL_VAULT_UNSUPPORTED_MESSAGE = (
     "Credential Vault requires the sandbox-side egress sidecar and is not "
     "available for sandboxes created from fsb templates."
 )
-
-
-def merge_network_policy_rules(
-    current: NetworkPolicy, rules: list[NetworkRule]
-) -> NetworkPolicy:
-    """Apply sidecar patch merge semantics on top of the current policy.
-
-    - Incoming rules take priority over existing rules with the same target.
-    - Existing rules for other targets remain in place.
-    - Within one patch payload, the first rule for a target wins.
-    - The current defaultAction is preserved.
-    """
-    incoming: dict[str, NetworkRule] = {}
-    for rule in rules:
-        incoming.setdefault(rule.target, rule)
-    merged: list[NetworkRule] = []
-    for rule in current.egress or []:
-        # Incoming rules replace existing rules for the same target in place.
-        merged.append(incoming.pop(rule.target) if rule.target in incoming else rule)
-    merged.extend(incoming.values())
-    return NetworkPolicy.model_validate(
-        {
-            "defaultAction": current.default_action,
-            "egress": merged,
-        }
-    )
-
-
-def delete_network_policy_rules(
-    current: NetworkPolicy, targets: list[str]
-) -> NetworkPolicy:
-    """Drop rules by target (idempotent), preserving the current defaultAction."""
-    removed = set(targets)
-    kept = [rule for rule in current.egress or [] if rule.target not in removed]
-    return NetworkPolicy.model_validate(
-        {
-            "defaultAction": current.default_action,
-            "egress": kept,
-        }
-    )
 
 
 class NetworkPolicyAdapter(Egress):
@@ -164,29 +126,6 @@ class NetworkPolicyAdapter(Egress):
             )
         return policy
 
-    async def _replace_policy(self, policy: NetworkPolicy) -> None:
-        from opensandbox.api.lifecycle.api.sandboxes import (
-            replace_sandbox_network_policy,
-        )
-        from opensandbox.api.lifecycle.models.network_policy import (
-            NetworkPolicy as ApiNetworkPolicy,
-        )
-        from opensandbox.api.lifecycle.types import Unset
-
-        api_policy = SandboxModelConverter.to_api_network_policy(policy)
-        if isinstance(api_policy, Unset) or not isinstance(
-            api_policy, ApiNetworkPolicy
-        ):
-            raise ValueError("Network policy payload must not be empty")
-        response_obj = await replace_sandbox_network_policy.asyncio_detailed(
-            client=self._client,
-            sandbox_id=self.sandbox_id,
-            body=api_policy,
-        )
-        handle_api_error(
-            response_obj, f"Replace network policy for sandbox {self.sandbox_id}"
-        )
-
     async def get_policy(self) -> NetworkPolicy:
         try:
             return NetworkPolicy.model_validate(
@@ -200,8 +139,18 @@ class NetworkPolicyAdapter(Egress):
 
     async def patch_rules(self, rules: list[NetworkRule]) -> None:
         try:
-            current = await self.get_policy()
-            await self._replace_policy(merge_network_policy_rules(current, rules))
+            from opensandbox.api.lifecycle.api.sandboxes import (
+                patch_sandbox_network_policy,
+            )
+
+            response_obj = await patch_sandbox_network_policy.asyncio_detailed(
+                client=self._client,
+                sandbox_id=self.sandbox_id,
+                body=SandboxModelConverter.to_api_network_rules(rules),
+            )
+            handle_api_error(
+                response_obj, f"Patch network policy for sandbox {self.sandbox_id}"
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to patch network policy for sandbox {self.sandbox_id}: {e}"
@@ -210,8 +159,19 @@ class NetworkPolicyAdapter(Egress):
 
     async def delete_rules(self, targets: list[str]) -> None:
         try:
-            current = await self.get_policy()
-            await self._replace_policy(delete_network_policy_rules(current, targets))
+            from opensandbox.api.lifecycle.api.sandboxes import (
+                delete_sandbox_network_policy_rules,
+            )
+
+            response_obj = await delete_sandbox_network_policy_rules.asyncio_detailed(
+                client=self._client,
+                sandbox_id=self.sandbox_id,
+                body=list(targets),
+            )
+            handle_api_error(
+                response_obj,
+                f"Delete network policy rules for sandbox {self.sandbox_id}",
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to delete network policy rules for sandbox {self.sandbox_id}: {e}"

@@ -126,6 +126,12 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
         return self._fsb.replace_network_policy(sandbox_id, policy)
 
+    def patch_network_policy(self, sandbox_id: str, rules: list) -> dict:
+        return self._fsb.patch_network_policy(sandbox_id, rules)
+
+    def delete_network_policy_rules(self, sandbox_id: str, targets: list) -> dict:
+        return self._fsb.delete_network_policy_rules(sandbox_id, targets)
+
     def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         return self._backend(sandbox_id).get_sandbox_log_diagnostics(sandbox_id, scope)
 

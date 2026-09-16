@@ -3,7 +3,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
-"""Read/replace policy intent without exposing the Fastlet's loopback handler."""
+"""Read/replace/patch policy intent without exposing the Fastlet's loopback handler."""
 
 import asyncio
 
@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.proxy import _proxy_http_request
-from opensandbox_server.api.schema import NetworkPolicy
+from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
 from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.fast_sandbox import FastSandboxService
 
@@ -36,4 +36,25 @@ async def get_network_policy(request: Request, sandbox_id: str):
 async def replace_network_policy(request: Request, sandbox_id: str, policy: NetworkPolicy):
     if sandbox_id.startswith("fsb-"):
         return await asyncio.to_thread(_fsb_service().replace_network_policy, sandbox_id, policy)
+    return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)
+
+
+@router.patch("/sandboxes/{sandbox_id}/networkpolicy")
+async def patch_network_policy(request: Request, sandbox_id: str, rules: list[NetworkRule]):
+    """Merge rules into the persisted policy (sidecar PATCH semantics).
+
+    Incoming rules replace existing rules with the same target in place;
+    the first rule per target in the payload wins; the current
+    defaultAction is preserved.
+    """
+    if sandbox_id.startswith("fsb-"):
+        return await asyncio.to_thread(_fsb_service().patch_network_policy, sandbox_id, rules)
+    return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)
+
+
+@router.delete("/sandboxes/{sandbox_id}/networkpolicy")
+async def delete_network_policy(request: Request, sandbox_id: str, targets: list[str]):
+    """Remove rules by target (idempotent); the current defaultAction is preserved."""
+    if sandbox_id.startswith("fsb-"):
+        return await asyncio.to_thread(_fsb_service().delete_network_policy_rules, sandbox_id, targets)
     return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)

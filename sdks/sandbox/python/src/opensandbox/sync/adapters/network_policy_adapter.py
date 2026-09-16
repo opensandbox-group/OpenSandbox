@@ -38,8 +38,6 @@ from opensandbox.adapters.converter.sandbox_model_converter import (
 )
 from opensandbox.adapters.network_policy_adapter import (
     _CREDENTIAL_VAULT_UNSUPPORTED_MESSAGE,
-    delete_network_policy_rules,
-    merge_network_policy_rules,
 )
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import SandboxException
@@ -123,29 +121,6 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
         return policy
 
-    def _replace_policy(self, policy: NetworkPolicy) -> None:
-        from opensandbox.api.lifecycle.api.sandboxes import (
-            replace_sandbox_network_policy,
-        )
-        from opensandbox.api.lifecycle.models.network_policy import (
-            NetworkPolicy as ApiNetworkPolicy,
-        )
-        from opensandbox.api.lifecycle.types import Unset
-
-        api_policy = SandboxModelConverter.to_api_network_policy(policy)
-        if isinstance(api_policy, Unset) or not isinstance(
-            api_policy, ApiNetworkPolicy
-        ):
-            raise ValueError("Network policy payload must not be empty")
-        response_obj = replace_sandbox_network_policy.sync_detailed(
-            client=self._client,
-            sandbox_id=self.sandbox_id,
-            body=api_policy,
-        )
-        handle_api_error(
-            response_obj, f"Replace network policy for sandbox {self.sandbox_id}"
-        )
-
     def get_policy(self) -> NetworkPolicy:
         try:
             return NetworkPolicy.model_validate(self._get_policy_payload().to_dict())
@@ -157,8 +132,18 @@ class NetworkPolicyAdapterSync(EgressSync):
 
     def patch_rules(self, rules: list[NetworkRule]) -> None:
         try:
-            current = self.get_policy()
-            self._replace_policy(merge_network_policy_rules(current, rules))
+            from opensandbox.api.lifecycle.api.sandboxes import (
+                patch_sandbox_network_policy,
+            )
+
+            response_obj = patch_sandbox_network_policy.sync_detailed(
+                client=self._client,
+                sandbox_id=self.sandbox_id,
+                body=SandboxModelConverter.to_api_network_rules(rules),
+            )
+            handle_api_error(
+                response_obj, f"Patch network policy for sandbox {self.sandbox_id}"
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to patch network policy for sandbox {self.sandbox_id}: {e}"
@@ -167,8 +152,19 @@ class NetworkPolicyAdapterSync(EgressSync):
 
     def delete_rules(self, targets: list[str]) -> None:
         try:
-            current = self.get_policy()
-            self._replace_policy(delete_network_policy_rules(current, targets))
+            from opensandbox.api.lifecycle.api.sandboxes import (
+                delete_sandbox_network_policy_rules,
+            )
+
+            response_obj = delete_sandbox_network_policy_rules.sync_detailed(
+                client=self._client,
+                sandbox_id=self.sandbox_id,
+                body=list(targets),
+            )
+            handle_api_error(
+                response_obj,
+                f"Delete network policy rules for sandbox {self.sandbox_id}",
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to delete network policy rules for sandbox {self.sandbox_id}: {e}"

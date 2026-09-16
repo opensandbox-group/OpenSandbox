@@ -131,6 +131,100 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      tags: [Sandboxes]
+      operationId: patchSandboxNetworkPolicy
+      summary: Patch sandbox network policy rules
+      description: |
+        Merges egress rules into the current policy using the same semantics
+        as the sandbox-side egress service PATCH endpoint: incoming rules
+        take priority over existing rules with the same target and replace
+        them in place; within one patch payload, the first rule for a target
+        wins; existing rules for other targets and the current defaultAction
+        are preserved. Fsb commits the merged binding through FastPath with
+        UID/generation conflict protection. Other backends proxy the
+        sandbox-side egress service.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/NetworkRule'
+      responses:
+        '200':
+          description: Committed policy intent; Fsb omits enforcementMode.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: FastPath or policy state is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags: [Sandboxes]
+      operationId: deleteSandboxNetworkPolicyRules
+      summary: Delete sandbox network policy rules by target
+      description: |
+        Removes egress rules whose target matches one of the provided
+        entries. Matching is by exact target string; unknown targets are
+        silently ignored (idempotent). The current defaultAction is
+        preserved. Other backends proxy the sandbox-side egress service.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        '200':
+          description: Committed policy intent; Fsb omits enforcementMode.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: FastPath or policy state is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /metrics/events:
     post:
       tags: [Metrics]

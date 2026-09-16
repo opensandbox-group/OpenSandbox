@@ -606,6 +606,51 @@ def test_http_policy_replace_preserves_bindings_and_fences_updates(persisted_fsb
     assert client.get(url).json()["policy"] == policy
 
 
+def test_http_policy_patch_and_delete_match_sidecar_semantics(persisted_fsb):
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+    client.put(url, json={
+        "defaultAction": "allow",
+        "egress": [
+            {"action": "deny", "target": "a.com"},
+            {"action": "allow", "target": "b.com"},
+        ],
+    })
+
+    # PATCH: incoming replaces same-target in place, first-wins, others kept,
+    # defaultAction preserved.
+    patched = client.patch(url, json=[
+        {"action": "allow", "target": "a.com"},
+        {"action": "deny", "target": "c.com"},
+        {"action": "allow", "target": "c.com"},
+    ])
+    assert patched.status_code == 200
+    assert patched.json()["policy"] == {
+        "defaultAction": "allow",
+        "egress": [
+            {"action": "allow", "target": "a.com"},
+            {"action": "allow", "target": "b.com"},
+            {"action": "deny", "target": "c.com"},
+        ],
+    }
+
+    # DELETE: idempotent by target, defaultAction preserved.
+    deleted = client.request("DELETE", url, json=["a.com", "missing.com"])
+    assert deleted.status_code == 200
+    assert deleted.json()["policy"] == {
+        "defaultAction": "allow",
+        "egress": [
+            {"action": "allow", "target": "b.com"},
+            {"action": "deny", "target": "c.com"},
+        ],
+    }
+    assert client.request("DELETE", url, json=["a.com"]).status_code == 200
+
+    # Conflict protection still applies to merged commits.
+    fake.abort_update_with = grpc.StatusCode.ABORTED
+    assert client.patch(url, json=[{"action": "deny", "target": "d.com"}]).status_code == 409
+
+
 def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
     client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"

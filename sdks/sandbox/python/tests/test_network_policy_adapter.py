@@ -17,14 +17,10 @@ from __future__ import annotations
 
 import pytest
 
-from opensandbox.adapters.network_policy_adapter import (
-    NetworkPolicyAdapter,
-    delete_network_policy_rules,
-    merge_network_policy_rules,
-)
+from opensandbox.adapters.network_policy_adapter import NetworkPolicyAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import SandboxApiException, SandboxException
-from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule
+from opensandbox.models.sandboxes import NetworkRule
 
 
 class _Resp:
@@ -61,45 +57,6 @@ def _api_policy_status(
     )
 
 
-def test_merge_rules_first_wins_and_preserves_default_action() -> None:
-    current = NetworkPolicy.model_validate(
-        {
-            "defaultAction": "allow",
-            "egress": [
-                {"action": "deny", "target": "a.com"},
-                {"action": "allow", "target": "b.com"},
-            ],
-        }
-    )
-    merged = merge_network_policy_rules(
-        current,
-        [
-            NetworkRule(action="allow", target="a.com"),
-            NetworkRule(action="deny", target="c.com"),
-            NetworkRule(action="deny", target="c.com"),
-        ],
-    )
-
-    assert merged.default_action == "allow"
-    assert [(r.action, r.target) for r in merged.egress or []] == [
-        ("allow", "a.com"),
-        ("allow", "b.com"),
-        ("deny", "c.com"),
-    ]
-
-
-def test_delete_rules_is_idempotent() -> None:
-    current = NetworkPolicy.model_validate(
-        {
-            "defaultAction": "deny",
-            "egress": [{"action": "allow", "target": "a.com"}],
-        }
-    )
-    deleted = delete_network_policy_rules(current, ["a.com", "missing.com"])
-    assert deleted.default_action == "deny"
-    assert deleted.egress == []
-
-
 @pytest.mark.asyncio
 async def test_get_policy_routes_to_lifecycle_networkpolicy(
     monkeypatch: pytest.MonkeyPatch,
@@ -129,31 +86,18 @@ async def test_get_policy_routes_to_lifecycle_networkpolicy(
 
 
 @pytest.mark.asyncio
-async def test_patch_rules_reads_then_replaces(
+async def test_patch_rules_delegates_to_lifecycle_patch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = {}
+    calls = []
 
-    async def _fake_get(*, client, sandbox_id):
-        return _Resp(
-            status_code=200,
-            parsed=_api_policy_status(
-                default_action="allow",
-                rules=[("deny", "a.com"), ("allow", "b.com")],
-            ),
-        )
-
-    async def _fake_put(*, client, sandbox_id, body):
-        captured["put_body"] = body.to_dict()
+    async def _fake_patch(*, client, sandbox_id, body):
+        calls.append(("patch", sandbox_id, [r.to_dict() for r in body]))
         return _Resp(status_code=200, parsed=_api_policy_status())
 
     monkeypatch.setattr(
-        "opensandbox.api.lifecycle.api.sandboxes.get_sandbox_network_policy.asyncio_detailed",
-        _fake_get,
-    )
-    monkeypatch.setattr(
-        "opensandbox.api.lifecycle.api.sandboxes.replace_sandbox_network_policy.asyncio_detailed",
-        _fake_put,
+        "opensandbox.api.lifecycle.api.sandboxes.patch_sandbox_network_policy.asyncio_detailed",
+        _fake_patch,
     )
 
     adapter = NetworkPolicyAdapter(ConnectionConfig(), "sbx-1")
@@ -164,48 +108,37 @@ async def test_patch_rules_reads_then_replaces(
         ]
     )
 
-    assert captured["put_body"] == {
-        "defaultAction": "allow",
-        "egress": [
-            {"action": "allow", "target": "a.com"},
-            {"action": "allow", "target": "b.com"},
-            {"action": "deny", "target": "c.com"},
-        ],
-    }
+    assert calls == [
+        (
+            "patch",
+            "sbx-1",
+            [
+                {"action": "allow", "target": "a.com"},
+                {"action": "deny", "target": "c.com"},
+            ],
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_delete_rules_reads_then_replaces(
+async def test_delete_rules_delegates_to_lifecycle_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = {}
+    calls = []
 
-    async def _fake_get(*, client, sandbox_id):
-        return _Resp(
-            status_code=200,
-            parsed=_api_policy_status(rules=[("allow", "a.com"), ("allow", "b.com")]),
-        )
-
-    async def _fake_put(*, client, sandbox_id, body):
-        captured["put_body"] = body.to_dict()
+    async def _fake_delete(*, client, sandbox_id, body):
+        calls.append(("delete", sandbox_id, list(body)))
         return _Resp(status_code=200, parsed=_api_policy_status())
 
     monkeypatch.setattr(
-        "opensandbox.api.lifecycle.api.sandboxes.get_sandbox_network_policy.asyncio_detailed",
-        _fake_get,
-    )
-    monkeypatch.setattr(
-        "opensandbox.api.lifecycle.api.sandboxes.replace_sandbox_network_policy.asyncio_detailed",
-        _fake_put,
+        "opensandbox.api.lifecycle.api.sandboxes.delete_sandbox_network_policy_rules.asyncio_detailed",
+        _fake_delete,
     )
 
     adapter = NetworkPolicyAdapter(ConnectionConfig(), "sbx-1")
     await adapter.delete_rules(["a.com"])
 
-    assert captured["put_body"] == {
-        "defaultAction": "deny",
-        "egress": [{"action": "allow", "target": "b.com"}],
-    }
+    assert calls == [("delete", "sbx-1", ["a.com"])]
 
 
 @pytest.mark.asyncio
