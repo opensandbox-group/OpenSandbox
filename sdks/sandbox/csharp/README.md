@@ -192,7 +192,105 @@ await sandbox.Files.DeleteDirectoriesAsync(new[] { "/tmp/demo" });
 await sandbox.Files.DeleteFilesAsync(new[] { "/tmp/demo/hello.txt" });
 ```
 
-### 5. Endpoints
+### 5. Snapshots
+
+Capture a sandbox's state and restore new sandboxes from it. Snapshots are
+administered through `SandboxManager` (the per-sandbox shortcut
+`sandbox.CreateSnapshotAsync(name)` also exists):
+
+```csharp
+await using var manager = SandboxManager.Create(new SandboxManagerOptions
+{
+    ConnectionConfig = config
+});
+
+var snapshot = await manager.CreateSnapshotAsync(sandboxId, "pre-migration");
+
+// Poll until Ready — C# has no built-in wait helper, so poll GetSnapshotAsync
+// and treat Failed as terminal
+SnapshotInfo ready;
+while (true)
+{
+    ready = await manager.GetSnapshotAsync(snapshot.Id);
+    if (ready.Status.State != "Creating") break;
+    await Task.Delay(TimeSpan.FromSeconds(2));
+}
+if (ready.Status.State != "Ready")
+    throw new InvalidOperationException(
+        $"snapshot not Ready: {ready.Status.State} ({ready.Status.Reason})");
+
+var list = await manager.ListSnapshotsAsync(new ListSnapshotsParams
+{
+    PageSize = 10
+});
+```
+
+Restore with `Sandbox.CreateAsync` — exactly one of `Image` or `SnapshotId`
+must be set (the SDK throws `InvalidArgumentException` otherwise, and
+`Entrypoint` must be omitted when restoring):
+
+```csharp
+await using var restored = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    SnapshotId = ready.Id,
+});
+
+// Only delete the snapshot after the restore has succeeded
+await manager.DeleteSnapshotAsync(ready.Id);
+```
+
+### 6. Isolated Sessions
+
+Isolated sessions run multi-step code in a hardened, resource-bounded
+namespace with bind mounts — reachable through `sandbox.Isolation`. The
+`RunOnceAsync` / `WithSessionAsync` extension methods (create → run →
+guaranteed delete in one call) cover callers that don't need to keep the
+session around:
+
+```csharp
+var session = await sandbox.Isolation.CreateAsync(new CreateIsolatedSessionRequest(
+    Workspace: new IsolatedWorkspaceSpec(Path: "/workspace", Mode: "rw"),
+    Profile: "strict",
+    Binds: new List<BindMount>
+    {
+        new(Source: "/data", Dest: "/data", ReadOnly: true)
+    },
+    IdleTimeoutSeconds: 600  // auto-destroy when idle; omitting disables idle GC
+));
+
+try
+{
+    // Foreground run — TimeoutSeconds applies here only; background runs
+    // are deliberately not time-limited
+    var run = await session.RunAsync(
+        "python -c 'print(1+1)'",
+        new IsolatedRunOpts { TimeoutSeconds = 30 });
+    Console.WriteLine(run.Logs.Stdout[0].Text);
+
+    // Background runs: start, poll until finished, then drain logs
+    var bg = await session.RunBackgroundAsync("make build");
+    var status = await session.GetRunStatusAsync(bg.RunId);
+    while (status.Running)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        status = await session.GetRunStatusAsync(bg.RunId);
+    }
+    var logs = await session.GetRunLogsAsync(bg.RunId);
+    Console.WriteLine(logs.Text);
+}
+finally
+{
+    await session.DeleteAsync();
+}
+```
+
+`GetRunLogsAsync` is cursor-based: each call returns at most 16 MiB, and
+per-run retention is capped at 16 MiB, so drain incrementally with the
+returned `Cursor` while the run is active if the output may exceed one
+page.
+
+### 7. Endpoints
 
 `GetEndpointAsync()` returns an endpoint **without a scheme** (for example `"localhost:44772"`). Use `GetEndpointUrlAsync()` if you want a ready-to-use absolute URL.
 
@@ -204,7 +302,7 @@ var url = await sandbox.GetEndpointUrlAsync(44772);
 Console.WriteLine(url); // e.g., "http://localhost:44772"
 ```
 
-### 6. Sandbox Management (Admin)
+### 8. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 
