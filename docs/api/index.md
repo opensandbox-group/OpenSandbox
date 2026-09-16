@@ -22,11 +22,12 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - **Resource & Runtime Configuration**: Specify CPU/memory/GPU resource limits, image startup `entrypoint`, optional `secureAccess`, environment variables, and opaque `extensions`
 - **Image Support**: Create sandboxes from public or private registries, including registry auth
 - **Timeout Management**: Optional `timeout` on creation (omit or set to `null` to disable automatic expiration) with explicit renewal via API
-- **Endpoint Access**: Retrieve public access endpoints for services running inside sandboxes, including required headers when secured access is enabled
+- **Endpoint Access**: Retrieve public access endpoints for services running inside sandboxes, including required headers when secured access is enabled; endpoint lookups report the sandbox origin via the `OPEN-SANDBOX-ORIGIN` response header (`template` for fsb golden-image sandboxes)
+- **Template Management**: Create, list, inspect, and delete fsb golden-image templates; template builds are asynchronous (poll until `Succeeded`)
 - **Snapshot Management**: Create snapshots from sandboxes, list snapshots with source/name filters, and delete snapshots
 
 **Main Endpoints (base path `/v1`):**
-- `POST /sandboxes` - Create a sandbox from an image or snapshot with timeout and resource limits
+- `POST /sandboxes` - Create a sandbox from an image, snapshot, or template with timeout and resource limits
 - `GET /sandboxes` - List sandboxes with state/metadata filters and pagination
 - `GET /sandboxes/{sandboxId}` - Get full sandbox details (including startup source and entrypoint)
 - `DELETE /sandboxes/{sandboxId}` - Delete a sandbox
@@ -39,6 +40,11 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `POST /sandboxes/{sandboxId}/renew-expiration` - Renew sandbox expiration (TTL)
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
 - `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint for a service port
+- `GET/PUT/PATCH/DELETE /sandboxes/{sandboxId}/networkpolicy` - Inspect and manage the sandbox egress network policy (Fsb persists intent on the Sandbox CR; other backends proxy the sandbox-side egress service)
+- `POST /templates` - Create a fsb template (asynchronous golden-image build)
+- `GET /templates` - List templates with metadata filters and pagination
+- `GET /templates/{templateId}` - Get template status and artifact references
+- `DELETE /templates/{templateId}` - Delete a template
 
 **Optional `Sandbox.allocation` response field:**
 - Returned only when the runtime confirms the sandbox's current concrete Pool allocation.

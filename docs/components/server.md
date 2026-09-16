@@ -115,7 +115,10 @@ Content-Type: application/json
 ```
 
 GET on the same path reads the persisted policy. PUT replaces the complete
-policy; it does not merge rules. Unrelated action bindings retain their values
+policy; it does not merge rules. `PATCH` merges rules with the same semantics
+as the egress sidecar (incoming same-target rules replace in place, first rule
+per target in the payload wins, defaultAction preserved), and `DELETE` removes
+rules by target (idempotent). Unrelated action bindings retain their values
 and order. Concurrent writes are protected by Sandbox UID/generation fences
 and return `409` on conflict. Other tenants' sandboxes return `404`.
 

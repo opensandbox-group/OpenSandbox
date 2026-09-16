@@ -86,7 +86,7 @@ OpenSandbox treats `specs/` as the public contract source of truth.
 
 Main resource groups:
 
-- **Sandboxes**: create from an image, snapshot, or template; list, get, delete, pause, resume, renew expiration, and resolve port endpoints. FastSandbox also supports inspecting and replacing runtime network policy through `GET/PUT /sandboxes/{sandboxId}/networkpolicy`.
+- **Sandboxes**: create from an image, snapshot, or template; list, get, delete, pause, resume, renew expiration, and resolve port endpoints. FastSandbox also supports inspecting and managing runtime network policy through `GET/PUT/PATCH/DELETE /sandboxes/{sandboxId}/networkpolicy`, and reports the sandbox origin to clients via the `OPEN-SANDBOX-ORIGIN` response header on endpoint lookups.
 - **Snapshots**: create a persistent snapshot from a sandbox, list snapshots, get snapshot state, and delete snapshots.
 - **Templates**: create, list, inspect, and delete template definitions in the catalog used by FastSandbox (`/templates`).
 
@@ -365,7 +365,7 @@ Create request with networkPolicy
   -> server validates runtime-specific network policy settings
   -> runtime attaches egress sidecar or binds policy actions to shared Fastlet profile
   -> sandbox outbound DNS/network traffic is filtered
-  -> FastSandbox clients update policy via PUT /v1/sandboxes/{sandboxId}/networkpolicy
+  -> FastSandbox clients manage policy via GET/PUT/PATCH/DELETE /v1/sandboxes/{sandboxId}/networkpolicy
   -> container clients resolve the egress endpoint and PATCH /policy
 ```
 
