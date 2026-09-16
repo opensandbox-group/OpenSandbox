@@ -33,6 +33,12 @@ from opensandbox.models.sandboxes import (
     SnapshotFilter,
     SnapshotInfo,
 )
+from opensandbox.models.templates import (
+    CreateTemplateRequest,
+    PagedTemplateInfos,
+    TemplateFilter,
+    TemplateInfo,
+)
 from opensandbox.sync.adapters.factory import AdapterFactorySync
 from opensandbox.sync.services.diagnostics import DiagnosticsSync
 from opensandbox.sync.services.sandbox import SandboxesSync
@@ -262,6 +268,22 @@ class SandboxManagerSync:
     def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete a snapshot by id (blocking)."""
         self._sandbox_service.delete_snapshot(snapshot_id)
+
+    def create_template(self, request: CreateTemplateRequest) -> TemplateInfo:
+        """Create a fsb template (golden-image build); the build is asynchronous (blocking)."""
+        return self._sandbox_service.create_template(request)
+
+    def get_template(self, template_id: str) -> TemplateInfo:
+        """Get a template with its latest build status by id (blocking)."""
+        return self._sandbox_service.get_template(template_id)
+
+    def list_templates(self, filter: TemplateFilter) -> PagedTemplateInfos:
+        """List templates with metadata filtering and pagination options (blocking)."""
+        return self._sandbox_service.list_templates(filter)
+
+    def delete_template(self, template_id: str) -> None:
+        """Delete a template by id (blocking). Running sandboxes are unaffected."""
+        self._sandbox_service.delete_template(template_id)
 
     def close(self) -> None:
         """

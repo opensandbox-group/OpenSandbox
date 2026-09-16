@@ -32,6 +32,9 @@ from opensandbox.adapters.converter.response_handler import (
 from opensandbox.adapters.converter.sandbox_model_converter import (
     SandboxModelConverter,
 )
+from opensandbox.adapters.converter.template_model_converter import (
+    TemplateModelConverter,
+)
 from opensandbox.api.lifecycle.types import UNSET
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.internal.readiness import constrain_readiness_request
@@ -52,6 +55,12 @@ from opensandbox.models.sandboxes import (
     SnapshotFilter,
     SnapshotInfo,
     Volume,
+)
+from opensandbox.models.templates import (
+    CreateTemplateRequest,
+    PagedTemplateInfos,
+    TemplateFilter,
+    TemplateInfo,
 )
 from opensandbox.sync.services.sandbox import SandboxesSync
 
@@ -480,4 +489,84 @@ class SandboxesAdapterSync(SandboxesSync):
             handle_api_error(response_obj, f"Delete snapshot {snapshot_id}")
         except Exception as e:
             logger.warning(f"Failed to delete snapshot {snapshot_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def create_template(self, request: CreateTemplateRequest) -> TemplateInfo:
+        try:
+            from opensandbox.api.lifecycle.api.templates import create_template
+            from opensandbox.api.lifecycle.models import FsbTemplate as ApiTemplate
+
+            response_obj = create_template.sync_detailed(
+                client=self._get_client(),
+                body=TemplateModelConverter.to_api_create_template_request(request),
+            )
+            handle_api_error(response_obj, "Create template")
+            parsed = require_parsed(response_obj, ApiTemplate, "Create template")
+            return TemplateModelConverter.to_template_info(parsed)
+        except Exception as e:
+            logger.warning(f"Failed to create template: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def get_template(self, template_id: str) -> TemplateInfo:
+        try:
+            from opensandbox.api.lifecycle.api.templates import get_template
+            from opensandbox.api.lifecycle.models import FsbTemplate as ApiTemplate
+
+            response_obj = get_template.sync_detailed(
+                client=self._get_client(),
+                template_id=template_id,
+            )
+            handle_api_error(response_obj, f"Get template {template_id}")
+            parsed = require_parsed(
+                response_obj, ApiTemplate, f"Get template {template_id}"
+            )
+            return TemplateModelConverter.to_template_info(parsed)
+        except Exception as e:
+            logger.warning(f"Failed to get template {template_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def list_templates(self, filter: TemplateFilter) -> PagedTemplateInfos:
+        # Same raw `key=value&...` metadata join as the async adapter.
+        metadata = UNSET
+        if filter.metadata:
+            metadata_parts: list[str] = []
+            for key, value in filter.metadata.items():
+                metadata_parts.append(f"{key}={value}")
+            metadata = "&".join(metadata_parts)
+
+        try:
+            from opensandbox.api.lifecycle.api.templates import list_templates
+            from opensandbox.api.lifecycle.models import (
+                ListFsbTemplatesResponse as ApiListTemplatesResponse,
+            )
+            from opensandbox.api.lifecycle.types import UNSET as API_UNSET
+
+            response_obj = list_templates.sync_detailed(
+                client=self._get_client(),
+                metadata=metadata,
+                page=filter.page if filter.page is not None else API_UNSET,
+                page_size=filter.page_size
+                if filter.page_size is not None
+                else API_UNSET,
+            )
+            handle_api_error(response_obj, "List templates")
+            parsed = require_parsed(
+                response_obj, ApiListTemplatesResponse, "List templates"
+            )
+            return TemplateModelConverter.to_paged_template_infos(parsed)
+        except Exception as e:
+            logger.warning(f"Failed to list templates: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def delete_template(self, template_id: str) -> None:
+        try:
+            from opensandbox.api.lifecycle.api.templates import delete_template
+
+            response_obj = delete_template.sync_detailed(
+                client=self._get_client(),
+                template_id=template_id,
+            )
+            handle_api_error(response_obj, f"Delete template {template_id}")
+        except Exception as e:
+            logger.warning(f"Failed to delete template {template_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e

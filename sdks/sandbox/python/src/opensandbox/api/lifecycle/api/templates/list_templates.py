@@ -16,25 +16,36 @@
 
 from http import HTTPStatus
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
-from ...models.command_status_response import CommandStatusResponse
 from ...models.error_response import ErrorResponse
-from ...types import Response
+from ...models.list_fsb_templates_response import ListFsbTemplatesResponse
+from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
-    id: str,
+    *,
+    metadata: str | Unset = UNSET,
+    page: int | Unset = 1,
+    page_size: int | Unset = 20,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+
+    params["metadata"] = metadata
+
+    params["page"] = page
+
+    params["pageSize"] = page_size
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
+
     _kwargs: dict[str, Any] = {
         "method": "get",
-        "url": "/command/status/{id}".format(
-            id=quote(str(id), safe=""),
-        ),
+        "url": "/templates",
+        "params": params,
     }
 
     return _kwargs
@@ -42,26 +53,21 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> CommandStatusResponse | ErrorResponse | None:
+) -> ErrorResponse | ListFsbTemplatesResponse | None:
     if response.status_code == 200:
-        response_200 = CommandStatusResponse.from_dict(response.json())
+        response_200 = ListFsbTemplatesResponse.from_dict(response.json())
 
         return response_200
 
-    if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
 
-        return response_400
+        return response_401
 
-    if response.status_code == 404:
-        response_404 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 501:
+        response_501 = ErrorResponse.from_dict(response.json())
 
-        return response_404
-
-    if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
-
-        return response_500
+        return response_501
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -71,7 +77,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[CommandStatusResponse | ErrorResponse]:
+) -> Response[ErrorResponse | ListFsbTemplatesResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -81,30 +87,35 @@ def _build_response(
 
 
 def sync_detailed(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[CommandStatusResponse | ErrorResponse]:
-    """Get command running status
+    metadata: str | Unset = UNSET,
+    page: int | Unset = 1,
+    page_size: int | Unset = 20,
+) -> Response[ErrorResponse | ListFsbTemplatesResponse]:
+    """List fsb templates
 
-     Returns the current status of a command (foreground or background) by command ID.
-    Includes running flag, exit code, error (if any), and start/finish timestamps.
-    Completed command metadata is retained for at least 24 hours and then removed
-    by an hourly cleanup. Running commands are never removed by retention cleanup.
+     Lists the current tenant's templates with optional metadata filtering
+    (AND logic) and pagination. Results never include other tenants'
+    templates.
 
     Args:
-        id (str):
+        metadata (str | Unset):
+        page (int | Unset):  Default: 1.
+        page_size (int | Unset):  Default: 20.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[CommandStatusResponse | ErrorResponse]
+        Response[ErrorResponse | ListFsbTemplatesResponse]
     """
 
     kwargs = _get_kwargs(
-        id=id,
+        metadata=metadata,
+        page=page,
+        page_size=page_size,
     )
 
     response = client.get_httpx_client().request(
@@ -115,59 +126,69 @@ def sync_detailed(
 
 
 def sync(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> CommandStatusResponse | ErrorResponse | None:
-    """Get command running status
+    metadata: str | Unset = UNSET,
+    page: int | Unset = 1,
+    page_size: int | Unset = 20,
+) -> ErrorResponse | ListFsbTemplatesResponse | None:
+    """List fsb templates
 
-     Returns the current status of a command (foreground or background) by command ID.
-    Includes running flag, exit code, error (if any), and start/finish timestamps.
-    Completed command metadata is retained for at least 24 hours and then removed
-    by an hourly cleanup. Running commands are never removed by retention cleanup.
+     Lists the current tenant's templates with optional metadata filtering
+    (AND logic) and pagination. Results never include other tenants'
+    templates.
 
     Args:
-        id (str):
+        metadata (str | Unset):
+        page (int | Unset):  Default: 1.
+        page_size (int | Unset):  Default: 20.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        CommandStatusResponse | ErrorResponse
+        ErrorResponse | ListFsbTemplatesResponse
     """
 
     return sync_detailed(
-        id=id,
         client=client,
+        metadata=metadata,
+        page=page,
+        page_size=page_size,
     ).parsed
 
 
 async def asyncio_detailed(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[CommandStatusResponse | ErrorResponse]:
-    """Get command running status
+    metadata: str | Unset = UNSET,
+    page: int | Unset = 1,
+    page_size: int | Unset = 20,
+) -> Response[ErrorResponse | ListFsbTemplatesResponse]:
+    """List fsb templates
 
-     Returns the current status of a command (foreground or background) by command ID.
-    Includes running flag, exit code, error (if any), and start/finish timestamps.
-    Completed command metadata is retained for at least 24 hours and then removed
-    by an hourly cleanup. Running commands are never removed by retention cleanup.
+     Lists the current tenant's templates with optional metadata filtering
+    (AND logic) and pagination. Results never include other tenants'
+    templates.
 
     Args:
-        id (str):
+        metadata (str | Unset):
+        page (int | Unset):  Default: 1.
+        page_size (int | Unset):  Default: 20.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[CommandStatusResponse | ErrorResponse]
+        Response[ErrorResponse | ListFsbTemplatesResponse]
     """
 
     kwargs = _get_kwargs(
-        id=id,
+        metadata=metadata,
+        page=page,
+        page_size=page_size,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -176,31 +197,36 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> CommandStatusResponse | ErrorResponse | None:
-    """Get command running status
+    metadata: str | Unset = UNSET,
+    page: int | Unset = 1,
+    page_size: int | Unset = 20,
+) -> ErrorResponse | ListFsbTemplatesResponse | None:
+    """List fsb templates
 
-     Returns the current status of a command (foreground or background) by command ID.
-    Includes running flag, exit code, error (if any), and start/finish timestamps.
-    Completed command metadata is retained for at least 24 hours and then removed
-    by an hourly cleanup. Running commands are never removed by retention cleanup.
+     Lists the current tenant's templates with optional metadata filtering
+    (AND logic) and pagination. Results never include other tenants'
+    templates.
 
     Args:
-        id (str):
+        metadata (str | Unset):
+        page (int | Unset):  Default: 1.
+        page_size (int | Unset):  Default: 20.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        CommandStatusResponse | ErrorResponse
+        ErrorResponse | ListFsbTemplatesResponse
     """
 
     return (
         await asyncio_detailed(
-            id=id,
             client=client,
+            metadata=metadata,
+            page=page,
+            page_size=page_size,
         )
     ).parsed

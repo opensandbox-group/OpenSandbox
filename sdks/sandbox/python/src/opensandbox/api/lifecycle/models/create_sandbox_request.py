@@ -69,6 +69,15 @@ class CreateSandboxRequest:
                 Supports public registry images and private registry images with authentication.
             snapshot_id (str | Unset): Snapshot identifier to restore from.
                 Mutually exclusive with `image`.
+            template_id (str | Unset): Fsb (fast-sandbox microVM) template to create the sandbox from; on the
+                `kubernetes` runtime this routes the create to the fsb catalog.
+                Mutually exclusive with `image` and `snapshotId`; in template mode
+                the workload shape is fixed by the template's golden image, so
+                `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
+                `volumes`, `platform`, `credentialProxy`, `secureAccess` and
+                `lifecycle` are rejected (400), and `timeout` is required.
+                The template must belong to the requester's tenant and be
+                `Succeeded`; anything else yields 404 (no existence leak).
             platform (PlatformSpec | Unset): Runtime platform constraint used for scheduling/provisioning.
 
                 This field is independent from `image` and expresses the expected target
@@ -179,6 +188,7 @@ class CreateSandboxRequest:
 
     image: ImageSpec | Unset = UNSET
     snapshot_id: str | Unset = UNSET
+    template_id: str | Unset = UNSET
     platform: PlatformSpec | Unset = UNSET
     timeout: int | None | Unset = UNSET
     resource_limits: ResourceLimits | Unset = UNSET
@@ -200,6 +210,8 @@ class CreateSandboxRequest:
             image = self.image.to_dict()
 
         snapshot_id = self.snapshot_id
+
+        template_id = self.template_id
 
         platform: dict[str, Any] | Unset = UNSET
         if not isinstance(self.platform, Unset):
@@ -263,6 +275,8 @@ class CreateSandboxRequest:
             field_dict["image"] = image
         if snapshot_id is not UNSET:
             field_dict["snapshotId"] = snapshot_id
+        if template_id is not UNSET:
+            field_dict["templateId"] = template_id
         if platform is not UNSET:
             field_dict["platform"] = platform
         if timeout is not UNSET:
@@ -314,6 +328,8 @@ class CreateSandboxRequest:
             image = ImageSpec.from_dict(_image)
 
         snapshot_id = d.pop("snapshotId", UNSET)
+
+        template_id = d.pop("templateId", UNSET)
 
         _platform = d.pop("platform", UNSET)
         platform: PlatformSpec | Unset
@@ -403,6 +419,7 @@ class CreateSandboxRequest:
         create_sandbox_request = cls(
             image=image,
             snapshot_id=snapshot_id,
+            template_id=template_id,
             platform=platform,
             timeout=timeout,
             resource_limits=resource_limits,

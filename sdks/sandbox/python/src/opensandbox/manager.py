@@ -36,6 +36,12 @@ from opensandbox.models.sandboxes import (
     SnapshotFilter,
     SnapshotInfo,
 )
+from opensandbox.models.templates import (
+    CreateTemplateRequest,
+    PagedTemplateInfos,
+    TemplateFilter,
+    TemplateInfo,
+)
 from opensandbox.services.diagnostics import Diagnostics
 from opensandbox.services.sandbox import Sandboxes
 
@@ -281,6 +287,27 @@ class SandboxManager:
     async def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete a snapshot by id."""
         await self._sandbox_service.delete_snapshot(snapshot_id)
+
+    async def create_template(self, request: CreateTemplateRequest) -> TemplateInfo:
+        """
+        Create a fsb template (golden-image build).
+
+        The build is asynchronous: the response starts at
+        ``status.phase: Pending``; poll ``get_template`` until ``Succeeded``.
+        """
+        return await self._sandbox_service.create_template(request)
+
+    async def get_template(self, template_id: str) -> TemplateInfo:
+        """Get a template with its latest build status by id."""
+        return await self._sandbox_service.get_template(template_id)
+
+    async def list_templates(self, filter: TemplateFilter) -> PagedTemplateInfos:
+        """List templates with metadata filtering and pagination options."""
+        return await self._sandbox_service.list_templates(filter)
+
+    async def delete_template(self, template_id: str) -> None:
+        """Delete a template by id. Running sandboxes are unaffected."""
+        await self._sandbox_service.delete_template(template_id)
 
     async def close(self) -> None:
         """
