@@ -29,11 +29,11 @@ def _fsb_service():
 async def get_network_policy(request: Request, sandbox_id: str):
     if sandbox_id.startswith("fsb-"):
         return await asyncio.to_thread(_fsb_service().get_network_policy, sandbox_id)
-    return await _proxy_http_request(request, sandbox_id, 18080, "policy")
+    return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)
 
 
 @router.put("/sandboxes/{sandbox_id}/networkpolicy")
 async def replace_network_policy(request: Request, sandbox_id: str, policy: NetworkPolicy):
     if sandbox_id.startswith("fsb-"):
         return await asyncio.to_thread(_fsb_service().replace_network_policy, sandbox_id, policy)
-    return await _proxy_http_request(request, sandbox_id, 18080, "policy")
+    return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)

@@ -1400,3 +1400,112 @@ def test_proxy_active_credential_vault_returns_sidecar_forbidden(
     assert response.content == b"forbidden\n"
     assert fake_client.built is not None
     assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault/_active"
+
+
+def _egress_stub_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(
+            sandbox_id: str,
+            port: int,
+            resolve_internal: bool = False,
+            use_proxy_host: bool = False,
+        ) -> Endpoint:
+            assert port == 18080
+            return Endpoint(
+                endpoint="10.57.1.91:18080",
+                headers={OPEN_SANDBOX_EGRESS_AUTH_HEADER: "injected-egress-token"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+
+def test_networkpolicy_get_forwards_egress_auth_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /networkpolicy is an internal proxy: the egress auth token resolved
+    on the endpoint must reach the egress sidecar (#1859)."""
+    _egress_stub_service(monkeypatch)
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"status":"ok"}'],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/networkpolicy",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["url"] == "http://10.57.1.91:18080/policy"
+    lowered = {k.lower(): v for k, v in fake_client.built["headers"].items()}
+    assert lowered.get(OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()) == "injected-egress-token"
+
+
+def test_networkpolicy_put_forwards_egress_auth_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PUT /networkpolicy shares the internal-proxy path (#1859)."""
+    _egress_stub_service(monkeypatch)
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"status":"ok"}'],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.put(
+        "/v1/sandboxes/sbx-123/networkpolicy",
+        json={"defaultAction": "deny", "egress": []},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    lowered = {k.lower(): v for k, v in fake_client.built["headers"].items()}
+    assert lowered.get(OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()) == "injected-egress-token"
+
+
+def test_user_proxy_still_strips_egress_auth_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-facing proxy requests must keep the endpoint-resolved egress
+    credentials stripped — only internal service proxies forward them."""
+    class StubService:
+        @staticmethod
+        def get_endpoint(
+            sandbox_id: str,
+            port: int,
+            resolve_internal: bool = False,
+            use_proxy_host: bool = False,
+        ) -> Endpoint:
+            return Endpoint(
+                endpoint="10.57.1.91:44772",
+                headers={OPEN_SANDBOX_EGRESS_AUTH_HEADER: "injected-egress-token"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(chunks=[b"user-proxy-ok"])
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772/",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    lowered = {k.lower(): v for k, v in fake_client.built["headers"].items()}
+    assert OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower() not in lowered

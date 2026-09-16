@@ -119,11 +119,15 @@ def _filter_proxy_headers(
     *,
     extra_excluded: Optional[set[str]] = None,
     connection_header: Optional[str] = None,
+    forward_egress_auth: bool = False,
 ) -> dict[str, str]:
     """Drop transport/auth headers while preserving app-level headers.
 
     Endpoint-resolved headers are merged for routing, except secure-access
-    credentials which callers must explicitly provide on server-proxy requests.
+    credentials which callers must explicitly provide on server-proxy requests
+    and the egress auth token, which is only forwarded for internal service
+    proxies (``forward_egress_auth=True``) where the server itself talks to a
+    sandbox-internal service that requires it.
     """
     excluded = set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS) | set(FORWARDED_HEADERS)
     if extra_excluded:
@@ -140,10 +144,9 @@ def _filter_proxy_headers(
             forwarded[key] = value
 
     if endpoint_headers:
-        endpoint_header_excluded = {
-            OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower(),
-            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(),
-        } | FORWARDED_HEADERS
+        endpoint_header_excluded = {OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower()} | FORWARDED_HEADERS
+        if not forward_egress_auth:
+            endpoint_header_excluded.add(OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower())
         forwarded.update(
             {
                 key: value
@@ -316,7 +319,17 @@ async def _proxy_http_request(
     sandbox_id: str,
     port: int,
     full_path: str,
+    *,
+    internal: bool = False,
 ) -> StreamingResponse:
+    """Forward ``request`` to a sandbox endpoint.
+
+    ``internal=True`` marks an internal service proxy: a route where the
+    server itself reaches a sandbox-internal service (e.g. the egress
+    sidecar's policy API). Endpoint-resolved egress credentials are
+    forwarded to such targets, while user-facing proxy requests keep
+    them stripped.
+    """
     resolve_internal = get_config().proxy.resolve_internal
     endpoint = lifecycle.sandbox_service.get_endpoint(
         sandbox_id,
@@ -342,6 +355,7 @@ async def _proxy_http_request(
             request.headers,
             endpoint.headers,
             connection_header=request.headers.get("connection"),
+            forward_egress_auth=internal,
         )
         # Forwarded headers are stripped above and rebuilt from the connection
         # observed by this trusted proxy, so clients cannot spoof transport state.
