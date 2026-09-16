@@ -161,6 +161,7 @@ class Sandbox:
         diagnostics_service: Diagnostics | None = None,
         isolated_service: IsolationService | None = None,
         custom_health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
+        from_template: bool = False,
     ) -> None:
         """
         Internal constructor for Sandbox. Use Sandbox.create() or Sandbox.connect() instead.
@@ -179,6 +180,17 @@ class Sandbox:
         )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
+        self._from_template = from_template
+
+    @property
+    def from_template(self) -> bool:
+        """Whether this sandbox was created from a fsb template.
+
+        Template-based sandboxes route egress policy operations through the
+        lifecycle control plane (``/sandboxes/{sandboxId}/networkpolicy``)
+        instead of the sandbox-side egress sidecar.
+        """
+        return self._from_template
 
     @property
     def isolation(self) -> IsolationService:
@@ -680,6 +692,7 @@ class Sandbox:
                 network_policy=network_policy,
                 extensions=extensions,
             ),
+            from_template=True,
         )
 
     @classmethod
@@ -694,6 +707,7 @@ class Sandbox:
         health_check_polling_interval: timedelta,
         skip_health_check: bool,
         create_call: Callable[[Sandboxes], Awaitable[SandboxCreateResponse]],
+        from_template: bool = False,
     ) -> "Sandbox":
         """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
         factory = AdapterFactory(config)
@@ -707,14 +721,25 @@ class Sandbox:
             sandbox_id = response.id
 
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
-            execd_endpoint, egress_endpoint = await _gather_fail_fast(
-                budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
-                    response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
-                )),
-                budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
-                    response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-                )),
-            )
+            if from_template:
+                # fsb template sandboxes have no sandbox-side egress sidecar:
+                # policy operations go through the lifecycle control plane.
+                execd_endpoint = await budget.endpoint(
+                    lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                    )
+                )
+                egress_service = factory.create_network_policy_service(response.id)
+            else:
+                execd_endpoint, egress_endpoint = await _gather_fail_fast(
+                    budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                    )),
+                    budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                    )),
+                )
+                egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=response.id,
@@ -723,13 +748,14 @@ class Sandbox:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
-                egress_service=factory.create_egress_service(egress_endpoint),
+                egress_service=egress_service,
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(
                     execd_endpoint
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
+                from_template=from_template,
             )
 
             if not skip_health_check:

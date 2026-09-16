@@ -666,6 +666,7 @@ def test_sync_create_from_template_passes_only_allowed_fields(
     class _SandboxServiceCreateStub:
         def __init__(self) -> None:
             self.template_calls: list[dict[str, object]] = []
+            self.endpoint_ports: list[int] = []
 
         def create_sandbox_from_template(
             self,
@@ -686,7 +687,10 @@ def test_sync_create_from_template_passes_only_allowed_fields(
             )
             return _CreateResponse()
 
-        def get_sandbox_endpoint(self, _sandbox_id, port: int, _use_server_proxy: bool = False):
+        def get_sandbox_endpoint(
+            self, _sandbox_id, port: int, _use_server_proxy: bool = False
+        ):
+            self.endpoint_ports.append(port)
             return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
 
         def kill_sandbox(self, _sandbox_id: str) -> None:
@@ -714,6 +718,9 @@ def test_sync_create_from_template_passes_only_allowed_fields(
         def create_egress_service(self, _endpoint):
             return _EgressServiceStub()
 
+        def create_network_policy_service(self, _sandbox_id):
+            return _Noop()
+
         def create_diagnostics_service(self):
             return _DiagnosticsServiceStub()
 
@@ -731,6 +738,9 @@ def test_sync_create_from_template_passes_only_allowed_fields(
     )
 
     assert sandbox.id == "sbx-from-template"
+    assert sandbox.from_template is True
+    # Template sandboxes must not resolve the egress sidecar endpoint.
+    assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
     assert len(factory.service.template_calls) == 1
     call = factory.service.template_calls[0]
     assert call["template_id"] == "tpl_1"

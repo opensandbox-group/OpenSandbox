@@ -140,6 +140,7 @@ class SandboxSync:
         diagnostics_service: DiagnosticsSync | None = None,
         isolated_service: IsolationServiceSync | None = None,
         custom_health_check: Callable[["SandboxSync"], bool] | None = None,
+        from_template: bool = False,
     ) -> None:
         """
         Internal constructor for SandboxSync. Use :meth:`create` or :meth:`connect` instead.
@@ -158,6 +159,17 @@ class SandboxSync:
         )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
+        self._from_template = from_template
+
+    @property
+    def from_template(self) -> bool:
+        """Whether this sandbox was created from a fsb template.
+
+        Template-based sandboxes route egress policy operations through the
+        lifecycle control plane (``/sandboxes/{sandboxId}/networkpolicy``)
+        instead of the sandbox-side egress sidecar.
+        """
+        return self._from_template
 
     @property
     def isolation(self) -> IsolationServiceSync:
@@ -652,6 +664,7 @@ class SandboxSync:
                 network_policy=network_policy,
                 extensions=extensions,
             ),
+            from_template=True,
         )
 
     @classmethod
@@ -666,6 +679,7 @@ class SandboxSync:
         health_check_polling_interval: timedelta,
         skip_health_check: bool,
         create_call: Callable[[SandboxesSync], SandboxCreateResponse],
+        from_template: bool = False,
     ) -> "SandboxSync":
         """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
         factory = AdapterFactorySync(config)
@@ -678,12 +692,21 @@ class SandboxSync:
             response = create_call(sandbox_service)
             sandbox_id = response.id
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
-            execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            ))
-            egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-            ))
+            if from_template:
+                # fsb template sandboxes have no sandbox-side egress sidecar:
+                # policy operations go through the lifecycle control plane.
+                execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
+                    response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                ))
+                egress_service = factory.create_network_policy_service(response.id)
+            else:
+                execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
+                    response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                ))
+                egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
+                    response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ))
+                egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=response.id,
@@ -692,13 +715,14 @@ class SandboxSync:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
-                egress_service=factory.create_egress_service(egress_endpoint),
+                egress_service=egress_service,
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(
                     execd_endpoint
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
+                from_template=from_template,
             )
 
             if not skip_health_check:

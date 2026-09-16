@@ -31,6 +31,7 @@ from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.health_adapter import HealthAdapter
 from opensandbox.adapters.isolated_adapter import IsolatedSessionsAdapter
 from opensandbox.adapters.metrics_adapter import MetricsAdapter
+from opensandbox.adapters.network_policy_adapter import NetworkPolicyAdapter
 from opensandbox.adapters.sandboxes_adapter import SandboxesAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.sandboxes import SandboxEndpoint
@@ -103,6 +104,15 @@ class AdapterFactory:
     def create_egress_service(self, endpoint: SandboxEndpoint) -> Egress:
         """Create a direct egress service for runtime egress policy operations."""
         return EgressAdapter(self.connection_config, endpoint)
+
+    def create_network_policy_service(self, sandbox_id: str) -> Egress:
+        """Create a lifecycle control-plane network policy service.
+
+        Used for sandboxes created from fsb templates: policy intent is
+        persisted via ``/sandboxes/{sandboxId}/networkpolicy`` instead of the
+        sandbox-side egress sidecar.
+        """
+        return NetworkPolicyAdapter(self.connection_config, sandbox_id)
 
     def create_health_service(self, endpoint: SandboxEndpoint) -> Health:
         """Create a health monitoring service for sandbox status checks.
