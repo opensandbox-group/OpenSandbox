@@ -157,6 +157,37 @@ def test_get_endpoint_bridge_non_egress_port_does_not_include_auth_header(
     assert endpoint.endpoint == "192.168.1.100:50002/proxy/44772"
     assert endpoint.headers is None
 
+def test_get_endpoint_bridge_internal_egress_port_includes_auth_header(
+    mock_docker_service,
+):
+    """Internal resolution for the egress sidecar port must carry the egress
+    auth token: the /networkpolicy routes are internal service proxies whose
+    downstream (sidecar :18080) requires it (#1859)."""
+    service, mock_client = mock_docker_service
+    service.app_config.docker.network_mode = "bridge"
+    service.network_mode = "bridge"
+
+    labels = {
+        "opensandbox.io/embedding-proxy-port": "50002",
+        "opensandbox.io/egress-auth-token": "egress-token",
+    }
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": labels},
+        "NetworkSettings": {"IPAddress": "172.17.0.5"},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+    with patch.object(
+        service, "_resolve_proxy_host", return_value="192.168.1.100"
+    ):
+        endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
+
+    assert endpoint.endpoint == "192.168.1.100:50002/proxy/18080"
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
+
+
 def test_get_endpoint_bridge_internal_resolution(mock_docker_service):
     service, mock_client = mock_docker_service
     service.app_config.docker.network_mode = "bridge"
@@ -195,7 +226,10 @@ def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_falls_back_
     endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
 
     assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
-    assert endpoint.headers is None
+    # The egress auth token rides on the endpoint so internal service
+    # proxies can forward it; user-facing proxy requests strip it in
+    # _filter_proxy_headers (#1859).
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
 
 
 def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_ignores_container_ip(
@@ -220,7 +254,10 @@ def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_ignores_con
     endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
 
     assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
-    assert endpoint.headers is None
+    # The egress auth token rides on the endpoint so internal service
+    # proxies can forward it; user-facing proxy requests strip it in
+    # _filter_proxy_headers (#1859).
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
 
 
 def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_uses_proxy_host_not_eip(
@@ -247,7 +284,10 @@ def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_uses_proxy_
     endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
 
     assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
-    assert endpoint.headers is None
+    # The egress auth token rides on the endpoint so internal service
+    # proxies can forward it; user-facing proxy requests strip it in
+    # _filter_proxy_headers (#1859).
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
 
 
 def test_get_endpoint_bridge_public_uses_eip_when_set(mock_docker_service):

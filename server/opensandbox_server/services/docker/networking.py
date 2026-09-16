@@ -258,11 +258,15 @@ class DockerNetworkingMixin:
             # main container's private IP is not a stable proxy target. In that case, treat the
             # server-proxy target as the server-local host-mapped endpoint instead of a container IP.
             if labels.get(SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY):
+                # Egress auth headers attach for the egress sidecar port
+                # (18080) only; the user-facing proxy still strips them in
+                # _filter_proxy_headers, keeping enforcement at the filter
+                # layer like every other resolver path.
                 return self._resolve_host_mapped_endpoint(
                     self._resolve_proxy_host(),
                     labels,
                     port,
-                    include_egress_auth_headers=False,
+                    include_egress_auth_headers=True,
                 )
             return self._resolve_internal_endpoint(container, port)
 
