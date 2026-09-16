@@ -81,6 +81,9 @@ spec:
         {{- if .Values.controller.snapshot.registry }}
         - --snapshot-registry={{ .Values.controller.snapshot.registry }}
         {{- end }}
+        {{- if .Values.controller.snapshot.imageURITemplate }}
+        - {{ printf "--snapshot-image-uri-template=%s" .Values.controller.snapshot.imageURITemplate | quote }}
+        {{- end }}
         {{- if .Values.controller.snapshot.registryInsecure }}
         - --snapshot-registry-insecure={{ .Values.controller.snapshot.registryInsecure }}
         {{- end }}

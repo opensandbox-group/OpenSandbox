@@ -75,6 +75,7 @@ opensandbox-controller:
     replicaCount: 2
     snapshot:
       registry: my-registry/snapshots
+      imageURITemplate: "" # Optional Go template; see the pause/resume guide.
       registryInsecure: false
       snapshotPushSecret: registry-snapshot-push-secret
       imageCommitterPodTemplate:
