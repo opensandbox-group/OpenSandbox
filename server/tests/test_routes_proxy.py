@@ -1436,12 +1436,22 @@ def test_networkpolicy_route_forwards_egress_auth_header(
 
     response = client.get(
         "/v1/sandboxes/sbx-123/networkpolicy",
-        headers=auth_headers,
+        headers={
+            **auth_headers,
+            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(): "caller-fake-token",
+        },
     )
 
     assert response.status_code == 200
     assert fake_client.built is not None
     assert fake_client.built["url"] == "http://10.57.1.91:18080/policy"
-    lowered_headers = {k.lower(): v for k, v in fake_client.built["headers"].items()}
-    assert lowered_headers.get(OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()) == "injected-egress-token"
+    # Ensure caller-supplied header was completely replaced and does not duplicate
+    egress_headers = [
+        (k, v)
+        for k, v in fake_client.built["headers"].items()
+        if k.lower() == OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()
+    ]
+    assert len(egress_headers) == 1
+    assert egress_headers[0][1] == "injected-egress-token"
+
 

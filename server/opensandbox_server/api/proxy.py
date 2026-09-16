@@ -151,6 +151,14 @@ def _filter_proxy_headers(
         } | FORWARDED_HEADERS
         if not internal:
             endpoint_header_excluded.add(OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower())
+        else:
+            # Strip any inbound egress auth header so caller-supplied values cannot
+            # shadow or duplicate the trusted endpoint token.
+            forwarded = {
+                k: v
+                for k, v in forwarded.items()
+                if k.lower() != OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()
+            }
         forwarded.update(
             {
                 key: value
