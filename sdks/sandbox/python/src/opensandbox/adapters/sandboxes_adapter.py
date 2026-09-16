@@ -23,6 +23,7 @@ the auto-generated API client, handling all model conversions and error mapping.
 
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 import httpx  # type: ignore[reportMissingImports]
 
@@ -68,6 +69,19 @@ from opensandbox.models.templates import (
 from opensandbox.services.sandbox import Sandboxes
 
 logger = logging.getLogger(__name__)
+
+
+def encode_metadata_filter(metadata: dict[str, str]) -> str:
+    """Percent-encode a metadata filter for the ``metadata`` query parameter.
+
+    httpx percent-encodes the value once more and the server decodes its
+    layer before splitting with ``parse_qsl``, so a single ``quote`` here
+    round-trips keys and values containing ``&``, ``=`` or ``%``.
+    """
+    return "&".join(
+        f"{quote(key, safe='')}={quote(value, safe='')}"
+        for key, value in metadata.items()
+    )
 
 
 class SandboxesAdapter(Sandboxes):
@@ -273,13 +287,9 @@ class SandboxesAdapter(Sandboxes):
         """List sandboxes with optional filtering criteria."""
         logger.debug(f"Listing sandboxes with filter: {filter}")
 
-        # Prepare metadata parameter similar to Kotlin SDK
-        metadata = UNSET
-        if filter.metadata:
-            metadata_parts: list[str] = []
-            for key, value in filter.metadata.items():
-                metadata_parts.append(f"{key}={value}")
-            metadata = "&".join(metadata_parts)
+        metadata = (
+            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
+        )
 
         try:
             from opensandbox.api.lifecycle.api.sandboxes import get_sandboxes
@@ -478,15 +488,9 @@ class SandboxesAdapter(Sandboxes):
 
     async def list_templates(self, filter: TemplateFilter) -> PagedTemplateInfos:
         """List the current tenant's templates with optional filtering."""
-        # The server splits this field with parse_qsl after the query layer
-        # decodes it once; httpx percent-encodes reserved characters so a raw
-        # `key=value&...` join round-trips correctly.
-        metadata = UNSET
-        if filter.metadata:
-            metadata_parts: list[str] = []
-            for key, value in filter.metadata.items():
-                metadata_parts.append(f"{key}={value}")
-            metadata = "&".join(metadata_parts)
+        metadata = (
+            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
+        )
 
         try:
             from opensandbox.api.lifecycle.api.templates import list_templates

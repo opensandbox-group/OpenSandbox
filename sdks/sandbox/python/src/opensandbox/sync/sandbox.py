@@ -166,6 +166,12 @@ class SandboxSync:
     def origin(self) -> str:
         """Origin of this sandbox (see :class:`SandboxOrigin`).
 
+        Set locally for sandboxes created via ``create`` /
+        ``create_from_template``; taken from the server's
+        ``OPEN-SANDBOX-ORIGIN`` response header when connecting to or
+        resuming an existing sandbox (``unknown`` when the server does not
+        send it).
+
         Template-backed sandboxes (``origin == "template"``) route egress
         policy operations through the lifecycle control plane
         (``/sandboxes/{sandboxId}/networkpolicy``) instead of the
@@ -642,15 +648,11 @@ class SandboxSync:
             Fully configured and ready SandboxSync instance
 
         Raises:
-            InvalidArgumentException: if template_id is blank or timeout is missing
+            InvalidArgumentException: if template_id is blank
             SandboxException: if sandbox creation or initialization fails
         """
         if not template_id or not template_id.strip():
             raise InvalidArgumentException("Template ID must be specified")
-        if timeout is None:
-            raise InvalidArgumentException(
-                "timeout is required when creating a sandbox from a template"
-            )
         if not skip_health_check:
             validate_polling_interval(health_check_polling_interval)
 

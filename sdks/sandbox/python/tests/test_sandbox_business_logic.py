@@ -1072,12 +1072,6 @@ async def test_create_from_template_passes_only_allowed_fields(
 
 
 @pytest.mark.asyncio
-async def test_create_from_template_requires_timeout() -> None:
-    with pytest.raises(InvalidArgumentException):
-        await Sandbox.create_from_template("tpl_1", timeout=None)  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
 async def test_create_from_template_rejects_blank_template_id() -> None:
     with pytest.raises(InvalidArgumentException):
         await Sandbox.create_from_template(

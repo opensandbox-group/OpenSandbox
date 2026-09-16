@@ -35,6 +35,7 @@ from opensandbox.adapters.converter.sandbox_model_converter import (
 from opensandbox.adapters.converter.template_model_converter import (
     TemplateModelConverter,
 )
+from opensandbox.adapters.sandboxes_adapter import encode_metadata_filter
 from opensandbox.api.lifecycle.types import UNSET
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.internal.readiness import constrain_readiness_request
@@ -228,19 +229,9 @@ class SandboxesAdapterSync(SandboxesSync):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_sandboxes(self, filter: SandboxFilter) -> PagedSandboxInfos:
-        # metadata double-encoding logic kept identical to async adapter
-        metadata = UNSET
-        if filter.metadata:
-            from urllib.parse import quote
-
-            metadata_parts: list[str] = []
-            for key, value in filter.metadata.items():
-                k1 = quote(key, safe="")
-                v1 = quote(value, safe="")
-                k2 = quote(k1, safe="")
-                v2 = quote(v1, safe="")
-                metadata_parts.append(f"{k2}={v2}")
-            metadata = "&".join(metadata_parts)
+        metadata = (
+            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
+        )
 
         try:
             from opensandbox.api.lifecycle.api.sandboxes import get_sandboxes
@@ -575,13 +566,9 @@ class SandboxesAdapterSync(SandboxesSync):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_templates(self, filter: TemplateFilter) -> PagedTemplateInfos:
-        # Same raw `key=value&...` metadata join as the async adapter.
-        metadata = UNSET
-        if filter.metadata:
-            metadata_parts: list[str] = []
-            for key, value in filter.metadata.items():
-                metadata_parts.append(f"{key}={value}")
-            metadata = "&".join(metadata_parts)
+        metadata = (
+            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
+        )
 
         try:
             from opensandbox.api.lifecycle.api.templates import list_templates

@@ -101,6 +101,7 @@ from opensandbox_server.middleware.date_header import DateHeaderMiddleware  # no
 from opensandbox_server.middleware.http_metrics import HttpMetricsMiddleware  # noqa: E402
 from opensandbox_server.middleware.request_id import RequestIdMiddleware  # noqa: E402
 from opensandbox_server.repositories.snapshots.factory import close_snapshot_repository  # noqa: E402
+from opensandbox_server.services.constants import OPEN_SANDBOX_ORIGIN_HEADER  # noqa: E402
 from opensandbox_server.services.extension_service import require_extension_service  # noqa: E402
 from opensandbox_server.services.runtime_resolver import (  # noqa: E402
     validate_secure_runtime_on_startup,
@@ -234,7 +235,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["OPEN-SANDBOX-ORIGIN"],
+    expose_headers=[OPEN_SANDBOX_ORIGIN_HEADER],
 )
 # RequestIdMiddleware wraps auth and CORS so every response (including 401 from
 # AuthMiddleware) gets X-Request-ID and logs have request_id in context.

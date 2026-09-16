@@ -790,9 +790,9 @@ class SandboxEndpoint(BaseModel):
     origin: str | None = Field(
         default=None,
         description=(
-            "Origin of the sandbox, reported by the server via the "
+            "Origin of the sandbox taken from the server's "
             "OPEN-SANDBOX-ORIGIN response header (see SandboxOrigin). "
-            "None when the server does not report it."
+            "None when the server does not send it."
         ),
     )
 
@@ -1005,8 +1005,12 @@ class SandboxState:
 
 
 class SandboxOrigin:
-    """Origin of a sandbox, as reported by the server via the
-    ``OPEN-SANDBOX-ORIGIN`` response header.
+    """Origin backing a sandbox.
+
+    ``create``/``create_from_template`` set the value locally (the client
+    knows what it asked for). ``connect``/``resume`` take the value from the
+    server's ``OPEN-SANDBOX-ORIGIN`` response header, which currently is
+    only sent for template-backed sandboxes.
 
     Known values:
         IMAGE (str): Created from a container image.
@@ -1014,8 +1018,8 @@ class SandboxOrigin:
         TEMPLATE (str): Runs on a fsb golden-image template (no sandbox-side
             egress sidecar; egress policy goes through the lifecycle control
             plane).
-        UNKNOWN (str): The server did not report a source (e.g. an older
-            server without the header).
+        UNKNOWN (str): The origin could not be determined (e.g. an older
+            server that does not send the header).
 
     The server may introduce new values in future versions; clients should
     handle unknown string values gracefully.

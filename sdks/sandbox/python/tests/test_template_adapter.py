@@ -197,6 +197,61 @@ async def test_list_templates_joins_metadata_and_converts_pagination(
 
 
 @pytest.mark.asyncio
+async def test_list_templates_metadata_percent_encoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from urllib.parse import parse_qsl
+
+    captured = {}
+
+    async def _fake_asyncio_detailed(*, client, metadata, page, page_size):
+        captured["metadata"] = metadata
+        return _Resp(status_code=200, parsed=_api_list_templates_response())
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.templates.list_templates.asyncio_detailed",
+        _fake_asyncio_detailed,
+    )
+
+    adapter = SandboxesAdapter(ConnectionConfig())
+    raw = {"a": "x&y=b", "p": "50%"}
+    await adapter.list_templates(TemplateFilter(metadata=raw))
+
+    assert dict(parse_qsl(captured["metadata"])) == raw
+
+
+def test_sync_list_templates_metadata_percent_encoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from urllib.parse import parse_qsl
+
+    captured = {}
+
+    def _fake_sync_detailed(*, client, metadata, page, page_size):
+        captured["metadata"] = metadata
+        return _Resp(status_code=200, parsed=_api_list_templates_response())
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.templates.list_templates.sync_detailed",
+        _fake_sync_detailed,
+    )
+
+    adapter = SyncSandboxesAdapter(ConnectionConfigSync())
+    raw = {"a": "x&y=b"}
+    adapter.list_templates(TemplateFilter(metadata=raw))
+
+    assert dict(parse_qsl(captured["metadata"])) == raw
+
+
+def test_template_filter_rejects_zero_page() -> None:
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError, match="at least 1"):
+        TemplateFilter(page=0)
+
+
+@pytest.mark.asyncio
 async def test_list_templates_omits_unset_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

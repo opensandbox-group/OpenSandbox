@@ -23,7 +23,6 @@ import pytest
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
 from opensandbox.exceptions import (
-    InvalidArgumentException,
     SandboxException,
     SandboxReadyTimeoutException,
 )
@@ -750,11 +749,6 @@ def test_sync_create_from_template_passes_only_allowed_fields(
     assert call["metadata"] is None
     assert call["network_policy"] is None
     assert call["extensions"] == {"debug": "true"}
-
-
-def test_sync_create_from_template_requires_timeout() -> None:
-    with pytest.raises(InvalidArgumentException):
-        SandboxSync.create_from_template("tpl_1", timeout=None)  # type: ignore[arg-type]
 
 
 def test_sync_credential_vault_raises_for_template_sandbox() -> None:

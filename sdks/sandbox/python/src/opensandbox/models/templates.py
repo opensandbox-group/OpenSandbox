@@ -222,9 +222,9 @@ class TemplateFilter(BaseModel):
 
     @field_validator("page")
     @classmethod
-    def template_page_must_be_non_negative(cls, v: int | None) -> int | None:
-        if v is not None and v < 0:
-            raise ValueError("Page must be non-negative")
+    def template_page_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("Page must be at least 1 (1-indexed)")
         return v
 
 

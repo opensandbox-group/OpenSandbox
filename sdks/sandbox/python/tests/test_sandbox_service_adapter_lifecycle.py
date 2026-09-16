@@ -345,9 +345,11 @@ async def test_create_sandbox_empty_response_raises(
 
 
 @pytest.mark.asyncio
-async def test_list_sandboxes_metadata_double_encoded(
+async def test_list_sandboxes_metadata_percent_encoded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from urllib.parse import parse_qsl
+
     from opensandbox.api.lifecycle.types import UNSET as API_UNSET
 
     captured = {}
@@ -364,10 +366,12 @@ async def test_list_sandboxes_metadata_double_encoded(
     )
 
     adapter = SandboxesAdapter(ConnectionConfig())
-    f = SandboxFilter(metadata={"k k": "v/v"})
-    await adapter.list_sandboxes(f)
+    raw = {"k k": "v/v", "a": "x&y=b", "p": "50%"}
+    await adapter.list_sandboxes(SandboxFilter(metadata=raw))
 
-    assert captured["metadata"] == "k k=v/v"
+    # The server decodes the query layer then splits with parse_qsl, so the
+    # encoded filter must round-trip through parse_qsl losslessly.
+    assert dict(parse_qsl(captured["metadata"])) == raw
     assert captured["state"] is API_UNSET
 
 
