@@ -79,7 +79,7 @@ func (store *inMemoryAllocationStore) Recover(ctx context.Context, c client.Clie
 	newPools := make(map[string]*poolEntry)
 
 	for _, sbx := range batchSandboxList.Items {
-		poolRef := sbx.Spec.PoolRef
+		poolRef := utils.EffectivePoolRef(&sbx)
 		if poolRef == "" {
 			continue
 		}
@@ -269,7 +269,7 @@ func newAnnoAllocationSyncer(client client.Client) allocationSyncer {
 }
 
 func (syncer *annoAllocationSyncer) SetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, allocation *sandboxAllocation) error {
-	allocation.PoolRef = sandbox.Spec.PoolRef
+	allocation.PoolRef = utils.EffectivePoolRef(sandbox)
 	allocation.Generation = sandbox.Generation
 	js, err := json.Marshal(allocation)
 	if err != nil {
@@ -641,7 +641,7 @@ func (allocator *defaultAllocator) ReleasePodsAllocation(ctx context.Context, ns
 func (allocator *defaultAllocator) SyncSandboxAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, pods []string) error {
 	log := logf.FromContext(ctx)
 	log.Info("Syncing sandbox allocation", "sandbox", sandbox.Name, "pods", pods)
-	poolRef := sandbox.Spec.PoolRef
+	poolRef := utils.EffectivePoolRef(sandbox)
 
 	// Snapshot the current in-memory state for rollback on failure.
 	oldState, err := allocator.syncer.GetAllocation(ctx, sandbox)
@@ -669,7 +669,7 @@ func (allocator *defaultAllocator) SyncSandboxAllocation(ctx context.Context, sa
 func (allocator *defaultAllocator) SyncSandboxReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, pods []string) error {
 	log := logf.FromContext(ctx)
 	log.Info("Syncing sandbox released", "sandbox", sandbox.Name, "pods", pods)
-	poolRef := sandbox.Spec.PoolRef
+	poolRef := utils.EffectivePoolRef(sandbox)
 
 	// Phase 1: persist to sandbox annotation.
 	released := &allocationReleased{Pods: pods}

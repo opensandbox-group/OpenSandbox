@@ -18,6 +18,8 @@ import (
 	"context"
 	"sync"
 
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
+
 	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,7 +52,7 @@ var OwnerIndexFunc = func(obj client.Object) []string {
 var PoolRefIndexFunc = func(obj client.Object) []string {
 	batchSandbox, ok := obj.(*sandboxv1alpha1.BatchSandbox)
 	if ok {
-		return []string{batchSandbox.Spec.PoolRef}
+		return []string{utils.EffectivePoolRef(batchSandbox)}
 	}
 	return nil
 }

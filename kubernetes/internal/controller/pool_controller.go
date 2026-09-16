@@ -311,7 +311,7 @@ func (r *PoolReconciler) removePoolAllocationFinalizerIfUnavailable(
 		if err := r.APIReader.Get(ctx, sandboxKey, latestSandbox); err != nil {
 			return err
 		}
-		if latestSandbox.Spec.PoolRef != poolKey.Name ||
+		if utils.EffectivePoolRef(latestSandbox) != poolKey.Name ||
 			latestSandbox.DeletionTimestamp.IsZero() ||
 			!controllerutil.ContainsFinalizer(latestSandbox, finalizerPoolAllocation) {
 			return nil
@@ -644,7 +644,7 @@ func (r *PoolReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconci
 			{
 				NamespacedName: types.NamespacedName{
 					Namespace: batchSandbox.Namespace,
-					Name:      batchSandbox.Spec.PoolRef,
+					Name:      utils.EffectivePoolRef(batchSandbox),
 				},
 			},
 		}
@@ -670,7 +670,7 @@ func (r *PoolReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconci
 			q.Add(reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: oldObj.Namespace,
-					Name:      oldObj.Spec.PoolRef,
+					Name:      utils.EffectivePoolRef(oldObj),
 				},
 			})
 		},

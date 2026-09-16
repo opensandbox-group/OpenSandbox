@@ -33,11 +33,11 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
-// Regression tests for the spec.poolRef CEL transition rule. Re-pointing a
+// Regression tests for the controller-side poolRef guard. Re-pointing a
 // bound BatchSandbox to a different pool used to make the previous pool
 // recycle the in-use pod while the stale allocation record blocked the new
 // pool from supplying a replacement, leaving the sandbox permanently starved.
-var _ = Describe("BatchSandbox poolRef immutability", func() {
+var _ = Describe("BatchSandbox poolRef guard", func() {
 	var (
 		timeout  = 15 * time.Second
 		interval = 1 * time.Second
@@ -123,7 +123,7 @@ var _ = Describe("BatchSandbox poolRef immutability", func() {
 			}
 		})
 
-		It("rejects the re-point and keeps the existing allocation intact", func() {
+		It("reports the re-point and keeps the existing allocation intact", func() {
 			bsbxName := types.NamespacedName{
 				Name:      "immu-switch-" + rand.String(8),
 				Namespace: "default",
@@ -159,10 +159,18 @@ var _ = Describe("BatchSandbox poolRef immutability", func() {
 				latest.Spec.PoolRef = poolBName.Name
 				return k8sClient.Update(ctx, latest)
 			})
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("cannot be re-pointed"))
+			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the sandbox keeps its pod and binding")
+			By("reporting the rejected transition")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, bsbxName, batchSandbox)).To(Succeed())
+				g.Expect(batchSandbox.Status.Conditions).To(ContainElement(And(
+					HaveField("Type", sandboxv1alpha1.BatchSandboxConditionType("PoolRefUpdateRejected")),
+					HaveField("Status", sandboxv1alpha1.ConditionTrue),
+				)))
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying the sandbox keeps its pod and original allocation")
 			Consistently(func(g Gomega) {
 				pod := &v1.Pod{}
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -172,11 +180,29 @@ var _ = Describe("BatchSandbox poolRef immutability", func() {
 				g.Expect(pod.DeletionTimestamp).To(BeNil())
 
 				g.Expect(k8sClient.Get(ctx, bsbxName, batchSandbox)).To(Succeed())
-				g.Expect(batchSandbox.Spec.PoolRef).To(Equal(poolAName.Name))
+				g.Expect(batchSandbox.Spec.PoolRef).To(Equal(poolBName.Name))
+				g.Expect(batchSandbox.Status.Ready).To(Equal(int32(1)))
 				alloc, err := getSandboxAllocation(batchSandbox)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(alloc.Pods).To(ConsistOf(allocatedPod))
+				g.Expect(alloc.PoolRef).To(Equal(poolAName.Name))
 			}, 5*time.Second, interval).Should(Succeed())
+
+			By("restoring the original reference clears the rejection condition")
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &sandboxv1alpha1.BatchSandbox{}
+				if err := k8sClient.Get(ctx, bsbxName, latest); err != nil {
+					return err
+				}
+				latest.Spec.PoolRef = poolAName.Name
+				return k8sClient.Update(ctx, latest)
+			})).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, bsbxName, batchSandbox)).To(Succeed())
+				g.Expect(batchSandbox.Status.Conditions).NotTo(ContainElement(
+					HaveField("Type", sandboxv1alpha1.BatchSandboxConditionPoolRefUpdateRejected),
+				))
+			}, timeout, interval).Should(Succeed())
 
 			Expect(k8sClient.Delete(ctx, batchSandbox)).To(Succeed())
 		})
@@ -206,18 +232,6 @@ var _ = Describe("BatchSandbox poolRef immutability", func() {
 				latest.Spec.PoolRef = poolAName.Name
 				return k8sClient.Update(ctx, latest)
 			})).To(Succeed())
-
-			By("re-pointing the now-bound sandbox to pool B is rejected")
-			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				latest := &sandboxv1alpha1.BatchSandbox{}
-				if err := k8sClient.Get(ctx, bsbxName, latest); err != nil {
-					return err
-				}
-				latest.Spec.PoolRef = poolBName.Name
-				return k8sClient.Update(ctx, latest)
-			})
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("cannot be re-pointed"))
 
 			By("clearing poolRef to detach is allowed")
 			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {

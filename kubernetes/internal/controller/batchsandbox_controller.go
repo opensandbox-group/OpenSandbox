@@ -224,6 +224,7 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	runtimeView := buildRuntimeView(batchSbx, pods)
+	r.applyPoolRefGuard(batchSbx, runtimeView.status)
 	poolAllocationPending, err := r.applyFixedPoolCapacityCondition(ctx, batchSbx, runtimeView.status)
 	if err != nil {
 		aggErrors = append(aggErrors, err)
@@ -331,7 +332,7 @@ func (r *BatchSandboxReconciler) applyFixedPoolCapacityCondition(
 		)
 		return false, nil
 	}
-	if batchSbx.Spec.PoolRef == "" || batchSbx.Spec.PoolRef == poolAutoAssignRef {
+	if poolRef := utils.EffectivePoolRef(batchSbx); poolRef == "" || poolRef == poolAutoAssignRef {
 		setConditionInStatus(
 			status,
 			sandboxv1alpha1.BatchSandboxConditionPoolAllocationPending,
@@ -359,7 +360,7 @@ func (r *BatchSandboxReconciler) applyFixedPoolCapacityCondition(
 	}
 
 	pool := &sandboxv1alpha1.Pool{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: batchSbx.Namespace, Name: batchSbx.Spec.PoolRef}, pool); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: batchSbx.Namespace, Name: utils.EffectivePoolRef(batchSbx)}, pool); err != nil {
 		if errors.IsNotFound(err) {
 			setConditionInStatus(
 				status,
