@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 )
@@ -46,8 +47,10 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
-	// Increase scanner buffer from default 64KiB to 4MiB to handle large SSE data lines.
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	// Do not cap the line length: execd writes each stdout/stderr line of a
+	// command as one event line of unbounded size, and the event is kept in
+	// memory by the handler anyway. The buffer starts at 64KiB and grows.
+	scanner.Buffer(make([]byte, 64*1024), math.MaxInt)
 
 	var current StreamEvent
 	var dataLines []string
