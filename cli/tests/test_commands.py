@@ -1180,7 +1180,7 @@ class TestFileChmod:
 
 
 class TestCommandSeparators:
-    def test_command_run_supports_shell_payload_after_separator(self, runner: CliRunner) -> None:
+    def test_command_run_passes_native_argv_after_separator(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
         execution = MagicMock()
         execution.error = None
@@ -1195,7 +1195,47 @@ class TestCommandSeparators:
 
         assert result.exit_code == 0
         mock_sb.commands.run.assert_called_once()
-        assert mock_sb.commands.run.call_args.args[0] == "sh -lc 'echo ready'"
+        assert mock_sb.commands.run.call_args.args[0] == ["sh", "-lc", "echo ready"]
+
+    def test_command_run_preserves_literal_argv_arguments(self, runner: CliRunner) -> None:
+        # Exact reproduction from #1757: the trailing arguments must reach the
+        # process verbatim — literal "$HOME", embedded space, single quote, and
+        # an empty string — with no shell quoting or expansion in between.
+        mock_sb = MagicMock()
+        execution = MagicMock()
+        execution.error = None
+        mock_sb.commands.run.return_value = execution
+
+        result = _invoke(
+            runner,
+            [
+                "command",
+                "run",
+                "sb-1",
+                "--",
+                "python3",
+                "-c",
+                "import sys; print(sys.argv[1:])",
+                "a b",
+                "$HOME",
+                "x'y",
+                "",
+            ],
+            sandbox=mock_sb,
+            output_format="raw",
+        )
+
+        assert result.exit_code == 0
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == [
+            "python3",
+            "-c",
+            "import sys; print(sys.argv[1:])",
+            "a b",
+            "$HOME",
+            "x'y",
+            "",
+        ]
 
     def test_command_run_help_mentions_separator_rule(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["command", "run", "--help"])
@@ -1455,6 +1495,9 @@ class TestCommandRun:
         data = json.loads(result.output)
         assert data["execution_id"] == "exec-123"
         assert data["mode"] == "background"
+        # Background mode passes the payload as native argv, like foreground.
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == ["echo", "hello"]
 
     def test_foreground_run_rejects_json_output(self, runner: CliRunner) -> None:
         result = _invoke(

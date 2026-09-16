@@ -33,6 +33,19 @@ from opensandbox.models.sandboxes import SandboxEndpoint
 
 _UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
 
+# Exact reproduction case from #1757: the trailing arguments must reach the
+# process verbatim — literal "$HOME", embedded space, single quote, and an
+# empty string — without any shell expansion or quoting.
+ISSUE_1757_ARGV = [
+    "python3",
+    "-c",
+    "import sys; print(sys.argv[1:])",
+    "a b",
+    "$HOME",
+    "x'y",
+    "",
+]
+
 
 class _SseTransport(httpx.AsyncBaseTransport):
     def __init__(self) -> None:
@@ -66,6 +79,32 @@ class _SseTransport(httpx.AsyncBaseTransport):
             events = [
                 {"type": "init", "text": "exec-unicode", "timestamp": 1},
                 {"type": "stdout", "text": _UNICODE_SEPARATORS, "timestamp": 2},
+                {
+                    "type": "execution_complete",
+                    "timestamp": 3,
+                    "execution_time": 4,
+                },
+            ]
+            sse = b"".join(
+                f"{json.dumps(event, ensure_ascii=False)}\n\n".encode()
+                for event in events
+            )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=sse,
+                request=request,
+            )
+
+        if request.url.path == "/command" and payload.get("argv") == ISSUE_1757_ARGV:
+            # Simulate execd's native argv execution: run the payload as
+            # `python3 -c <code> <args...>` directly (no shell) and stream
+            # back what `print(sys.argv[1:])` produces — with -c, Python's
+            # sys.argv[1:] is exactly the trailing literal arguments.
+            printed = str(payload["argv"][3:]) + "\n"
+            events = [
+                {"type": "init", "text": "exec-argv", "timestamp": 1},
+                {"type": "stdout", "text": printed, "timestamp": 2},
                 {
                     "type": "execution_complete",
                     "timestamp": 3,
@@ -154,6 +193,28 @@ async def test_run_command_streaming_preserves_unicode_separators() -> None:
     assert execution.logs.stdout[0].text == _UNICODE_SEPARATORS
     assert execution.complete is not None
     assert execution.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_run_command_argv_streams_literal_arguments() -> None:
+    # Issue #1757 reproduction: argv must cross the wire verbatim and the
+    # streamed stdout must reflect the literal arguments.
+    transport = _SseTransport()
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    execution = await adapter.run(ISSUE_1757_ARGV)
+
+    assert execution.id == "exec-argv"
+    assert execution.logs.stdout[0].text == str(ISSUE_1757_ARGV[3:]) + "\n"
+    assert "$HOME" in execution.logs.stdout[0].text
+    assert execution.complete is not None
+    assert execution.exit_code == 0
+
+    assert transport.last_request is not None
+    body = json.loads(transport.last_request.content.decode("utf-8"))
+    assert body == {"argv": ISSUE_1757_ARGV}
 
 
 @pytest.mark.asyncio
