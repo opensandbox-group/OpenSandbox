@@ -79,6 +79,8 @@ Tasks are optional: a `BatchSandbox` without a `taskTemplate` is pure allocation
 
 Pausing persists the rootfs, pushes it to the configured registry, and releases pods and pool slots; resuming recreates the workload from the snapshot image with the same sandbox ID. The commit runs as a job on the source node and is limited to single-replica sandboxes. Registry credentials, retention, and capacity planning are operator concerns — deleting a snapshot record does not delete the pushed images.
 
+Set `--snapshot-image-uri-template` (Helm: `controller.snapshot.imageURITemplate`) to customize snapshot image names before the initial push. An empty template preserves the default naming rule; see [custom image names](/guides/pause-resume#custom-image-names) for the named fields and date/timezone formatting helpers.
+
 ## Reading status
 
 The phase reports sandbox runtime health; the conditions explain it. Both are Kubernetes-native and inspectable with plain `kubectl`.

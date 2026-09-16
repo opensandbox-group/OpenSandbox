@@ -161,7 +161,8 @@ Configure the controller manager deployment with snapshot flags:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `--snapshot-registry` | string | `""` | **Required.** OCI registry prefix. Images are stored as `<registry>/<sandboxName>-<container>:snap-gen<N>`. |
+| `--snapshot-registry` | string | `""` | **Required.** OCI registry prefix. By default, images are stored as `<registry>/<sandboxName>-<container>:snap-gen<N>`. |
+| `--snapshot-image-uri-template` | string | `""` | Go named-field template for snapshot image URIs; empty uses the default naming rule below. |
 | `--snapshot-registry-insecure` | bool | `false` | Enables insecure registry mode for snapshot push operations. Use only for HTTP or self-signed local registries. |
 | `--snapshot-push-secret` | string | `""` | Kubernetes Secret name for pushing snapshots. Must be `kubernetes.io/dockerconfigjson` type. |
 | `--image-committer-pod-template-file` | string | `""` | Path to a PodTemplateSpec overlay for commit Job Pods. |
@@ -177,6 +178,7 @@ The `opensandbox-controller` Helm chart now exposes the snapshot-related control
 - `controller.snapshot.imageCommitterPodTemplate`
 - `controller.snapshot.commitJobTimeout`
 - `controller.snapshot.registry`
+- `controller.snapshot.imageURITemplate`
 - `controller.snapshot.registryInsecure`
 - `controller.snapshot.snapshotPushSecret`
 - `controller.snapshot.resumePullSecret`
@@ -314,6 +316,115 @@ The controller distinguishes the two modes by owner reference. Pause/resume
 snapshots are created by the `BatchSandbox` controller and have a controller
 ownerReference to the owning `BatchSandbox`; public snapshots are created by the
 Lifecycle server and do not use that ownerReference.
+
+#### Custom image names
+
+Set `--snapshot-image-uri-template` on the controller manager, or
+`controller.snapshot.imageURITemplate` in the controller Helm chart, to replace the
+naming rule. An empty value uses this Go `text/template`:
+
+```text
+{{.Registry}}/{{.SandboxName}}-{{.ContainerName}}:{{.SnapshotTag}}
+```
+
+The template receives these named fields:
+
+| Field | Value |
+|-------|-------|
+| `Registry` | The required `--snapshot-registry` prefix, including any repository path |
+| `Namespace` | The snapshot's Kubernetes namespace |
+| `SandboxName` | The source BatchSandbox name |
+| `SnapshotName` | The SandboxSnapshot name |
+| `SnapshotUID` | The SandboxSnapshot UID |
+| `SnapshotCreationTime` | The SandboxSnapshot `metadata.creationTimestamp` as a Go `time.Time` in the controller process's local timezone |
+| `ContainerName` | The source container name, or `vmstate` for a QEMU VM-state artifact |
+| `SnapshotTag` | The existing `snap-gen<N>` or public snapshot tag described above |
+| `ArtifactKind` | `rootfs` for container images, or `vmstate` for a QEMU VM-state artifact |
+
+For example, use one repository with a distinct tag for each snapshot artifact:
+
+```yaml
+controller:
+  snapshot:
+    registry: registry.example.com/sandboxes
+    imageURITemplate: '{{.Registry}}/snapshots:{{.SnapshotUID}}-{{.ArtifactKind}}-{{.ContainerName}}'
+```
+
+To group images by the snapshot creation date in the controller's local
+timezone while retaining the sandbox, container, and snapshot tag:
+
+```yaml
+controller:
+  snapshot:
+    registry: registry.example.com/team
+    imageURITemplate: '{{.Registry}}/library/snapshots-{{date "2006-01-02" .SnapshotCreationTime}}:{{.SandboxName}}-{{.ContainerName}}-{{.SnapshotTag}}'
+```
+
+The date functions follow Helm's names and argument order and accept a Go
+`time.Time`, such as `SnapshotCreationTime`:
+
+```text
+{{date "2006-01-02" .SnapshotCreationTime}}
+{{dateInZone "2006-01-02" .SnapshotCreationTime "UTC"}}
+{{dateInZone "2006-01-02-15-04-05" .SnapshotCreationTime "+08:00"}}
+{{dateInZone "2006-01-02" .SnapshotCreationTime "America/New_York"}}
+```
+
+`date` uses Go's `time.Local`. `dateInZone` accepts `Local` or an empty timezone
+for the same default, `UTC` or `Z`, a signed `HH:MM` offset (hours 00–23, minutes
+00–59), or an IANA `Area/Location` name. Fixed offsets such as `+05:30` do not
+change with daylight saving time; named zones follow the rules for the snapshot's
+creation instant. Unknown zones and malformed offsets fail template execution.
+These helpers reject a zero timestamp instead of substituting the current time.
+
+On Unix, the local timezone comes from `TZ`, or `/etc/localtime` when `TZ` is
+unset. In Kubernetes this is the controller container's timezone; set its `TZ`
+environment variable or provide its timezone files to select the intended local
+zone. The controller embeds timezone data for named zones when the OS has none.
+
+Formatting uses Go's standard layouts: `2006-01-02` for a date,
+`20060102-150405` for a compact timestamp, and `2006-01-02-15-04-05.000` for
+milliseconds. Java-style `yyyy-MM-dd` patterns are not supported. Layouts must
+produce a valid image reference in their template position: spaces, colons, or
+uppercase month names are unsuitable in a repository name and fail validation.
+
+Native methods remain available: `.SnapshotCreationTime.Format "2006-01-02"`
+uses the local timezone, while `.SnapshotCreationTime.UTC.Format "2006-01-02"`
+selects UTC explicitly. Templates written for the earlier UTC-only field should
+select UTC explicitly to preserve their date when the controller's local zone is
+not UTC.
+
+The source is always the snapshot creation timestamp, so retries after midnight
+keep the same date with the same timezone configuration. Existing commit Jobs
+retain their resolved targets when the template or timezone setting changes.
+
+For the umbrella chart, nest these values under `opensandbox-controller`.
+Helm passes the template literally; it does not evaluate the Go template fields.
+For Kustomize or a direct Deployment, add an argument to the manager container:
+
+```yaml
+- '--snapshot-image-uri-template={{.Registry}}/snapshots:{{.SnapshotUID}}-{{.ArtifactKind}}-{{.ContainerName}}'
+```
+
+The controller renders the URI before creating the commit Job. The image
+committer pushes directly to that URI, and restore uses the recorded reference;
+there is no intermediate push or rename. QEMU rootfs and VM-state artifacts use
+the same template and original snapshot tag.
+
+Templates must produce valid tagged OCI image references without a digest.
+Custom template results are normalized to fully qualified references before
+they are recorded and passed to the image committer: `snapshots:tag` becomes
+`docker.io/library/snapshots:tag`, and `team/snapshots:tag` becomes
+`docker.io/team/snapshots:tag`. Include an explicit registry host (a hostname
+containing a dot, a host with a port, or `localhost`) to target another registry.
+An empty template keeps the original naming rule and registry prefix unchanged.
+Names are not automatically sanitized or truncated. Include fields that keep
+artifacts and snapshots distinct; the controller rejects duplicate targets
+within a snapshot, but cannot detect collisions with other snapshots. Template
+syntax errors prevent controller startup; rendering errors, invalid references,
+and duplicate targets fail the snapshot before a commit Job is created.
+Changes apply when creating new commit Jobs; existing Jobs keep their resolved
+targets, and completed snapshots retain their recorded restore references.
 
 ### Runtime compatibility
 
