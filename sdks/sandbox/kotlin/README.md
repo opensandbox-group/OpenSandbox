@@ -224,9 +224,11 @@ manager.deleteSnapshot(ready.getId());
 
 Isolated sessions run multi-step code in a hardened, resource-bounded
 namespace with bind mounts — reachable through `sandbox.isolation()`. The
-service also offers `runOnce(...)` (create → run → guaranteed delete in one
-call) and `withSession(...) { }` (scoped block with guaranteed delete) for
-callers that don't need to keep the session around:
+service also offers `runOnce(...)` (create → run → best-effort delete in
+one call) and `withSession(...) { }` (scoped block with best-effort
+delete — both catch and log delete failures, so the session can outlive
+the helper if execd is unavailable) for callers that don't need to keep
+the session around:
 
 ```java
 IsolationSession session = sandbox.isolation().create(
