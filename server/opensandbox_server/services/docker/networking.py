@@ -263,7 +263,6 @@ class DockerNetworkingMixin:
                     self._resolve_proxy_host(),
                     labels,
                     port,
-                    include_egress_auth_headers=False,
                 )
             return self._resolve_internal_endpoint(container, port)
 
@@ -388,10 +387,13 @@ class DockerNetworkingMixin:
     def _resolve_internal_endpoint(self, container, port: int) -> Endpoint:
         """Return the internal endpoint used when bypassing host mapping."""
         if self.network_mode == HOST_NETWORK_MODE:
-            return Endpoint(endpoint=f"127.0.0.1:{port}")
-
-        ip_address = self._extract_bridge_ip(container)
-        return Endpoint(endpoint=f"{ip_address}:{port}")
+            endpoint = Endpoint(endpoint=f"127.0.0.1:{port}")
+        else:
+            ip_address = self._extract_bridge_ip(container)
+            endpoint = Endpoint(endpoint=f"{ip_address}:{port}")
+        labels = container.attrs.get("Config", {}).get("Labels") or {}
+        self._attach_egress_auth_headers(endpoint, labels, port)
+        return endpoint
 
     # ---------------------------
     # Common helpers for creation

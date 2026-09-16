@@ -120,11 +120,16 @@ def _filter_proxy_headers(
     *,
     extra_excluded: Optional[set[str]] = None,
     connection_header: Optional[str] = None,
+    internal: bool = False,
 ) -> dict[str, str]:
     """Drop transport/auth headers while preserving app-level headers.
 
     Endpoint-resolved headers are merged for routing, except secure-access
     credentials which callers must explicitly provide on server-proxy requests.
+
+    When *internal* is True the call originates from a server-managed API route
+    (e.g. ``/networkpolicy``) rather than from the external ``/proxy/{port}``
+    path, so egress-auth credentials resolved from the endpoint are preserved.
     """
     excluded = set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS) | set(FORWARDED_HEADERS)
     if extra_excluded:
@@ -143,8 +148,9 @@ def _filter_proxy_headers(
     if endpoint_headers:
         endpoint_header_excluded = {
             OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower(),
-            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(),
         } | FORWARDED_HEADERS
+        if not internal:
+            endpoint_header_excluded.add(OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower())
         forwarded.update(
             {
                 key: value
@@ -317,6 +323,8 @@ async def _proxy_http_request(
     sandbox_id: str,
     port: int,
     full_path: str,
+    *,
+    internal: bool = False,
 ) -> StreamingResponse:
     resolve_internal = get_config().proxy.resolve_internal
     endpoint = lifecycle.sandbox_service.get_endpoint(
@@ -343,6 +351,7 @@ async def _proxy_http_request(
             request.headers,
             endpoint.headers,
             connection_header=request.headers.get("connection"),
+            internal=internal,
         )
         # Forwarded headers are stripped above and rebuilt from the connection
         # observed by this trusted proxy, so clients cannot spoof transport state.

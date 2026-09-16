@@ -567,7 +567,7 @@ def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fsb, monkeyp
 
     client, _, _ = http_fsb
 
-    async def proxy(request, sandbox_id, port, path):
+    async def proxy(request, sandbox_id, port, path, **kwargs):
         assert (sandbox_id, port, path) == ("legacy-id", 18080, "policy")
         body = b"".join([part async for part in request.stream()])
         return JSONResponse(json.loads(body) if body else {"status": "ok"})
