@@ -209,7 +209,16 @@ class SandboxSync:
     def credential_vault(self) -> CredentialVaultSync:
         """
         Provides access to sandbox-scoped Credential Vault operations.
+
+        Raises:
+            SandboxException: for sandboxes created from fsb templates
+                (they have no sandbox-side egress sidecar).
         """
+        if self._from_template:
+            raise SandboxException(
+                "Credential Vault is not available for sandboxes created "
+                "from fsb templates: they have no sandbox-side egress sidecar."
+            )
         return self._egress_service
 
     @property
@@ -774,6 +783,7 @@ class SandboxSync:
         connect_timeout: timedelta = timedelta(seconds=30),
         health_check_polling_interval: timedelta = timedelta(milliseconds=200),
         skip_health_check: bool = False,
+        from_template: bool = False,
     ) -> "SandboxSync":
         """
         Connect to an existing sandbox instance by ID (blocking).
@@ -785,6 +795,10 @@ class SandboxSync:
             connect_timeout: Total endpoint/health-check budget; see class timeout notes.
             health_check_polling_interval: Polling interval used while waiting for readiness/health.
             skip_health_check: Skip health checks; endpoint publication is still awaited.
+            from_template: Declare that the sandbox was created from a fsb
+                template. Egress policy operations then go through the
+                lifecycle control plane instead of the egress sidecar, and
+                Credential Vault is unavailable.
 
         Returns:
             Connected SandboxSync instance
@@ -809,9 +823,15 @@ class SandboxSync:
             execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-            ))
+            if from_template:
+                # fsb template sandboxes have no sandbox-side egress sidecar:
+                # policy operations go through the lifecycle control plane.
+                egress_service = factory.create_network_policy_service(sandbox_id)
+            else:
+                egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ))
+                egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -820,13 +840,14 @@ class SandboxSync:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
-                egress_service=factory.create_egress_service(egress_endpoint),
+                egress_service=egress_service,
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(
                     execd_endpoint
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
+                from_template=from_template,
             )
 
             if not skip_health_check:
@@ -853,6 +874,7 @@ class SandboxSync:
         resume_timeout: timedelta = timedelta(seconds=30),
         health_check_polling_interval: timedelta = timedelta(milliseconds=200),
         skip_health_check: bool = False,
+        from_template: bool = False,
     ) -> "SandboxSync":
         """
         Resume a paused sandbox by ID and return a new, usable SandboxSync instance.
@@ -869,6 +891,10 @@ class SandboxSync:
                 completes; see class timeout notes.
             health_check_polling_interval: Polling interval used while waiting for readiness/health.
             skip_health_check: Skip health checks; endpoint publication is still awaited.
+            from_template: Declare that the sandbox was created from a fsb
+                template. Egress policy operations then go through the
+                lifecycle control plane instead of the egress sidecar, and
+                Credential Vault is unavailable.
         """
         if not sandbox_id:
             raise InvalidArgumentException("Sandbox ID must be specified")
@@ -891,9 +917,15 @@ class SandboxSync:
             execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-            ))
+            if from_template:
+                # fsb template sandboxes have no sandbox-side egress sidecar:
+                # policy operations go through the lifecycle control plane.
+                egress_service = factory.create_network_policy_service(sandbox_id)
+            else:
+                egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ))
+                egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -902,13 +934,14 @@ class SandboxSync:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
-                egress_service=factory.create_egress_service(egress_endpoint),
+                egress_service=egress_service,
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(
                     execd_endpoint
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
+                from_template=from_template,
             )
 
             if not skip_health_check:

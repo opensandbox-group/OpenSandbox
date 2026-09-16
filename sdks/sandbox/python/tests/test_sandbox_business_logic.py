@@ -25,6 +25,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
 from opensandbox.exceptions import (
     InvalidArgumentException,
+    SandboxException,
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
@@ -1081,3 +1082,87 @@ async def test_create_from_template_rejects_blank_template_id() -> None:
         await Sandbox.create_from_template(
             "  ", timeout=timedelta(minutes=5)
         )
+
+
+@pytest.mark.asyncio
+async def test_credential_vault_raises_for_template_sandbox() -> None:
+    sandbox = await _make_template_sandbox()
+    with pytest.raises(SandboxException, match="Credential Vault"):
+        _ = sandbox.credential_vault
+
+
+@pytest.mark.asyncio
+async def test_connect_from_template_skips_egress_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SandboxServiceConnectStub:
+        def __init__(self) -> None:
+            self.endpoint_ports: list[int] = []
+
+        async def get_sandbox_endpoint(
+            self, _sandbox_id, port: int, _use_server_proxy: bool = False
+        ):
+            self.endpoint_ports.append(port)
+            return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            self.service = _SandboxServiceConnectStub()
+            self.network_policy_calls: list[str] = []
+
+        def create_sandbox_service(self):
+            return self.service
+
+        def create_filesystem_service(self, _endpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint):
+            raise AssertionError("sidecar egress must not be constructed")
+
+        def create_network_policy_service(self, sandbox_id: str):
+            self.network_policy_calls.append(sandbox_id)
+            return _Noop()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    factory = _FactoryStub(ConnectionConfig())
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", lambda _c: factory)
+
+    sandbox = await Sandbox.connect(
+        "sbx-1", from_template=True, skip_health_check=True
+    )
+
+    assert sandbox.from_template is True
+    assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
+    assert factory.network_policy_calls == ["sbx-1"]
+    with pytest.raises(SandboxException, match="Credential Vault"):
+        _ = sandbox.credential_vault
+
+
+async def _make_template_sandbox() -> Sandbox:
+    from opensandbox.config import ConnectionConfig as _Cfg
+
+    return Sandbox(
+        sandbox_id="sbx-tpl",
+        sandbox_service=_SandboxServiceStub(),
+        filesystem_service=_Noop(),
+        command_service=_Noop(),
+        health_service=_Noop(),
+        metrics_service=_Noop(),
+        egress_service=_Noop(),
+        connection_config=_Cfg(),
+        from_template=True,
+    )
