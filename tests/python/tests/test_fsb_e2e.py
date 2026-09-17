@@ -37,6 +37,7 @@ unset and is excluded from the default ``make test`` run.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -95,15 +96,47 @@ def _connection_config() -> ConnectionConfig:
 
 
 async def _wait_until(operation, timeout: timedelta, description: str):
-    """Poll ``operation`` until it returns truthy, mirroring the shell wait_for."""
+    """Poll ``operation`` until it returns truthy, mirroring the shell wait_for.
+
+    ``operation`` may be a plain callable, an already-created coroutine, or a
+    callable returning an awaitable.
+    """
     deadline = time.monotonic() + timeout.total_seconds()
     last = None
     while time.monotonic() < deadline:
-        last = await operation()
-        if last:
-            return last
+        result = operation() if callable(operation) else operation
+        if inspect.isawaitable(result):
+            result = await result
+        last = result
+        if result:
+            return result
         await asyncio.sleep(2)
     raise AssertionError(f"timed out after {timeout} waiting for {description}: {last!r}")
+
+
+async def _get_sandbox_info(manager: SandboxManager, sandbox_id: str):
+    """get_sandbox_info tolerating a transient 404.
+
+    Right after a fsb create returns, the Sandbox CR may not have propagated
+    through the server's informer yet; the GET then 404s even though the
+    sandbox exists and serves traffic.
+    """
+    try:
+        return await manager.get_sandbox_info(sandbox_id)
+    except SandboxApiException as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+
+
+async def _get_snapshot(manager: SandboxManager, snapshot_id: str):
+    """get_snapshot tolerating a transient 404 (same informer lag as above)."""
+    try:
+        return await manager.get_snapshot(snapshot_id)
+    except SandboxApiException as exc:
+        if exc.status_code == 404:
+            return None
+        raise
 
 
 async def _kill_and_wait_gone(manager: SandboxManager, sandbox_id: str) -> None:
@@ -232,6 +265,12 @@ class TestFsbE2E:
                 )
                 return result.error is None
 
+            async def _http_blocked(target: str) -> bool:
+                result = await sandbox.commands.run(
+                    f"wget -T 8 -q -O /dev/null https://{target}"
+                )
+                return result.error is not None
+
             async def _example_com_enforced() -> bool:
                 policy = await sandbox.get_egress_policy()
                 return any(
@@ -249,7 +288,7 @@ class TestFsbE2E:
                 "allowed target serves HTTPS",
             )
             await _wait_until(
-                lambda: not _http_reachable("www.github.com"),
+                lambda: _http_blocked("www.github.com"),
                 timedelta(seconds=30),
                 "denied target must not serve HTTPS",
             )
@@ -301,7 +340,7 @@ class TestFsbE2E:
                 "deleted rule no longer served",
             )
             await _wait_until(
-                lambda: not _http_reachable("example.com"),
+                lambda: _http_blocked("example.com"),
                 timedelta(seconds=30),
                 "deleted target must stop serving HTTPS",
             )
@@ -360,8 +399,8 @@ class TestFsbE2E:
         )
         try:
             async def _state_is(state: str) -> bool:
-                info = await manager.get_sandbox_info(sandbox.id)
-                return info.status.state == state
+                info = await _get_sandbox_info(manager, sandbox.id)
+                return info is not None and info.status.state == state
 
             await _wait_until(_state_is("Running"), timedelta(minutes=3), "Running")
 
@@ -396,8 +435,8 @@ class TestFsbE2E:
         snapshot_ids: list[str] = []
         try:
             async def _state_is(state: str) -> bool:
-                info = await manager.get_sandbox_info(source.id)
-                return info.status.state == state
+                info = await _get_sandbox_info(manager, source.id)
+                return info is not None and info.status.state == state
 
             await _wait_until(_state_is("Running"), timedelta(minutes=5), "Running")
             assert await source.is_healthy()
@@ -422,8 +461,8 @@ class TestFsbE2E:
                 assert exc.status_code == 409, f"unexpected re-entry error: {exc}"
 
             async def _snapshot_ready(snapshot_id: str) -> bool:
-                info = await manager.get_snapshot(snapshot_id)
-                return info.status.state == "Ready"
+                info = await _get_snapshot(manager, snapshot_id)
+                return info is not None and info.status.state == "Ready"
 
             await _wait_until(
                 lambda: _snapshot_ready(snapshot.id),
@@ -438,8 +477,8 @@ class TestFsbE2E:
 
             if extra_snapshot_id is not None:
                 async def _extra_terminal() -> bool:
-                    info = await manager.get_snapshot(extra_snapshot_id)
-                    return info.status.state in {"Ready", "Failed"}
+                    info = await _get_snapshot(manager, extra_snapshot_id)
+                    return info is not None and info.status.state in {"Ready", "Failed"}
 
                 await _wait_until(
                     _extra_terminal,
