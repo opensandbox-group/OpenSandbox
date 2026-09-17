@@ -187,14 +187,14 @@ class Sandbox:
     def origin(self) -> str:
         """Origin of this sandbox (see :class:`SandboxOrigin`).
 
-        Set locally for sandboxes created via ``create`` /
-        ``create_from_template``; taken from the server's
-        ``OPEN-SANDBOX-ORIGIN`` response header when connecting to or
-        resuming an existing sandbox (``unknown`` when the server does not
-        send it).
+        ``template`` when the sandbox runs on a fsb golden-image template:
+        set locally by ``create_from_template``, and reported by the
+        server's ``OPEN-SANDBOX-ORIGIN`` response header otherwise (also
+        honored for snapshot restores, which boot the template's published
+        artifact set). ``unknown`` for everything else.
 
-        Template-backed sandboxes (``origin == "template"``) route egress
-        policy operations through the lifecycle control plane
+        Template-backed sandboxes route egress policy operations through
+        the lifecycle control plane
         (``/sandboxes/{sandboxId}/networkpolicy``) instead of the
         sandbox-side egress sidecar.
         """
@@ -599,7 +599,6 @@ class Sandbox:
         if isinstance(image, str):
             image = SandboxImageSpec(image=image)
 
-        origin = SandboxOrigin.SNAPSHOT if snapshot_id else SandboxOrigin.IMAGE
         startup_source = image.image if image is not None else snapshot_id
         timeout_log = (
             "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
@@ -616,7 +615,6 @@ class Sandbox:
             health_check=health_check,
             health_check_polling_interval=health_check_polling_interval,
             skip_health_check=skip_health_check,
-            origin=origin,
             create_call=lambda service: service.create_sandbox(
                 spec=image,
                 entrypoint=entrypoint,
@@ -755,7 +753,24 @@ class Sandbox:
                         response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
                     )),
                 )
-                egress_service = factory.create_egress_service(egress_endpoint)
+                # The server is authoritative about the runtime backing: for
+                # fsb- prefixed sandboxes it reports `template` even when the
+                # create used a snapshotId (a restore boots the template's
+                # published artifact set). Such sandboxes have no sidecar,
+                # so the egress service is swapped for the control-plane
+                # adapter and the fetched sidecar endpoint goes unused.
+                origin = execd_endpoint.origin or origin
+                if origin == SandboxOrigin.TEMPLATE:
+                    logger.info(
+                        "server reported origin=template for %s; routing "
+                        "egress policy through the lifecycle control plane",
+                        response.id,
+                    )
+                    egress_service = factory.create_network_policy_service(
+                        response.id
+                    )
+                else:
+                    egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=response.id,

@@ -1007,26 +1007,24 @@ class SandboxState:
 class SandboxOrigin:
     """Origin backing a sandbox.
 
-    ``create``/``create_from_template`` set the value locally (the client
-    knows what it asked for). ``connect``/``resume`` take the value from the
-    server's ``OPEN-SANDBOX-ORIGIN`` response header, which currently is
-    only sent for template-backed sandboxes.
+    The protocol defines a single origin value: ``template`` (reported by
+    the server via the ``OPEN-SANDBOX-ORIGIN`` response header, and set
+    locally when the sandbox was explicitly created from a template).
+    Anything else - including sandboxes created from an image or a snapshot
+    - carries no origin value.
 
     Known values:
-        IMAGE (str): Created from a container image.
-        SNAPSHOT (str): Restored from a snapshot.
         TEMPLATE (str): Runs on a fsb golden-image template (no sandbox-side
             egress sidecar; egress policy goes through the lifecycle control
             plane).
-        UNKNOWN (str): The origin could not be determined (e.g. an older
-            server that does not send the header).
+        UNKNOWN (str): The origin could not be determined (create from an
+            image or snapshot, or an older server that does not send the
+            header).
 
     The server may introduce new values in future versions; clients should
     handle unknown string values gracefully.
     """
 
-    IMAGE = "image"
-    SNAPSHOT = "snapshot"
     TEMPLATE = "template"
     UNKNOWN = "unknown"
 
