@@ -16,7 +16,6 @@
 set -euxo pipefail
 
 TAG=${TAG:-latest}
-RUN_CODE_INTERPRETER_E2E=${RUN_CODE_INTERPRETER_E2E:-false}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_PID=""
@@ -91,13 +90,4 @@ pnpm -C ../../sdks install --frozen-lockfile
 export OPENSANDBOX_TEST_API_KEY=""
 export OPENSANDBOX_SANDBOX_DEFAULT_IMAGE="opensandbox/code-interpreter:${TAG}"
 
-if [ "${RUN_CODE_INTERPRETER_E2E}" = "true" ]; then
-  pnpm test:ci
-else
-  pnpm run prep:sdk
-  test_files=$(find tests -name "*.test.ts" ! -name "test_code_interpreter_e2e.test.ts" -print | sort)
-  pnpm exec vitest run ${test_files} \
-    --reporter=default \
-    --reporter=junit \
-    --outputFile=build/test-results/junit.xml
-fi
+pnpm test:ci

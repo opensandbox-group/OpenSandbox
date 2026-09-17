@@ -25,7 +25,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdks\sandbox\csharp\src\OpenSandbox\OpenSandbox.csproj" />
-    <ProjectReference Include="..\..\..\sdks\code-interpreter\csharp\src\OpenSandbox.CodeInterpreter\OpenSandbox.CodeInterpreter.csproj" />
   </ItemGroup>
 
 </Project>

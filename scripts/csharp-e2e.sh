@@ -16,7 +16,6 @@
 set -euxo pipefail
 
 TAG=${TAG:-latest}
-RUN_CODE_INTERPRETER_E2E=${RUN_CODE_INTERPRETER_E2E:-false}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_PID=""
@@ -82,13 +81,8 @@ export OPENSANDBOX_SANDBOX_DEFAULT_IMAGE="opensandbox/code-interpreter:${TAG}"
 
 mkdir -p tests/csharp/build/test-results
 dotnet restore "tests/csharp/OpenSandbox.E2ETests/OpenSandbox.E2ETests.csproj"
-DOTNET_TEST_FILTER=()
-if [ "${RUN_CODE_INTERPRETER_E2E}" != "true" ]; then
-  DOTNET_TEST_FILTER=(--filter "FullyQualifiedName!~CodeInterpreterE2ETests")
-fi
 dotnet test "tests/csharp/OpenSandbox.E2ETests/OpenSandbox.E2ETests.csproj" \
   --configuration Release \
   --no-restore \
   --results-directory "tests/csharp/build/test-results" \
-  --logger "trx;LogFileName=csharp-e2e.trx" \
-  "${DOTNET_TEST_FILTER[@]}"
+  --logger "trx;LogFileName=csharp-e2e.trx"

@@ -24,9 +24,6 @@ importers:
       '@alibaba-group/opensandbox':
         specifier: link:../../sdks/sandbox/javascript
         version: link:../../sdks/sandbox/javascript
-      '@alibaba-group/opensandbox-code-interpreter':
-        specifier: link:../../sdks/code-interpreter/javascript
-        version: link:../../sdks/code-interpreter/javascript
     devDependencies:
       '@eslint/js':
         specifier: ^9.39.4

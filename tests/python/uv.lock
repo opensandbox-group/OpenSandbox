@@ -198,35 +198,11 @@ dev = [
 ]
 
 [[package]]
-name = "opensandbox-code-interpreter"
-source = { editable = "../../sdks/code-interpreter/python" }
-dependencies = [
-    { name = "opensandbox" },
-    { name = "pydantic" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "opensandbox", editable = "../../sdks/sandbox/python" },
-    { name = "pydantic", specifier = ">=2.4.2,<3.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pyright", specifier = ">=1.1.407" },
-    { name = "pytest", specifier = ">=7.0.0" },
-    { name = "pytest-asyncio", specifier = ">=0.21.0" },
-    { name = "pytest-cov", specifier = ">=4.0.0" },
-    { name = "ruff", specifier = ">=0.14.8" },
-]
-
-[[package]]
 name = "opensandbox-e2e-tests"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "opensandbox" },
-    { name = "opensandbox-code-interpreter" },
     { name = "pydantic" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -244,7 +220,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "opensandbox", editable = "../../sdks/sandbox/python" },
-    { name = "opensandbox-code-interpreter", editable = "../../sdks/code-interpreter/python" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
