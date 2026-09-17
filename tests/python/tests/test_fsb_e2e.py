@@ -1,0 +1,378 @@
+#
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+"""E2E coverage for the fast-sandbox (fsb) integration environment.
+
+Mirrors the HTTP verify stages of
+``scripts/fast-sandbox-env/integration-env.sh`` using the Python SDK
+instead of raw curl: template catalog visibility, template-based sandbox
+creation through the signed gateway route, networkpolicy convergence
+(PATCH merge + DELETE), lifecycle ops (get/list/metadata/renew),
+pause/resume round trip, and the public snapshot round trip (snapshot,
+re-entry fence, restore, cleanup).
+
+Requires the fsb integration stack to be up plus
+``OPENSANDBOX_TEST_FSB_TEMPLATE_ID`` (the golden-image template built by
+the env script's ``template_up`` stage):
+
+    ./scripts/fast-sandbox-env/integration-env.sh up
+    cd tests/python
+    OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" \
+        uv run pytest tests/test_fsb_e2e.py
+
+The whole module is skipped when ``OPENSANDBOX_TEST_FSB_TEMPLATE_ID`` is
+unset and is excluded from the default ``make test`` run.
+"""
+
+import asyncio
+import logging
+import os
+import time
+from datetime import timedelta
+
+import pytest
+from opensandbox.config import ConnectionConfig
+from opensandbox.exceptions import SandboxApiException
+from opensandbox.manager import SandboxManager
+from opensandbox.models.sandboxes import (
+    NetworkPolicy,
+    NetworkRule,
+    SandboxFilter,
+    SandboxOrigin,
+    SnapshotFilter,
+)
+from opensandbox.models.templates import TemplateFilter, TemplatePhase
+from opensandbox.sandbox import Sandbox
+
+logger = logging.getLogger(__name__)
+
+FSB_TEMPLATE_ID = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ID", "")
+FSB_DOMAIN = os.getenv("OPENSANDBOX_TEST_DOMAIN", "127.0.0.1:18080")
+FSB_PROTOCOL = os.getenv("OPENSANDBOX_TEST_PROTOCOL", "http")
+FSB_API_KEY = os.getenv("OPENSANDBOX_TEST_API_KEY", "fast-sandbox-env")
+
+pytestmark = pytest.mark.skipif(
+    not FSB_TEMPLATE_ID,
+    reason="OPENSANDBOX_TEST_FSB_TEMPLATE_ID is not set (requires the "
+    "scripts/fast-sandbox-env integration environment)",
+)
+
+# The first create on a cold pool pulls the golden image through DART;
+# the shell verify grants it a 600s ping budget.
+COLD_READY_TIMEOUT = timedelta(minutes=15)
+WARM_READY_TIMEOUT = timedelta(minutes=5)
+
+
+def _connection_config() -> ConnectionConfig:
+    return ConnectionConfig(
+        domain=FSB_DOMAIN, protocol=FSB_PROTOCOL, api_key=FSB_API_KEY
+    )
+
+
+async def _wait_until(operation, timeout: timedelta, description: str):
+    """Poll ``operation`` until it returns truthy, mirroring the shell wait_for."""
+    deadline = time.monotonic() + timeout.total_seconds()
+    last = None
+    while time.monotonic() < deadline:
+        last = await operation()
+        if last:
+            return last
+        await asyncio.sleep(2)
+    raise AssertionError(f"timed out after {timeout} waiting for {description}: {last!r}")
+
+
+async def _kill_and_wait_gone(manager: SandboxManager, sandbox_id: str) -> None:
+    try:
+        await manager.kill_sandbox(sandbox_id)
+    except Exception as exc:  # noqa: BLE001 - cleanup must never mask test failures
+        logger.warning("verify cleanup: kill %s failed: %s", sandbox_id, exc)
+    finally:
+
+        async def _gone() -> bool:
+            try:
+                await manager.get_sandbox_info(sandbox_id)
+                return False
+            except SandboxApiException as exc:
+                return exc.status_code == 404
+
+        await _wait_until(_gone, timedelta(minutes=2), f"sandbox {sandbox_id} deleted")
+
+
+class TestFsbE2E:
+    """SDK-driven conversion of the fsb integration-env verify stages."""
+
+    @pytest.fixture(scope="class")
+    async def manager(self) -> SandboxManager:
+        async with await SandboxManager.create(_connection_config()) as mgr:
+            yield mgr
+
+    @pytest.mark.timeout(600)
+    async def test_01_template_catalog_visible(self, manager: SandboxManager) -> None:
+        info = await manager.get_template(FSB_TEMPLATE_ID)
+        assert info.status.phase == TemplatePhase.SUCCEEDED
+        assert info.status.manifest_ref, "template manifestRef is empty"
+        assert info.metadata.get("origin") == "fast-sandbox-env"
+
+        paged = await manager.list_templates(
+            TemplateFilter(metadata={"origin": "fast-sandbox-env"})
+        )
+        assert FSB_TEMPLATE_ID in [t.template_id for t in paged.template_infos]
+
+    @pytest.mark.timeout(1200)
+    async def test_02_template_sandbox_lifecycle_and_policy(
+        self, manager: SandboxManager
+    ) -> None:
+        # verify_one_sandbox: create carries the default egress policy so the
+        # networkPolicy -> egress action binding -> nft chain is exercised on
+        # every create; SDK readiness is the execd /ping through the signed
+        # gateway route.
+        sandbox = await Sandbox.create_from_template(
+            FSB_TEMPLATE_ID,
+            timeout=timedelta(hours=1),
+            ready_timeout=COLD_READY_TIMEOUT,
+            metadata={"origin": "fast-sandbox-env-verify"},
+            network_policy=NetworkPolicy(
+                defaultAction="deny",
+                egress=[
+                    NetworkRule(action="allow", target="example.com"),
+                    NetworkRule(action="allow", target="*.opensandbox.ai"),
+                ],
+            ),
+        )
+        try:
+            assert sandbox.origin == SandboxOrigin.TEMPLATE
+
+            async def _example_com_enforced() -> bool:
+                policy = await sandbox.get_egress_policy()
+                return any(
+                    rule.target == "example.com" for rule in policy.egress or []
+                )
+
+            await _wait_until(
+                _example_com_enforced,
+                timedelta(minutes=2),
+                "egress policy enforcing (networkPolicy -> action binding -> nft)",
+            )
+
+            # verify_policy_updated, converted to the SDK merge/delete paths:
+            # PATCH merges github.com into the binding and the egress sidecar
+            # hot-swaps the nft rules; DELETE removes example.com again.
+            await sandbox.patch_egress_rules(
+                [NetworkRule(action="allow", target="github.com")]
+            )
+
+            async def _github_com_enforced() -> bool:
+                policy = await sandbox.get_egress_policy()
+                return any(
+                    rule.target == "github.com" for rule in policy.egress or []
+                )
+
+            await _wait_until(
+                _github_com_enforced,
+                timedelta(minutes=2),
+                "policy update converged (PATCH -> ReplaceActionBindings -> egress)",
+            )
+            await sandbox.delete_egress_rules(["example.com"])
+
+            async def _example_com_gone() -> bool:
+                policy = await sandbox.get_egress_policy()
+                return all(
+                    rule.target != "example.com" for rule in policy.egress or []
+                )
+
+            await _wait_until(
+                _example_com_gone,
+                timedelta(minutes=2),
+                "deleted rule no longer served",
+            )
+
+            # verify_lifecycle_ops: get, list, metadata merge-patch
+            # (upsert + delete via null), renew-expiration.
+            info = await manager.get_sandbox_info(sandbox.id)
+            assert info.id == sandbox.id
+
+            listed = await manager.list_sandbox_infos(
+                SandboxFilter(page=1, page_size=50)
+            )
+            assert sandbox.id in [item.id for item in listed.sandbox_infos]
+
+            await manager.patch_sandbox_metadata(
+                sandbox.id, {"env": "verify", "stage": "lifecycle-ops"}
+            )
+
+            async def _metadata_upserted() -> bool:
+                current = await manager.get_sandbox_info(sandbox.id)
+                return (
+                    current.metadata.get("env") == "verify"
+                    and current.metadata.get("stage") == "lifecycle-ops"
+                )
+
+            await _wait_until(_metadata_upserted, timedelta(minutes=1), "metadata upsert")
+            await manager.patch_sandbox_metadata(sandbox.id, {"stage": None})
+
+            async def _metadata_deleted() -> bool:
+                current = await manager.get_sandbox_info(sandbox.id)
+                return (
+                    current.metadata.get("stage") is None
+                    and current.metadata.get("env") == "verify"
+                )
+
+            await _wait_until(_metadata_deleted, timedelta(minutes=1), "metadata delete")
+
+            before = await manager.get_sandbox_info(sandbox.id)
+            renewed = await manager.renew_sandbox(sandbox.id, timedelta(hours=2))
+            after = await manager.get_sandbox_info(sandbox.id)
+            assert renewed.expires_at > before.expires_at
+            assert after.expires_at == renewed.expires_at
+        finally:
+            await _kill_and_wait_gone(manager, sandbox.id)
+
+    @pytest.mark.timeout(900)
+    async def test_03_pause_resume_round_trip(self, manager: SandboxManager) -> None:
+        sandbox = await Sandbox.create_from_template(
+            FSB_TEMPLATE_ID,
+            timeout=timedelta(hours=1),
+            ready_timeout=COLD_READY_TIMEOUT,
+            metadata={"origin": "fast-sandbox-env-pause"},
+        )
+        try:
+            async def _state_is(state: str) -> bool:
+                info = await manager.get_sandbox_info(sandbox.id)
+                return info.status.state == state
+
+            await _wait_until(_state_is("Running"), timedelta(minutes=3), "Running")
+
+            # Paused is durable-first: checkpoint complete + capacity released;
+            # the signed gateway route stops serving.
+            await sandbox.pause()
+            await _wait_until(_state_is("Paused"), timedelta(minutes=4), "Paused")
+
+            # Resume advances the route generation; Sandbox.resume re-resolves
+            # endpoints and reads the sandbox origin from the server header.
+            resumed = await Sandbox.resume(
+                sandbox.id, ready_timeout=WARM_READY_TIMEOUT
+            )
+            assert resumed.origin == SandboxOrigin.TEMPLATE
+            assert await resumed.is_healthy()
+        finally:
+            await _kill_and_wait_gone(manager, sandbox.id)
+
+    @pytest.mark.timeout(1500)
+    async def test_04_snapshot_round_trip(self, manager: SandboxManager) -> None:
+        source = await Sandbox.create_from_template(
+            FSB_TEMPLATE_ID,
+            timeout=timedelta(hours=1),
+            ready_timeout=COLD_READY_TIMEOUT,
+            metadata={"origin": "fast-sandbox-env-snapshot"},
+        )
+        snapshot_ids: list[str] = []
+        try:
+            async def _state_is(state: str) -> bool:
+                info = await manager.get_sandbox_info(source.id)
+                return info.status.state == state
+
+            await _wait_until(_state_is("Running"), timedelta(minutes=5), "Running")
+            assert await source.is_healthy()
+
+            # 1. Snapshot create returns Creating; the server row converges
+            # from the fast-sandbox SandboxSnapshot CR via its watcher.
+            snapshot = await manager.create_snapshot(source.id, name="env-verify")
+            snapshot_ids.append(snapshot.id)
+            assert snapshot.status.state == "Creating"
+
+            # 2. Re-entry while the dump window holds the sandbox: fenced as
+            # 409 once the CR is cache-visible, or accepted (202) during
+            # fence cache lag and resolved to a terminal phase afterwards.
+            extra_snapshot_id: str | None = None
+            try:
+                reentry = await manager.create_snapshot(
+                    source.id, name="env-verify-reentry"
+                )
+                extra_snapshot_id = reentry.id
+                snapshot_ids.append(reentry.id)
+            except SandboxApiException as exc:
+                assert exc.status_code == 409, f"unexpected re-entry error: {exc}"
+
+            async def _snapshot_ready(snapshot_id: str) -> bool:
+                info = await manager.get_snapshot(snapshot_id)
+                return info.status.state == "Ready"
+
+            await _wait_until(
+                lambda: _snapshot_ready(snapshot.id),
+                timedelta(minutes=5),
+                f"snapshot {snapshot.id} Ready",
+            )
+
+            # 3. Source survival: the pause window must be released and the
+            # sandbox back to serving after the snapshot went terminal.
+            await _wait_until(_state_is("Running"), timedelta(minutes=2), "source Running")
+            assert await source.is_healthy()
+
+            if extra_snapshot_id is not None:
+                async def _extra_terminal() -> bool:
+                    info = await manager.get_snapshot(extra_snapshot_id)
+                    return info.status.state in {"Ready", "Failed"}
+
+                await _wait_until(
+                    _extra_terminal,
+                    timedelta(minutes=3),
+                    "accepted re-entry snapshot reached a terminal phase",
+                )
+
+            # 4. Second snapshot after the first is terminal: fresh id.
+            second = await manager.create_snapshot(source.id, name="env-verify-2")
+            snapshot_ids.append(second.id)
+            assert second.id != snapshot.id
+            await _wait_until(
+                lambda: _snapshot_ready(second.id),
+                timedelta(minutes=5),
+                f"snapshot {second.id} Ready",
+            )
+
+            # 5. Listing scoped by sandboxId contains the snapshots as Ready.
+            listed = await manager.list_snapshots(
+                SnapshotFilter(sandbox_id=source.id, page=1, page_size=50)
+            )
+            ready_ids = {
+                item.id
+                for item in listed.snapshot_infos
+                if item.status.state == "Ready"
+            }
+            assert snapshot.id in ready_ids
+            assert second.id in ready_ids
+
+            # 6. Restore: the restored sandbox boots the published artifact
+            # set; resourceLimits must restate the pool profile.
+            restore = await Sandbox.create(
+                snapshot_id=snapshot.id,
+                timeout=timedelta(hours=1),
+                resource={"cpu": "1", "memory": "512Mi", "pids": "128"},
+                ready_timeout=timedelta(minutes=10),
+            )
+            try:
+                assert await restore.is_healthy()
+            finally:
+                await _kill_and_wait_gone(manager, restore.id)
+        finally:
+            await _kill_and_wait_gone(manager, source.id)
+            for snapshot_id in snapshot_ids:
+                try:
+                    await manager.delete_snapshot(snapshot_id)
+                except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                    logger.warning(
+                        "verify cleanup: delete snapshot %s failed: %s",
+                        snapshot_id,
+                        exc,
+                    )

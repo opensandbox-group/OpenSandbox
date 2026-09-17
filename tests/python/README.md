@@ -35,6 +35,22 @@ E2E suite:
 ../../scripts/python-e2e.sh
 ```
 
+### Fast-sandbox (fsb) integration env
+
+`tests/test_fsb_e2e.py` converts the HTTP verify stages of
+`scripts/fast-sandbox-env/integration-env.sh` (template create → gateway
+ping → networkpolicy PATCH/DELETE convergence, lifecycle ops, pause/resume,
+public snapshot round trip) into Python SDK calls. It is skipped unless the
+fsb stack is up and `OPENSANDBOX_TEST_FSB_TEMPLATE_ID` points at the
+golden-image template the env script builds, and it is excluded from the
+default `make test` run:
+
+```bash
+./scripts/fast-sandbox-env/integration-env.sh up     # brings up the stack, prints/keeps the template id
+cd tests/python
+OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" make test-fsb
+```
+
 ### Foreground command stream completion
 
 ```bash

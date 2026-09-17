@@ -1,4 +1,4 @@
-.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-code test-pool test-credential-vault lint fmt
+.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-code test-pool test-credential-vault test-fsb lint fmt
 
 sync:
 	uv sync
@@ -7,7 +7,7 @@ sync-dev:
 	uv sync --group dev
 
 test:
-	uv run pytest --ignore=tests/test_execd_init_e2e.py --ignore=tests/test_execd_hardening_e2e.py
+	uv run pytest --ignore=tests/test_execd_init_e2e.py --ignore=tests/test_execd_hardening_e2e.py --ignore=tests/test_fsb_e2e.py
 
 test-kubernetes-mini:
 	uv run pytest \
@@ -28,6 +28,12 @@ test-pool:
 
 test-credential-vault:
 	uv run pytest tests/test_credential_vault_e2e.py
+
+# fast-sandbox (fsb) integration env: requires the stack from
+# scripts/fast-sandbox-env/integration-env.sh up plus
+# OPENSANDBOX_TEST_FSB_TEMPLATE_ID; skipped everywhere else.
+test-fsb:
+	uv run pytest tests/test_fsb_e2e.py
 
 lint:
 	uv run ruff check tests

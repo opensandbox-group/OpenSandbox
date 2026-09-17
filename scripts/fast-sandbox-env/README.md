@@ -37,6 +37,12 @@ After `up`, point any OpenSandbox SDK at `http://127.0.0.1:18080` with the
 `OPEN-SANDBOX-API-KEY: fast-sandbox-env` header; sandbox endpoints are
 signed `f1.*` header routes served by the gateway at `http://127.0.0.1:18081`.
 
+The `up` verify stages are also available as Python SDK e2e tests
+(template create → gateway ping → networkpolicy convergence, lifecycle
+ops, pause/resume, snapshot round trip) — see `tests/python/README.md`
+(`make test-fsb`, requires `OPENSANDBOX_TEST_FSB_TEMPLATE_ID`, which the
+script stores in `$WORK/template-id`).
+
 ## Wiring
 
 ```
