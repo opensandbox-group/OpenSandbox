@@ -147,6 +147,21 @@ async def _get_sandbox_info(manager: SandboxManager, sandbox_id: str):
         raise
 
 
+async def _http_reachable_on(sandbox: Sandbox, target: str) -> bool:
+    """HTTP-level enforcement probe: busybox wget performs a real HTTPS GET."""
+    result = await sandbox.commands.run(
+        f"wget -T 8 -q -O /dev/null https://{target}"
+    )
+    return result.error is None
+
+
+async def _http_blocked_on(sandbox: Sandbox, target: str) -> bool:
+    result = await sandbox.commands.run(
+        f"wget -T 8 -q -O /dev/null https://{target}"
+    )
+    return result.error is not None
+
+
 async def _get_policy_tolerant(sandbox: Sandbox):
     """get_egress_policy tolerating transient 404/503 during CR propagation."""
     try:
@@ -314,17 +329,11 @@ class TestFsbE2E:
             # HTTP-level enforcement probe: busybox wget performs a real
             # HTTPS request, covering both gates of the fsb dns+nft chain
             # (DNS resolution and transport).
-            async def _http_reachable(target: str) -> bool:
-                result = await sandbox.commands.run(
-                    f"wget -T 8 -q -O /dev/null https://{target}"
-                )
-                return result.error is None
+            def _http_reachable(target: str) -> bool:
+                return _http_reachable_on(sandbox, target)
 
-            async def _http_blocked(target: str) -> bool:
-                result = await sandbox.commands.run(
-                    f"wget -T 8 -q -O /dev/null https://{target}"
-                )
-                return result.error is not None
+            def _http_blocked(target: str) -> bool:
+                return _http_blocked_on(sandbox, target)
 
             async def _example_com_enforced() -> bool:
                 policy = await _get_policy_tolerant(sandbox)
@@ -468,7 +477,7 @@ class TestFsbE2E:
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)
 
-    @pytest.mark.timeout(900)
+    @pytest.mark.timeout(1200)
     async def test_03_pause_resume_round_trip(
         self, manager: SandboxManager, connection_config
     ) -> None:
@@ -479,9 +488,16 @@ class TestFsbE2E:
             ready_timeout=COLD_READY_TIMEOUT,
             connection_config=connection_config,
             metadata={"origin": "fast-sandbox-env-pause"},
+            network_policy=NetworkPolicy(
+                defaultAction="deny",
+                egress=[NetworkRule(action="allow", target="pypi.org")],
+            ),
         )
         logger.info(
-            "sandbox ready: id=%s (create+ready %.1fs)", sandbox.id, time.monotonic() - started
+            "sandbox ready: id=%s origin=%s (create+ready %.1fs)",
+            sandbox.id,
+            sandbox.origin,
+            time.monotonic() - started,
         )
         try:
             async def _state_is(state: str) -> bool:
@@ -489,6 +505,26 @@ class TestFsbE2E:
                 return info is not None and info.status.state == state
 
             await _wait_until(lambda: _state_is("Running"), timedelta(minutes=3), "Running")
+
+            # State markers written before the checkpoint: a regular file,
+            # a RAM-backed tmpfs file, and the guest clock (uptime must be
+            # continuous across resume - a reboot would reset it to ~0).
+            await sandbox.files.write_file("/tmp/fsb-state.txt", "pause-state-check")
+            await sandbox.commands.run("echo ram-state-check > /dev/shm/fsb-mem.txt")
+            uptime_before = float(
+                (
+                    await sandbox.commands.run("cut -d' ' -f1 /proc/uptime")
+                ).logs.stdout[0].text
+            )
+            await _wait_until(
+                lambda: _http_reachable_on(sandbox, "pypi.org"),
+                timedelta(minutes=2),
+                "pypi.org reachable pre-pause",
+            )
+            logger.info(
+                "pre-pause state written (file + tmpfs + uptime=%.1fs); policy enforced (pypi.org reachable)",
+                uptime_before,
+            )
 
             # Paused is durable-first: checkpoint complete + capacity released;
             # the signed gateway route stops serving.
@@ -516,10 +552,52 @@ class TestFsbE2E:
             )
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
+
+            # Checkpoint fidelity: regular file, RAM-backed tmpfs file and
+            # continuous uptime all survive the checkpoint round trip.
+            assert (
+                await resumed.files.read_file("/tmp/fsb-state.txt")
+                == "pause-state-check"
+            )
+            assert (
+                await resumed.commands.run("cat /dev/shm/fsb-mem.txt")
+            ).logs.stdout[0].text.strip() == "ram-state-check"
+            uptime_after = float(
+                (
+                    await resumed.commands.run("cut -d' ' -f1 /proc/uptime")
+                ).logs.stdout[0].text
+            )
+            assert uptime_after >= uptime_before, (
+                f"uptime regressed {uptime_before} -> {uptime_after}: "
+                "the sandbox rebooted instead of resuming the checkpoint"
+            )
+            logger.info(
+                "checkpoint fidelity ok: file + tmpfs + uptime continuous (%.1fs -> %.1fs)",
+                uptime_before,
+                uptime_after,
+            )
+
+            # Policy survives resume, stays enforced, and can be updated.
+            policy = await resumed.get_egress_policy()
+            assert any(
+                rule.target == "pypi.org" for rule in policy.egress or []
+            ), f"policy lost across resume: {policy}"
+            await _wait_until(
+                lambda: _http_reachable_on(resumed, "pypi.org"),
+                timedelta(minutes=2),
+                "pypi.org reachable post-resume",
+            )
+            await resumed.delete_egress_rules(["pypi.org"])
+            await _wait_until(
+                lambda: _http_blocked_on(resumed, "pypi.org"),
+                timedelta(minutes=2),
+                "pypi.org blocked after post-resume DELETE",
+            )
+            logger.info("post-resume policy update verified (delete -> blocked)")
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)
 
-    @pytest.mark.timeout(1500)
+    @pytest.mark.timeout(1800)
     async def test_04_snapshot_round_trip(
         self, manager: SandboxManager, connection_config
     ) -> None:
@@ -538,6 +616,14 @@ class TestFsbE2E:
 
             await _wait_until(lambda: _state_is("Running"), timedelta(minutes=5), "Running")
             assert await source.is_healthy()
+
+            # State marker written before the snapshot: a restored sandbox
+            # boots the artifact set published at dump time, so the file must
+            # be present in the restored guest.
+            await source.files.write_file(
+                "/tmp/fsb-snap-state.txt", "snapshot-state-check"
+            )
+            logger.info("pre-snapshot state written: /tmp/fsb-snap-state.txt")
 
             # 1. Snapshot create returns Creating; the server row converges
             # from the fast-sandbox SandboxSnapshot CR via its watcher.
@@ -642,6 +728,42 @@ class TestFsbE2E:
                     "restore ok: %s boots the published artifact set (ready %.1fs)",
                     restore.id,
                     time.monotonic() - restore_started,
+                )
+
+                # State fidelity: the pre-snapshot file must be present in
+                # the restored guest.
+                assert (
+                    await restore.files.read_file("/tmp/fsb-snap-state.txt")
+                    == "snapshot-state-check"
+                )
+                logger.info("file state survived snapshot restore")
+
+                # The restore carries no network policy: set one, verify it
+                # is enforced, then update it and verify again.
+                await restore.patch_egress_rules(
+                    [NetworkRule(action="allow", target="pypi.org")]
+                )
+                await _wait_until(
+                    lambda: _http_reachable_on(restore, "pypi.org"),
+                    timedelta(minutes=2),
+                    "restored sandbox enforces the patched allow rule",
+                )
+                await _wait_until(
+                    lambda: _http_blocked_on(restore, "www.github.com"),
+                    timedelta(minutes=2),
+                    "restored sandbox blocks non-allowed targets (deny-first)",
+                )
+                logger.info(
+                    "policy on restored sandbox enforced: pypi.org reachable, www.github.com blocked"
+                )
+                await restore.delete_egress_rules(["pypi.org"])
+                await _wait_until(
+                    lambda: _http_blocked_on(restore, "pypi.org"),
+                    timedelta(minutes=2),
+                    "deleted rule stops resolving on the restored sandbox",
+                )
+                logger.info(
+                    "policy update on restored sandbox verified (DELETE -> blocked)"
                 )
             finally:
                 await _kill_and_wait_gone(manager, restore.id)
