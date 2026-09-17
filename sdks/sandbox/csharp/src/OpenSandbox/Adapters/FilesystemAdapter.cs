@@ -16,6 +16,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using OpenSandbox.Core;
 using OpenSandbox.Internal;
 using OpenSandbox.Models;
@@ -32,6 +33,9 @@ internal sealed class FilesystemAdapter : ISandboxFiles
     private readonly HttpClient _httpClient;
     private readonly string _baseUrl;
     private readonly IReadOnlyDictionary<string, string> _headers;
+    private static readonly Regex ContentRangeRegex = new(
+        @"^bytes\s+(\d+)-(\d+)/(\d+|\*)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -190,34 +194,58 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         ReadBytesOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var headers = new Dictionary<string, string>();
-        var range = options?.Range;
-        if (range != null && range.Length > 0)
-        {
-            headers["Range"] = range;
-        }
+        var response = await ReadBytesDetailedAsync(path, options, cancellationToken).ConfigureAwait(false);
+        return response.Body;
+    }
 
-        var queryParams = new Dictionary<string, string?>
-        {
-            ["path"] = path
-        };
-
-        if (options?.Offset != null)
-        {
-            queryParams["offset"] = options.Offset.Value.ToString();
-        }
-        if (options?.Limit != null)
-        {
-            queryParams["limit"] = options.Limit.Value.ToString();
-        }
-
-        return await _client.GetBytesAsync("/files/download", queryParams, headers, cancellationToken).ConfigureAwait(false);
+    public async Task<ReadBytesResponse<byte[]>> ReadBytesDetailedAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = BuildDownloadRequest(path, options);
+        using var response = await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        await _client.EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        var body = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+        return CreateReadBytesResponse(response, body);
     }
 
     public async IAsyncEnumerable<byte[]> ReadBytesStreamAsync(
         string path,
         ReadBytesOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var response = await ReadBytesStreamDetailedAsync(path, options, cancellationToken).ConfigureAwait(false);
+        await using var body = response.Body;
+        await foreach (var chunk in body.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            yield return chunk;
+        }
+    }
+
+    public async Task<ReadBytesResponse<IAsyncReadBytesStream>> ReadBytesStreamDetailedAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = BuildDownloadRequest(path, options);
+        var response = await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await _client.EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
+
+        IAsyncReadBytesStream body = new ResponseByteStream(response, cancellationToken);
+        return CreateReadBytesResponse(response, body);
+    }
+
+    private HttpRequestMessage BuildDownloadRequest(string path, ReadBytesOptions? options)
     {
         var url = $"{_baseUrl}/files/download?path={Uri.EscapeDataString(path)}";
         if (options?.Offset != null)
@@ -229,43 +257,125 @@ internal sealed class FilesystemAdapter : ISandboxFiles
             url += $"&limit={options.Limit.Value}";
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        foreach (var header in _headers)
-        {
-            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
-        }
-
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
         var range = options?.Range;
-        if (range != null && range.Length > 0)
+        if (!string.IsNullOrEmpty(range))
         {
             request.Headers.TryAddWithoutValidation("Range", range);
         }
+        return request;
+    }
 
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+    private static ReadBytesResponse<T> CreateReadBytesResponse<T>(HttpResponseMessage response, T body)
+    {
+        var isPartial = (int)response.StatusCode == 206;
+        var contentLength = response.Content.Headers.ContentLength ?? -1;
+        var contentRange = isPartial ? ParseContentRange(GetContentHeader(response, "Content-Range")) : null;
+        return new ReadBytesResponse<T>(
+            Body: body,
+            StatusCode: (int)response.StatusCode,
+            ContentType: GetContentHeader(response, "Content-Type"),
+            ContentDisposition: GetContentHeader(response, "Content-Disposition"),
+            ContentLength: contentLength,
+            TotalSize: isPartial ? contentRange?.Total ?? -1 : contentLength,
+            ContentRange: contentRange);
+    }
 
-        if (!response.IsSuccessStatusCode)
+    private static ByteRange? ParseContentRange(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw))
         {
-            var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var requestId = response.Headers.TryGetValues(Constants.RequestIdHeader, out var values)
-                ? values.FirstOrDefault()
-                : null;
-
-            throw new SandboxApiException(
-                message: "Download stream failed",
-                statusCode: (int)response.StatusCode,
-                requestId: requestId,
-                rawBody: content);
+            return null;
         }
 
-        var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-        var buffer = new byte[8192];
-        int bytesRead;
-
-        while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
+        var invalid = new ByteRange(-1, -1, -1, raw!);
+        var match = ContentRangeRegex.Match(raw!);
+        if (!match.Success ||
+            !long.TryParse(match.Groups[1].Value, out var start) ||
+            !long.TryParse(match.Groups[2].Value, out var end))
         {
-            var chunk = new byte[bytesRead];
-            Array.Copy(buffer, chunk, bytesRead);
-            yield return chunk;
+            return invalid;
+        }
+
+        var total = -1L;
+        if (match.Groups[3].Value != "*" && !long.TryParse(match.Groups[3].Value, out total))
+        {
+            return invalid;
+        }
+        if (end < start || (total != -1 && total <= end))
+        {
+            return invalid;
+        }
+        return new ByteRange(start, end, total, raw!);
+    }
+
+    private static string? GetContentHeader(HttpResponseMessage response, string name)
+    {
+        return response.Content.Headers.TryGetValues(name, out var values)
+            ? values.FirstOrDefault()
+            : null;
+    }
+
+    private sealed class ResponseByteStream : IAsyncReadBytesStream
+    {
+        private readonly HttpResponseMessage _response;
+        private readonly CancellationToken _requestCancellationToken;
+        private int _enumerated;
+        private int _disposed;
+
+        public ResponseByteStream(
+            HttpResponseMessage response,
+            CancellationToken requestCancellationToken)
+        {
+            _response = response;
+            _requestCancellationToken = requestCancellationToken;
+        }
+
+        public IAsyncEnumerator<byte[]> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Exchange(ref _enumerated, 1) != 0)
+            {
+                throw new InvalidOperationException("Download body can only be read once");
+            }
+            return ReadChunksAsync(cancellationToken).GetAsyncEnumerator();
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                _response.Dispose();
+            }
+            return default;
+        }
+
+        private async IAsyncEnumerable<byte[]> ReadChunksAsync(
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                _requestCancellationToken,
+                cancellationToken);
+            try
+            {
+                using var stream = await _response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+                var buffer = new byte[8192];
+                int bytesRead;
+
+                while ((bytesRead = await stream.ReadAsync(
+                    buffer,
+                    0,
+                    buffer.Length,
+                    linkedCancellation.Token).ConfigureAwait(false)) > 0)
+                {
+                    var chunk = new byte[bytesRead];
+                    Array.Copy(buffer, chunk, bytesRead);
+                    yield return chunk;
+                }
+            }
+            finally
+            {
+                await DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 

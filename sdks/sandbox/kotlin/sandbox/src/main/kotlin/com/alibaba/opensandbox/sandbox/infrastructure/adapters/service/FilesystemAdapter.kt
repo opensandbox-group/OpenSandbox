@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentRep
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceResult
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.MoveEntry
+import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ReadBytesResponse
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SearchEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SetPermissionEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry
@@ -113,7 +114,14 @@ internal class FilesystemAdapter(
         range: String?,
         offset: Int?,
         limit: Int?,
-    ): ByteArray {
+    ): ByteArray = readByteArrayDetailed(path, range, offset, limit).body
+
+    override fun readByteArrayDetailed(
+        path: String,
+        range: String?,
+        offset: Int?,
+        limit: Int?,
+    ): ReadBytesResponse<ByteArray> {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
             httpClientProvider.httpClient.newCall(request).execute().use { response ->
@@ -122,7 +130,8 @@ internal class FilesystemAdapter(
                         "Failed to read file. Status code: $statusCode, Body: $body"
                     }
                 }
-                return response.body?.bytes() ?: ByteArray(0)
+                val body = response.body?.bytes() ?: ByteArray(0)
+                return response.toReadBytesResponse(body)
             }
         } catch (e: Exception) {
             logReadFailure("Failed to read file as byte array: $path", e)
@@ -135,7 +144,14 @@ internal class FilesystemAdapter(
         range: String?,
         offset: Int?,
         limit: Int?,
-    ): InputStream {
+    ): InputStream = readStreamDetailed(path, range, offset, limit).body
+
+    override fun readStreamDetailed(
+        path: String,
+        range: String?,
+        offset: Int?,
+        limit: Int?,
+    ): ReadBytesResponse<InputStream> {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
             val response = httpClientProvider.httpClient.newCall(request).execute()
@@ -151,8 +167,12 @@ internal class FilesystemAdapter(
                 }
             }
 
-            return response.body?.byteStream()
-                ?: throw IllegalStateException("Response body is null")
+            val responseBody =
+                response.body ?: run {
+                    response.close()
+                    throw IllegalStateException("Response body is null")
+                }
+            return response.toReadBytesResponse(responseBody.byteStream())
         } catch (e: Exception) {
             logReadFailure("Failed to read file as stream: $path", e)
             throw e.toSandboxException()

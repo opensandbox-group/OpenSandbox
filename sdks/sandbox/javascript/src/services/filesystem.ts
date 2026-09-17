@@ -19,6 +19,8 @@ import type {
   DirectoryListEntry,
   FileInfo,
   MoveEntry,
+  ReadBytesResponse,
+  ReadBytesStream,
   SearchEntry,
   SetPermissionEntry,
   WriteEntry,
@@ -41,7 +43,9 @@ export interface SandboxFiles {
   writeFiles(entries: WriteEntry[]): Promise<void>;
   readFile(path: string, opts?: { encoding?: string; range?: string; offset?: number; limit?: number }): Promise<string>;
   readBytes(path: string, opts?: { range?: string; offset?: number; limit?: number }): Promise<Uint8Array>;
+  readBytesDetailed(path: string, opts?: { range?: string; offset?: number; limit?: number }): Promise<ReadBytesResponse<Uint8Array>>;
   readBytesStream(path: string, opts?: { range?: string; offset?: number; limit?: number }): AsyncIterable<Uint8Array>;
+  readBytesStreamDetailed(path: string, opts?: { range?: string; offset?: number; limit?: number }): Promise<ReadBytesResponse<ReadBytesStream>>;
 
   deleteFiles(paths: string[]): Promise<void>;
   moveFiles(entries: MoveEntry[]): Promise<void>;
