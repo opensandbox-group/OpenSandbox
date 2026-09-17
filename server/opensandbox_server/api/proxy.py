@@ -99,8 +99,9 @@ def _build_proxy_target_url(
 ) -> str:
     """Build the backend URL from an endpoint plus optional path/query suffix.
 
-    For HTTP, ``query_string`` is omitted from the URL so httpx can pass it via ``params=``
-    (avoids duplicate encoding issues). For WebSocket, the query is appended to the URI.
+    The raw query is appended as-is for both HTTP and WebSocket. Passing it to httpx
+    via ``params=`` would re-serialize it: repeated keys get regrouped, valueless keys
+    gain ``=``, non-UTF-8 escapes become U+FFFD and ``%20`` turns into ``+``.
     """
     scheme = "ws" if websocket else "http"
     base = endpoint.endpoint.rstrip("/")
@@ -108,7 +109,7 @@ def _build_proxy_target_url(
     url = f"{scheme}://{base}"
     if normalized_path:
         url = f"{url}/{normalized_path}"
-    if query_string and websocket:
+    if query_string:
         url = f"{url}?{query_string}"
     return url
 
@@ -369,7 +370,6 @@ async def _proxy_http_request(
         req = client.build_request(
             method=request.method,
             url=target_url,
-            params=query_string if query_string else None,
             headers=headers,
             content=request.stream() if stream_body else None,
         )
