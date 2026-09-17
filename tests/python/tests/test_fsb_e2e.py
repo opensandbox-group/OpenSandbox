@@ -400,7 +400,11 @@ class TestFsbE2E:
             renewed = await manager.renew_sandbox(sandbox.id, timedelta(hours=2))
             after = await manager.get_sandbox_info(sandbox.id)
             assert renewed.expires_at > before.expires_at
-            assert after.expires_at == renewed.expires_at
+            # The server persists expiresAt truncated to whole seconds while
+            # the renew response carries microseconds.
+            assert abs(
+                (after.expires_at - renewed.expires_at).total_seconds()
+            ) < 1
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)
 
@@ -432,7 +436,7 @@ class TestFsbE2E:
             resumed = await Sandbox.resume(
                 sandbox.id,
                 connection_config=connection_config,
-                ready_timeout=WARM_READY_TIMEOUT,
+                resume_timeout=WARM_READY_TIMEOUT,
             )
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
@@ -490,7 +494,7 @@ class TestFsbE2E:
 
             # 3. Source survival: the pause window must be released and the
             # sandbox back to serving after the snapshot went terminal.
-            await _wait_until(_state_is("Running"), timedelta(minutes=2), "source Running")
+            await _wait_until(lambda: _state_is("Running"), timedelta(minutes=2), "source Running")
             assert await source.is_healthy()
 
             if extra_snapshot_id is not None:
