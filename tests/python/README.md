@@ -65,6 +65,7 @@ Sandbox lifecycle (`SandboxManager` + `Sandbox`):
 - [x] `Sandbox.create_from_template` — with `networkPolicy` + `metadata`; readiness via the signed gateway route
 - [x] `Sandbox.create(snapshot_id=...)` — restore with the pool resource profile; server-reported `origin=template` routes egress through the control plane
 - [x] `Sandbox.resume` — re-resolves endpoints, reads `OPEN-SANDBOX-ORIGIN`
+- [x] `Sandbox.connect` — re-attach to a running sandbox; origin auto-detected from the server header; execd + policy operations served through the re-attached instance
 - [x] `sandbox.pause` → `Paused` (durable-first window)
 - [x] `sandbox.kill` (+ deletion re-read)
 - [x] `SandboxManager.get_sandbox_info` / `list_sandbox_infos` / `patch_sandbox_metadata` (upsert + null delete) / `renew_sandbox`
@@ -98,7 +99,7 @@ State fidelity:
 
 Not covered here (needs a different stack or out of scope): credential
 vault (fsb has no egress sidecar), execd background/isolated-session
-APIs, signed endpoint expiry, `Sandbox.connect`.
+APIs, signed endpoint expiry.
 
 ### Foreground command stream completion
 

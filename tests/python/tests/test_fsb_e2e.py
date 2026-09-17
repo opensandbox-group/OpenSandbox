@@ -782,3 +782,68 @@ class TestFsbE2E:
                         snapshot_id,
                         exc,
                     )
+
+    @pytest.mark.timeout(1200)
+    async def test_05_connect_reattaches_template_sandbox(
+        self, manager: SandboxManager, connection_config
+    ) -> None:
+        """Sandbox.connect re-attaches to a running template sandbox: the
+        server header drives origin auto-detection (control-plane egress),
+        and the re-attached instance fully serves execd + policy operations."""
+        sandbox = await Sandbox.create_from_template(
+            FSB_TEMPLATE_ID,
+            timeout=timedelta(hours=1),
+            ready_timeout=COLD_READY_TIMEOUT,
+            connection_config=connection_config,
+            metadata={"origin": "fast-sandbox-env-connect"},
+            network_policy=NetworkPolicy(
+                defaultAction="deny",
+                egress=[NetworkRule(action="allow", target="example.com")],
+            ),
+        )
+        try:
+            attached = await Sandbox.connect(
+                sandbox.id, connection_config=connection_config
+            )
+            assert attached.id == sandbox.id
+            assert attached.origin == SandboxOrigin.TEMPLATE
+            assert await attached.is_healthy()
+            logger.info(
+                "connected: id=%s origin=%s (server header auto-detected)",
+                attached.id,
+                attached.origin,
+            )
+
+            # execd serves through the re-attached instance.
+            result = await attached.commands.run("echo connect-ok")
+            assert result.error is None
+            assert "connect-ok" in result.logs.stdout[0].text
+            logger.info("execd command ok on connected instance")
+
+            # The policy persisted across attach, is enforced, and can be
+            # updated through the connected instance.
+            policy = await attached.get_egress_policy()
+            assert any(r.target == "example.com" for r in policy.egress or [])
+            await _wait_until(
+                lambda: _http_reachable_on(attached, "example.com"),
+                timedelta(minutes=2),
+                "pre-existing allow rule still enforced after connect",
+            )
+            await _wait_until(
+                lambda: _http_blocked_on(attached, "www.github.com"),
+                timedelta(minutes=2),
+                "deny-first still blocks non-allowed targets after connect",
+            )
+            await attached.patch_egress_rules(
+                [NetworkRule(action="allow", target="pypi.org")]
+            )
+            await _wait_until(
+                lambda: _http_reachable_on(attached, "pypi.org"),
+                timedelta(minutes=2),
+                "PATCH via the connected instance is enforced",
+            )
+            logger.info(
+                "policy verified on connected instance: persisted, enforced, updatable"
+            )
+        finally:
+            await _kill_and_wait_gone(manager, sandbox.id)
