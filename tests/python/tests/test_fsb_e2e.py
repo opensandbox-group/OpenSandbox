@@ -107,16 +107,29 @@ async def _wait_until(operation, timeout: timedelta, description: str):
             "object - a coroutine cannot be re-awaited across iterations"
         )
     deadline = time.monotonic() + timeout.total_seconds()
+    start = time.monotonic()
+    polls = 0
     last = None
+    logger.info("[wait] %s (budget %s)", description, timeout)
     while time.monotonic() < deadline:
+        polls += 1
         result = operation()
         if inspect.isawaitable(result):
             result = await result
         last = result
         if result:
+            logger.info(
+                "[wait] %s: satisfied (polls=%d, %.1fs)",
+                description,
+                polls,
+                time.monotonic() - start,
+            )
             return result
+        logger.debug("[wait] %s: not satisfied yet (polls=%d)", description, polls)
         await asyncio.sleep(2)
-    raise AssertionError(f"timed out after {timeout} waiting for {description}: {last!r}")
+    raise AssertionError(
+        f"timed out after {timeout} waiting for {description}: {last!r}"
+    )
 
 
 async def _get_sandbox_info(manager: SandboxManager, sandbox_id: str):
@@ -194,11 +207,21 @@ class TestFsbE2E:
         assert info.status.phase == TemplatePhase.SUCCEEDED
         assert info.status.manifest_ref, "template manifestRef is empty"
         assert info.metadata.get("origin") == "fast-sandbox-env"
+        logger.info(
+            "env template %s: phase=%s manifestRef=%s",
+            FSB_TEMPLATE_ID,
+            info.status.phase,
+            info.status.manifest_ref,
+        )
 
         paged = await manager.list_templates(
             TemplateFilter(metadata={"origin": "fast-sandbox-env"})
         )
         assert FSB_TEMPLATE_ID in [t.template_id for t in paged.template_infos]
+        logger.info(
+            "metadata filter hit: %d template(s), env template listed",
+            len(paged.template_infos),
+        )
 
     @pytest.mark.timeout(900)
     async def test_01b_template_crud(self, manager: SandboxManager) -> None:
@@ -213,6 +236,11 @@ class TestFsbE2E:
                 readiness=TemplateReadiness(warmup_seconds=15),
                 metadata={"origin": "fast-sandbox-env-sdk"},
             )
+        )
+        logger.info(
+            "template created: id=%s phase=%s (build runs asynchronously)",
+            created.template_id,
+            created.status.phase,
         )
         try:
             assert created.status.phase == TemplatePhase.PENDING
@@ -229,13 +257,23 @@ class TestFsbE2E:
             )
             assert info.status.manifest_ref, "template manifestRef is empty"
             assert info.image == FSB_TEMPLATE_IMAGE
+            logger.info(
+                "template build Succeeded: manifestRef=%s image=%s",
+                info.status.manifest_ref,
+                info.image,
+            )
 
             paged = await manager.list_templates(
                 TemplateFilter(metadata={"origin": "fast-sandbox-env-sdk"})
             )
             assert created.template_id in [t.template_id for t in paged.template_infos]
+            logger.info(
+                "template listed under metadata filter (%d hit(s))",
+                len(paged.template_infos),
+            )
         finally:
             await manager.delete_template(created.template_id)
+            logger.info("template deleted: %s", created.template_id)
 
         async def _gone() -> bool:
             try:
@@ -245,6 +283,7 @@ class TestFsbE2E:
                 return exc.status_code == 404
 
         assert await _gone()
+        logger.info("template 404 confirmed after delete")
 
     @pytest.mark.timeout(1200)
     async def test_02_template_sandbox_lifecycle_and_policy(
@@ -268,6 +307,7 @@ class TestFsbE2E:
                 ],
             ),
         )
+        logger.info("sandbox ready: id=%s origin=%s", sandbox.id, sandbox.origin)
         try:
             assert sandbox.origin == SandboxOrigin.TEMPLATE
 
@@ -312,11 +352,18 @@ class TestFsbE2E:
             result = await sandbox.commands.run("echo hello-fsb")
             assert result.error is None
             assert "hello-fsb" in result.logs.stdout[0].text
+            logger.info("execd command ok: stdout=%r", result.logs.stdout[0].text)
             await sandbox.files.write_file("/tmp/fsb-e2e.txt", "hello-fsb")
             assert await sandbox.files.read_file("/tmp/fsb-e2e.txt") == "hello-fsb"
+            logger.info("execd file round trip ok: /tmp/fsb-e2e.txt")
             metrics = await sandbox.get_metrics()
             assert metrics.cpu_count > 0
             assert metrics.memory_total_in_mib > 0
+            logger.info(
+                "execd metrics ok: cpu=%s memory=%.1fMiB",
+                metrics.cpu_count,
+                metrics.memory_total_in_mib,
+            )
 
             # verify_policy_updated, converted to the SDK merge/delete paths:
             # PATCH merges pypi.org into the binding and the egress
@@ -344,6 +391,9 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "newly allowed target serves HTTPS",
             )
+            logger.info(
+                "PATCH enforced: pypi.org reachable after allow rule merge"
+            )
             await sandbox.delete_egress_rules(["example.com"])
 
             async def _example_com_gone() -> bool:
@@ -362,6 +412,7 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "deleted target must stop serving HTTPS",
             )
+            logger.info("DELETE enforced: example.com blocked after rule removal")
 
             # verify_lifecycle_ops: get, list, metadata merge-patch
             # (upsert + delete via null), renew-expiration.
@@ -372,6 +423,10 @@ class TestFsbE2E:
                 SandboxFilter(page=1, page_size=50)
             )
             assert sandbox.id in [item.id for item in listed.sandbox_infos]
+            logger.info(
+                "list ok: %d sandbox(es), verify sandbox present",
+                len(listed.sandbox_infos),
+            )
 
             await manager.patch_sandbox_metadata(
                 sandbox.id, {"env": "verify", "stage": "lifecycle-ops"}
@@ -400,6 +455,11 @@ class TestFsbE2E:
             renewed = await manager.renew_sandbox(sandbox.id, timedelta(hours=2))
             after = await manager.get_sandbox_info(sandbox.id)
             assert renewed.expires_at > before.expires_at
+            logger.info(
+                "renew ok: expiresAt %s -> %s",
+                before.expires_at,
+                renewed.expires_at,
+            )
             # The server persists expiresAt truncated to whole seconds while
             # the renew response carries microseconds.
             assert abs(
@@ -412,12 +472,16 @@ class TestFsbE2E:
     async def test_03_pause_resume_round_trip(
         self, manager: SandboxManager, connection_config
     ) -> None:
+        started = time.monotonic()
         sandbox = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
             ready_timeout=COLD_READY_TIMEOUT,
             connection_config=connection_config,
             metadata={"origin": "fast-sandbox-env-pause"},
+        )
+        logger.info(
+            "sandbox ready: id=%s (create+ready %.1fs)", sandbox.id, time.monotonic() - started
         )
         try:
             async def _state_is(state: str) -> bool:
@@ -428,15 +492,27 @@ class TestFsbE2E:
 
             # Paused is durable-first: checkpoint complete + capacity released;
             # the signed gateway route stops serving.
+            pause_started = time.monotonic()
             await sandbox.pause()
+            logger.info("pause initiated: %s", sandbox.id)
             await _wait_until(lambda: _state_is("Paused"), timedelta(minutes=4), "Paused")
+            logger.info(
+                "Paused observed (durable-first, %.1fs after pause)",
+                time.monotonic() - pause_started,
+            )
 
             # Resume advances the route generation; Sandbox.resume re-resolves
             # endpoints and reads the sandbox origin from the server header.
+            resume_started = time.monotonic()
             resumed = await Sandbox.resume(
                 sandbox.id,
                 connection_config=connection_config,
                 resume_timeout=WARM_READY_TIMEOUT,
+            )
+            logger.info(
+                "resumed: origin=%s healthy (restore window %.1fs incl. 503 retries)",
+                resumed.origin,
+                time.monotonic() - resume_started,
             )
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
@@ -468,6 +544,9 @@ class TestFsbE2E:
             snapshot = await manager.create_snapshot(source.id, name="env-verify")
             snapshot_ids.append(snapshot.id)
             assert snapshot.status.state == "Creating"
+            logger.info(
+                "snapshot created: id=%s state=%s", snapshot.id, snapshot.status.state
+            )
 
             # 2. Re-entry while the dump window holds the sandbox: fenced as
             # 409 once the CR is cache-visible, or accepted (202) during
@@ -479,23 +558,34 @@ class TestFsbE2E:
                 )
                 extra_snapshot_id = reentry.id
                 snapshot_ids.append(reentry.id)
+                logger.info(
+                    "re-entry snapshot accepted during fence cache lag: id=%s",
+                    extra_snapshot_id,
+                )
             except SandboxApiException as exc:
                 assert exc.status_code == 409, f"unexpected re-entry error: {exc}"
+                logger.info("re-entry snapshot fenced by the pause window (409)")
 
             async def _snapshot_ready(snapshot_id: str) -> bool:
                 info = await _get_snapshot(manager, snapshot_id)
                 return info is not None and info.status.state == "Ready"
 
+            snapshot_started = time.monotonic()
             await _wait_until(
                 lambda: _snapshot_ready(snapshot.id),
                 timedelta(minutes=5),
                 f"snapshot {snapshot.id} Ready",
+            )
+            logger.info(
+                "snapshot Ready (%.1fs after POST)",
+                time.monotonic() - snapshot_started,
             )
 
             # 3. Source survival: the pause window must be released and the
             # sandbox back to serving after the snapshot went terminal.
             await _wait_until(lambda: _state_is("Running"), timedelta(minutes=2), "source Running")
             assert await source.is_healthy()
+            logger.info("source sandbox survived: Running + /ping 200 after snapshot")
 
             if extra_snapshot_id is not None:
                 async def _extra_terminal() -> bool:
@@ -517,6 +607,7 @@ class TestFsbE2E:
                 timedelta(minutes=5),
                 f"snapshot {second.id} Ready",
             )
+            logger.info("second snapshot Ready: id=%s (distinct id)", second.id)
 
             # 5. Listing scoped by sandboxId contains the snapshots as Ready.
             listed = await manager.list_snapshots(
@@ -529,9 +620,15 @@ class TestFsbE2E:
             }
             assert snapshot.id in ready_ids
             assert second.id in ready_ids
+            logger.info(
+                "snapshot list ok: %d row(s), both required snapshots Ready",
+                len(listed.snapshot_infos),
+            )
 
             # 6. Restore: the restored sandbox boots the published artifact
             # set; resourceLimits must restate the pool profile.
+            restore_started = time.monotonic()
+            logger.info("restoring sandbox from snapshot %s ...", snapshot.id)
             restore = await Sandbox.create(
                 snapshot_id=snapshot.id,
                 timeout=timedelta(hours=1),
@@ -541,10 +638,19 @@ class TestFsbE2E:
             )
             try:
                 assert await restore.is_healthy()
+                logger.info(
+                    "restore ok: %s boots the published artifact set (ready %.1fs)",
+                    restore.id,
+                    time.monotonic() - restore_started,
+                )
             finally:
                 await _kill_and_wait_gone(manager, restore.id)
         finally:
             await _kill_and_wait_gone(manager, source.id)
+            logger.info(
+                "cleanup: source sandbox deleted, %d snapshot row(s) removed",
+                len(snapshot_ids),
+            )
             for snapshot_id in snapshot_ids:
                 try:
                     await manager.delete_snapshot(snapshot_id)
