@@ -98,13 +98,18 @@ def _connection_config() -> ConnectionConfig:
 async def _wait_until(operation, timeout: timedelta, description: str):
     """Poll ``operation`` until it returns truthy, mirroring the shell wait_for.
 
-    ``operation`` may be a plain callable, an already-created coroutine, or a
-    callable returning an awaitable.
+    ``operation`` must be a callable (a bare coroutine cannot be re-awaited
+    across poll iterations); it may be sync or return an awaitable.
     """
+    if not callable(operation):
+        raise TypeError(
+            "_wait_until expects a callable (e.g. a lambda), not a coroutine "
+            "object - a coroutine cannot be re-awaited across iterations"
+        )
     deadline = time.monotonic() + timeout.total_seconds()
     last = None
     while time.monotonic() < deadline:
-        result = operation() if callable(operation) else operation
+        result = operation()
         if inspect.isawaitable(result):
             result = await result
         last = result
@@ -288,7 +293,7 @@ class TestFsbE2E:
                 "allowed target serves HTTPS",
             )
             await _wait_until(
-                lambda: _http_blocked("www.github.com"),
+                lambda: _http_blocked("pypi.org"),
                 timedelta(seconds=30),
                 "denied target must not serve HTTPS",
             )
@@ -304,26 +309,29 @@ class TestFsbE2E:
             assert metrics.memory_total_in_mib > 0
 
             # verify_policy_updated, converted to the SDK merge/delete paths:
-            # PATCH merges www.github.com into the binding and the egress
+            # PATCH merges pypi.org into the binding and the egress
             # sidecar hot-swaps the nft rules; DELETE removes example.com.
+            # A fresh FQDN never probed before (no stale negative DNS
+            # cache) and a flat A record; the shell verify allows up to 120s
+            # for the binding hot-swap to converge.
             await sandbox.patch_egress_rules(
-                [NetworkRule(action="allow", target="www.github.com")]
+                [NetworkRule(action="allow", target="pypi.org")]
             )
 
-            async def _github_com_enforced() -> bool:
+            async def _pypi_org_enforced() -> bool:
                 policy = await sandbox.get_egress_policy()
                 return any(
-                    rule.target == "www.github.com" for rule in policy.egress or []
+                    rule.target == "pypi.org" for rule in policy.egress or []
                 )
 
             await _wait_until(
-                _github_com_enforced,
+                _pypi_org_enforced,
                 timedelta(minutes=2),
                 "policy update converged (PATCH -> ReplaceActionBindings -> egress)",
             )
             await _wait_until(
-                lambda: _http_reachable("www.github.com"),
-                timedelta(seconds=30),
+                lambda: _http_reachable("pypi.org"),
+                timedelta(minutes=2),
                 "newly allowed target serves HTTPS",
             )
             await sandbox.delete_egress_rules(["example.com"])
@@ -341,7 +349,7 @@ class TestFsbE2E:
             )
             await _wait_until(
                 lambda: _http_blocked("example.com"),
-                timedelta(seconds=30),
+                timedelta(minutes=2),
                 "deleted target must stop serving HTTPS",
             )
 
@@ -402,12 +410,12 @@ class TestFsbE2E:
                 info = await _get_sandbox_info(manager, sandbox.id)
                 return info is not None and info.status.state == state
 
-            await _wait_until(_state_is("Running"), timedelta(minutes=3), "Running")
+            await _wait_until(lambda: _state_is("Running"), timedelta(minutes=3), "Running")
 
             # Paused is durable-first: checkpoint complete + capacity released;
             # the signed gateway route stops serving.
             await sandbox.pause()
-            await _wait_until(_state_is("Paused"), timedelta(minutes=4), "Paused")
+            await _wait_until(lambda: _state_is("Paused"), timedelta(minutes=4), "Paused")
 
             # Resume advances the route generation; Sandbox.resume re-resolves
             # endpoints and reads the sandbox origin from the server header.
@@ -438,7 +446,7 @@ class TestFsbE2E:
                 info = await _get_sandbox_info(manager, source.id)
                 return info is not None and info.status.state == state
 
-            await _wait_until(_state_is("Running"), timedelta(minutes=5), "Running")
+            await _wait_until(lambda: _state_is("Running"), timedelta(minutes=5), "Running")
             assert await source.is_healthy()
 
             # 1. Snapshot create returns Creating; the server row converges
