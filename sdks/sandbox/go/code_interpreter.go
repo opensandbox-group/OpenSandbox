@@ -143,6 +143,13 @@ func (ci *CodeInterpreter) IsHealthy(ctx context.Context) bool {
 // waitRuntimeReady polls the runtime check until it passes or the timeout
 // expires.
 func (ci *CodeInterpreter) waitRuntimeReady(ctx context.Context, timeout, interval time.Duration) error {
+	// Keep this runtime-specific poll consistent with Sandbox.WaitUntilReady:
+	// a non-positive duration passed to time.After would fire immediately and
+	// repeatedly issue RunCommand requests until the timeout expires.
+	if interval <= 0 {
+		interval = DefaultHealthCheckPollingInterval
+	}
+
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 

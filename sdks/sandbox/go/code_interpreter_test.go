@@ -100,3 +100,13 @@ func TestCodeInterpreter_WaitRuntimeReady_TimesOut(t *testing.T) {
 	require.ErrorAs(t, err, &readyErr, "timeout error type")
 	assert.Contains(t, readyErr.Error(), "jupyter", "timeout message should mention the runtime")
 }
+
+func TestCodeInterpreter_WaitRuntimeReady_UsesDefaultForNegativeInterval(t *testing.T) {
+	var calls int32
+	srv := newCodeInterpreterTestServer(t, func(attempt int32) bool { return false }, &calls)
+	ci := newTestCodeInterpreter(t, srv.URL)
+
+	err := ci.waitRuntimeReady(context.Background(), 250*time.Millisecond, -time.Millisecond)
+	require.Error(t, err, "waitRuntimeReady should time out")
+	require.True(t, atomic.LoadInt32(&calls) <= 2, "negative intervals must not busy-loop runtime checks")
+}
