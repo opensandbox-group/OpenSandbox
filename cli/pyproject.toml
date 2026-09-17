@@ -42,10 +42,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # Native argv command execution (#1757) reached the SDK after the 0.1.16
-    # release; the CLI now passes argv lists to commands.run, so it requires
-    # the first SDK release that ships that support. Release the CLI only
-    # after the python/sandbox SDK >= 0.1.17 is published.
+    # `command run --argv` passes a list to commands.run; the SDK accepts a
+    # list there from 0.1.17. Release the CLI only after that SDK is published.
     "opensandbox>=0.1.17,<0.2.0",
     "click>=8.1.0,<9.0",
     "rich>=13.0.0,<14.0",

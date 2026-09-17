@@ -195,13 +195,15 @@ osb command status <sandbox-id> <execution-id> -o json
 osb command logs <sandbox-id> <execution-id> -o json
 ```
 
-Arguments after `--` are executed directly as an argv list (no shell), so literal
-`$HOME`, quotes, and empty strings reach the process unchanged. Use
-`sh -c '<shell text>'` when you need pipelines, redirection, or environment
-prefixes:
+By default the payload after `--` is joined into one shell command string, so
+pipelines, redirection, and `$VAR` expansion work as in a terminal. Add `--argv`
+to pass the arguments to the executable as a literal argv list (no shell) when
+values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the
+process unchanged. `--argv` needs a sandbox image whose execd accepts argv
+requests:
 
 ```bash
-osb command run <sandbox-id> -o raw -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""
+osb command run <sandbox-id> -o raw --argv -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""
 ```
 
 Persistent shell session:

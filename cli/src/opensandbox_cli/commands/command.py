@@ -51,20 +51,28 @@ def _run_command(
     workdir: str | None,
     timeout: timedelta | None,
     output_format: str | None,
+    argv: bool = False,
 ) -> None:
     """Shared implementation for ``command run``.
 
     Mode contract:
     - foreground (default): stream output directly, allow only ``-o raw``
     - background (``--background``): return a tracked execution object, allow structured output
+
+    Payload contract:
+    - default: join the arguments into one shell command string (works against
+      every deployed execd)
+    - ``--argv``: send the arguments as a literal argv list, no shell; needs an
+      execd that accepts the ``argv`` request field
     """
     allowed = ("table", "json", "yaml") if background else ("raw",)
     fallback = "table" if background else "raw"
     prepare_output(obj, output_format, allowed=allowed, fallback=fallback)
-    # Click already split the payload into discrete arguments; pass them as a
-    # native argv list so literal values (empty strings, "$HOME", quotes,
-    # embedded spaces) reach the process without shell re-parsing (#1757).
-    argv = list(command)
+    payload: str | list[str]
+    if argv:
+        payload = list(command)
+    else:
+        payload = " ".join(shlex.quote(arg) for arg in command)
     sandbox = obj.connect_sandbox(sandbox_id)
 
     try:
@@ -75,7 +83,7 @@ def _run_command(
         )
 
         if background:
-            execution = sandbox.commands.run(argv, opts=opts)
+            execution = sandbox.commands.run(payload, opts=opts)
             obj.output.success_panel(
                 {
                     "execution_id": execution.id,
@@ -102,7 +110,7 @@ def _run_command(
             sys.stderr.flush()
 
         handlers = ExecutionHandlersSync(on_stdout=on_stdout, on_stderr=on_stderr)
-        execution = sandbox.commands.run(argv, opts=opts, handlers=handlers)
+        execution = sandbox.commands.run(payload, opts=opts, handlers=handlers)
 
         # Ensure terminal prompt starts on a new line
         if last_text and not last_text.endswith("\n"):
@@ -126,15 +134,13 @@ def _handle_execution_error(obj: ClientContext, execution) -> None:
 
 @command_group.command(
     "run",
-    help=(
-        "Run a command in a sandbox. Use `--` before the sandbox command payload; "
-        "arguments are executed directly without a shell."
-    ),
+    help="Run a command in a sandbox. Use `--` before the sandbox command payload.",
     epilog=(
         "Separator rule: use `--` before the sandbox command payload.\n\n"
-        "Arguments after `--` are passed to the executable as-is (no shell), so "
-        "literal `$HOME`, quotes, and empty strings are preserved. Use "
-        "`sh -c '<shell text>'` for pipelines, redirection, or env prefixes."
+        "By default the payload is joined into one shell command string. Add "
+        "`--argv` to pass the arguments to the executable as-is (no shell), so "
+        "literal `$HOME`, quotes, and empty strings are preserved; this needs a "
+        "sandbox image whose execd accepts argv requests."
     ),
 )
 @click.argument("sandbox_id")
@@ -142,6 +148,12 @@ def _handle_execution_error(obj: ClientContext, execution) -> None:
 @click.option("-d", "--background", is_flag=True, default=False, help="Run in background.")
 @click.option("-w", "--workdir", default=None, help="Working directory.")
 @click.option("-t", "--timeout", type=DURATION, default=None, help="Command timeout (e.g. 30s, 5m).")
+@click.option(
+    "--argv",
+    is_flag=True,
+    default=False,
+    help="Pass the payload as a literal argv list (no shell). Requires an argv-capable execd.",
+)
 @output_option("table", "json", "yaml", "raw")
 @click.pass_obj
 @handle_errors
@@ -152,13 +164,14 @@ def command_run(
     background: bool,
     workdir: str | None,
     timeout: timedelta | None,
+    argv: bool,
     output_format: str | None,
 ) -> None:
     """Run a command in a sandbox.
 
     Default mode streams output directly. Add ``--background`` to return a
-    tracked execution object instead. Use ``--`` before the sandbox command payload;
-    arguments are executed directly without a shell.
+    tracked execution object instead. Use ``--`` before the sandbox command payload.
+    The payload is sent as a shell command string unless ``--argv`` is given.
     """
     _run_command(
         obj,
@@ -168,6 +181,7 @@ def command_run(
         workdir,
         timeout,
         output_format,
+        argv=argv,
     )
 
 

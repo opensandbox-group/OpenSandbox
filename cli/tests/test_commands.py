@@ -1118,7 +1118,7 @@ class TestFileChmod:
 
 
 class TestCommandSeparators:
-    def test_command_run_passes_native_argv_after_separator(self, runner: CliRunner) -> None:
+    def test_command_run_supports_shell_payload_after_separator(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
         execution = MagicMock()
         execution.error = None
@@ -1133,12 +1133,29 @@ class TestCommandSeparators:
 
         assert result.exit_code == 0
         mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == "sh -lc 'echo ready'"
+
+    def test_command_run_argv_flag_passes_native_argv_after_separator(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        execution = MagicMock()
+        execution.error = None
+        mock_sb.commands.run.return_value = execution
+
+        result = _invoke(
+            runner,
+            ["command", "run", "sb-1", "--argv", "--", "sh", "-lc", "echo ready"],
+            sandbox=mock_sb,
+            output_format="raw",
+        )
+
+        assert result.exit_code == 0
+        mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == ["sh", "-lc", "echo ready"]
 
-    def test_command_run_preserves_literal_argv_arguments(self, runner: CliRunner) -> None:
-        # Exact reproduction from #1757: the trailing arguments must reach the
-        # process verbatim — literal "$HOME", embedded space, single quote, and
-        # an empty string — with no shell quoting or expansion in between.
+    def test_command_run_argv_flag_preserves_literal_arguments(self, runner: CliRunner) -> None:
+        # With --argv the trailing arguments must reach the process verbatim:
+        # literal "$HOME", embedded space, single quote, and an empty string,
+        # with no shell quoting or expansion in between.
         mock_sb = MagicMock()
         execution = MagicMock()
         execution.error = None
@@ -1150,6 +1167,7 @@ class TestCommandSeparators:
                 "command",
                 "run",
                 "sb-1",
+                "--argv",
                 "--",
                 "python3",
                 "-c",
@@ -1433,7 +1451,24 @@ class TestCommandRun:
         data = json.loads(result.output)
         assert data["execution_id"] == "exec-123"
         assert data["mode"] == "background"
-        # Background mode passes the payload as native argv, like foreground.
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == "echo hello"
+
+    def test_background_run_argv_flag_passes_native_argv(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_execution = MagicMock()
+        mock_execution.id = "exec-123"
+        mock_sb.commands.run.return_value = mock_execution
+
+        result = _invoke(
+            runner,
+            ["command", "run", "sb-1", "-d", "--argv", "echo", "hello", "-o", "json"],
+            sandbox=mock_sb,
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["execution_id"] == "exec-123"
+        assert data["mode"] == "background"
         mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == ["echo", "hello"]
 

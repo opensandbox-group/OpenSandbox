@@ -29,10 +29,9 @@ from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
 
 _UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
 
-# Exact reproduction case from #1757: the trailing arguments must reach the
-# process verbatim — literal "$HOME", embedded space, single quote, and an
-# empty string — without any shell expansion or quoting.
-ISSUE_1757_ARGV = [
+# Arguments a shell would rewrite: a literal "$HOME", an embedded space, a
+# single quote, and an empty string. They must reach the process verbatim.
+LITERAL_ARGV = [
     "python3",
     "-c",
     "import sys; print(sys.argv[1:])",
@@ -89,7 +88,7 @@ class _SseTransport(httpx.BaseTransport):
                 request=request,
             )
 
-        if request.url.path == "/command" and payload.get("argv") == ISSUE_1757_ARGV:
+        if request.url.path == "/command" and payload.get("argv") == LITERAL_ARGV:
             # Simulate execd's native argv execution: run the payload as
             # `python3 -c <code> <args...>` directly (no shell) and stream
             # back what `print(sys.argv[1:])` produces — with -c, Python's
@@ -204,24 +203,22 @@ def test_sync_run_command_streaming_preserves_unicode_separators() -> None:
 
 
 def test_sync_run_command_argv_streams_literal_arguments() -> None:
-    # Issue #1757 reproduction: argv must cross the wire verbatim and the
-    # streamed stdout must reflect the literal arguments.
     transport = _SseTransport()
     cfg = ConnectionConfigSync(protocol="http", transport=transport)
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapterSync(cfg, endpoint)
 
-    execution = adapter.run(ISSUE_1757_ARGV)
+    execution = adapter.run(LITERAL_ARGV)
 
     assert execution.id == "exec-argv"
-    assert execution.logs.stdout[0].text == str(ISSUE_1757_ARGV[3:]) + "\n"
+    assert execution.logs.stdout[0].text == str(LITERAL_ARGV[3:]) + "\n"
     assert "$HOME" in execution.logs.stdout[0].text
     assert execution.complete is not None
     assert execution.exit_code == 0
 
     assert transport.last_request is not None
     body = json.loads(transport.last_request.content.decode("utf-8"))
-    assert body == {"argv": ISSUE_1757_ARGV}
+    assert body == {"argv": LITERAL_ARGV}
 
 
 def test_sync_run_command_streaming_non_zero_exit_updates_exit_code() -> None:
