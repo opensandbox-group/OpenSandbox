@@ -35,7 +35,7 @@ func main() {
     lc := opensandbox.NewLifecycleClient("http://localhost:8080/v1", "your-api-key")
 
     sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-        Image:      opensandbox.ImageSpec{URI: "python:3.12"},
+        Image:      &opensandbox.ImageSpec{URI: "python:3.12"},
         Entrypoint: []string{"/bin/sh"},
         ResourceLimits: opensandbox.ResourceLimits{
             "cpu":    "500m",
@@ -197,7 +197,7 @@ logs. Create the sandbox with `CredentialProxy` enabled, then write credentials
 and bindings through the sandbox helpers or `EgressClient`.
 
 ```go
-sandbox, err := manager.Create(ctx, opensandbox.SandboxCreateOptions{
+sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
     Image: "python:3.11",
     NetworkPolicy: &opensandbox.NetworkPolicy{
         DefaultAction: "deny",

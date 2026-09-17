@@ -86,10 +86,15 @@ sandbox.renew(Duration.ofMinutes(30));
 sandbox.pause();
 
 // Resume execution
-sandbox.resume();
+// There is no Sandbox.resume() instance method: resuming re-attaches to an
+// existing sandbox by id and returns a new, connected handle.
+Sandbox resumed = Sandbox.resumer()
+    .sandboxId(sandbox.getId())
+    .connectionConfig(config)
+    .resume();
 
 // Get current status
-SandboxInfo info = sandbox.getInfo();
+SandboxInfo info = resumed.getInfo();
 System.out.println("State: " + info.getStatus().getState());
 System.out.println("Expires: " + info.getExpiresAt()); // null when manual cleanup mode is used
 ```
@@ -388,10 +393,7 @@ Sandbox sandbox = Sandbox.builder()
     .connectionConfig(config)
     .image("python:3.11")
     .timeout(Duration.ofMinutes(30))
-    .resource(map -> {
-        map.put("cpu", "2");
-        map.put("memory", "4Gi");
-    })
+    .resource(Map.of("cpu", "2", "memory", "4Gi"))
     .env("PYTHONPATH", "/app")
     .metadata("project", "demo")
     .extension("storage.id", "dataset-001")

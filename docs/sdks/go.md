@@ -40,7 +40,7 @@ func main() {
     lc := opensandbox.NewLifecycleClient("http://localhost:8080/v1", "your-api-key")
 
     sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-        Image:      opensandbox.ImageSpec{URI: "python:3.12"},
+        Image:      &opensandbox.ImageSpec{URI: "python:3.12"},
         Entrypoint: []string{"/bin/sh"},
         ResourceLimits: opensandbox.ResourceLimits{
             "cpu":    "500m",
