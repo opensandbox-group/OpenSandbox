@@ -127,8 +127,17 @@ class TestFsbE2E:
     """SDK-driven conversion of the fsb integration-env verify stages."""
 
     @pytest.fixture(scope="class")
-    async def manager(self) -> SandboxManager:
-        async with await SandboxManager.create(_connection_config()) as mgr:
+    async def connection_config(self):
+        # Shared by the manager and every classmethod entry point
+        # (create/resume), so all calls hit the integration-env server
+        # instead of the SDK default localhost:8080.
+        config = _connection_config().with_transport_if_missing()
+        yield config
+        await config.close_transport_if_owned()
+
+    @pytest.fixture(scope="class")
+    async def manager(self, connection_config) -> SandboxManager:
+        async with await SandboxManager.create(connection_config) as mgr:
             yield mgr
 
     @pytest.mark.timeout(600)
@@ -191,7 +200,7 @@ class TestFsbE2E:
 
     @pytest.mark.timeout(1200)
     async def test_02_template_sandbox_lifecycle_and_policy(
-        self, manager: SandboxManager
+        self, manager: SandboxManager, connection_config
     ) -> None:
         # verify_one_sandbox: create carries the default egress policy so the
         # networkPolicy -> egress action binding -> nft chain is exercised on
@@ -201,6 +210,7 @@ class TestFsbE2E:
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
             ready_timeout=COLD_READY_TIMEOUT,
+            connection_config=connection_config,
             metadata={"origin": "fast-sandbox-env-verify"},
             network_policy=NetworkPolicy(
                 defaultAction="deny",
@@ -338,11 +348,14 @@ class TestFsbE2E:
             await _kill_and_wait_gone(manager, sandbox.id)
 
     @pytest.mark.timeout(900)
-    async def test_03_pause_resume_round_trip(self, manager: SandboxManager) -> None:
+    async def test_03_pause_resume_round_trip(
+        self, manager: SandboxManager, connection_config
+    ) -> None:
         sandbox = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
             ready_timeout=COLD_READY_TIMEOUT,
+            connection_config=connection_config,
             metadata={"origin": "fast-sandbox-env-pause"},
         )
         try:
@@ -360,7 +373,9 @@ class TestFsbE2E:
             # Resume advances the route generation; Sandbox.resume re-resolves
             # endpoints and reads the sandbox origin from the server header.
             resumed = await Sandbox.resume(
-                sandbox.id, ready_timeout=WARM_READY_TIMEOUT
+                sandbox.id,
+                connection_config=connection_config,
+                ready_timeout=WARM_READY_TIMEOUT,
             )
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
@@ -368,11 +383,14 @@ class TestFsbE2E:
             await _kill_and_wait_gone(manager, sandbox.id)
 
     @pytest.mark.timeout(1500)
-    async def test_04_snapshot_round_trip(self, manager: SandboxManager) -> None:
+    async def test_04_snapshot_round_trip(
+        self, manager: SandboxManager, connection_config
+    ) -> None:
         source = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
             ready_timeout=COLD_READY_TIMEOUT,
+            connection_config=connection_config,
             metadata={"origin": "fast-sandbox-env-snapshot"},
         )
         snapshot_ids: list[str] = []
@@ -457,6 +475,7 @@ class TestFsbE2E:
                 snapshot_id=snapshot.id,
                 timeout=timedelta(hours=1),
                 resource={"cpu": "1", "memory": "512Mi", "pids": "128"},
+                connection_config=connection_config,
                 ready_timeout=timedelta(minutes=10),
             )
             try:
