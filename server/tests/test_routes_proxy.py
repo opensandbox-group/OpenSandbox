@@ -544,8 +544,8 @@ def test_proxy_forwards_filtered_headers_and_query(
 
     assert fake_client.built is not None
     assert fake_client.built["method"] == "POST"
-    assert fake_client.built["url"] == "http://10.57.1.91:40109/api/run"
-    assert fake_client.built["params"] == "q=search"
+    assert fake_client.built["url"] == "http://10.57.1.91:40109/api/run?q=search"
+    assert fake_client.built["params"] is None
     forwarded_headers = fake_client.built["headers"]
     lowered_headers = {k.lower(): v for k, v in forwarded_headers.items()}
     assert "host" not in lowered_headers
@@ -778,8 +778,8 @@ def test_proxy_root_path_forwards_endpoint_headers_and_query(
     assert response.status_code == 200
     assert response.content == b"root-ok"
     assert fake_client.built is not None
-    assert fake_client.built["url"] == "http://10.57.1.91:40109/base"
-    assert fake_client.built["params"] == "q=search"
+    assert fake_client.built["url"] == "http://10.57.1.91:40109/base?q=search"
+    assert fake_client.built["params"] is None
     lowered_headers = {
         key.lower(): value for key, value in fake_client.built["headers"].items()
     }
@@ -912,7 +912,8 @@ def test_proxy_forwards_get_request_with_query_params(
     """
     This test verifies the fix for issue #484 where GET requests with query
     parameters were failing with 400 MISSING_QUERY when using use_server_proxy.
-    The query string should be passed via httpx params, not embedded in URL.
+    The raw query string is embedded verbatim in the target URL (#1901);
+    passing it through httpx ``params=`` would re-serialize it.
     """
     class StubService:
         @staticmethod
@@ -941,8 +942,8 @@ def test_proxy_forwards_get_request_with_query_params(
     assert response.status_code == 200
     assert fake_client.built is not None
     assert fake_client.built["method"] == "GET"
-    assert fake_client.built["url"] == "http://10.57.1.91:40109/files/search"
-    assert fake_client.built["params"] == "path=%2Fworkspace"
+    assert fake_client.built["url"] == "http://10.57.1.91:40109/files/search?path=%2Fworkspace"
+    assert fake_client.built["params"] is None
     assert fake_client.built["content"] is None
 
 
@@ -1501,3 +1502,59 @@ def test_networkpolicy_route_forwards_egress_auth_header(
     assert egress_headers[0][1] == "injected-egress-token"
 
 
+
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    [
+        "b=2&a=1&b=3",       # repeated keys must keep order
+        "uploads",            # bare key must not gain '='
+        "sig=%E9%FF",         # non-UTF-8 escapes must survive byte-for-byte
+        "s=1;2",              # ';' must not be escaped
+        "q=hello%20world",    # %20 must not become '+'
+    ],
+)
+def test_proxy_forwards_raw_query_string_verbatim(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_query: str,
+) -> None:
+    """The HTTP proxy forwards the client's query string verbatim (#1901)."""
+    class StubService:
+        @staticmethod
+        def get_endpoint(
+            sandbox_id: str,
+            port: int,
+            resolve_internal: bool = False,
+            use_proxy_host: bool = False,
+        ) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:44772")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(chunks=[b"ok"])
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        f"/v1/sandboxes/sbx-123/proxy/44772/echo?{raw_query}",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["url"] == f"http://10.57.1.91:44772/echo?{raw_query}"
+    assert fake_client.built["params"] is None
+
+
+def test_httpx_preserves_raw_query_embedded_in_url() -> None:
+    """httpx keeps a query string embedded in the request URL verbatim; it is
+    the ``params=`` path that re-parses and re-serializes it (#1901)."""
+    raw_query = "b=2&a=1&b=3&uploads&sig=%E9%FF&s=1;2&q=hello%20world"
+    client = httpx.Client()
+    try:
+        req = client.build_request("GET", f"http://10.57.1.91:44772/echo?{raw_query}")
+    finally:
+        client.close()
+    assert req.url.raw_path.decode("latin-1") == f"/echo?{raw_query}"
