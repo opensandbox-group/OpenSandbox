@@ -1744,6 +1744,27 @@ snapshot_verify() {
 	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
 }
 
+# --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py) -----------------
+
+sdk_e2e() {
+	kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
+		|| die "cluster $KIND_CLUSTER is not up (run up first)"
+	curl -fsS -m 5 "$SERVER_URL/health" >/dev/null 2>&1 \
+		|| die "server $SERVER_URL is not reachable (run up first)"
+	command -v uv >/dev/null 2>&1 \
+		|| die "uv is required on PATH (https://docs.astral.sh/uv/ — curl -LsSf https://astral.sh/uv/install.sh | sh)"
+	local template_id
+	template_id="$(cat "$WORK/template-id" 2>/dev/null || true)"
+	[[ -n "$template_id" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
+	export OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$template_id"
+	export OPENSANDBOX_TEST_DOMAIN="127.0.0.1:$SERVER_HOST_PORT"
+	export OPENSANDBOX_TEST_PROTOCOL="http"
+	export OPENSANDBOX_TEST_API_KEY="$SERVER_API_KEY"
+	log "sdk e2e: template=$template_id server=$SERVER_URL -> tests/python/tests/test_fsb_e2e.py"
+	cd "$OSB_ROOT/tests/python" || die "tests/python not found under $OSB_ROOT"
+	exec uv run pytest tests/test_fsb_e2e.py
+}
+
 # --- status / summary ---------------------------------------------------------------------
 
 dart_metrics_summary() {
@@ -1861,7 +1882,7 @@ down() {
 
 usage() {
 	cat <<'EOF'
-usage: integration-env.sh [--auto-clean] {up|down|status|pool}
+usage: integration-env.sh [--auto-clean] {up|down|status|pool|sdk-e2e}
 
   up       initialize the full environment: fast-sandbox@pinned-commit images,
            two-node kind cluster (KVM), MinIO, control plane, firecracker
@@ -1872,6 +1893,10 @@ usage: integration-env.sh [--auto-clean] {up|down|status|pool}
            plus a pause/resume round-trip through the checkpoint).
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / MinIO / OpenSandbox health
+  sdk-e2e  run the Python SDK e2e suite (tests/python/tests/test_fsb_e2e.py)
+           against the live stack; requires `up` (template id at
+           $WORK/template-id) and uv on PATH. Extra pytest args go through
+           PYTEST_ADDOPTS.
   down     teardown: kind cluster + MinIO + sysctl + XFS StateRoot + caches
 
   --auto-clean  on up failure, run down automatically before dumping logs
@@ -1890,7 +1915,7 @@ EOF
 for arg in "$@"; do
 	case "$arg" in
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|pool) ACTION="$arg" ;;
+		up|down|status|pool|sdk-e2e) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -1958,6 +1983,9 @@ case "$ACTION" in
 		;;
 	status)
 		status
+		;;
+	sdk-e2e)
+		sdk_e2e
 		;;
 	down)
 		down

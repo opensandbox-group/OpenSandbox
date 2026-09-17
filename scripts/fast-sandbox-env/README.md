@@ -30,6 +30,7 @@ caveats): `fast-sandbox/docs/guides/firecracker-integration-env.md`.
 ./scripts/fast-sandbox-env/integration-env.sh up        # full stack + end-to-end + pause/resume verify
 ./scripts/fast-sandbox-env/integration-env.sh status    # component / pool / DART / OpenSandbox health
 ./scripts/fast-sandbox-env/integration-env.sh pool      # re-apply the pool only
+./scripts/fast-sandbox-env/integration-env.sh sdk-e2e   # Python SDK e2e suite against the live stack
 ./scripts/fast-sandbox-env/integration-env.sh down      # teardown, host left clean
 ```
 
@@ -39,9 +40,16 @@ signed `f1.*` header routes served by the gateway at `http://127.0.0.1:18081`.
 
 The `up` verify stages are also available as Python SDK e2e tests
 (template create → gateway ping → networkpolicy convergence, lifecycle
-ops, pause/resume, snapshot round trip) — see `tests/python/README.md`
-(`make test-fsb`, requires `OPENSANDBOX_TEST_FSB_TEMPLATE_ID`, which the
-script stores in `$WORK/template-id`).
+ops, pause/resume, snapshot round trip):
+
+```bash
+./scripts/fast-sandbox-env/integration-env.sh sdk-e2e   # needs uv on PATH
+```
+
+or, manually: `cd tests/python && OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat
+"$WORK/template-id")" make test-fsb` (requires
+`OPENSANDBOX_TEST_FSB_TEMPLATE_ID`; the script stores the id in
+`$WORK/template-id`).
 
 ## Wiring
 
