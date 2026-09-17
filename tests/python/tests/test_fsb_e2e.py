@@ -53,12 +53,23 @@ from opensandbox.models.sandboxes import (
     SandboxOrigin,
     SnapshotFilter,
 )
-from opensandbox.models.templates import TemplateFilter, TemplatePhase
+from opensandbox.models.templates import (
+    CreateTemplateRequest,
+    TemplateFilter,
+    TemplatePhase,
+    TemplateReadiness,
+)
 from opensandbox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
 FSB_TEMPLATE_ID = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ID", "")
+# ubuntu base has no curl/wget/python3; enforcement probes use `getent`
+# (DNS is the first gate of the fsb dns+nft egress chain).
+FSB_TEMPLATE_IMAGE = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_IMAGE", "ubuntu:latest")
+FSB_PUBLISH_TARGET = os.getenv(
+    "OPENSANDBOX_TEST_FSB_PUBLISH_TARGET", "s3://sandbox-images/publish"
+)
 FSB_DOMAIN = os.getenv("OPENSANDBOX_TEST_DOMAIN", "127.0.0.1:18080")
 FSB_PROTOCOL = os.getenv("OPENSANDBOX_TEST_PROTOCOL", "http")
 FSB_API_KEY = os.getenv("OPENSANDBOX_TEST_API_KEY", "fast-sandbox-env")
@@ -130,6 +141,52 @@ class TestFsbE2E:
         )
         assert FSB_TEMPLATE_ID in [t.template_id for t in paged.template_infos]
 
+    @pytest.mark.timeout(900)
+    async def test_01b_template_crud(self, manager: SandboxManager) -> None:
+        """Full template lifecycle via the SDK: async build -> Succeeded ->
+        listed under its metadata filter -> deleted (404)."""
+        created = await manager.create_template(
+            CreateTemplateRequest(
+                image=FSB_TEMPLATE_IMAGE,
+                publish=FSB_PUBLISH_TARGET,
+                format="native",
+                resource_limits={"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
+                readiness=TemplateReadiness(warmup_seconds=15),
+                metadata={"origin": "fast-sandbox-env-sdk"},
+            )
+        )
+        try:
+            assert created.status.phase == TemplatePhase.PENDING
+
+            async def _terminal() -> bool:
+                info = await manager.get_template(created.template_id)
+                return info.status.phase in {TemplatePhase.SUCCEEDED, TemplatePhase.FAILED}
+
+            await _wait_until(_terminal, timedelta(minutes=10), "build terminal")
+
+            info = await manager.get_template(created.template_id)
+            assert info.status.phase == TemplatePhase.SUCCEEDED, (
+                f"template build failed: {info.status.message}"
+            )
+            assert info.status.manifest_ref, "template manifestRef is empty"
+            assert info.image == FSB_TEMPLATE_IMAGE
+
+            paged = await manager.list_templates(
+                TemplateFilter(metadata={"origin": "fast-sandbox-env-sdk"})
+            )
+            assert created.template_id in [t.template_id for t in paged.template_infos]
+        finally:
+            await manager.delete_template(created.template_id)
+
+        async def _gone() -> bool:
+            try:
+                await manager.get_template(created.template_id)
+                return False
+            except SandboxApiException as exc:
+                return exc.status_code == 404
+
+        assert await _gone()
+
     @pytest.mark.timeout(1200)
     async def test_02_template_sandbox_lifecycle_and_policy(
         self, manager: SandboxManager
@@ -154,6 +211,12 @@ class TestFsbE2E:
         try:
             assert sandbox.origin == SandboxOrigin.TEMPLATE
 
+            # DNS is the first gate of the fsb dns+nft egress chain: an
+            # allowed target resolves, anything else fails to resolve.
+            async def _resolve(target: str) -> bool:
+                result = await sandbox.commands.run(f"getent hosts {target}")
+                return result.error is None
+
             async def _example_com_enforced() -> bool:
                 policy = await sandbox.get_egress_policy()
                 return any(
@@ -165,18 +228,30 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "egress policy enforcing (networkPolicy -> action binding -> nft)",
             )
+            assert await _resolve("example.com"), "allowed target must resolve"
+            assert not await _resolve("www.github.com"), "denied target must not resolve"
+
+            # execd surface: command execution, filesystem round trip, metrics.
+            result = await sandbox.commands.run("echo hello-fsb")
+            assert result.error is None
+            assert "hello-fsb" in result.logs.stdout[0].text
+            await sandbox.files.write_file("/tmp/fsb-e2e.txt", "hello-fsb")
+            assert await sandbox.files.read_file("/tmp/fsb-e2e.txt") == "hello-fsb"
+            metrics = await sandbox.get_metrics()
+            assert metrics.cpu_count > 0
+            assert metrics.memory_total_in_mib > 0
 
             # verify_policy_updated, converted to the SDK merge/delete paths:
-            # PATCH merges github.com into the binding and the egress sidecar
-            # hot-swaps the nft rules; DELETE removes example.com again.
+            # PATCH merges www.github.com into the binding and the egress
+            # sidecar hot-swaps the nft rules; DELETE removes example.com.
             await sandbox.patch_egress_rules(
-                [NetworkRule(action="allow", target="github.com")]
+                [NetworkRule(action="allow", target="www.github.com")]
             )
 
             async def _github_com_enforced() -> bool:
                 policy = await sandbox.get_egress_policy()
                 return any(
-                    rule.target == "github.com" for rule in policy.egress or []
+                    rule.target == "www.github.com" for rule in policy.egress or []
                 )
 
             await _wait_until(
@@ -184,6 +259,7 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "policy update converged (PATCH -> ReplaceActionBindings -> egress)",
             )
+            assert await _resolve("www.github.com"), "newly allowed target must resolve"
             await sandbox.delete_egress_rules(["example.com"])
 
             async def _example_com_gone() -> bool:
@@ -197,6 +273,7 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "deleted rule no longer served",
             )
+            assert not await _resolve("example.com"), "deleted target must stop resolving"
 
             # verify_lifecycle_ops: get, list, metadata merge-patch
             # (upsert + delete via null), renew-expiration.
