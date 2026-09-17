@@ -115,7 +115,7 @@ MINIO_CONTAINER="${MINIO_CONTAINER:-fast-sandbox-env-minio}"
 MINIO_DATA="$WORK/minio-data"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"   # auto-derived from the kind network
 
-SBX_IMAGE="${SBX_IMAGE:-ubuntu:latest}"
+SBX_IMAGE="${SBX_IMAGE:-alpine:3.19}"
 EXECD="${EXECD:-opensandbox/execd:1.1.0}"
 # WARM_IMAGES=1 preheats the pool instead of the default on-demand flow
 # (warmImages reference the template id: the exact per-template index key).

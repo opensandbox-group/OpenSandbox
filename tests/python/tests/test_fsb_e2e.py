@@ -64,9 +64,11 @@ from opensandbox.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 FSB_TEMPLATE_ID = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ID", "")
-# ubuntu base has no curl/wget/python3; enforcement probes use `getent`
-# (DNS is the first gate of the fsb dns+nft egress chain).
-FSB_TEMPLATE_IMAGE = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_IMAGE", "ubuntu:latest")
+# alpine ships busybox wget: a real HTTPS request, so egress probes
+# exercise both gates of the fsb dns+nft chain (DNS resolution and
+# transport). Override with e.g. curlimages/curl if cert-verified curl
+# semantics are needed (note: that image defaults to a non-root user).
+FSB_TEMPLATE_IMAGE = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_IMAGE", "alpine:3.19")
 FSB_PUBLISH_TARGET = os.getenv(
     "OPENSANDBOX_TEST_FSB_PUBLISH_TARGET", "s3://sandbox-images/publish"
 )
@@ -211,10 +213,13 @@ class TestFsbE2E:
         try:
             assert sandbox.origin == SandboxOrigin.TEMPLATE
 
-            # DNS is the first gate of the fsb dns+nft egress chain: an
-            # allowed target resolves, anything else fails to resolve.
-            async def _resolve(target: str) -> bool:
-                result = await sandbox.commands.run(f"getent hosts {target}")
+            # HTTP-level enforcement probe: busybox wget performs a real
+            # HTTPS request, covering both gates of the fsb dns+nft chain
+            # (DNS resolution and transport).
+            async def _http_reachable(target: str) -> bool:
+                result = await sandbox.commands.run(
+                    f"wget -T 8 -q -O /dev/null https://{target}"
+                )
                 return result.error is None
 
             async def _example_com_enforced() -> bool:
@@ -228,8 +233,16 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "egress policy enforcing (networkPolicy -> action binding -> nft)",
             )
-            assert await _resolve("example.com"), "allowed target must resolve"
-            assert not await _resolve("www.github.com"), "denied target must not resolve"
+            await _wait_until(
+                lambda: _http_reachable("example.com"),
+                timedelta(seconds=30),
+                "allowed target serves HTTPS",
+            )
+            await _wait_until(
+                lambda: not _http_reachable("www.github.com"),
+                timedelta(seconds=30),
+                "denied target must not serve HTTPS",
+            )
 
             # execd surface: command execution, filesystem round trip, metrics.
             result = await sandbox.commands.run("echo hello-fsb")
@@ -259,7 +272,11 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "policy update converged (PATCH -> ReplaceActionBindings -> egress)",
             )
-            assert await _resolve("www.github.com"), "newly allowed target must resolve"
+            await _wait_until(
+                lambda: _http_reachable("www.github.com"),
+                timedelta(seconds=30),
+                "newly allowed target serves HTTPS",
+            )
             await sandbox.delete_egress_rules(["example.com"])
 
             async def _example_com_gone() -> bool:
@@ -273,7 +290,11 @@ class TestFsbE2E:
                 timedelta(minutes=2),
                 "deleted rule no longer served",
             )
-            assert not await _resolve("example.com"), "deleted target must stop resolving"
+            await _wait_until(
+                lambda: not _http_reachable("example.com"),
+                timedelta(seconds=30),
+                "deleted target must stop serving HTTPS",
+            )
 
             # verify_lifecycle_ops: get, list, metadata merge-patch
             # (upsert + delete via null), renew-expiration.
