@@ -134,6 +134,16 @@ async def _get_sandbox_info(manager: SandboxManager, sandbox_id: str):
         raise
 
 
+async def _get_policy_tolerant(sandbox: Sandbox):
+    """get_egress_policy tolerating transient 404/503 during CR propagation."""
+    try:
+        return await sandbox.get_egress_policy()
+    except SandboxApiException as exc:
+        if exc.status_code in {404, 503}:
+            return None
+        raise
+
+
 async def _get_snapshot(manager: SandboxManager, snapshot_id: str):
     """get_snapshot tolerating a transient 404 (same informer lag as above)."""
     try:
@@ -277,8 +287,8 @@ class TestFsbE2E:
                 return result.error is not None
 
             async def _example_com_enforced() -> bool:
-                policy = await sandbox.get_egress_policy()
-                return any(
+                policy = await _get_policy_tolerant(sandbox)
+                return policy is not None and any(
                     rule.target == "example.com" for rule in policy.egress or []
                 )
 
@@ -319,8 +329,8 @@ class TestFsbE2E:
             )
 
             async def _pypi_org_enforced() -> bool:
-                policy = await sandbox.get_egress_policy()
-                return any(
+                policy = await _get_policy_tolerant(sandbox)
+                return policy is not None and any(
                     rule.target == "pypi.org" for rule in policy.egress or []
                 )
 
@@ -337,8 +347,8 @@ class TestFsbE2E:
             await sandbox.delete_egress_rules(["example.com"])
 
             async def _example_com_gone() -> bool:
-                policy = await sandbox.get_egress_policy()
-                return all(
+                policy = await _get_policy_tolerant(sandbox)
+                return policy is not None and all(
                     rule.target != "example.com" for rule in policy.egress or []
                 )
 
