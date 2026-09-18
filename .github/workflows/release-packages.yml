@@ -268,7 +268,11 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      # ---- leg 1: PyPI (server → cli → sandbox → code-interpreter → mcp) ----
+      # ---- leg 1: PyPI (server → sandbox → code-interpreter → mcp → cli) ----
+      # The CLI and the code-interpreter/mcp Python packages depend on the
+      # opensandbox SDK (see cli/pyproject.toml: "Release the CLI only after
+      # that SDK is published"), so the SDK must be visible on the index
+      # before its dependents go out.
 
       - name: Publish PyPI packages
         env:
@@ -288,10 +292,10 @@ jobs:
             echo "verification failed for ${name}" >&2; return 1
           }
           publish_one opensandbox-server            held/pkg-pypi-server
-          publish_one opensandbox-cli               held/pkg-pypi-cli
           publish_one opensandbox                   held/pkg-pypi-sandbox
           publish_one opensandbox-code-interpreter  held/pkg-pypi-code-interpreter
           publish_one opensandbox-mcp               held/pkg-pypi-mcp-sandbox
+          publish_one opensandbox-cli               held/pkg-pypi-cli
 
       # ---- leg 2: npm ----
 
