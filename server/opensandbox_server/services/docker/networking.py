@@ -75,6 +75,10 @@ _CONTAINER_ENV_VARS = ("container", "CONTAINER")
 _CONTAINER_RUNTIME_VALUES = frozenset(
     {"podman", "docker", "oci", "lxc", "lxc-libvirt", "systemd-nspawn"}
 )
+# Bind hosts that name the process's own loopback: inside a container they never reach the
+# host-mapped ports, so they must not switch ``[docker].host_ip`` off (see the resolvers below).
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
 
 
 def _running_inside_docker_container() -> bool:
@@ -359,11 +363,15 @@ class DockerNetworkingMixin:
             return eip_cfg
         host_cfg = (self.app_config.server.host or "").strip()
         host_key = host_cfg.lower()
-        if host_key in {"", "0.0.0.0", "::"}:
+        # Inside a container, [docker].host_ip is where host-mapped ports answer; a loopback bind
+        # (the safe default beside the sandboxes' network) is never that address, so it must not
+        # turn the setting off. An explicit non-loopback bind is left as it is.
+        if host_key in {"", "0.0.0.0", "::"} or host_key in _LOOPBACK_HOSTS:
             if _running_inside_docker_container():
                 host_ip = self._get_docker_host_ip()
                 if host_ip:
                     return host_ip
+        if host_key in {"", "0.0.0.0", "::"}:
             return self._resolve_bind_ip(socket.AF_INET)
         return host_cfg
 
@@ -375,11 +383,14 @@ class DockerNetworkingMixin:
         """
         host_cfg = (self.app_config.server.host or "").strip()
         host_key = host_cfg.lower()
-        if host_key in {"", "0.0.0.0", "::"}:
+        # Same rule as the public host: inside a container, host_ip says where the host-mapped
+        # endpoints (execd, the egress sidecar's readiness probe) answer — for a loopback bind too.
+        if host_key in {"", "0.0.0.0", "::"} or host_key in _LOOPBACK_HOSTS:
             if _running_inside_docker_container():
                 host_ip = self._get_docker_host_ip()
                 if host_ip:
                     return host_ip
+        if host_key in {"", "0.0.0.0", "::"}:
             return "127.0.0.1"
         return host_cfg
 
