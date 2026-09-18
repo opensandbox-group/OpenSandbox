@@ -409,20 +409,16 @@ kubectl get nodes -o json | jq -e '
 pull_and_maybe_load_image() {
   local image="$1"
   local attempt
-  if docker image inspect --format '{{.Id}}' "$image" >/dev/null 2>&1; then
-    log "Image ${image} already present locally; skipping pull (release tag may not be published yet)"
-  else
-    for attempt in 1 2 3; do
-      if docker pull --platform linux/amd64 "$image"; then
-        break
-      fi
-      if ((attempt == 3)); then
-        die "Failed to pull image after ${attempt} attempts: $image"
-      fi
-      warn "Image pull attempt ${attempt} failed for ${image}; retrying"
-      sleep $((attempt * 5))
-    done
-  fi
+  for attempt in 1 2 3; do
+    if docker pull --platform linux/amd64 "$image"; then
+      break
+    fi
+    if ((attempt == 3)); then
+      die "Failed to pull image after ${attempt} attempts: $image"
+    fi
+    warn "Image pull attempt ${attempt} failed for ${image}; retrying"
+    sleep $((attempt * 5))
+  done
 
   docker image inspect --format '{{json .}}' "$image" |
     jq -c --arg requested_reference "$image" \

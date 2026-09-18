@@ -62,10 +62,7 @@ if [[ "$PUSH" == "true" ]]; then
 else
   # Build only (for local testing / dry-run): single-arch, loaded into the
   # local docker daemon so `docker image inspect` can resolve the digest.
-  image_tags=(
-    -t "opensandbox/nodeagent:${TAG}"
-    -t "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent:${TAG}"
-  )
+  image_tags=(-t "opensandbox/nodeagent:${TAG}")
 fi
 
 builder_name="nodeagent-builder-$$-${RANDOM}"
