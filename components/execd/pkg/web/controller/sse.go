@@ -160,7 +160,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteStdout", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteStdout", payload, false, event.Summary())
 		},
 		OnExecuteStderr: func(text string) {
 			if text == "" {
@@ -173,7 +173,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteStderr", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteStderr", payload, false, event.Summary())
 		},
 	}
 
