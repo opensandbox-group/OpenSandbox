@@ -57,14 +57,14 @@ controller:
     # -- Controller image repository (built by manifests/release/build-fast-sandbox.sh)
     repository: opensandbox/fsb-controller
     # -- Image tag
-    tag: dev
+    tag: release-1.1.0-rc.1
     # -- Image pull policy
     pullPolicy: IfNotPresent
   # -- Number of controller replicas (no leader election; keep 1)
   replicaCount: 1
   # -- Image that executes SandboxTemplate golden-image builds (builder Pods
   # are created by the controller; build it with manifests/release/build-fast-sandbox.sh)
-  sandboxtemplateBuilderImage: opensandbox/fsb-sandboxtemplate-builder:dev
+  sandboxtemplateBuilderImage: opensandbox/fsb-sandboxtemplate-builder:release-1.1.0-rc.1
   # -- Resource requests and limits for the controller
   resources:
     limits:
@@ -147,7 +147,7 @@ janitor:
     # -- Janitor image repository (built by manifests/release/build-fast-sandbox.sh)
     repository: opensandbox/fsb-janitor
     # -- Image tag
-    tag: dev
+    tag: release-1.1.0-rc.1
     # -- Image pull policy
     pullPolicy: IfNotPresent
   # -- Orphan scan interval
@@ -171,7 +171,7 @@ runtime:
     # -- Runtime image repository (built by manifests/release/build-fast-sandbox.sh)
     repository: opensandbox/fsb-firecracker-runtime
     # -- Image tag
-    tag: dev
+    tag: release-1.1.0-rc.1
     # -- Image pull policy
     pullPolicy: IfNotPresent
   # -- Node selector. Empty by default: the runtime applies the firecracker

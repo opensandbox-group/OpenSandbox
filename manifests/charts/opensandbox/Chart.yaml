@@ -16,8 +16,8 @@ apiVersion: v2
 name: opensandbox
 description: All-in-one Helm chart for deploying OpenSandbox controller and server
 type: application
-version: 0.2.2
-appVersion: "0.2.2"
+version: 1.1.0-rc.1
+appVersion: "1.1.0-rc.1"
 
 keywords:
   - sandbox
@@ -40,25 +40,25 @@ kubeVersion: ">=1.21.1-0"
 
 dependencies:
   - name: base
-    version: "0.1.0"
+    version: "1.1.0-rc.1"
     repository: "file://../base"
     condition: base.enabled
   - name: opensandbox-controller
-    version: "0.2.1"
+    version: "1.1.0-rc.1"
     repository: "file://../controller"
   - name: opensandbox-server
-    version: "0.1.0"
+    version: "1.1.0-rc.1"
     repository: "file://../server"
   - name: ingress-gateway
-    version: "0.1.0"
+    version: "1.1.0-rc.1"
     repository: "file://../ingress-gateway"
     condition: ingress-gateway.enabled
   - name: opensandbox-node-agent
-    version: "0.1.0"
+    version: "1.1.0-rc.1"
     repository: "file://../node-agent"
     condition: opensandbox-node-agent.enabled
   - name: fast-sandbox
-    version: "0.1.0"
+    version: "1.1.0-rc.1"
     repository: "file://../fast-sandbox"
     condition: fast-sandbox.enabled
 
