@@ -7,7 +7,9 @@ export default defineConfig({
   lastUpdated: true,
   base: process.env.DOCS_BASE || "/",
   ignoreDeadLinks: [/^https?:\/\/localhost/],
-  srcExclude: ["README.md"],
+  // Release notes (docs/releases/*) are GitHub Release bodies referenced
+  // verbatim by the umbrella release workflow — not docs-site pages.
+  srcExclude: ["README.md", "releases/**"],
 
   head: [
     ["link", { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" }],

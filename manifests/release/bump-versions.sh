@@ -20,8 +20,9 @@
 #
 #   1-2. chart version/appVersion + umbrella chart dependencies
 #   3.   chart image references -> :release-<v>
-#   4-7. SDK/CLI package versions (JS/Kotlin/.NET) + python dependency ranges
-#   8.   SDK identity versions: default User-Agent strings + Go Version
+#   4.   umbrella Chart.lock regeneration
+#   5-8. SDK/CLI package versions (JS/Kotlin/.NET) + python dependency ranges
+#   9.   SDK identity versions: default User-Agent strings + Go Version
 #        constant, together with their pinning regression tests
 #        (code-interpreter python/js and the CLI reuse these constants)
 #
@@ -141,7 +142,26 @@ else
   done < <(find manifests/charts -name 'values*.yaml' -print0)
 fi
 
-# 4) JS SDK package versions (top-level field)
+# 4) Umbrella Chart.lock must follow the dependency bumps: packaged sub-charts
+# are not committed, and CI runs `helm dependency build`, which rejects a lock
+# that is out of sync with Chart.yaml.
+LOCK_FILE="manifests/charts/opensandbox/Chart.lock"
+stale_lock="$(sed -n '/^dependencies:/,$p' "$LOCK_FILE" | awk -v want="${VERSION}" '
+  /^[[:space:]]+- name:/ { name=$NF }
+  /^[[:space:]]+version:/ {
+    v=$2; gsub(/"/, "", v)
+    if (v != want) print name " -> " v
+  }')"
+if [[ "$DRY_RUN" == true ]]; then
+  [[ -n "$stale_lock" ]] && log "dry-run ${LOCK_FILE}: regenerate (stale: ${stale_lock//$'\n'/, })"
+elif command -v helm >/dev/null 2>&1; then
+  helm dependency update manifests/charts/opensandbox >/dev/null
+  log "regenerated ${LOCK_FILE}"
+else
+  [[ -z "$stale_lock" ]] || die "helm not found and ${LOCK_FILE} is stale (${stale_lock//$'\n'/, }). Install helm or run 'helm dependency update manifests/charts/opensandbox' manually."
+fi
+
+# 5) JS SDK package versions (top-level field)
 for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/package.json; do
   [[ -f "$f" ]] || { warn "missing ${f}; skipped"; continue; }
   if [[ "$DRY_RUN" == true ]]; then
@@ -153,7 +173,7 @@ for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/p
     { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
 done
 
-# 5) Kotlin/JVM project version
+# 6) Kotlin/JVM project version
 f="sdks/sandbox/kotlin/gradle.properties"
 if [[ "$DRY_RUN" == true ]]; then
   log "dry-run ${f}: $(sed -n 's/^project\.version=//p' "$f" | head -1) -> ${VERSION}"
@@ -161,7 +181,7 @@ elif [[ -f "$f" ]]; then
   sed -i.bak "s/^project\.version=.*/project.version=${VERSION}/" "$f" && rm -f "${f}.bak"
 fi
 
-# 6) .NET package versions + dependency range
+# 7) .NET package versions + dependency range
 f="sdks/Directory.Build.props"
 if [[ -f "$f" ]]; then
   if [[ "$DRY_RUN" == true ]]; then
@@ -175,7 +195,7 @@ if [[ -f "$f" ]]; then
   fi
 fi
 
-# 7) Python inter-package dependency ranges (cli + sdks)
+# 8) Python inter-package dependency ranges (cli + sdks)
 for f in cli/pyproject.toml sdks/code-interpreter/python/pyproject.toml sdks/mcp/sandbox/python/pyproject.toml; do
   [[ -f "$f" ]] || continue
   if [[ "$DRY_RUN" == true ]]; then
@@ -187,7 +207,7 @@ for f in cli/pyproject.toml sdks/code-interpreter/python/pyproject.toml sdks/mcp
   sed -i.bak -E "s|\"opensandbox>=[^\"]*\"|\"opensandbox>=${VERSION},<${NEXT_MAJOR}.0.0\"|g" "$f" && rm -f "${f}.bak"
 done
 
-# 8) SDK identity versions: default User-Agent strings + Go Version constant,
+# 9) SDK identity versions: default User-Agent strings + Go Version constant,
 #    each together with the regression test that pins the exact value.
 # file|<product prefix> — any semver after the prefix is rewritten.
 UA_SPECS=(
