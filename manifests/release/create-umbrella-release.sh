@@ -217,84 +217,11 @@ CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [[ "$CURRENT_BRANCH" == "$RELEASE_BRANCH" ]] || die "Current branch '${CURRENT_BRANCH}' != --release-branch '${RELEASE_BRANCH}'. Check out the release branch first."
 
 # ---------------------------------------------------------------------------
-# --bump-only: one-command release prep commit (machine-deterministic part)
+# --bump-only: delegate to the one-shot version bump script
 # ---------------------------------------------------------------------------
 
 if [[ "$BUMP_ONLY" == true ]]; then
-  git diff-index --quiet HEAD -- || die "Worktree not clean. Commit or stash before --bump-only."
-
-  # 1) Chart.yaml top-level versions + appVersion (where present)
-  for chart in base controller server ingress-gateway node-agent fast-sandbox opensandbox; do
-    f="manifests/charts/${chart}/Chart.yaml"
-    [[ -f "$f" ]] || { warn "missing ${f}; skipped"; continue; }
-    awk -v v="$VERSION" '
-      /^dependencies:/ { deps = 1 }
-      !deps && /^appVersion:/ { print "appVersion: \"" v "\""; next }
-      !deps && /^version:/ { print "version: " v; next }
-      { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
-  done
-
-  # 2) Umbrella appVersion + dependency versions
-  f="manifests/charts/opensandbox/Chart.yaml"
-  awk -v v="$VERSION" '
-    /^appVersion:/ { print "appVersion: \"" v "\""; next }
-    /^dependencies:/ { deps = 1 }
-    deps && /^([[:space:]])+version:/ {
-      match($0, /^[[:space:]]+/)
-      print substr($0, 1, RLENGTH) "version: \"" v "\""
-      next
-    }
-    { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
-
-  # 3) Image references in chart values: pinned split tags and full-image strings
-  while IFS= read -r -d '' f; do
-    sed -E \
-      -e 's,((opensandbox|fast-sandbox)/[A-Za-z0-9._/-]+):(v[0-9][^"[:space:]]*|dev|latest),\1:release-'"${VERSION}"',g' \
-      -e 's,^([[:space:]]*tag:[[:space:]]*")(v[0-9][^"]*|dev|latest)("),\1release-'"${VERSION}"'\3,' \
-      -e 's,^([[:space:]]*tag:[[:space:]]*)(v[0-9][^"[:space:]]*|dev|latest)$,\1release-'"${VERSION}"',' \
-      "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
-  done < <(find manifests/charts -name 'values*.yaml' -print0)
-
-  # 4) JS SDK package versions (top-level field)
-  for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/package.json; do
-    [[ -f "$f" ]] || { warn "missing ${f}; skipped"; continue; }
-    awk -v v="$VERSION" '
-      !done && /"version":/ { sub(/"version":[[:space:]]*"[^"]*"/, "\"version\": \"" v "\""); done = 1 }
-      { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
-  done
-
-  # 5) Kotlin/JVM project version
-  f="sdks/sandbox/kotlin/gradle.properties"
-  [[ -f "$f" ]] && sed -i.bak "s/^project\.version=.*/project.version=${VERSION}/" "$f" && rm -f "${f}.bak"
-
-  # 6) .NET package versions + dependency range
-  f="sdks/Directory.Build.props"
-  if [[ -f "$f" ]]; then
-    sed -i.bak \
-      -e "s|<OpenSandboxPackageVersion>[^<]*</OpenSandboxPackageVersion>|<OpenSandboxPackageVersion>${VERSION}</OpenSandboxPackageVersion>|" \
-      -e "s|<OpenSandboxCodeInterpreterPackageVersion>[^<]*</OpenSandboxCodeInterpreterPackageVersion>|<OpenSandboxCodeInterpreterPackageVersion>${VERSION}</OpenSandboxCodeInterpreterPackageVersion>|" \
-      -e "s|<OpenSandboxDependencyVersionRange>[^<]*</OpenSandboxDependencyVersionRange>|<OpenSandboxDependencyVersionRange>[${VERSION},${NEXT_MAJOR}.0.0)</OpenSandboxDependencyVersionRange>|" \
-      "$f" && rm -f "${f}.bak"
-  fi
-
-  # 7) Python inter-package dependency ranges (cli + sdks)
-  for f in cli/pyproject.toml sdks/code-interpreter/python/pyproject.toml sdks/mcp/sandbox/python/pyproject.toml; do
-    [[ -f "$f" ]] || continue
-    sed -i.bak -E "s|\"opensandbox>=[^\"]*\"|\"opensandbox>=${VERSION},<${NEXT_MAJOR}.0.0\"|g" "$f" && rm -f "${f}.bak"
-  done
-
-  # 8) SDK identity versions: default User-Agent strings + Go Version constant
-  "${RELEASE_DIR}/bump-sdk-identity.sh" --version "$VERSION"
-
-  git add manifests/charts sdks cli
-  if git diff --cached --quiet; then
-    warn "Nothing to bump; already at ${VERSION}."
-  else
-    git commit -m "release(opensandbox): bump platform version to ${VERSION}"
-    log "Bump commit created for ${VERSION}."
-  fi
-  log "Next: copy docs/releases/TEMPLATE.md to docs/releases/${VERSION}.md, fill it in, commit, then run the full release (drop --bump-only)."
-  exit 0
+  exec "${RELEASE_DIR}/bump-versions.sh" --version "$VERSION"
 fi
 
 C_BUILD="$(git rev-parse HEAD)"
