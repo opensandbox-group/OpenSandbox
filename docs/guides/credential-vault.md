@@ -63,6 +63,15 @@ a binding matches and the request would otherwise receive credentials. The
 active-vault check itself runs before binding selection for every intercepted
 flow, including requests to hosts that would not match a binding.
 
+Binding host matching runs on the `Host` (or HTTP/2 `:authority`) header, which
+the sandbox workload controls. For HTTPS, the sidecar additionally requires the
+TLS ClientHello SNI to fall inside the same binding's `match.hosts` scope before
+injecting anything: the SNI is the name the upstream certificate is verified
+against, so this keeps a credential from being released to a peer that merely
+claims the bound host name. Plaintext HTTP carries no SNI and therefore no
+verifiable endpoint identity — for `http` bindings the egress allow rules remain
+the only destination control.
+
 The active vault used by the MITM process is served over a local Unix domain
 socket inside the sidecar. The sandbox workload cannot fetch this active state
 over the normal server proxy path.
@@ -490,7 +499,8 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 - Avoid overlapping bindings at the same precedence; ambiguous matches are
   rejected.
 - Rejected requests (ambiguous paths, encoded separators crossing a binding
-  boundary) return `403` when the request body is small and fully known.
+  boundary, a TLS SNI outside the matched binding's host scope) return `403`
+  when the request body is small and fully known.
   Requests with bodies above the mitmproxy streaming threshold (~1 MiB) or
   with unknown length (chunked) cannot be answered with a `403` while the
   body is being streamed, so the sidecar drops the connection instead —
