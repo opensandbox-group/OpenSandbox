@@ -283,6 +283,9 @@ if [[ "$BUMP_ONLY" == true ]]; then
     sed -i.bak -E "s|\"opensandbox>=[^\"]*\"|\"opensandbox>=${VERSION},<${NEXT_MAJOR}.0.0\"|g" "$f" && rm -f "${f}.bak"
   done
 
+  # 8) SDK identity versions: default User-Agent strings + Go Version constant
+  "${RELEASE_DIR}/bump-sdk-identity.sh" --version "$VERSION"
+
   git add manifests/charts sdks cli
   if git diff --cached --quiet; then
     warn "Nothing to bump; already at ${VERSION}."
