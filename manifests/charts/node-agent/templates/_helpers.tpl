@@ -36,7 +36,7 @@ app.kubernetes.io/component: node-agent
 {{- end -}}
 
 {{- define "opensandbox-node-agent.image" -}}
-{{- $tag := default .Chart.AppVersion .Values.image.tag -}}
+{{- $tag := default (printf "release-%s" .Chart.AppVersion) .Values.image.tag -}}
 {{- if and (not (hasPrefix "v" $tag)) (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+" $tag) -}}
 {{- $tag = printf "v%s" $tag -}}
 {{- end -}}

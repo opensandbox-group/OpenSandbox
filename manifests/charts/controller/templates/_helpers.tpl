@@ -74,12 +74,13 @@ Get the namespace to use
 {{- end }}
 
 {{/*
-Controller image with automatic version prefix handling.
-Prepends 'v' to semantic version tags (e.g., 0.0.1 -> v0.0.1) but preserves
-special tags like 'latest', 'dev', 'main', etc. as-is.
+Controller image tag resolution. When no tag is set, defaults to the
+release-<appVersion> image tag published by the umbrella release pipeline.
+Explicit tags pass through; plain semver keeps the legacy 'v' prefix
+(e.g., 0.0.1 -> v0.0.1); special tags like 'latest', 'dev', 'main' as-is.
 */}}
 {{- define "opensandbox.controllerImage" -}}
-{{- $tag := .Values.controller.image.tag | default .Chart.AppVersion }}
+{{- $tag := .Values.controller.image.tag | default (printf "release-%s" .Chart.AppVersion) }}
 {{- $finalTag := $tag }}
 {{- if and (not (hasPrefix "v" $tag)) (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+" $tag) }}
 {{- $finalTag = printf "v%s" $tag }}

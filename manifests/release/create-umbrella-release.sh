@@ -438,6 +438,7 @@ images:
   imageCommitter: { image: docker.io/opensandbox/image-committer, tag: release-${VERSION}, digest: sha256:PENDING }
   controller:     { image: docker.io/opensandbox/controller,      tag: release-${VERSION}, digest: sha256:PENDING }
   taskExecutor:   { image: docker.io/opensandbox/task-executor,   tag: release-${VERSION}, digest: sha256:PENDING }
+  nodeAgent:      { image: docker.io/opensandbox/nodeagent,       tag: release-${VERSION}, digest: sha256:PENDING }
   # fast-sandbox runtime family (fsb- prefix, linux/amd64; same mirror set)
   fsbController:            { image: docker.io/opensandbox/fsb-controller,            tag: release-${VERSION}, digest: sha256:PENDING }
   fsbFastlet:               { image: docker.io/opensandbox/fsb-fastlet,               tag: release-${VERSION}, digest: sha256:PENDING }

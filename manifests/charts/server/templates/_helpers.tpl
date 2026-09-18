@@ -69,10 +69,12 @@ ServiceAccount name (same as fullname, always created by chart)
 {{- end }}
 
 {{/*
-Server image with tag (prepend v to semver if missing)
+Server image tag resolution. When no tag is set, defaults to the
+release-<appVersion> image tag published by the umbrella release pipeline.
+Explicit tags pass through; plain semver keeps the legacy 'v' prefix.
 */}}
 {{- define "opensandbox-server.serverImage" -}}
-{{- $tag := .Values.server.image.tag | default .Chart.AppVersion }}
+{{- $tag := .Values.server.image.tag | default (printf "release-%s" .Chart.AppVersion) }}
 {{- $finalTag := $tag }}
 {{- if and (not (hasPrefix "v" $tag)) (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+" $tag) }}
 {{- $finalTag = printf "v%s" $tag }}

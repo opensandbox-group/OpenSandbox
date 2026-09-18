@@ -32,6 +32,7 @@ build_arg_if_set() {
 }
 
 TAG=${TAG:-latest}
+PUSH=${PUSH:-true}
 GHCR_REPO=${GHCR_REPO:-}
 VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}
 GIT_COMMIT=${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
@@ -45,17 +46,23 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || realpath "$(dirname "$0
 cd "$REPO_ROOT"
 mkdir -p "$(dirname "$BUILD_METADATA_FILE")"
 
-image_tags=(
-  -t "opensandbox/nodeagent:${TAG}"
-  -t "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent:${TAG}"
-)
-if [[ -n "$GHCR_REPO" ]]; then image_tags+=(-t "${GHCR_REPO}/nodeagent:${TAG}"); fi
-if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  image_tags+=(
-    -t "opensandbox/nodeagent:latest"
-    -t "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent:latest"
+if [[ "$PUSH" == "true" ]]; then
+  image_tags=(
+    -t "opensandbox/nodeagent:${TAG}"
+    -t "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent:${TAG}"
   )
-  if [[ -n "$GHCR_REPO" ]]; then image_tags+=(-t "${GHCR_REPO}/nodeagent:latest"); fi
+  if [[ -n "$GHCR_REPO" ]]; then image_tags+=(-t "${GHCR_REPO}/nodeagent:${TAG}"); fi
+  if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    image_tags+=(
+      -t "opensandbox/nodeagent:latest"
+      -t "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent:latest"
+    )
+    if [[ -n "$GHCR_REPO" ]]; then image_tags+=(-t "${GHCR_REPO}/nodeagent:latest"); fi
+  fi
+else
+  # Build only (for local testing / dry-run): single-arch, loaded into the
+  # local docker daemon so `docker image inspect` can resolve the digest.
+  image_tags=(-t "opensandbox/nodeagent:${TAG}")
 fi
 
 builder_name="nodeagent-builder-$$-${RANDOM}"
@@ -66,6 +73,13 @@ cleanup_builder() {
   fi
 }
 trap cleanup_builder EXIT
+
+platforms="linux/amd64,linux/arm64"
+build_output="--push"
+if [[ "$PUSH" != "true" ]]; then
+  platforms="linux/amd64"
+  build_output="--load"
+fi
 
 docker buildx create --name "$builder_name"
 builder_created=true
@@ -79,7 +93,7 @@ docker buildx build \
   --build-arg VERSION="$VERSION" \
   --build-arg GIT_COMMIT="$GIT_COMMIT" \
   --build-arg BUILD_TIME="$BUILD_TIME" \
-  --platform linux/amd64,linux/arm64 \
+  --platform "$platforms" \
   --metadata-file "$BUILD_METADATA_FILE" \
-  --push \
+  "$build_output" \
   .

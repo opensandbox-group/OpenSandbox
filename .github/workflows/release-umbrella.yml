@@ -114,6 +114,8 @@ jobs:
             dir: kubernetes
           - component: task-executor
             dir: kubernetes
+          - component: nodeagent
+            dir: components/nodeagent
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -368,7 +370,7 @@ jobs:
           STAGING_TAG: staging-${{ github.sha }}-${{ github.run_id }}
         run: |
           set -euo pipefail
-          components=(server execd ingress egress image-committer controller task-executor)
+          components=(server execd ingress egress image-committer controller task-executor nodeagent)
           registries=(
             "docker.io/opensandbox"
             "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
