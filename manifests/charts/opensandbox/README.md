@@ -72,9 +72,9 @@ The following table lists the configurable parameters of the chart and their def
 | ingress-gateway.enabled | bool | `false` | Whether the ingress gateway is enabled. |
 | opensandbox-controller.controller.logLevel | string | `"info"` | Controller log level (debug, info, error). |
 | opensandbox-controller.controller.replicaCount | int | `1` | Number of controller replicas. |
-| opensandbox-controller.controller.snapshot | object | `{"commitJobTimeout":"10m","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1","imageCommitterPodTemplate":{},"registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration. |
+| opensandbox-controller.controller.snapshot | object | `{"commitJobTimeout":"10m","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0-rc.1","imageCommitterPodTemplate":{},"registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration. |
 | opensandbox-controller.controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs. |
-| opensandbox-controller.controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"` | Image used for commit operations. |
+| opensandbox-controller.controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0-rc.1"` | Image used for commit operations. |
 | opensandbox-controller.controller.snapshot.imageCommitterPodTemplate | object | `{}` | PodTemplateSpec overlay for image-committer commit Job Pods. |
 | opensandbox-controller.controller.snapshot.registry | string | `""` | OCI registry prefix used for snapshot images. |
 | opensandbox-controller.controller.snapshot.registryInsecure | bool | `false` | Use insecure registry mode when pushing snapshot images. |

@@ -21,8 +21,9 @@
 #   1-2. chart version/appVersion + umbrella chart dependencies
 #   3.   chart image references -> :release-<v>
 #   4.   umbrella Chart.lock regeneration
-#   5-8. SDK/CLI package versions (JS/Kotlin/.NET) + python dependency ranges
-#   9.   SDK identity versions: default User-Agent strings + Go Version
+#   5.   chart README regeneration (helm-docs)
+#   6-9. SDK/CLI package versions (JS/Kotlin/.NET) + python dependency ranges
+#   10.  SDK identity versions: default User-Agent strings + Go Version
 #        constant, together with their pinning regression tests
 #        (code-interpreter python/js and the CLI reuse these constants)
 #
@@ -155,13 +156,31 @@ stale_lock="$(sed -n '/^dependencies:/,$p' "$LOCK_FILE" | awk -v want="${VERSION
 if [[ "$DRY_RUN" == true ]]; then
   [[ -n "$stale_lock" ]] && log "dry-run ${LOCK_FILE}: regenerate (stale: ${stale_lock//$'\n'/, })"
 elif command -v helm >/dev/null 2>&1; then
+  lock_before="$(mktemp -t lock.XXXXXX)"
+  grep -v '^generated:' "$LOCK_FILE" >"$lock_before"
   helm dependency update manifests/charts/opensandbox >/dev/null
-  log "regenerated ${LOCK_FILE}"
+  # keep the run idempotent: a re-bump only refreshes the generated timestamp
+  if diff -q "$lock_before" <(grep -v '^generated:' "$LOCK_FILE") >/dev/null; then
+    git checkout -- "$LOCK_FILE"
+  fi
+  rm -f "$lock_before"
+  log "regenerated ${LOCK_FILE} (or confirmed in sync)"
 else
   [[ -z "$stale_lock" ]] || die "helm not found and ${LOCK_FILE} is stale (${stale_lock//$'\n'/, }). Install helm or run 'helm dependency update manifests/charts/opensandbox' manually."
 fi
 
-# 5) JS SDK package versions (top-level field)
+# 5) Regenerate chart documentation so values tables and version badges
+#    follow the bump (the CI helm-docs drift check fails otherwise).
+if [[ "$DRY_RUN" == true ]]; then
+  log "dry-run manifests/charts/*/README.md: regenerate via 'make helm-docs' in manifests/ when values drift"
+elif command -v helm-docs >/dev/null 2>&1; then
+  (cd manifests && helm-docs --chart-search-root charts/ >/dev/null)
+  log "regenerated chart README files"
+else
+  warn "helm-docs not found; chart README files may be stale and the CI helm-docs check will fail. Run 'make helm-docs' in manifests/ manually."
+fi
+
+# 6) JS SDK package versions (top-level field)
 for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/package.json; do
   [[ -f "$f" ]] || { warn "missing ${f}; skipped"; continue; }
   if [[ "$DRY_RUN" == true ]]; then
@@ -173,7 +192,7 @@ for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/p
     { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
 done
 
-# 6) Kotlin/JVM project version
+# 7) Kotlin/JVM project version
 f="sdks/sandbox/kotlin/gradle.properties"
 if [[ "$DRY_RUN" == true ]]; then
   log "dry-run ${f}: $(sed -n 's/^project\.version=//p' "$f" | head -1) -> ${VERSION}"
@@ -181,7 +200,7 @@ elif [[ -f "$f" ]]; then
   sed -i.bak "s/^project\.version=.*/project.version=${VERSION}/" "$f" && rm -f "${f}.bak"
 fi
 
-# 7) .NET package versions + dependency range
+# 8) .NET package versions + dependency range
 f="sdks/Directory.Build.props"
 if [[ -f "$f" ]]; then
   if [[ "$DRY_RUN" == true ]]; then
@@ -195,7 +214,7 @@ if [[ -f "$f" ]]; then
   fi
 fi
 
-# 8) Python inter-package dependency ranges (cli + sdks)
+# 9) Python inter-package dependency ranges (cli + sdks)
 for f in cli/pyproject.toml sdks/code-interpreter/python/pyproject.toml sdks/mcp/sandbox/python/pyproject.toml; do
   [[ -f "$f" ]] || continue
   if [[ "$DRY_RUN" == true ]]; then
@@ -207,7 +226,7 @@ for f in cli/pyproject.toml sdks/code-interpreter/python/pyproject.toml sdks/mcp
   sed -i.bak -E "s|\"opensandbox>=[^\"]*\"|\"opensandbox>=${VERSION},<${NEXT_MAJOR}.0.0\"|g" "$f" && rm -f "${f}.bak"
 done
 
-# 9) SDK identity versions: default User-Agent strings + Go Version constant,
+# 10) SDK identity versions: default User-Agent strings + Go Version constant,
 #    each together with the regression test that pins the exact value.
 # file|<product prefix> — any semver after the prefix is rewritten.
 UA_SPECS=(

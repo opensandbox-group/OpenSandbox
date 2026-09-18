@@ -100,9 +100,9 @@ helm template release-under-test "$package_path" \
 
 check_primary_image=1
 case "$expected_component" in
-  opensandbox|opensandbox-server) expected_primary_image_suffix="/server:v${expected_app_version}" ;;
-  opensandbox-controller) expected_primary_image_suffix="/controller:v${expected_app_version}" ;;
-  opensandbox-node-agent) expected_primary_image_suffix="/nodeagent:v${expected_app_version}" ;;
+  opensandbox|opensandbox-server) expected_primary_image_suffix="/server:release-${expected_app_version}" ;;
+  opensandbox-controller) expected_primary_image_suffix="/controller:release-${expected_app_version}" ;;
+  opensandbox-node-agent) expected_primary_image_suffix="/nodeagent:release-${expected_app_version}" ;;
   base) check_primary_image= ;;  # cluster-scoped resources only, no workloads
   ingress-gateway) check_primary_image= ;;  # image tag is independent of chart releases
   *) die "Unsupported Helm component: ${expected_component}" ;;

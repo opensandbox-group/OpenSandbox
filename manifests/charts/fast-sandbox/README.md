@@ -55,15 +55,15 @@ The following table lists the configurable parameters of the chart and their def
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
-| controller.image.tag | string | `"dev"` | Image tag |
+| controller.image.tag | string | `"release-1.1.0-rc.1"` | Image tag |
 | controller.replicaCount | int | `1` | Number of controller replicas (no leader election; keep 1) |
 | controller.resources | object | `{"limits":{"cpu":"1","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits for the controller |
-| controller.sandboxtemplateBuilderImage | string | `"opensandbox/fsb-sandboxtemplate-builder:dev"` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh) |
+| controller.sandboxtemplateBuilderImage | string | `"opensandbox/fsb-sandboxtemplate-builder:release-1.1.0-rc.1"` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh) |
 | fullnameOverride | string | `""` | Override the full name of the chart |
 | imagePullSecrets | list | `[]` | Image pull secrets for every workload in this chart |
 | janitor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | janitor.image.repository | string | `"opensandbox/fsb-janitor"` | Janitor image repository (built by manifests/release/build-fast-sandbox.sh) |
-| janitor.image.tag | string | `"dev"` | Image tag |
+| janitor.image.tag | string | `"release-1.1.0-rc.1"` | Image tag |
 | janitor.orphanTimeout | string | `"30s"` | Orphan timeout before cleanup |
 | janitor.scanInterval | string | `"2m"` | Orphan scan interval |
 | nameOverride | string | `""` | Override the name of the chart |
@@ -78,7 +78,7 @@ The following table lists the configurable parameters of the chart and their def
 | runtime.enabled | bool | `true` | Whether the firecracker-runtime DaemonSet, its RBAC, the agent config ConfigMap and the dart headless Service are installed |
 | runtime.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | runtime.image.repository | string | `"opensandbox/fsb-firecracker-runtime"` | Runtime image repository (built by manifests/release/build-fast-sandbox.sh) |
-| runtime.image.tag | string | `"dev"` | Image tag |
+| runtime.image.tag | string | `"release-1.1.0-rc.1"` | Image tag |
 | runtime.nodeSelector | object | `{}` | Node selector. Empty by default: the runtime applies the firecracker scheduling labels itself, so it must run on every candidate node. Pin it with your own coarse selector only if the cluster hosts unrelated node pools. |
 | runtime.registrySecret | string | `"fast-sandbox-agent-registry"` | Secret carrying the compiled agent registry configuration (registry.json key with artifact-store pull credentials); must be provisioned by the operator. |
 | runtime.socketDir | string | `"/run/fast-sandbox/firecracker"` | Node hostPath sharing the agent UDS socket with fastlet Pods |

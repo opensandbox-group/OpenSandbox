@@ -130,7 +130,7 @@ The following table lists the configurable parameters of the chart and their def
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_enabled = true\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.7\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. |
+| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.1.0-rc.1\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_enabled = true\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.1.0-rc.1\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. |
 | fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
 | imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
 | nameOverride | string | `""` | Override the name of the chart |
@@ -144,9 +144,9 @@ The following table lists the configurable parameters of the chart and their def
 | server.gateway.secureAccess.activeKey | string | `""` | Active signing key id, one character in [0-9a-z]. |
 | server.gateway.secureAccess.existingSecret | string | `""` | Name of an existing Secret holding the signing keys (keys + active-key), as an alternative to plaintext `keys` above (mutually exclusive). The Secret must carry two entries:   keys:       the key ring, "a=<base64-secret>[,b=<base64-secret>...]"   active-key: the active signing key id, one character in [0-9a-z] The chart wires it into the server as environment variables (OPENSANDBOX_SECURE_ACCESS_*), so key material never appears in values, the server ConfigMap, or pod args. The ingress-gateway chart consumes the same Secret for verification. Env-sourced Secrets are read once at container start: after updating the Secret in place, `kubectl rollout restart` the server Deployment (or version the Secret name to get a spec-driven rollout). |
 | server.gateway.secureAccess.keys | list | `[]` | List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }. key_id must be exactly one character in [0-9a-z]. |
-| server.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":"v0.2.2"}` | Server image configuration |
+| server.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":"release-1.1.0-rc.1"}` | Server image configuration |
 | server.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server"` | Server image repository. |
-| server.image.tag | string | `"v0.2.2"` | Server image tag. Defaults to the chart appVersion when empty. |
+| server.image.tag | string | `"release-1.1.0-rc.1"` | Server image tag. Defaults to the chart appVersion when empty. |
 | server.nodeSelector | object | `{}` | Node selector for the server pod. |
 | server.podAnnotations | object | `{}` | Extra annotations for the server pod. |
 | server.podLabels | object | `{}` | Extra labels for the server pod. |

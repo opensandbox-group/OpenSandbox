@@ -23,7 +23,7 @@ jobs:
   exact-package-kind-smoke:
     name: Exact package Kind smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       KIND_NODE_IMAGE: kindest/node:v1.30.13@sha256:8673291894dc400e0fb4f57243f5fdc6e355ceaa765505e0e73941aa1b6e0b80
       HELM_SMOKE_ARTIFACTS_DIR: /tmp/helm-smoke-diagnostics
@@ -63,6 +63,18 @@ jobs:
         run: |
           go install sigs.k8s.io/kind@v0.31.0
           echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+
+      - name: Build release-tag images locally
+        run: |
+          set -euo pipefail
+          app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' manifests/charts/opensandbox/Chart.yaml)"
+          export TAG="release-${app_version}"
+          export PUSH=false
+          echo "Building candidate images at ${TAG} (local only, kind load happens in the smoke)"
+          chmod +x server/build.sh components/execd/build.sh kubernetes/build.sh
+          (cd server && ./build.sh)
+          (cd components/execd && ./build.sh)
+          (cd kubernetes && COMPONENT=controller ./build.sh)
 
       - name: Package umbrella release candidate once
         id: package
