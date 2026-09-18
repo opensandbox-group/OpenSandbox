@@ -99,6 +99,7 @@ else
         $BUILD_ARG \
         "${BUILD_ARGS[@]}" \
         -t "${DOCKERHUB_REPO}/${IMAGE_NAME}:${TAG}" \
+        -t "${ACR_REPO}/${IMAGE_NAME}:${TAG}" \
         -f "$DOCKERFILE" \
         --load \
         .
