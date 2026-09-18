@@ -321,6 +321,10 @@ if [[ "$SKIP_CONSISTENCY" != true ]]; then
     scan_ok "chart split-field image tags are empty or release-${VERSION}"
   fi
 
+  # JS SDKs, Kotlin/JVM, .NET, Python ranges: SDK package carriers only move
+  # at a stable release — rc ships no SDK artifacts, so their versions stay
+  # at the last published line and are not checked here.
+  if [[ "$CHANNEL" == "stable" ]]; then
   # JS SDKs
   for pkg in sdks/sandbox/javascript sdks/code-interpreter/javascript; do
     f="${pkg}/package.json"
@@ -364,6 +368,9 @@ if [[ "$SKIP_CONSISTENCY" != true ]]; then
       fi
     else scan_fail "missing ${f}"; fi
   done
+  else
+    scan_ok "channel=rc: SDK package carriers skipped (they bump at the stable release)"
+  fi
 
   # hatch-vcs tag patterns: umbrella-only; legacy per-component regexes are frozen
   # (both tag_regex and git_describe_command pin the namespace)

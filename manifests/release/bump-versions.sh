@@ -22,10 +22,9 @@
 #   3.   chart image references -> :release-<v>
 #   4.   umbrella Chart.lock regeneration
 #   5.   chart README regeneration (helm-docs)
-#   6-9. SDK/CLI package versions (JS/Kotlin/.NET) + python dependency ranges
-#   10.  SDK identity versions: default User-Agent strings + Go Version
-#        constant, together with their pinning regression tests
-#        (code-interpreter python/js and the CLI reuse these constants)
+#   6-10. SDK/CLI package versions, dependency ranges, identity constants
+#        (stable channel only — rc ships no SDK artifacts, so the SDK tree
+#        stays at the last published line)
 #
 # Called by create-umbrella-release.sh --bump-only; can also run standalone.
 # The hand-authored release notes are NOT touched by this script.
@@ -180,6 +179,13 @@ else
   warn "helm-docs not found; chart README files may be stale and the CI helm-docs check will fail. Run 'make helm-docs' in manifests/ manually."
 fi
 
+# 6-10) SDK/CLI package versions, dependency ranges, and identity constants.
+# These only move at the stable bump: rc releases ship no SDK artifacts, so
+# the SDK tree stays at the last published line (dependency ranges keep
+# referencing published versions instead of an rc version that never ships).
+if [[ "$VERSION" == *-* ]]; then
+  log "channel=rc: SDK/CLI package versions, dependency ranges, and identity constants untouched (they bump at the stable release)"
+else
 # 6) JS SDK package versions (top-level field)
 for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/package.json; do
   [[ -f "$f" ]] || { warn "missing ${f}; skipped"; continue; }
@@ -267,6 +273,7 @@ for spec in "${UA_SPECS[@]}"; do
     log "bumped ${f} -> ${pattern}/${VERSION}"
   fi
 done
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
   log "Dry run complete; nothing was rewritten or committed."
