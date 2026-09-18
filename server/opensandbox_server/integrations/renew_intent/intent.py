@@ -28,6 +28,9 @@ class RenewIntent:
     observed_at: datetime
     port: Optional[int] = None
     request_uri: Optional[str] = None
+    # Namespace of the sandbox at ingress time. Ingress includes it in the
+    # payload (omitempty); older messages carry no such key and leave it None.
+    namespace: Optional[str] = None
 
 
 def _parse_rfc3339_time(value: str) -> Optional[datetime]:
@@ -78,9 +81,13 @@ def parse_renew_intent_json(raw: str) -> Optional[RenewIntent]:
     uri = data.get("request_uri")
     request_uri = uri if isinstance(uri, str) else None
 
+    ns = data.get("namespace")
+    namespace = ns.strip() or None if isinstance(ns, str) else None
+
     return RenewIntent(
         sandbox_id=sid.strip(),
         observed_at=observed_at,
         port=port,
         request_uri=request_uri,
+        namespace=namespace,
     )

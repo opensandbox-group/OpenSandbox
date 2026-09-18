@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException
 
@@ -32,6 +32,7 @@ from opensandbox_server.integrations.renew_intent.logutil import (
     RENEW_SOURCE_SERVER_PROXY,
     renew_bundle,
 )
+from opensandbox_server.tenants.context import reset_resolved_sandbox_ns, set_observed_namespace
 
 if TYPE_CHECKING:
     from opensandbox_server.services.extension_service import ExtensionService
@@ -57,10 +58,34 @@ class AccessRenewController:
         self._sandbox_service = sandbox_service
         self._extension_service = extension_service
 
-    def _try_renew_sync(self, sandbox_id: str, *, source: str) -> bool:
+    def _log_http_renew_failure(
+        self, sandbox_id: str, source: str, skip_reason: str, exc: HTTPException
+    ) -> None:
+        """Log one renew step that failed with an HTTPException."""
+        detail_s = _http_detail_str(exc.detail)
+        line, ex = renew_bundle(
+            event=RENEW_EVENT_FAILED,
+            source=source,
+            sandbox_id=sandbox_id,
+            skip_reason=skip_reason,
+            http_detail=detail_s,
+            http_status=getattr(exc, "status_code", None),
+        )
+        logger.warning(f"renew_intent {line} detail={detail_s}", extra=ex)
+
+    def _try_renew_sync(
+        self, sandbox_id: str, *, source: str, namespace: Optional[str] = None
+    ) -> bool:
+        # Namespace resolution is memoized per attempt; a fresh attempt must
+        # not see the previous attempt's result (the sandbox may have moved).
+        reset_resolved_sandbox_ns()
+        # Namespace observed by ingress (queue source only): published for
+        # the lookup, scoped to this attempt like the memo above.
+        set_observed_namespace(namespace)
         try:
             sandbox = self._sandbox_service.get_sandbox(sandbox_id)
-        except HTTPException:
+        except HTTPException as exc:
+            self._log_http_renew_failure(sandbox_id, source, "get_sandbox_failed", exc)
             return False
 
         if sandbox.status.state.lower() != "running":
@@ -85,16 +110,9 @@ class AccessRenewController:
         try:
             self._sandbox_service.renew_expiration(sandbox_id, req)
         except HTTPException as exc:
-            detail_s = _http_detail_str(exc.detail)
-            line, ex = renew_bundle(
-                event=RENEW_EVENT_FAILED,
-                source=source,
-                sandbox_id=sandbox_id,
-                skip_reason="renew_expiration_rejected",
-                http_detail=detail_s,
-                http_status=getattr(exc, "status_code", None),
+            self._log_http_renew_failure(
+                sandbox_id, source, "renew_expiration_rejected", exc
             )
-            logger.warning(f"renew_intent {line} detail={detail_s}", extra=ex)
             return False
         except Exception as exc:
             line, ex = renew_bundle(
@@ -121,9 +139,13 @@ class AccessRenewController:
         """Run gates + renew (sync)."""
         return self._try_renew_sync(sandbox_id, source=source)
 
-    async def renew_after_gates(self, sandbox_id: str, *, source: str) -> None:
+    async def renew_after_gates(
+        self, sandbox_id: str, *, source: str, namespace: Optional[str] = None
+    ) -> None:
         """Run renew in a worker thread (caller holds per-sandbox serialization)."""
-        await asyncio.to_thread(self._try_renew_sync, sandbox_id, source=source)
+        await asyncio.to_thread(self._try_renew_sync, sandbox_id, source=source, namespace=namespace)
 
     async def process_intent_after_lock(self, intent: RenewIntent) -> None:
-        await self.renew_after_gates(intent.sandbox_id, source=RENEW_SOURCE_REDIS_QUEUE)
+        await self.renew_after_gates(
+            intent.sandbox_id, source=RENEW_SOURCE_REDIS_QUEUE, namespace=intent.namespace
+        )

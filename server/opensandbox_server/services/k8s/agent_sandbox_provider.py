@@ -391,6 +391,15 @@ class AgentSandboxProvider(WorkloadProvider):
             label_selector=label_selector,
         )
 
+    def list_workloads_all_namespaces(self, label_selector: str) -> List[Dict[str, Any]]:
+        """List Sandbox CRDs across all namespaces matching the label selector."""
+        return self.k8s_client.list_custom_objects_all_namespaces(
+            group=self.group,
+            version=self.version,
+            plural=self.plural,
+            label_selector=label_selector,
+        )
+
     def update_expiration(self, sandbox_id: str, namespace: str, expires_at: datetime) -> None:
         """Patch the Sandbox CRD shutdownTime field."""
         sandbox = self.get_workload(sandbox_id, namespace)
