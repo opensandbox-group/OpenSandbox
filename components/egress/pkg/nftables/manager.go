@@ -52,6 +52,12 @@ type Options struct {
 	// reconnect gap, but increase /proc scans and nft updates. The 30-second
 	// default is half the minimum 60-second DNS lease.
 	ConnectionRefreshInterval time.Duration
+	// UpstreamProxy, when set, adds an infrastructure-only accept scoped to the
+	// mitmproxy UID and the configured proxy endpoint (IP + TCP port). The
+	// proxy dial must not depend on the sandbox allow sets: those sets are
+	// IP-only and unscoped by UID, so putting the proxy there would let
+	// sandbox workloads CONNECT it directly and bounce to denied destinations.
+	UpstreamProxy *UpstreamProxyEndpoint
 }
 
 type Manager struct {
@@ -261,6 +267,9 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	// The ip6 OUTPUT REDIRECTs (DNS → :15353, MITM → :18081) land on ::1 with the original egress
 	// interface still selected, so oifname "lo" does not match them: ::1 is the v6 loopback rule.
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr ::1 accept\n", tableName, chainName)
+	if ep := opts.UpstreamProxy; ep != nil {
+		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
+	}
 	if opts.BlockDoT {
 		fmt.Fprintf(&b, "add rule inet %s %s tcp dport 853 drop\n", tableName, chainName)
 		fmt.Fprintf(&b, "add rule inet %s %s udp dport 853 drop\n", tableName, chainName)

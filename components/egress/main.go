@@ -33,6 +33,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/startup"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
@@ -50,10 +51,19 @@ func main() {
 	ctx = withLogger(ctx)
 	defer log.Logger.Sync()
 
+	// Validate the chained upstream proxy env before profile dispatch: a
+	// configured proxy without transparent mitmproxy, or under fast-sandbox,
+	// fails startup instead of being silently ignored.
+	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
+	upstreamSpec, err := upstreamProxySpecForProfile(profile)
+	if err != nil {
+		log.Fatalf("invalid upstream proxy configuration: %v", err)
+	}
+
 	// Fast Sandbox profile: multi-sandbox control plane over the slot
 	// store and the proxy route. Sidecar stays the default; the two profiles
 	// are mutually exclusive deployment forms.
-	if strings.TrimSpace(os.Getenv(constants.EnvEgressProfile)) == constants.ProfileFastSandbox {
+	if profile == constants.ProfileFastSandbox {
 		runFastSandboxProfile(ctx)
 		return
 	}
@@ -91,10 +101,36 @@ func main() {
 	allowIPs := allowIps()
 	mode := parseMode()
 	log.Infof("enforcement mode: %s", mode)
-	nftMgr := createNftManager(mode)
+
+	// upstreamSpec was already validated at startup; it scopes the infra nft
+	// exception and lets DNS exempt the proxy hostname from sandbox policy
+	// without feeding the allow sets.
+	nftMgr, err := createNftManager(mode, upstreamSpec)
+	if err != nil {
+		log.Fatalf("nftables options: %v", err)
+	}
 	proxy, err := dnsproxy.New(initialRules, "", alwaysDeny, alwaysAllow)
 	if err != nil {
 		log.Fatalf("failed to init dns proxy: %v", err)
+	}
+	if upstreamSpec != nil {
+		if _, err := netip.ParseAddr(upstreamSpec.Host); err != nil {
+			// Hostname endpoint: mitmdump resolves it through the dnsproxy, so
+			// exempt it from sandbox policy and feed answers to the uid-scoped
+			// nft set instead of the sandbox allow sets.
+			host := upstreamSpec.Host
+			proxy.SetInfraDomain(host, func(domain string, ips []nftables.ResolvedIP) {
+				if nftMgr == nil {
+					return
+				}
+				addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil {
+					log.Warnf("upstream proxy: nft update for %q failed: %v", domain, err)
+				}
+			})
+			log.Infof("upstream proxy: registered infra DNS domain %q (uid-scoped nft only)", host)
+		}
 	}
 	if err := proxy.Start(ctx); err != nil {
 		log.Fatalf("failed to start dns proxy: %v", err)

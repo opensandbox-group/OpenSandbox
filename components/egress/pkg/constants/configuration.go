@@ -93,6 +93,16 @@ const (
 	// removed without notice.
 	EnvMitmproxyExtraPorts = "OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS"
 
+	// EnvUpstreamProxy: chained upstream proxy endpoint ("http://host:port" or
+	// "https://host:port"). When set, the bundled upstream_proxy.py addon is
+	// loaded and all mitm-handled egress is chained through it (fail-closed:
+	// anything that cannot be chained is refused). Empty = disabled.
+	EnvUpstreamProxy = "OPENSANDBOX_EGRESS_UPSTREAM_PROXY"
+	// EnvUpstreamProxyAuth: complete Proxy-Authorization header value sent on
+	// the upstream CONNECT (e.g. "Basic base64(user:pass)"). Requires
+	// EnvUpstreamProxy. Never logged.
+	EnvUpstreamProxyAuth = "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH"
+
 	// Comma-separated upstream resolvers: literal IP only (optional :port) — no hostnames (see dnsproxy REDIRECT note).
 	EnvDNSUpstream                 = "OPENSANDBOX_EGRESS_DNS_UPSTREAM"
 	EnvDNSUpstreamTimeout          = "OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT"
