@@ -766,7 +766,10 @@ export class SandboxPool {
         releaseCreate();
       }
       const warmupReadinessDeadline = performance.now() + this.options.warmupReadyTimeoutSeconds * 1_000;
+      let initialDelayConsumedReadinessDeadline = false;
       if (!this.options.warmupSkipHealthCheck && this.options.warmupHealthCheckInitialDelayMillis > 0) {
+        initialDelayConsumedReadinessDeadline =
+          this.options.warmupHealthCheckInitialDelayMillis >= this.options.warmupReadyTimeoutSeconds * 1_000;
         await sleep(
           Math.min(
             this.options.warmupHealthCheckInitialDelayMillis,
@@ -779,13 +782,15 @@ export class SandboxPool {
       try {
         if (!this.options.warmupSkipHealthCheck) {
           await this.tracer.runPhase(POOL_WARMUP_SPANS.readiness, async () =>
-            await this.waitUntilWarmupHealthy(
-              sandbox!,
-              warmupReadinessDeadline,
-              postCreateSemaphore,
-              lease,
-              signal,
-            ),
+            initialDelayConsumedReadinessDeadline
+              ? await this.runFinalWarmupHealthCheck(sandbox!, postCreateSemaphore, lease, signal)
+              : await this.waitUntilWarmupHealthy(
+                sandbox!,
+                warmupReadinessDeadline,
+                postCreateSemaphore,
+                lease,
+                signal,
+              ),
           );
         } else {
           lease.release = await postCreateSemaphore.acquire(signal);
@@ -982,6 +987,15 @@ export class SandboxPool {
       return;
     }
 
+    await this.runFinalWarmupHealthCheck(sandbox, semaphore, lease, signal);
+  }
+
+  private async runFinalWarmupHealthCheck(
+    sandbox: Sandbox,
+    semaphore: AsyncSemaphore,
+    lease: AsyncSemaphoreLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
     signal?.throwIfAborted();
     lease.release ??= await semaphore.acquire(signal);
     const healthy = await runAbortable(() => this.options.warmupHealthCheck
