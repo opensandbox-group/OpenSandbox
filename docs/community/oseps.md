@@ -31,6 +31,7 @@ See the [OSEP contributing guide](https://github.com/opensandbox-group/OpenSandb
 | [OSEP-0016](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0016-unified-umbrella-release-governance.md) | Unified Umbrella Release Governance | implementing | 2026-09-17 |
 | [OSEP-0017](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0017-resilient-sdk-transport.md) | Resilient SDK Transport | implementing | 2026-07-22 |
 | [OSEP-0019](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0019-node-agent-sandbox-collection.md) | Node Agent for Node-Level Sandbox Collection | implementing | 2026-08-11 |
+| [OSEP-0024](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0024-s3-volume-backend.md) | S3 Volume Backend | draft | 2026-09-17 |
 
 ## Status Definitions
 
