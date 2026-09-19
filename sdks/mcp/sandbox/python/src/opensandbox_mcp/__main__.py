@@ -33,6 +33,17 @@ def main() -> None:
         help="Transport to use. Default uses the MCP SDK default.",
     )
     parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="HTTP bind host for streamable-http transport.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="HTTP bind port for streamable-http transport.",
+    )
+    parser.add_argument(
         "--api-key",
         default=None,
         help="OpenSandbox API key (overrides OPEN_SANDBOX_API_KEY).",
@@ -81,7 +92,9 @@ def main() -> None:
 
     if args.transport == "streamable-http":
         mcp.run(
-            transport="streamable-http"
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
         )
         return
 
