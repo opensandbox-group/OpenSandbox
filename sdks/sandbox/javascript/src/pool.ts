@@ -766,6 +766,11 @@ export class SandboxPool {
         releaseCreate();
       }
       const warmupReadinessDeadline = performance.now() + this.options.warmupReadyTimeoutSeconds * 1_000;
+      // Decide the final attempt before sleeping, as Kotlin does: the delay timer can fire slightly
+      // before performance.now() reaches the deadline. Compare in seconds, because 2.007 * 1_000 is
+      // 2007.0000000000002 and a millisecond comparison would miss equal settings.
+      const warmupFinalAttemptOnly =
+        this.options.warmupHealthCheckInitialDelayMillis / 1_000 >= this.options.warmupReadyTimeoutSeconds;
       if (!this.options.warmupSkipHealthCheck && this.options.warmupHealthCheckInitialDelayMillis > 0) {
         await sleep(
           Math.min(
@@ -782,6 +787,7 @@ export class SandboxPool {
             await this.waitUntilWarmupHealthy(
               sandbox!,
               warmupReadinessDeadline,
+              warmupFinalAttemptOnly,
               postCreateSemaphore,
               lease,
               signal,
@@ -964,12 +970,13 @@ export class SandboxPool {
   private async waitUntilWarmupHealthy(
     sandbox: Sandbox,
     deadline: number,
+    finalAttemptOnly: boolean,
     semaphore: AsyncSemaphore,
     lease: AsyncSemaphoreLease,
     signal?: AbortSignal,
   ): Promise<void> {
     const remainingMillis = deadline - performance.now();
-    if (remainingMillis > 0) {
+    if (!finalAttemptOnly && remainingMillis > 0) {
       await this.waitUntilHealthyWithSemaphore(
         sandbox,
         this.options.warmupHealthCheck ?? ((current) => current.isHealthy()),

@@ -188,6 +188,40 @@ test("warmup initial delay is capped by the readiness deadline with one final at
   }
 });
 
+test("capped warmup initial delay makes its final attempt even when the delay timer resolves early", async (t) => {
+  // Timers can fire before performance.now() crosses the readiness deadline.
+  // Skew the clock so the capped delay ends with budget left, then let the check push it past the deadline.
+  const realNow = performance.now.bind(performance);
+  let skewMillis = 0;
+  t.mock.method(performance, "now", () => realNow() - skewMillis);
+  let creates = 0;
+  let healthChecks = 0;
+  const pool = SandboxPool.create(poolOptions({
+    warmupSkipHealthCheck: false,
+    warmupReadyTimeoutSeconds: 0.05,
+    warmupHealthCheckInitialDelayMillis: 1_000,
+    sandboxCreator: async () => {
+      creates += 1;
+      setTimeout(() => { skewMillis = 25; }, 10);
+      return fakeSandbox(`early-timer-${creates}`);
+    },
+    warmupHealthCheck: async () => {
+      healthChecks += 1;
+      skewMillis = 0;
+      return true;
+    },
+  }));
+
+  try {
+    await pool.start();
+    await eventually(async () => (await pool.snapshot()).idleCount === 1, 500);
+    assert.equal(creates, 1);
+    assert.equal(healthChecks, 1);
+  } finally {
+    await pool.shutdown(false);
+  }
+});
+
 test("staged warmup runs readiness, preparer, post-check, renew, and commit in order", async () => {
   const events = [];
   let postAttempts = 0;
