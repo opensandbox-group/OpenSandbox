@@ -20,11 +20,13 @@ import http.client
 import importlib.util
 import json
 import os
+import select
 import shutil
 import socket
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -58,7 +60,24 @@ class UnixConnection(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
+class LateBodyConnection(UnixConnection):
+    """Send the body only after the server has replied and closed."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.sends = 0
+
+    def send(self, data):
+        self.sends += 1
+        if self.sends == 2:  # http.client writes headers and body separately
+            select.select([self.sock], [], [], self.timeout)
+            time.sleep(0.05)
+        super().send(data)
+
+
 class RevisionIPCTest(unittest.TestCase):
+    connection_class = UnixConnection
+
     def setUp(self):
         self.directory = tempfile.mkdtemp(prefix="osri-", dir="/tmp")
         self.path = os.path.join(self.directory, "receiver.sock")
@@ -101,8 +120,14 @@ class RevisionIPCTest(unittest.TestCase):
         headers = {"Authorization": f"Bearer {token}"}
         if body is not None:
             headers["Content-Type"] = "application/json"
-        connection = UnixConnection(self.path)
-        connection.request(method, target, body=body, headers=headers)
+        connection = self.connection_class(self.path)
+        try:
+            connection.request(method, target, body=body, headers=headers)
+        except (BrokenPipeError, ConnectionResetError):
+            # 401/404 replies fail closed without reading the body and close the
+            # socket, which can beat http.client's separate body write. The reply
+            # is already complete; with no reply, getresponse() still raises.
+            pass
         response = connection.getresponse()
         data = response.read()
         connection.close()
@@ -176,6 +201,21 @@ class RevisionIPCTest(unittest.TestCase):
         self.assertEqual(
             self.request("POST", "/v1/revisions/missing", {"secret": "never-log-me"}),
             (404, {"error": "not_found"}),
+        )
+
+    def test_reply_before_body_is_read_is_returned(self):
+        self.start()
+        self.connection_class = LateBodyConnection
+        self.assertEqual(
+            self.request("POST", "/v1/revisions/missing", {"secret": "never-log-me"}),
+            (404, {"error": "not_found"}),
+        )
+        revision = self.revision(1, 1, b"secret")
+        self.assertEqual(
+            self.request(
+                "POST", "/v1/revisions/commit", {"revision": revision}, token="x" * 32
+            ),
+            (401, {"error": "unauthorized"}),
         )
 
     def test_lifecycle_refuses_existing_path_and_fences_receiver(self):
