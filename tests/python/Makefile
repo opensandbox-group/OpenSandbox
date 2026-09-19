@@ -1,4 +1,4 @@
-.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-code test-pool test-credential-vault test-fsb lint fmt
+.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-pool test-credential-vault test-fsb lint fmt
 
 sync:
 	uv sync
@@ -19,9 +19,6 @@ test-sandbox:
 
 test-manager:
 	uv run pytest tests/test_sandbox_manager_e2e.py
-
-test-code:
-	uv run pytest tests/test_code_interpreter_e2e.py
 
 test-pool:
 	uv run pytest tests/test_sandbox_pool_e2e_sync.py tests/test_sandbox_pool_e2e_async.py

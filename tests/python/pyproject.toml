@@ -29,7 +29,6 @@ dependencies = [
     "pytest-order>=1.2.0",
     "pydantic>=2.0.0",
     "opensandbox",
-    "opensandbox-code-interpreter",
     "redis>=5.0,<6.0",
 ]
 
@@ -48,7 +47,6 @@ constraint-dependencies = [
 
 [tool.uv.sources]
 opensandbox = { path = "../../sdks/sandbox/python", editable = true }
-opensandbox-code-interpreter = { path = "../../sdks/code-interpreter/python", editable = true }
 
 [build-system]
 requires = ["hatchling"]

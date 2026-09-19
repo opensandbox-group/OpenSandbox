@@ -6,12 +6,6 @@ permissions:
 
 on:
   workflow_dispatch:
-    inputs:
-      run_code_interpreter_e2e:
-        description: 'Run code-interpreter E2E tests'
-        required: false
-        type: boolean
-        default: false
   pull_request:
     branches: [ main ]
   push:
@@ -32,8 +26,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
-    env:
-      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -264,8 +256,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
-    env:
-      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -384,8 +374,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
-    env:
-      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -493,8 +481,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
-    env:
-      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -587,8 +573,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
-    env:
-      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

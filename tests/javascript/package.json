@@ -28,8 +28,7 @@
     "test:ci": "pnpm run prep:sdk && pnpm exec vitest run --reporter=default --reporter=junit --outputFile=build/test-results/junit.xml"
   },
   "dependencies": {
-    "@alibaba-group/opensandbox": "link:../../sdks/sandbox/javascript",
-    "@alibaba-group/opensandbox-code-interpreter": "link:../../sdks/code-interpreter/javascript"
+    "@alibaba-group/opensandbox": "link:../../sdks/sandbox/javascript"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
