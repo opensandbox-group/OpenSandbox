@@ -282,7 +282,7 @@ See [Configuration](/getting-started/configuration) for the full reference.
 
 ## Related
 
-- [Kubernetes Overview](/kubernetes/) — Operator features and CRDs
+- [Kubernetes Overview](/architecture/control-plane/operator) — Operator features and CRDs
 - [Pause & Resume](/guides/pause-resume) — Snapshot-based pause/resume on Kubernetes
 - [Secure Container](/guides/secure-container) — gVisor and Kata on Kubernetes
-- [Network Isolation](/architecture/network-isolation) — Egress policy design for Kubernetes
+- [Network Isolation](/architecture/network/network-isolation) — Egress policy design for Kubernetes

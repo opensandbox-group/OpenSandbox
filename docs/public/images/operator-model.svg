@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="470" viewBox="0 0 1180 470" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="mA" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#2563eb"/></marker>
+    <marker id="mR" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+  </defs>
+
+  <rect width="1180" height="470" fill="#ffffff"/>
+  <text x="40" y="36" font-size="20" font-weight="700" fill="#0f172a">Controller resource model</text>
+  <text x="40" y="58" font-size="12" fill="#64748b">Keep warm capacity, allocate sandboxes from it, checkpoint them when idle.</text>
+
+  <!-- Pool -->
+  <rect x="60" y="130" width="300" height="120" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="80" y="162" font-size="15" font-weight="700" fill="#0f172a">Pool</text>
+  <text x="80" y="188" font-size="11.5" fill="#475569">warm, unallocated pods, held ready</text>
+  <text x="80" y="208" font-size="11" fill="#94a3b8">bufferMin/Max · poolMin/Max · eviction</text>
+
+  <!-- BatchSandbox -->
+  <rect x="440" y="130" width="300" height="120" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="460" y="162" font-size="15" font-weight="700" fill="#0f172a">BatchSandbox</text>
+  <text x="460" y="188" font-size="11.5" fill="#475569">one or many sandboxes (replicas)</text>
+  <text x="460" y="208" font-size="11" fill="#94a3b8">direct from template, or allocated via Pool</text>
+
+  <!-- SandboxSnapshot -->
+  <rect x="820" y="130" width="300" height="120" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="840" y="162" font-size="15" font-weight="700" fill="#0f172a">SandboxSnapshot</text>
+  <text x="840" y="188" font-size="11.5" fill="#475569">pause/resume checkpoint</text>
+  <text x="840" y="208" font-size="11" fill="#94a3b8">committed rootfs image (digest-pinned)</text>
+
+  <!-- arrows -->
+  <path d="M360,180 L434,180" stroke="#2563eb" stroke-width="2" marker-end="url(#mA)" fill="none"/>
+  <text x="366" y="168" font-size="11" fill="#2563eb">allocation</text>
+  <path d="M740,170 L814,170" stroke="#64748b" stroke-width="2" marker-end="url(#mR)" fill="none"/>
+  <text x="746" y="158" font-size="11" fill="#64748b">pause</text>
+  <path d="M900,250 C870,290 780,270 748,254" stroke="#2563eb" stroke-width="2" marker-end="url(#mA)" fill="none"/>
+  <text x="782" y="284" font-size="11" fill="#2563eb">resume · same sandbox ID</text>
+
+  <!-- side notes -->
+  <rect x="60" y="300" width="440" height="72" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="5,4"/>
+  <text x="80" y="328" font-size="12" font-weight="600" fill="#334155">Inside an allocated pod</text>
+  <text x="80" y="350" font-size="11" fill="#64748b">a task executor runs the request's entrypoint —</text>
+  <text x="80" y="366" font-size="11" fill="#64748b">the warm pod spec is never rewritten</text>
+
+  <rect x="540" y="300" width="580" height="72" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="5,4"/>
+  <text x="560" y="328" font-size="12" font-weight="600" fill="#334155">Status contract</text>
+  <text x="560" y="350" font-size="11" fill="#64748b">phase + conditions describe sandbox health; separate task counters describe task progress;</text>
+  <text x="560" y="366" font-size="11" fill="#64748b">trust status only when observedGeneration matches generation</text>
+
+  <!-- bottom bar -->
+  <rect x="60" y="404" width="1060" height="42" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="80" y="430" font-size="11.5" fill="#475569">Succeed means a sandbox pod is running and ready — it is the steady state, not task completion.</text>
+</svg>

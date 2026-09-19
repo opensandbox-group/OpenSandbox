@@ -1,13 +1,15 @@
 ---
-title: Single-Host Network
-description: How execd's reverse proxy gives every sandbox access to all HTTP/WebSocket ports through a single exposed host port.
+title: Single-Host Network (Docker)
+description: How the Docker runtime exposes every sandbox port through one host port per sandbox via execd's reverse proxy — host and bridge network modes.
 ---
 
-# Single-Host Network
+# Single-Host Network (Docker)
 
-Detailed routing for a single-host deployment: how execd’s proxy gives every sandbox access to HTTP and WebSocket ports through one exposed host port.
+This page describes the **Docker runtime** on a single host. Its counterpart on Kubernetes is the [Ingress gateway](/architecture/network/ingress), which routes sandbox traffic across the cluster.
 
-![Single-host sandbox routing](../public/images/single_host_network.png)
+The Docker runtime exposes every sandbox port through one host port per sandbox: `execd` bundles a reverse proxy, and the runtime maps only that proxy port to the host.
+
+![Single-host sandbox routing](../../public/images/single_host_network.png)
 
 ## Single-host routing model
 - Every sandbox container starts `execd` listening on container port `44772`. `execd` bundles a lightweight reverse proxy that intercepts requests with the `/proxy/{port}` prefix and forwards them to `127.0.0.1:{port}` inside the same container.

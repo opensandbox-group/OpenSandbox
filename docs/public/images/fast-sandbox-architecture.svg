@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="640" viewBox="0 0 1180 640" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="mB" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#2563eb"/></marker>
+    <marker id="mG" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+  </defs>
+
+  <rect width="1180" height="640" fill="#ffffff"/>
+  <text x="40" y="36" font-size="20" font-weight="700" fill="#0f172a">Fast Sandbox — overall architecture</text>
+  <text x="40" y="58" font-size="12" fill="#64748b">OpenSandbox owns the adapters; fast-sandbox owns the platform. Kubernetes CRDs are the durable record between them.</text>
+
+  <!-- openandbox side -->
+  <rect x="50" y="90" width="320" height="200" rx="14" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="70" y="120" font-size="14" font-weight="700" fill="#0f172a">OpenSandbox</text>
+  <text x="70" y="146" font-size="11.5" fill="#475569">Lifecycle server — FastSandboxService</text>
+  <text x="70" y="166" font-size="11.5" fill="#475569">Ingress gateway — FastSandboxProvider</text>
+  <text x="70" y="186" font-size="11.5" fill="#475569">Egress image — fast-sandbox profile</text>
+  <text x="70" y="212" font-size="11" fill="#94a3b8">same public API, SDKs and CLI as every</text>
+  <text x="70" y="230" font-size="11" fill="#94a3b8">other backend; fsb- IDs route here</text>
+
+  <!-- fast-sandbox control plane -->
+  <rect x="440" y="90" width="330" height="200" rx="14" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="460" y="120" font-size="14" font-weight="700" fill="#0f172a">fast-sandbox control plane</text>
+  <text x="460" y="146" font-size="11.5" fill="#475569">reconcilers + FastPath gRPC (v2)</text>
+  <text x="460" y="166" font-size="11.5" fill="#475569">template builder · janitor · placement</text>
+  <text x="460" y="192" font-size="11" fill="#94a3b8">mutations and live operations run here;</text>
+  <text x="460" y="210" font-size="11" fill="#94a3b8">state lives in the CRDs below, so the</text>
+  <text x="460" y="228" font-size="11" fill="#94a3b8">control plane is restartable by design</text>
+
+  <!-- CRD band -->
+  <rect x="840" y="90" width="300" height="200" rx="14" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="860" y="120" font-size="14" font-weight="700" fill="#0f172a">Kubernetes CRDs (durable)</text>
+  <text x="860" y="146" font-size="11.5" fill="#475569">SandboxPool · Sandbox · SandboxTemplate</text>
+  <text x="860" y="166" font-size="11.5" fill="#475569">SandboxSnapshot</text>
+  <text x="860" y="192" font-size="11" fill="#94a3b8">every sandbox's intent, placement,</text>
+  <text x="860" y="210" font-size="11" fill="#94a3b8">policy bindings and observations —</text>
+  <text x="860" y="228" font-size="11" fill="#94a3b8">survives any component restart</text>
+
+  <!-- node plane -->
+  <rect x="50" y="330" width="720" height="250" rx="14" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="70" y="360" font-size="14" font-weight="700" fill="#0f172a">Nodes — Fastlet pods (one pool spans nodes)</text>
+  <text x="70" y="386" font-size="11.5" fill="#475569">each Fastlet: many sandboxes (containers or Firecracker microVMs), the shared</text>
+  <text x="70" y="404" font-size="11.5" fill="#475569">egress process (Sandbox Actions handler), and a node-local runtime agent + DART</text>
+  <rect x="70" y="424" width="200" height="60" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="86" y="450" font-size="11.5" font-weight="600" fill="#334155">Sandbox A</text>
+  <text x="86" y="468" font-size="10.5" fill="#94a3b8">network slot · subject</text>
+  <rect x="290" y="424" width="200" height="60" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="306" y="450" font-size="11.5" font-weight="600" fill="#334155">Sandbox B</text>
+  <text x="306" y="468" font-size="10.5" fill="#94a3b8">network slot · subject</text>
+  <rect x="510" y="424" width="240" height="60" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="526" y="450" font-size="11.5" font-weight="600" fill="#334155">runtime agent + DART</text>
+  <text x="526" y="468" font-size="10.5" fill="#94a3b8">socket delegation · block delivery</text>
+
+  <!-- storage -->
+  <rect x="840" y="330" width="300" height="250" rx="14" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="860" y="360" font-size="14" font-weight="700" fill="#0f172a">Artifact store</text>
+  <text x="860" y="386" font-size="11.5" fill="#475569">template golden images, published as</text>
+  <text x="860" y="404" font-size="11.5" fill="#475569">content-addressed artifacts (S3-compatible)</text>
+  <text x="860" y="434" font-size="11.5" fill="#475569">snapshots and pause checkpoints land here;</text>
+  <text x="860" y="452" font-size="11.5" fill="#475569">nodes pull blocks peer-to-peer, not from</text>
+  <text x="860" y="470" font-size="11.5" fill="#475569">the origin</text>
+
+  <!-- flows -->
+  <path d="M370,180 L434,180" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <text x="372" y="168" font-size="10.5" fill="#2563eb">gRPC control</text>
+  <path d="M770,180 L834,180" stroke="#64748b" stroke-width="2" marker-end="url(#mG)" fill="none"/>
+  <text x="772" y="168" font-size="10.5" fill="#64748b">CRs</text>
+  <path d="M600,296 L600,324" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <text x="608" y="314" font-size="10.5" fill="#2563eb">reconcile · actions · endpoints</text>
+  <path d="M790,455 L834,430" stroke="#64748b" stroke-width="2" marker-end="url(#mG)" fill="none"/>
+  <text x="780" y="416" font-size="10.5" fill="#64748b">peer pulls</text>
+</svg>

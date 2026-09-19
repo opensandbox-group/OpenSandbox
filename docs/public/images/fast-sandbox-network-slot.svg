@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="660" viewBox="0 0 1180 660" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="mB" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#1d4ed8"/></marker>
+    <marker id="mG" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#16a34a"/></marker>
+    <marker id="mO" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#b45309"/></marker>
+    <marker id="mP" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#9333ea"/></marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.14"/></filter>
+    <linearGradient id="gHost" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#eef2f7"/></linearGradient>
+    <linearGradient id="gVM" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fef9c3"/><stop offset="1" stop-color="#fde68a"/></linearGradient>
+    <linearGradient id="gBlue" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#dbeafe"/><stop offset="1" stop-color="#bfdbfe"/></linearGradient>
+    <linearGradient id="gGreen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#dcfce7"/><stop offset="1" stop-color="#bbf7d0"/></linearGradient>
+    <linearGradient id="gRed" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fee2e2"/><stop offset="1" stop-color="#fecaca"/></linearGradient>
+    <linearGradient id="gPurple" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ede9fe"/><stop offset="1" stop-color="#ddd6fe"/></linearGradient>
+  </defs>
+
+  <rect width="1180" height="660" fill="#ffffff"/>
+  <text x="40" y="36" font-size="20" font-weight="700" fill="#0f172a">Fast Sandbox network slots — one pod netns, one slot per sandbox</text>
+  <text x="40" y="58" font-size="12" fill="#475569">Slots are pre-provisioned (netns · veth · masquerade) and delivered with SET_BINDING, before the sandbox runtime exists.</text>
+
+  <!-- pod netns -->
+  <rect x="40" y="84" width="740" height="520" rx="14" fill="url(#gHost)" stroke="#94a3b8" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="60" y="112" font-size="14" font-weight="700" fill="#334155">Fastlet pod network namespace</text>
+  <text x="60" y="130" font-size="11" fill="#64748b">bridge topology · net.bridge.bridge-nf-call-iptables=1 · enforcement by source IP</text>
+
+  <!-- sandbox guests -->
+  <rect x="66" y="170" width="180" height="104" rx="10" fill="url(#gVM)" stroke="#ca8a04" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="80" y="196" font-size="13" font-weight="700" fill="#713f12">Sandbox A</text>
+  <text x="80" y="216" font-size="11" fill="#78350f">netns · veth pair (slot)</text>
+  <text x="80" y="234" font-size="11" fill="#78350f">IP 10.30.0.5 · GW 10.30.0.1</text>
+  <text x="80" y="252" font-size="11" fill="#78350f">privateCidr 10.30.0.0/29</text>
+
+  <rect x="66" y="330" width="180" height="104" rx="10" fill="url(#gVM)" stroke="#ca8a04" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="80" y="356" font-size="13" font-weight="700" fill="#713f12">Sandbox B</text>
+  <text x="80" y="376" font-size="11" fill="#78350f">netns · veth pair (slot)</text>
+  <text x="80" y="394" font-size="11" fill="#78350f">IP 10.30.0.6 · GW 10.30.0.2</text>
+
+  <!-- prerouting -->
+  <rect x="300" y="150" width="250" height="196" rx="10" fill="url(#gBlue)" stroke="#3b82f6" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="314" y="176" font-size="13" font-weight="700" fill="#1e40af">prerouting nat — per subject</text>
+  <text x="314" y="202" font-size="10.5" fill="#1e3a8a">ip saddr 10.30.0.5 tcp dport {80,443}</text>
+  <text x="314" y="218" font-size="10.5" fill="#1e3a8a">  → dnat to 10.30.0.1:18081 (MITM)</text>
+  <text x="314" y="242" font-size="10.5" fill="#1e3a8a">ip saddr 10.30.0.5 dport 53</text>
+  <text x="314" y="258" font-size="10.5" fill="#1e3a8a">  → redirect gw :53 → proxy :15353</text>
+  <text x="314" y="290" font-size="10.5" font-style="italic" fill="#1e40af">…one rule pair installed per slot,</text>
+  <text x="314" y="306" font-size="10.5" font-style="italic" fill="#1e40af">keyed by the slot's source IP</text>
+
+  <!-- forward chain -->
+  <rect x="300" y="396" width="250" height="164" rx="10" fill="url(#gRed)" stroke="#ef4444" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="314" y="422" font-size="13" font-weight="700" fill="#991b1b">forward chain — authoritative</text>
+  <text x="314" y="448" font-size="10.5" fill="#7f1d1d">meta mark &amp; 0x2 → allow (policy verdict)</text>
+  <text x="314" y="468" font-size="10.5" fill="#7f1d1d">unmarked → drop (deny-first default)</text>
+  <text x="314" y="488" font-size="10.5" fill="#7f1d1d">privateCidr → sibling isolation</text>
+  <text x="314" y="514" font-size="10.5" font-style="italic" fill="#b91c1c">no explicit accept: verdicts travel</text>
+  <text x="314" y="530" font-size="10.5" font-style="italic" fill="#b91c1c">as marks (bridge L2 returns accepts)</text>
+
+  <!-- shared services -->
+  <rect x="600" y="150" width="160" height="196" rx="10" fill="url(#gGreen)" stroke="#22c55e" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="612" y="176" font-size="13" font-weight="700" fill="#166534">Shared services</text>
+  <text x="612" y="202" font-size="11" fill="#14532d">DNS proxy :15353</text>
+  <text x="612" y="220" font-size="10.5" fill="#166534">per-query policy = f(src IP)</text>
+  <text x="612" y="248" font-size="11" fill="#14532d">mitmdump :18081</text>
+  <text x="612" y="266" font-size="10.5" fill="#166534">vault lookup = f(src IP)</text>
+
+  <!-- control plane -->
+  <rect x="600" y="396" width="160" height="164" rx="10" fill="url(#gPurple)" stroke="#8b5cf6" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="612" y="422" font-size="13" font-weight="700" fill="#5b21b6">Egress control plane</text>
+  <text x="612" y="448" font-size="11" fill="#4c1d95">Sandbox Actions handler</text>
+  <text x="612" y="468" font-size="11" fill="#4c1d95">subject registry</text>
+  <text x="612" y="488" font-size="10.5" fill="#6d28d9">absent → denying → active</text>
+
+  <!-- arrows -->
+  <path d="M246,212 L294,212" stroke="#1d4ed8" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <text x="246" y="202" font-size="10" fill="#1d4ed8">80/443 · 53</text>
+  <path d="M246,372 C272,372 276,320 294,300" stroke="#1d4ed8" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <path d="M550,215 L594,215" stroke="#9333ea" stroke-width="2" marker-end="url(#mP)" fill="none"/>
+  <text x="546" y="204" font-size="10" fill="#9333ea">src IP kept</text>
+  <path d="M425,346 L425,390" stroke="#b45309" stroke-width="2" marker-end="url(#mO)" fill="none"/>
+  <text x="433" y="372" font-size="10" fill="#b45309">non-intercepted</text>
+  <path d="M425,560 L425,576" stroke="#475569" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <ellipse cx="425" cy="590" rx="86" ry="12" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="425" y="594" font-size="10" fill="#475569" text-anchor="middle">external network</text>
+
+  <!-- SET_BINDING card -->
+  <rect x="820" y="84" width="320" height="314" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="836" y="112" font-size="14" font-weight="700" fill="#0f172a">SET_BINDING envelope</text>
+  <text x="836" y="138" font-size="11" fill="#334155">sandbox.uid → subject identity</text>
+  <text x="836" y="162" font-size="11" fill="#334155">revision.runtimeInstanceId · attachmentId</text>
+  <text x="836" y="180" font-size="11" fill="#334155">  → identity fencing (change = rebind)</text>
+  <text x="836" y="208" font-size="12" font-weight="700" fill="#0f172a">attachment.network</text>
+  <text x="836" y="232" font-size="11" fill="#334155">ip → dispatch key (ip saddr)</text>
+  <text x="836" y="256" font-size="11" fill="#334155">gateway → DNS REDIRECT / MITM DNAT</text>
+  <text x="836" y="280" font-size="11" fill="#334155">privateCidr → sibling isolation</text>
+  <text x="836" y="304" font-size="11" fill="#334155">hostVeth → reserved (bridge topology)</text>
+  <text x="836" y="336" font-size="10.5" fill="#64748b">The slot's IP is the only key the hot path needs:</text>
+  <text x="836" y="352" font-size="10.5" fill="#64748b">packet → src IP → subject → policy verdict.</text>
+  <text x="836" y="380" font-size="10.5" fill="#64748b">Guests hold no NET_ADMIN in the pod netns.</text>
+
+  <!-- pre-provisioning card -->
+  <rect x="820" y="428" width="320" height="122" rx="12" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="836" y="456" font-size="13" font-weight="700" fill="#166534">Slot pre-provisioning</text>
+  <text x="836" y="480" font-size="11" fill="#14532d">netns · veth · MASQUERADE exist before create</text>
+  <text x="836" y="500" font-size="11" fill="#14532d">attachment ships with SET_BINDING</text>
+  <text x="836" y="524" font-size="11" font-weight="600" fill="#15803d">→ no per-create network setup window</text>
+</svg>

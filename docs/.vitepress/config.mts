@@ -63,14 +63,15 @@ export default defineConfig({
 
     nav: [
       { text: "Getting Started", link: "/getting-started/" },
+      { text: "Architecture", link: "/architecture/" },
       { text: "Guides", link: "/guides/" },
       {
         text: "Reference",
         items: [
           { text: "SDKs", link: "/sdks/" },
           { text: "API Specs", link: "/api/" },
-          { text: "Components", link: "/components/" },
-          { text: "Kubernetes", link: "/kubernetes/" },
+          { text: "CLI", link: "/cli/" },
+          { text: "Deployment", link: "/deployment/" },
           { text: "Migration Guides", link: "/reference/execd-path-migration" },
         ],
       },
@@ -104,15 +105,70 @@ export default defineConfig({
       "/architecture/": [
         {
           text: "Architecture",
+          items: [{ text: "Overview", link: "/architecture/" }],
+        },
+        {
+          text: "Control Plane",
           items: [
-            { text: "Overview", link: "/architecture/" },
+            { text: "Server", link: "/architecture/control-plane/server" },
             {
-              text: "Single-Host Network",
-              link: "/architecture/single-host-network",
+              text: "Kubernetes Controller",
+              link: "/architecture/control-plane/operator",
+            },
+          ],
+        },
+        {
+          text: "Data Plane",
+          items: [
+            { text: "Execd", link: "/architecture/data-plane/execd" },
+            {
+              text: "Node Agent",
+              link: "/architecture/data-plane/node-agent",
+            },
+          ],
+        },
+        {
+          text: "Network",
+          items: [
+            { text: "Ingress", link: "/architecture/network/ingress" },
+            { text: "Egress", link: "/architecture/network/egress" },
+            {
+              text: "Single-Host Network (Docker)",
+              link: "/architecture/network/single-host-network",
             },
             {
               text: "Network Isolation",
-              link: "/architecture/network-isolation",
+              link: "/architecture/network/network-isolation",
+            },
+          ],
+        },
+        {
+          text: "Fast Sandbox",
+          items: [
+            { text: "Overview", link: "/architecture/fast-sandbox/" },
+            { text: "Templates", link: "/architecture/fast-sandbox/templates" },
+            {
+              text: "Scheduling",
+              link: "/architecture/fast-sandbox/scheduling",
+            },
+            { text: "Networking", link: "/architecture/fast-sandbox/networking" },
+            { text: "High Availability", link: "/architecture/fast-sandbox/ha" },
+            { text: "Storage", link: "/architecture/fast-sandbox/storage" },
+            {
+              text: "Firecracker",
+              link: "/architecture/fast-sandbox/firecracker",
+            },
+          ],
+        },
+      ],
+
+      "/deployment/": [
+        {
+          text: "Deployment",
+          items: [
+            {
+              text: "Kubernetes Deployment",
+              link: "/deployment/",
             },
           ],
         },
@@ -131,6 +187,14 @@ export default defineConfig({
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            {
+              text: "QEMU VMState Snapshots",
+              link: "/guides/qemu-vmstate-snapshots",
+            },
+            {
+              text: "Egress SSE Truncation",
+              link: "/guides/egress-sse-truncation",
+            },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
           ],
@@ -138,34 +202,6 @@ export default defineConfig({
       ],
 
       "/sdks/": sdkSidebar,
-
-      "/components/": [
-        {
-          text: "Components",
-          items: [
-            { text: "Overview", link: "/components/" },
-            { text: "Server", link: "/components/server" },
-            { text: "Execd", link: "/components/execd" },
-            { text: "Ingress", link: "/components/ingress" },
-            { text: "Egress", link: "/components/egress" },
-            { text: "Node Agent", link: "/components/node-agent" },
-          ],
-        },
-      ],
-
-      "/kubernetes/": [
-        {
-          text: "Kubernetes",
-          items: [
-            { text: "Overview", link: "/kubernetes/" },
-            { text: "Deployment", link: "/kubernetes/deployment" },
-            {
-              text: "QEMU VMState Snapshots",
-              link: "/kubernetes/qemu-vmstate-snapshots",
-            },
-          ],
-        },
-      ],
 
       "/api/": [
         {

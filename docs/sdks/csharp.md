@@ -228,7 +228,7 @@ this example prints literal `$HOME` and keeps `hello world` as one argument:
 await sandbox.Commands.RunAsync(new[] { "printf", "%s\n", "$HOME", "hello world" });
 ```
 
-Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
+Native argv execution requires an updated execd. See [command execution modes](/architecture/data-plane/execd#command-execution) for executable lookup and platform behavior.
 
 #### Background commands
 

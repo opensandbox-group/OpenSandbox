@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="520" viewBox="0 0 1180 520" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="mB" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#2563eb"/></marker>
+    <marker id="mG" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+  </defs>
+
+  <rect width="1180" height="520" fill="#ffffff"/>
+  <text x="40" y="36" font-size="20" font-weight="700" fill="#0f172a">Ingress routing — from request to sandbox port</text>
+  <text x="40" y="58" font-size="12" fill="#64748b">The ingress carries no per-sandbox config: it watches workload state and resolves every request against a live cache.</text>
+
+  <!-- client -->
+  <rect x="50" y="140" width="250" height="120" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="66" y="170" font-size="14" font-weight="700" fill="#0f172a">Client request</text>
+  <text x="66" y="196" font-size="11" fill="#475569">header: OpenSandbox-Ingress-To:</text>
+  <text x="66" y="214" font-size="11" fill="#475569">  my-sandbox-8080</text>
+  <text x="66" y="238" font-size="11" fill="#475569">uri: /my-sandbox/8080/api/users</text>
+
+  <!-- ingress -->
+  <rect x="420" y="110" width="360" height="200" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="440" y="142" font-size="14" font-weight="700" fill="#0f172a">Ingress gateway</text>
+  <text x="440" y="172" font-size="12" fill="#475569">1 · resolve route → sandbox + port</text>
+  <text x="440" y="204" font-size="12" fill="#475569">2 · look up endpoint (live workload cache)</text>
+  <text x="440" y="236" font-size="12" fill="#475569">3 · forward: routing headers stripped,</text>
+  <text x="440" y="254" font-size="12" fill="#475569">     X-Forwarded-* added, path preserved</text>
+  <text x="440" y="286" font-size="11" fill="#94a3b8">annotation · service FQDN · FastPath</text>
+
+  <!-- sandbox -->
+  <rect x="900" y="170" width="230" height="100" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="916" y="200" font-size="14" font-weight="700" fill="#0f172a">Sandbox port</text>
+  <text x="916" y="226" font-size="11" fill="#475569">HTTP and WebSocket,</text>
+  <text x="916" y="244" font-size="11" fill="#94a3b8">streamed both directions</text>
+
+  <path d="M300,200 L414,200" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <path d="M780,200 L894,200" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+
+  <!-- error row -->
+  <text x="60" y="360" font-size="13" font-weight="700" fill="#334155">When routing cannot proceed:</text>
+  <rect x="60" y="376" width="150" height="56" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>
+  <text x="135" y="400" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">404</text>
+  <text x="135" y="420" font-size="10.5" fill="#94a3b8" text-anchor="middle">no such sandbox</text>
+  <rect x="230" y="376" width="150" height="56" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>
+  <text x="305" y="400" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">503</text>
+  <text x="305" y="420" font-size="10.5" fill="#94a3b8" text-anchor="middle">not ready yet</text>
+  <rect x="400" y="376" width="150" height="56" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>
+  <text x="475" y="400" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">502</text>
+  <text x="475" y="420" font-size="10.5" fill="#94a3b8" text-anchor="middle">infrastructure</text>
+
+  <text x="590" y="396" font-size="11" fill="#475569">Once reached, backend responses pass through verbatim —</text>
+  <text x="590" y="414" font-size="11" fill="#475569">redirects are never followed.</text>
+
+  <!-- bottom bar -->
+  <rect x="60" y="462" width="1080" height="30" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="80" y="482" font-size="11.5" fill="#475569">Routing state comes from what workloads already publish — no per-sandbox configuration exists anywhere in the gateway.</text>
+</svg>

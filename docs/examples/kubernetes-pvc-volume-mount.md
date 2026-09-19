@@ -250,7 +250,6 @@ Both paths only match server-labeled PVCs, so BYO and opted-out claims are never
 
 ## References
 
-- [OSEP-0003: Volume and VolumeBinding Support](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0003-volume-and-volumebinding-support.md)
 - [Kubernetes CSI Drivers](https://kubernetes-csi.github.io/docs/drivers.html)
 - [Alibaba Cloud CSI Driver](https://github.com/kubernetes-sigs/alibaba-cloud-csi-driver)
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/kubernetes-pvc-volume-mount)

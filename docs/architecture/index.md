@@ -32,6 +32,15 @@ OpenSandbox is organized around six practical surfaces:
 
 The split is intentional: SDKs and tools should depend on the public contracts, the server should own lifecycle orchestration, runtime providers should own platform-specific resource creation, and `execd`/egress should own operations that happen from inside the sandbox network and filesystem namespace.
 
+The implementation is documented by architectural layer under `architecture/`:
+
+| Layer | Responsibility | Documentation |
+|---|---|---|
+| Control plane | Lifecycle orchestration, workload orchestration, snapshots | [Server](/architecture/control-plane/server), [Kubernetes Controller](/architecture/control-plane/operator) |
+| Data plane | In-sandbox execution, node-side collection | [Execd](/architecture/data-plane/execd), [Node Agent](/architecture/data-plane/node-agent) |
+| Network | Inbound access, outbound policy, isolation design | [Ingress](/architecture/network/ingress), [Egress](/architecture/network/egress), [Single-Host Network](/architecture/network/single-host-network), [Network Isolation](/architecture/network/network-isolation) |
+| Backend integration | Template-backed sandboxes on the fast-sandbox platform | [Fast Sandbox](/architecture/fast-sandbox/) |
+
 ## 1. Client Surface
 
 The client surface is the developer-facing entry point for OpenSandbox.
@@ -241,7 +250,7 @@ In Kubernetes mode, `FastSandboxService` connects OpenSandbox to the external `f
 - **Pause/resume**: Delegates to FastPath, which restores the checkpoint on resume. Clients must resolve endpoints again after restoration.
 - **Networking**: The configured Fastlet pool supplies a shared Egress profile; the adapter sends network policy through FastPath Actions. This differs from attaching a per-sandbox container sidecar. The current server adapter rejects the `credentialProxy.enabled` creation flag and volume mounts on this path.
 
-The adapter and endpoint integration live in this repository; FastPath and the microVM runtime are provided by the external platform. See the [service dispatch](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/composite_service.py) and [FastSandbox adapter](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/fast_sandbox/service.py) for the implementation boundaries.
+The adapter and endpoint integration live in this repository; FastPath and the microVM runtime are provided by the external platform. See the [service dispatch](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/composite_service.py) and [FastSandbox adapter](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/fast_sandbox/service.py) for the implementation boundaries, and the [Fast Sandbox integration](/architecture/fast-sandbox/) documentation for the full design.
 
 ## 5. Sandbox Data Plane
 
@@ -423,16 +432,19 @@ Sandbox state includes `state`, `reason`, `message`, and transition time. `execd
 - [Diagnostics Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/diagnostic-api.yml)
 - [Sandbox Execution Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml)
 - [Egress Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/egress-api.yaml)
-- [Server](/components/server)
+- [Server](/architecture/control-plane/server)
 - [Server Configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md)
-- [Execd](/components/execd)
-- [Ingress](/components/ingress)
-- [Egress](/components/egress)
-- [Kubernetes](/kubernetes/)
+- [Execd](/architecture/data-plane/execd)
+- [Node Agent](/architecture/data-plane/node-agent)
+- [Ingress](/architecture/network/ingress)
+- [Egress](/architecture/network/egress)
+- [Kubernetes Controller](/architecture/control-plane/operator)
+- [Kubernetes Deployment](/deployment/)
+- [Fast Sandbox](/architecture/fast-sandbox/)
 - [Pause and Resume](/guides/pause-resume)
 - [Secure Container Runtime Guide](/guides/secure-container)
 - [Credential Vault](/guides/credential-vault)
-- [Network Isolation](/architecture/network-isolation)
+- [Network Isolation](/architecture/network/network-isolation)
 - [CLI](/cli/)
 - [MCP Server](/sdks/mcp)
 - [Examples](/examples/)

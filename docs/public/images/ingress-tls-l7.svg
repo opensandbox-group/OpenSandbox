@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="440" viewBox="0 0 1180 440" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="mB" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#2563eb"/></marker>
+    <marker id="mG" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+  </defs>
+
+  <rect width="1180" height="440" fill="#ffffff"/>
+  <text x="40" y="36" font-size="20" font-weight="700" fill="#0f172a">Putting ingress behind TLS</text>
+  <text x="40" y="58" font-size="12" fill="#64748b">The ingress speaks cleartext HTTP/1.1 only. The front proxy must deliver WebSocket upgrades as classic HTTP/1.1 — RFC 8441 (h2) is not accepted.</text>
+
+  <!-- browser -->
+  <rect x="60" y="120" width="240" height="110" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="80" y="150" font-size="14" font-weight="700" fill="#0f172a">Browser / client</text>
+  <text x="80" y="176" font-size="11" fill="#475569">TLS + ALPN (h2, http/1.1)</text>
+  <text x="80" y="198" font-size="11" fill="#94a3b8">drop h2 → simplest, verified</text>
+
+  <!-- L7 -->
+  <rect x="420" y="120" width="320" height="110" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="440" y="150" font-size="14" font-weight="700" fill="#0f172a">TLS front proxy (L7)</text>
+  <text x="440" y="176" font-size="11" fill="#475569">terminates TLS · hands the ingress</text>
+  <text x="440" y="194" font-size="11" fill="#475569">HTTP/1.1, including WS upgrades</text>
+  <text x="440" y="216" font-size="11" fill="#94a3b8">never forwards h2 to the ingress</text>
+
+  <!-- ingress -->
+  <rect x="860" y="120" width="280" height="110" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="880" y="150" font-size="14" font-weight="700" fill="#0f172a">Ingress</text>
+  <text x="880" y="176" font-size="11" fill="#475569">cleartext HTTP/1.1 · no TLS</text>
+  <text x="880" y="198" font-size="11" fill="#94a3b8">subprotocols, cookies, close codes</text>
+
+  <!-- sandbox -->
+  <rect x="420" y="290" width="720" height="70" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="440" y="320" font-size="13" font-weight="700" fill="#0f172a">Sandbox workload</text>
+  <text x="440" y="344" font-size="11" fill="#94a3b8">sees ordinary HTTP/1.1 requests and WebSocket connections, with X-Forwarded-* preserved</text>
+
+  <path d="M300,175 L414,175" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <text x="304" y="162" font-size="10.5" fill="#2563eb">TLS</text>
+  <path d="M740,175 L854,175" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <text x="746" y="162" font-size="10.5" fill="#2563eb">http/1.1</text>
+  <path d="M1000,230 L1000,284" stroke="#64748b" stroke-width="2" marker-end="url(#mG)" fill="none"/>
+
+  <!-- strategies -->
+  <rect x="60" y="390" width="1080" height="30" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="80" y="410" font-size="11.5" fill="#475569">Strategies, in order: 1 · drop h2 from browser-facing ALPN (verified) · 2 · per-WebSocket HTTP/1.1 fallback · 3 · RFC 8441 translation (verify first)</text>
+</svg>

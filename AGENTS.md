@@ -92,11 +92,10 @@ Never:
 ```
 docs/
   getting-started/     # Quick start, installation, configuration
-  architecture/        # Architecture overview, network design
+  architecture/        # Layered system docs: overview, control-plane/, data-plane/, network/
+  deployment/          # Deployment and operations (Kubernetes install, storage, metrics)
   guides/              # Feature guides (credential vault, secure container, etc.)
   sdks/                # SDK reference (one page per language per SDK)
-  components/          # Server, execd, ingress, egress
-  kubernetes/          # Kubernetes operator and deployment
   api/                 # OpenAPI spec reference
   cli/                 # CLI reference
   examples/            # One page per example

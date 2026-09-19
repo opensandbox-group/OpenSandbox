@@ -73,7 +73,7 @@ There is no terminal to answer permission prompts in a `-p` run: requests that w
 - `--permission-mode dontAsk` stays fail-closed: only tools pre-approved by your permission rules run — the standard pattern for locked-down CI. (`--permission-prompts none`, Claude Code v2.1.259+, is the print-mode equivalent.)
 
 ::: warning The interactive UI needs a TTY
-The interactive REPL (`claude "..."`) renders its UI, including permission prompts, on a terminal. Through a plain command pipe there is no way to answer a prompt, so the run can wait indefinitely. Use `-p` for scripted runs, or drive the interactive UI over a [PTY session](/components/execd).
+The interactive REPL (`claude "..."`) renders its UI, including permission prompts, on a terminal. Through a plain command pipe there is no way to answer a prompt, so the run can wait indefinitely. Use `-p` for scripted runs, or drive the interactive UI over a [PTY session](/architecture/data-plane/execd).
 :::
 
 To receive output as it is generated (token-level events) instead of a single final JSON object, use `--output-format stream-json --verbose --include-partial-messages`.

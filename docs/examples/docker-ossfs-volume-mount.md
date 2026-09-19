@@ -115,6 +115,5 @@ sandbox = await Sandbox.create(
 
 ## References
 
-- [OSEP-0003: Volume and VolumeBinding Support](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0003-volume-and-volumebinding-support.md)
 - [Sandbox Lifecycle API Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml)
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/docker-ossfs-volume-mount)

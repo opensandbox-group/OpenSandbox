@@ -126,7 +126,7 @@ Use one of these operator patterns instead:
 - keep mesh injection enabled, but do not enable `credentialProxy` / Credential Vault for those pods
 - move outbound policy and credential handling to a platform mechanism outside the sandbox pod if mesh injection is mandatory
 
-For the underlying egress-sidecar limitation, see [Egress](/components/egress#service-mesh-compatibility).
+For the underlying egress-sidecar limitation, see [Egress](/architecture/network/egress#service-mesh-compatibility).
 
 Credential bindings are intentionally precise. A default-deny egress policy is
 required. Use a narrow path match, for example `/v1/*` for Anthropic API calls.

@@ -15,8 +15,6 @@ Its counterparts:
 - [Credential Vault](/guides/credential-vault) — protects **outbound** requests.
 - [Secure Container Runtime](/guides/secure-container) — isolates the **workload**.
 
-Normative design: [OSEP-0011](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0011-secure-access-endpoint.md).
-
 ## Requirements
 
 - Kubernetes runtime (Docker rejects `secureAccess: true` with `400`).
@@ -186,5 +184,4 @@ response, still carrying the static `SecureAccessToken`.
 
 - [Credential Vault](/guides/credential-vault)
 - [Secure Container Runtime](/guides/secure-container)
-- [Ingress component](/components/ingress)
-- [OSEP-0011](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0011-secure-access-endpoint.md)
+- [Ingress component](/architecture/network/ingress)

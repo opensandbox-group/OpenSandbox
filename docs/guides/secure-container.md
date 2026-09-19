@@ -755,4 +755,3 @@ iptables v1.8.9 (legacy): can't initialize iptables table 'nat': Table does not 
 
 - **Documentation**: [OpenSandbox GitHub](https://github.com/opensandbox-group/OpenSandbox)
 - **Issues**: Report bugs via [GitHub Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
-- **Design Document**: See [OSEP-0004](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0004-secure-container-runtime.md) for complete design details

@@ -503,8 +503,7 @@ still fail at runtime on such hosts. If you rely on `workspace.mode:
 
 ## Limitations
 
-- **`diff` / `commit` are Phase 2 stubs**, currently return `503`. Tracked
-  in [OSEP-0013](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0013-isolated-execution-api.md).
+- **`diff` / `commit` are Phase 2 stubs**, currently return `503`.
 - **No hardware-level guarantee.** Namespaces + seccomp only; pair with a
   secure runtime for kernel-exploit defense.
 - **Linux only.** Non-Linux builds return `available: false`.
@@ -515,7 +514,6 @@ still fail at runtime on such hosts. If you rely on `workspace.mode:
 
 ## See Also
 
-- [OSEP-0013 — Isolated Execution API](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0013-isolated-execution-api.md)
-- [execd](/components/execd)
+- [execd](/architecture/data-plane/execd)
 - [Secure Container Runtime](/guides/secure-container)
 - [execd OpenAPI spec](/api/)

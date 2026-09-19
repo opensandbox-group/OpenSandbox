@@ -16,11 +16,11 @@ const EXACT: Record<string, string> = {
   "/overview/architecture": "/architecture/",
   "/overview/credential-vault": "/guides/credential-vault",
   "/overview/release-verification": "/community/release-verification",
-  "/design/single-host-network": "/architecture/single-host-network",
-  "/single_host_network": "/architecture/single-host-network",
-  "/kubernetes/development": "/kubernetes/deployment",
-  "/server/readme": "/components/server",
-  "/server/development": "/components/server",
+  "/design/single-host-network": "/architecture/network/single-host-network",
+  "/single_host_network": "/architecture/network/single-host-network",
+  "/kubernetes/development": "/architecture/deployment",
+  "/server/readme": "/architecture/control-plane/server",
+  "/server/development": "/architecture/control-plane/server",
   "/specs/readme": "/api/",
   "/secure-container": "/guides/secure-container",
   "/pause-resume": "/guides/pause-resume",
@@ -38,8 +38,9 @@ function resolveLegacy(rawPath: string): string {
   if (p === "" || p === "/") return "/";
   if (EXACT[p]) return EXACT[p];
   if (p.startsWith("/oseps/")) return "/community/oseps";
-  // Nested Kubernetes pages (charts, examples) all consolidated under /kubernetes/.
-  if (p.startsWith("/kubernetes/")) return "/kubernetes/";
+  // Nested Kubernetes pages (charts, examples) all consolidated under the
+  // controller documentation.
+  if (p.startsWith("/kubernetes/")) return "/architecture/control-plane/operator";
   // Code-interpreter SDKs keep a per-language page; just drop the leaf suffix.
   if (p.startsWith("/sdks/code-interpreter/")) {
     return p.replace(/\/(readme|development)$/, "");

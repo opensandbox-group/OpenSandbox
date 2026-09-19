@@ -181,7 +181,7 @@ runtime-dependent isolation features.
 
 **Sandbox Egress Runtime API**
 
-Defines the runtime egress policy interface exposed directly by the [egress sidecar](/components/egress)
+Defines the runtime egress policy interface exposed directly by the [egress sidecar](/architecture/network/egress)
 inside a sandbox. Unlike lifecycle operations, this API is reached by first resolving
 the sandbox endpoint for the egress port and then calling the sidecar endpoint directly.
 

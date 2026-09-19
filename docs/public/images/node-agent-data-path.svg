@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="470" viewBox="0 0 1180 470" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="mB" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#2563eb"/></marker>
+    <marker id="mG" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+  </defs>
+
+  <rect width="1180" height="470" fill="#ffffff"/>
+  <text x="40" y="36" font-size="20" font-weight="700" fill="#0f172a">Node Agent — from node logs to durable records</text>
+  <text x="40" y="58" font-size="12" fill="#64748b">One collector per node tails every sandbox's output and ships it to durable storage.</text>
+
+  <!-- pods -->
+  <rect x="60" y="110" width="230" height="70" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="76" y="138" font-size="13" font-weight="700" fill="#0f172a">Sandbox pod A</text>
+  <text x="76" y="160" font-size="11" fill="#94a3b8">stdout / stderr (kubelet logs)</text>
+
+  <rect x="60" y="200" width="230" height="70" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="76" y="228" font-size="13" font-weight="700" fill="#0f172a">Sandbox pod B</text>
+  <text x="76" y="250" font-size="11" fill="#94a3b8">stdout / stderr (kubelet logs)</text>
+
+  <rect x="60" y="300" width="230" height="56" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="5,4"/>
+  <text x="76" y="324" font-size="12" font-weight="700" fill="#64748b">Pooled (warm) pod</text>
+  <text x="76" y="344" font-size="10.5" fill="#94a3b8">not an allocation — excluded</text>
+
+  <!-- agent -->
+  <rect x="400" y="100" width="330" height="280" rx="14" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="420" y="132" font-size="14" font-weight="700" fill="#0f172a">Node Agent</text>
+  <text x="420" y="152" font-size="11" fill="#94a3b8">DaemonSet · one per node</text>
+  <text x="420" y="192" font-size="12" fill="#475569">source: container-logs</text>
+  <text x="420" y="232" font-size="12" fill="#475569">bounded per-sandbox queues</text>
+  <text x="420" y="272" font-size="12" fill="#475569">crash-recovering checkpoint</text>
+  <text x="420" y="312" font-size="12" fill="#475569">sink: one durable target</text>
+  <text x="420" y="352" font-size="11" fill="#94a3b8">backpressure instead of silent drops</text>
+
+  <!-- targets -->
+  <rect x="850" y="110" width="290" height="120" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="866" y="140" font-size="13" font-weight="700" fill="#0f172a">Durable local files</text>
+  <text x="866" y="164" font-size="11" fill="#475569">&lt;cluster&gt;/&lt;namespace&gt;/&lt;sandbox_id&gt;/</text>
+  <text x="866" y="184" font-size="11" fill="#475569">  &lt;pod_uid&gt;/ + finalized marker</text>
+  <text x="866" y="208" font-size="11" fill="#94a3b8">retention managed by the operator</text>
+
+  <rect x="850" y="270" width="290" height="110" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="866" y="298" font-size="13" font-weight="700" fill="#0f172a">Alibaba Cloud OSS</text>
+  <text x="866" y="322" font-size="11" fill="#475569">same layout · append/read/write only,</text>
+  <text x="866" y="340" font-size="11" fill="#475569">never delete · cleanup is offline</text>
+  <text x="866" y="364" font-size="11" fill="#94a3b8">refuses unsafe bucket configurations</text>
+
+  <!-- arrows -->
+  <path d="M290,145 L394,190" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <path d="M290,235 L394,250" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
+  <text x="298" y="180" font-size="10.5" fill="#2563eb">tail &amp; stream</text>
+  <path d="M730,180 L844,165" stroke="#64748b" stroke-width="2" marker-end="url(#mG)" fill="none"/>
+  <path d="M730,310 L844,330" stroke="#64748b" stroke-width="2" marker-end="url(#mG)" fill="none"/>
+  <text x="738" y="160" font-size="10.5" fill="#64748b">objects + marker</text>
+
+  <!-- bottom bar -->
+  <rect x="60" y="410" width="1080" height="30" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="80" y="430" font-size="11.5" fill="#475569">At-least-once delivery: duplicates are possible, silent loss is not — every stream ends in a completeness marker.</text>
+</svg>

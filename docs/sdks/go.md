@@ -152,7 +152,7 @@ if err != nil {
 }
 ```
 
-Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
+Native argv execution requires an updated execd. See [command execution modes](/architecture/data-plane/execd#command-execution) for executable lookup and platform behavior.
 
 ### Background commands
 
@@ -620,7 +620,7 @@ Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 | `ResumeSandbox(ctx, id)` | Resume a paused sandbox |
 | `RenewExpiration(ctx, id, expiresAt)` | Extend sandbox expiration time |
 | `GetEndpoint(ctx, sandboxID, port, useServerProxy)` | Get public endpoint for a sandbox port |
-| `GetSignedEndpoint(ctx, sandboxID, port, expires)` | Get signed endpoint URL with OSEP-0011 route token |
+| `GetSignedEndpoint(ctx, sandboxID, port, expires)` | Get signed endpoint URL with a signed route token |
 | `CreateTemplate(ctx, req)` | Declare a fsb template (async golden-image build) |
 | `GetTemplate(ctx, templateID)` | Get a template with its latest build status |
 | `ListTemplates(ctx, opts)` | List templates with metadata filtering and pagination |

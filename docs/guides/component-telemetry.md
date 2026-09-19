@@ -9,7 +9,7 @@ The Go components (including execd, egress, and ingress) share an OTLP metrics
 exporter. Set these variables in the **component process environment**. Setting
 them on the lifecycle server or in a sandbox creation request does not automatically
 configure another container, such as the egress sidecar. For server-managed
-egress endpoints, see [egress observability](/components/egress#observability-opentelemetry).
+egress endpoints, see [egress observability](/architecture/network/egress#observability-opentelemetry).
 
 ## Export endpoints and disabling metrics
 

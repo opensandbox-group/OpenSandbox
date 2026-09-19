@@ -540,8 +540,7 @@ rebinding the name requires either waiting out the tombstone TTL or rotating to 
 One deliberate exception: if the state store itself is unreachable, the destroy state
 is unknowable, so policies that already fall through to direct create on a store
 outage (`DIRECT_CREATE`, `RETRY_NEXT_IDLE_THEN_CREATE`) assume `ACTIVE` and proceed,
-matching the existing `try_take_idle` outage behavior in the OSEP-0005 error-code
-matrix. `FAIL_FAST` and `RETRY_NEXT_IDLE` surface the outage instead. That relaxation
+matching the existing `try_take_idle` outage behavior. `FAIL_FAST` and `RETRY_NEXT_IDLE` surface the outage instead. That relaxation
 stops at a sandbox already taken from the idle buffer: there the check is fail-closed
 and an unreachable store means the sandbox is killed, because nothing else is tracking
 it any more.

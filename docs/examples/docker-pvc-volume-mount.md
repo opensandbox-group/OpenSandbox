@@ -8,7 +8,7 @@ description: Mount Docker named volumes into sandbox containers using the OpenSa
 This example demonstrates how to mount Docker named volumes into sandbox containers using the OpenSandbox `pvc` backend. In Docker runtime, `pvc.claimName` maps to a Docker named volume -- providing a more convenient and secure alternative to host-path bind mounts for sharing data across sandboxes.
 
 ::: info What is `pvc`?
-The `pvc` backend is a runtime-neutral abstraction. In Kubernetes it maps to a PersistentVolumeClaim; in Docker it maps to a named volume. The same API request works on both runtimes. See [OSEP-0003](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0003-volume-and-volumebinding-support.md) for the design.
+The `pvc` backend is a runtime-neutral abstraction. In Kubernetes it maps to a PersistentVolumeClaim; in Docker it maps to a named volume. The same API request works on both runtimes.
 :::
 
 ## Why Named Volumes over Host Paths?
@@ -194,7 +194,6 @@ docker volume rm opensandbox-pvc-demo
 
 ## References
 
-- [OSEP-0003: Volume and VolumeBinding Support](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0003-volume-and-volumebinding-support.md) -- Design proposal
 - [Sandbox Lifecycle API Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml) -- OpenAPI schema for volume definitions
 - [Host Volume Mount Example](/examples/host-volume-mount) -- Host path bind mount example (alternative approach)
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/docker-pvc-volume-mount)
