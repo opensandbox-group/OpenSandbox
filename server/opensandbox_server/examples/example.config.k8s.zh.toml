@@ -67,9 +67,7 @@ kubeconfig_path = "~/.kube/config"
 # Namespace for sandbox workloads
 namespace = "opensandbox"
 
-# [Beta] 启用 informer 缓存以减少 API 调用。
-# 如需关闭 watch 缓存，将该项设为 false。
-informer_enabled = true
+# [Beta] informer 缓存的 resync 与 watch 调优参数。
 informer_resync_seconds = 300
 informer_watch_timeout_seconds = 60
 

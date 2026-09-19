@@ -617,13 +617,6 @@ class KubernetesRuntimeConfig(BaseModel):
         default=None,
         description="Absolute path to the kubeconfig file used for API authentication.",
     )
-    informer_enabled: bool = Field(
-        default=True,
-        description=(
-            "[Beta] Enable informer-backed cache for workload reads. "
-            "Keeps a watch to reduce API pressure; set false to disable."
-        ),
-    )
     informer_resync_seconds: int = Field(
         default=300,
         ge=1,

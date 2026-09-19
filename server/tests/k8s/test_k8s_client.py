@@ -132,7 +132,6 @@ class TestK8sClient:
     def _attach_informer(self, c, informer):
         c._informers[("g", "v1", "foos", "ns")] = informer
         c.config = MagicMock(
-            informer_enabled=True,
             informer_resync_seconds=300,
             informer_watch_timeout_seconds=60,
             read_qps=0.0,
@@ -201,7 +200,7 @@ class TestK8sClient:
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.create_namespaced_custom_object.return_value = {"metadata": {"name": "x"}}
         c._custom_objects_api.patch_namespaced_custom_object.return_value = {"metadata": {"name": "x"}}
-        c.config = MagicMock(informer_enabled=True, read_qps=0.0, write_qps=0.0)
+        c.config = MagicMock(read_qps=0.0, write_qps=0.0)
         # No informers registered → _lookup_informer returns None
         c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "x"}})
         c.patch_custom_object("g", "v1", "ns", "foos", "x", {})
@@ -364,9 +363,11 @@ class TestK8sClient:
         assert result is cached_obj
         c._custom_objects_api.get_namespaced_custom_object.assert_not_called()
 
-    def test_get_custom_object_skips_informer_when_disabled(self, k8s_runtime_config):
+    def test_get_custom_object_falls_back_to_api_without_synced_cache(
+        self, k8s_runtime_config
+    ):
+        """A lazily started (unsynced) informer never serves stale-free reads."""
         c = self._make_client(k8s_runtime_config)
-        c.config = MagicMock(informer_enabled=False, read_qps=0.0)
         obj = {"metadata": {"name": "foo-1"}}
         c._custom_objects_api.get_namespaced_custom_object.return_value = obj
         result = c.get_custom_object("g", "v1", "ns", "foos", "foo-1")
@@ -381,16 +382,13 @@ class TestK8sClient:
         result = c.list_custom_objects("g", "v1", "ns", "foos")
         assert len(result) == 2
 
-    def test_list_skips_selector_parsing_without_informer(self, k8s_runtime_config):
-        """Selector parsing is only part of the informer cache path."""
+    def test_list_falls_back_to_api_when_cache_unsynced(self, k8s_runtime_config):
+        """Selector terms are parsed in memory; an unsynced cache falls back to the API."""
         c = self._make_client(k8s_runtime_config)
-        c.config = MagicMock(informer_enabled=False, read_qps=0.0)
         c._custom_objects_api.list_namespaced_custom_object.return_value = {"items": []}
 
-        with patch("opensandbox_server.services.k8s.client.parse_selector") as parse:
-            assert c.list_custom_objects("g", "v1", "ns", "foos", "team=infra") == []
-
-        parse.assert_not_called()
+        assert c.list_custom_objects("g", "v1", "ns", "foos", "team=infra") == []
+        c._custom_objects_api.list_namespaced_custom_object.assert_called_once()
 
     def test_list_custom_objects_returns_empty_on_404(self, k8s_runtime_config):
         c = self._make_client(k8s_runtime_config)
@@ -603,7 +601,6 @@ class TestK8sClient:
 
     def test_read_limiter_called_on_get(self, k8s_runtime_config):
         c = self._make_client(k8s_runtime_config)
-        c.config = MagicMock(informer_enabled=False, read_qps=0.0)
         c._custom_objects_api.get_namespaced_custom_object.return_value = {}
         mock_limiter = MagicMock()
         c._read_limiter = mock_limiter

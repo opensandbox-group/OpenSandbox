@@ -206,7 +206,7 @@ Supported providers:
 
 The Kubernetes server path handles:
 
-- Kubernetes client initialization and optional informer-backed reads.
+- Kubernetes client initialization and informer-backed reads.
 - Workload creation from image requests; `snapshotId` startup resolves to a stored restorable image when the snapshot record supports restore.
 - Template merging for BatchSandbox and agent-sandbox manifests.
 - Per-request image pull secrets where the provider supports them.

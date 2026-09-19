@@ -257,7 +257,7 @@ class FastSandboxSnapshotRuntime:
             return
         if informer is None:
             logger.debug(
-                f"Informers disabled; fsb snapshot {namespace}/{PLURAL} converges via reads only"
+                f"fsb snapshot watch failed to start; fsb snapshot {namespace}/{PLURAL} converges via reads only"
             )
             return
         with self._watch_lock:

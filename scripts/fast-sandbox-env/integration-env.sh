@@ -1231,7 +1231,7 @@ type = "kubernetes"
 execd_image = "@EXECD_IMAGE@"
 
 [kubernetes]
-# One block serves both backends: CR reads (informer settings) and the
+# One block serves both backends: CR reads and the
 # fsb (fast-sandbox) settings. Sandboxes are created in the pool's
 # namespace so poolRef resolves; execd comes from runtime.execd_image
 # above (the server injects it into server-created SandboxTemplates).
@@ -1240,7 +1240,6 @@ fastpath_endpoint = "@FASTPATH_ENDPOINT@"
 fastpath_resource_pool = "@POOL_NAME@"
 fastpath_wait_ready_seconds = 30.0
 template_s3_publish_secret = "sandbox-oss-credentials"
-informer_enabled = true
 TOML
 	if grep -Eq '@[A-Z_]+@' "$GEN_DIR/osb-server-config.toml"; then
 		die "unrendered token left in $GEN_DIR/osb-server-config.toml"

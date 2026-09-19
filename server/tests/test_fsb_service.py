@@ -312,7 +312,8 @@ def http_fsb(monkeypatch):
     )
     fastpath = FastPathClient(endpoint=f"127.0.0.1:{port}")
     with patch.object(K8sClient, "_load_config"):
-        k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
     api = Mock(spec=CustomObjectsApi)
     api.get_api_resources.return_value = V1APIResourceList(
         group_version="sandbox.fast.io/v1alpha2",
@@ -519,7 +520,6 @@ def test_cr_reads_do_not_depend_on_fastpath_and_remain_tenant_scoped(persisted_f
 def test_cr_watch_and_fastpath_mutations_refresh_http_reads(persisted_fsb, monkeypatch):
     client, fake, service, sandbox_id = persisted_fsb
     k8s = service._cr_reader._client
-    k8s.config.informer_enabled = True
     monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
     url = f"/v1/sandboxes/{sandbox_id}"
     assert client.get(url).json()["status"]["state"] == "Running"

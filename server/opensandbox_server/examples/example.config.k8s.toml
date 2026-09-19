@@ -69,9 +69,7 @@ kubeconfig_path = "~/.kube/config"
 # Namespace for sandbox workloads
 namespace = "opensandbox"
 
-# [Beta] Enable informer-backed cache to reduce API calls.
-# Set to false to disable the watch-based cache.
-informer_enabled = true
+# [Beta] Informer cache resync and watch tuning.
 informer_resync_seconds = 300
 informer_watch_timeout_seconds = 60
 

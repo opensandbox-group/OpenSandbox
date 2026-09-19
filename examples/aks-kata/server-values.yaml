@@ -50,7 +50,6 @@ configToml: |
   [kubernetes]
   kubeconfig_path = ""
   namespace = "opensandbox"
-  informer_enabled = true
   informer_resync_seconds = 300
   informer_watch_timeout_seconds = 60
   workload_provider = "batchsandbox"

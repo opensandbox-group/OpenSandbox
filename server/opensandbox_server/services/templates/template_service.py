@@ -124,7 +124,7 @@ class FastSandboxTemplateService:
         )
         if informer is None:
             logger.warning(
-                "Template status watches disabled (informer_enabled=false); "
+                f"Template status watch failed to start for namespace {namespace!r}; "
                 "rows converge on reads only"
             )
             return

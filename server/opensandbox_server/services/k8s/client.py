@@ -98,8 +98,6 @@ class K8sClient:
         """Return an existing informer without starting one. Used by write paths
         to invalidate cache entries; never auto-create on writes since list paths
         own the lazy-start contract."""
-        if not self.config.informer_enabled:
-            return None
         key: _InformerKey = (group, version, plural, namespace)
         with self._informers_lock:
             return self._informers.get(key)
@@ -113,9 +111,6 @@ class K8sClient:
         event_handler=None,
     ) -> Optional[WorkloadInformer]:
         """Return the informer for this resource+namespace, starting it lazily."""
-        if not self.config.informer_enabled:
-            return None
-
         key: _InformerKey = (group, version, plural, namespace)
         with self._informers_lock:
             informer = self._informers.get(key)
@@ -159,8 +154,8 @@ class K8sClient:
 
         The handler fires for every watch event and for every item of an
         initial or reconnecting LIST snapshot, turning the informer into an
-        event reactor. Returns None when informers are disabled. The watch
-        stops with ``stop_informers``.
+        event reactor. Returns None when the informer cannot be started. The
+        watch stops with ``stop_informers``.
         """
         return self._get_informer(group, version, plural, namespace, event_handler)
 
