@@ -104,3 +104,77 @@ func (s *ProcessSession) finishBootstrap(committed bool, err error) {
 		s.bootstrap = bootstrapIdle
 	}
 }
+
+// ReconcileBootstrap resolves an indeterminate bootstrap using metadata-only
+// readback and the coordinator's exact commit/abort retry rules. A nil identity
+// means the candidate was not activated and a later Bootstrap may retry.
+func (s *ProcessSession) ReconcileBootstrap(
+	ctx context.Context,
+) (identity *revision.Identity, resultErr error) {
+	coordinator, err := s.Coordinator()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	previous, err := s.beginBootstrapReconcile()
+	if err != nil {
+		return nil, err
+	}
+	activated := false
+	defer func() { s.finishBootstrapReconcile(previous, activated, resultErr) }()
+
+	identity, err = coordinator.Reconcile(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if identity != nil {
+		activated = true
+		confirmed, err := coordinator.Confirmed()
+		if err != nil {
+			return nil, err
+		}
+		if confirmed == nil || *confirmed != *identity {
+			return nil, revision.ErrIndeterminate
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, revision.ErrClosed
+	}
+	if !s.parentPathMatches() {
+		return nil, revision.ErrTransportUnavailable
+	}
+	return identity, nil
+}
+
+func (s *ProcessSession) beginBootstrapReconcile() (bootstrapState, error) {
+	s.bootstrapMu.Lock()
+	defer s.bootstrapMu.Unlock()
+	if s.bootstrap == bootstrapRunning {
+		return bootstrapRunning, revision.ErrBusy
+	}
+	previous := s.bootstrap
+	s.bootstrap = bootstrapRunning
+	return previous, nil
+}
+
+func (s *ProcessSession) finishBootstrapReconcile(
+	previous bootstrapState,
+	activated bool,
+	err error,
+) {
+	s.bootstrapMu.Lock()
+	defer s.bootstrapMu.Unlock()
+	switch {
+	case activated:
+		s.bootstrap = bootstrapComplete
+	case err == nil:
+		s.bootstrap = bootstrapIdle
+	default:
+		s.bootstrap = previous
+	}
+}
