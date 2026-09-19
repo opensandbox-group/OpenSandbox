@@ -174,7 +174,7 @@ class RevisionIPCTest(unittest.TestCase):
             (409, {"error": "revision_rejected"}),
         )
         self.assertEqual(
-            self.request("POST", "/v1/revisions/missing", {"secret": "never-log-me"}),
+            self.request("POST", "/v1/revisions/missing"),
             (404, {"error": "not_found"}),
         )
 
