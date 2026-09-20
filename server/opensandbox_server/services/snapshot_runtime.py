@@ -110,6 +110,25 @@ class SnapshotRuntime(Protocol):
         """
 
 
+def is_snapshot_source_state_supported(
+    runtime: SnapshotRuntime,
+    sandbox_id: str,
+    state: str,
+    *,
+    namespace: str | None = None,
+) -> bool:
+    """Return whether a runtime accepts snapshot creation from the source state.
+
+    Existing runtime adapters that do not expose a source-state capability
+    retain the historical behavior and only accept Running. Backends may opt
+    into additional safe states by implementing supports_snapshot_source_state.
+    """
+    checker = getattr(runtime, "supports_snapshot_source_state", None)
+    if checker is None:
+        return state == "Running"
+    return checker(sandbox_id, state, namespace=namespace)
+
+
 class NoopSnapshotRuntime:
     """
     Placeholder runtime used when snapshot execution is not yet wired.
@@ -174,4 +193,5 @@ __all__ = [
     "SnapshotRuntimeStatus",
     "SnapshotRuntimeUnsupportedError",
     "NoopSnapshotRuntime",
+    "is_snapshot_source_state_supported",
 ]

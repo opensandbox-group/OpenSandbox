@@ -25,6 +25,22 @@ from opensandbox_server.services.docker.snapshot_runtime import (
 from opensandbox_server.services.snapshot_models import SnapshotState
 
 
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("Running", True),
+        ("Paused", True),
+        ("Pausing", False),
+        ("Resuming", False),
+        ("Failed", False),
+    ],
+)
+def test_supports_snapshot_source_state(state: str, expected: bool) -> None:
+    runtime = DockerSnapshotRuntime(SimpleNamespace())
+
+    assert runtime.supports_snapshot_source_state("sbx-001", state) is expected
+
+
 def test_create_snapshot_commits_container_and_marks_ready() -> None:
     container = SimpleNamespace()
     commits: list[tuple[str, str]] = []
