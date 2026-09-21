@@ -49,3 +49,4 @@ The adapter and endpoint integration live in this repository. FastPath, the Fast
 | [High Availability](/architecture/fast-sandbox/ha) | What survives which failure: control plane, nodes, sandboxes |
 | [Storage](/architecture/fast-sandbox/storage) | Artifact store, peer-to-peer block delivery, node state roots |
 | [Firecracker](/architecture/fast-sandbox/firecracker) | Host requirements, per-VM networking model, agent delegation |
+| [Performance](/architecture/fast-sandbox/performance) | Measured create, boot, and pause/resume characteristics |

@@ -172,6 +172,10 @@ export default defineConfig({
               text: "Firecracker",
               link: "/architecture/fast-sandbox/firecracker",
             },
+            {
+              text: "Performance",
+              link: "/architecture/fast-sandbox/performance",
+            },
           ],
         },
       ],

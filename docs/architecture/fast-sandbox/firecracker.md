@@ -66,6 +66,8 @@ From the real-hardware verification:
 |---|---|
 | VM `InstanceStart` → first response | ~1.6 s (kernel boot ~1.0 s) |
 
+The full set of measured figures — create, snapshot, pause/resume, request latency, artifact delivery — lives in [Performance](/architecture/fast-sandbox/performance).
+
 ## Isolation guarantees
 
 - **Per-VM policy enforcement**: each VM's outbound traffic is filtered by its own subject policy at the DNS and network layers.
