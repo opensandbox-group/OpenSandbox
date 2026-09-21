@@ -1,0 +1,146 @@
+# Umbrella release BOM — rendered by create-umbrella-release.sh from this
+# template. The BOM is authoritative for image digests. Entries marked
+# PENDING are pinned by the release-umbrella workflow during the
+# build-hold-publish fan-out.
+# Placeholders (written as ${NAME}): VERSION LINE CHANNEL RELEASE_DATE
+#   GIT_COMMIT SPEC_SANDBOX_LIFECYCLE_SHA256 SPEC_EXECD_API_SHA256
+#   SPEC_EGRESS_API_SHA256 SPEC_DIAGNOSTIC_API_SHA256
+apiVersion: opensandbox.io/v1
+kind: UmbrellaRelease
+metadata:
+  version: 1.1.0
+  line: "1.1"
+  channel: stable
+  releaseDate: "2026-09-21"
+  gitCommit: 451f69732887e784a7a5f309984acb9a563b168f
+
+compatibility:
+  kubernetes:
+    minVersion: v1.21
+    maxVersion: v1.34
+  crd:
+    - group: sandbox.opensandbox.io
+      versions: [v1alpha1]
+
+images:
+  server:
+    image: docker.io/opensandbox/server
+    tag: release-1.1.0
+    digest: sha256:68ca0212a2749b2c73096ce2ec0264455c64442c45f81007db442f52bf84c9d1
+  execd:
+    image: docker.io/opensandbox/execd
+    tag: release-1.1.0
+    digest: sha256:e11fdd6fa641329a1fe5298e71c8dd2afca742674fe48bc855b2ff6715512829
+  ingress:
+    image: docker.io/opensandbox/ingress
+    tag: release-1.1.0
+    digest: sha256:07e09c1277e3b1127a25b66fb23a9268ea4ec170535d5a1b5d8daaa362d20992
+  egress:
+    image: docker.io/opensandbox/egress
+    tag: release-1.1.0
+    digest: sha256:56429c89b7175c2a24af62ca93a99776f03ea67a0beb74d63c8ddb34ff16fd97
+  imageCommitter:
+    image: docker.io/opensandbox/image-committer
+    tag: release-1.1.0
+    digest: sha256:428392eeaf47a2b0ed87003962b367db58741d99f59467ba16a28f2b5f07514f
+  controller:
+    image: docker.io/opensandbox/controller
+    tag: release-1.1.0
+    digest: sha256:7299b94ab1382be4adb4fd41209ea60e16f66fcd963af64345b1106ac434957e
+  taskExecutor:
+    image: docker.io/opensandbox/task-executor
+    tag: release-1.1.0
+    digest: sha256:89e7af6d8ecdb58f35c05135224bc7a32c24fc3abd7b20c95862955f88ba5356
+  nodeAgent:
+    image: docker.io/opensandbox/nodeagent
+    tag: release-1.1.0
+    digest: sha256:e00b31c1b026f2ea909bd163b02b2eaf0b1a4f4d1e1a6ae4a6ddf770e0590f90
+  # fast-sandbox runtime family (fsb- prefix, linux/amd64; same mirror set)
+  fsbController:
+    image: docker.io/opensandbox/fsb-controller
+    tag: release-1.1.0
+    digest: sha256:470484b69f77f7aac632becf6ef535cb4c618a66e47962f784c875b20ff631dd
+  fsbFastlet:
+    image: docker.io/opensandbox/fsb-fastlet
+    tag: release-1.1.0
+    digest: sha256:d5a9fa99fc50b1eff4009fe4c73f79cd75805afea695498edccc154365602cc3
+  fsbFastletProxy:
+    image: docker.io/opensandbox/fsb-fastlet-proxy
+    tag: release-1.1.0
+    digest: sha256:6a00f8461515e6587edb7c0a5a16ebf1292cc86826926483f5586a967d1c6875
+  fsbJanitor:
+    image: docker.io/opensandbox/fsb-janitor
+    tag: release-1.1.0
+    digest: sha256:c384a3545aee673ce18399bcf377e46195f423dbe29a511408e4aa16627b8091
+  fsbFirecrackerRuntime:
+    image: docker.io/opensandbox/fsb-firecracker-runtime
+    tag: release-1.1.0
+    digest: sha256:c5cfd4c56bd02cf8c8debd43b48ea102ddd7247386211648ea4a7ceef43023f0
+  fsbSandboxtemplateBuilder:
+    image: docker.io/opensandbox/fsb-sandboxtemplate-builder
+    tag: release-1.1.0
+    digest: sha256:a37a32bc0ee561ad46b4f83ccb8f5623a58e3691d268f59bba6e7481128b0920
+
+# Charts ship in-repo at the release tag; not published to a chart repo.
+helm:
+  chart: opensandbox
+  version: "1.1.0"
+  appVersion: "1.1.0"
+
+server:
+  pypi: opensandbox-server==1.1.0
+cli:
+  pypi: opensandbox-cli==1.1.0
+sdks:
+  - product: sandbox
+    language: python
+    package: "pypi:opensandbox==1.1.0"
+  - product: code-interpreter
+    language: python
+    package: "pypi:opensandbox-code-interpreter==1.1.0"
+  - product: mcp/sandbox
+    language: python
+    package: "pypi:opensandbox-mcp==1.1.0"
+  - product: sandbox
+    language: javascript
+    package: "npm:@alibaba-group/opensandbox@1.1.0"
+  - product: code-interpreter
+    language: javascript
+    package: "npm:@alibaba-group/opensandbox-code-interpreter@1.1.0"
+  - product: sandbox
+    language: kotlin
+    package: "maven:com.alibaba.opensandbox:sandbox:1.1.0"
+  - product: sandbox-api
+    language: kotlin
+    package: "maven:com.alibaba.opensandbox:sandbox-api:1.1.0"
+  - product: sandbox-bom
+    language: kotlin
+    package: "maven:com.alibaba.opensandbox:sandbox-bom:1.1.0"
+  - product: sandbox-pool-redis
+    language: kotlin
+    package: "maven:com.alibaba.opensandbox:sandbox-pool-redis:1.1.0"
+  - product: code-interpreter
+    language: kotlin
+    package: "maven:com.alibaba.opensandbox:code-interpreter:1.1.0"
+  - product: sandbox
+    language: csharp
+    package: "nuget:Alibaba.OpenSandbox 1.1.0"
+  - product: code-interpreter
+    language: csharp
+    package: "nuget:Alibaba.OpenSandbox.CodeInterpreter 1.1.0"
+  - product: sandbox
+    language: go
+    package: "go:github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.1.0"
+  - product: sandbox-pool-redis
+    language: go
+    package: "go:github.com/alibaba/OpenSandbox/sdks/sandbox/go/poolredis v1.1.0"
+
+specs:
+  - path: specs/sandbox-lifecycle.yml
+    sha256: c1eb7cfbfd321b6287d57520f60e099edcfc0b9b6c482f9995b49377d6ce4c79
+  - path: specs/execd-api.yaml
+    sha256: ef7f43747f58f78b174fba97df81644820a206ca86918fd8a0c1d0db1dc47dff
+  - path: specs/egress-api.yaml
+    sha256: d19fb75a3b645fbc3af7bc1485443724475c07963090c77b29756c93d1835a9d
+  - path: specs/diagnostic-api.yml
+    sha256: 490a40ce4ce3f4decdf53e5457ff0eaf9857306c75e57b22fb3bbb921c0b9213
