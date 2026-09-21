@@ -37,7 +37,7 @@ gateway:
     # -- Gateway image repository.
     repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress
     # -- Gateway image tag.
-    tag: "release-1.1.0-rc.1"
+    tag: "release-1.1.0"
 
   # -- Number of gateway replicas.
   replicaCount: 2

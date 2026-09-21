@@ -13,7 +13,7 @@ opensandbox-controller:
     # -- Pause/Resume snapshot configuration.
     snapshot:
       # -- Image used for commit operations.
-      imageCommitterImage: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0-rc.1
+      imageCommitterImage: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0
       # -- PodTemplateSpec overlay for image-committer commit Job Pods.
       imageCommitterPodTemplate: {}
       # -- Timeout duration for commit jobs.

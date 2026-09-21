@@ -132,12 +132,14 @@ else
     }
     { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
 
-  # 3) Image references in chart values: pinned split tags and full-image strings
+  # 3) Image references in chart values: pinned split tags and full-image strings.
+  #    Rewrites any previous channel tag (legacy vX.Y.Z, dev, latest, or a
+  #    release-X.Y.Z[-rc.N] left by an earlier umbrella bump) to release-VERSION.
   while IFS= read -r -d '' f; do
     sed -E \
-      -e 's,((opensandbox|fast-sandbox)/[A-Za-z0-9._/-]+):(v[0-9][^"[:space:]]*|dev|latest),\1:release-'"${VERSION}"',g' \
-      -e 's,^([[:space:]]*tag:[[:space:]]*")(v[0-9][^"]*|dev|latest)("),\1release-'"${VERSION}"'\3,' \
-      -e 's,^([[:space:]]*tag:[[:space:]]*)(v[0-9][^"[:space:]]*|dev|latest)$,\1release-'"${VERSION}"',' \
+      -e 's,((opensandbox|fast-sandbox)/[A-Za-z0-9._/-]+):(v[0-9][^"[:space:]]*|release-[0-9][^"[:space:]]*|dev|latest),\1:release-'"${VERSION}"',g' \
+      -e 's,^([[:space:]]*tag:[[:space:]]*")(v[0-9][^"]*|release-[0-9][^"]*|dev|latest)("),\1release-'"${VERSION}"'\3,' \
+      -e 's,^([[:space:]]*tag:[[:space:]]*)(v[0-9][^"[:space:]]*|release-[0-9][^"[:space:]]*|dev|latest)$,\1release-'"${VERSION}"',' \
       "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
   done < <(find manifests/charts -name 'values*.yaml' -print0)
 fi
