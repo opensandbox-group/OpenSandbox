@@ -80,6 +80,33 @@ func TestDetectProvisioningFailure(t *testing.T) {
 			cond: recoveryConditionImagePull, reason: "ErrImagePull", message: `manifest for missing:tag not found`, perma: true, stuck: true,
 		},
 		{
+			name: "kubelet admission rejection is stuck",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase:  corev1.PodFailed,
+				Reason: "OutOfcpu",
+			}},
+			cond: recoveryConditionKubeletAdmission, reason: "OutOfcpu", stuck: true,
+		},
+		{
+			name: "node pressure eviction is stuck",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase:  corev1.PodFailed,
+				Reason: "Evicted",
+			}},
+			cond: recoveryConditionKubeletAdmission, reason: "Evicted", stuck: true,
+		},
+		{
+			name: "terminal container failure is not admission",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase:  corev1.PodFailed,
+				Reason: "ContainerFailed",
+				ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+				}}},
+			}},
+			stuck: false,
+		},
+		{
 			name: "create container config error excluded",
 			pod:  &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: waiting("CreateContainerConfigError")}}}}},
 		},
@@ -314,5 +341,36 @@ func TestReconcilePodRecovery(t *testing.T) {
 		require.Nil(t, h.pod.DeletionTimestamp)
 		require.Equal(t, 0, podRecoveryBudgets.count(controllerutils.GetControllerKey(h.bs), h.bs.Generation))
 		assert.True(t, strings.Contains(strings.Join(h.events(), "\n"), "Warning ImagePullPermanentFailure"))
+	})
+
+	t.Run("recovers kubelet admission rejections without freezing", func(t *testing.T) {
+		h := setup(t, "recovery-admission")
+		h.pod.Status.Phase = corev1.PodFailed
+		h.pod.Status.Reason = "OutOfcpu"
+		h.pod.Status.Message = "Insufficient cpu (limit 1000m)"
+		require.NoError(t, apiClient.Status().Update(testContext, h.pod))
+		h.sync(h.pod)
+
+		// The rejection must not flip the sandbox to Failed; replacement proceeds.
+		h.r.podRecoveryNow = func() time.Time { return time.Now().Add(10 * time.Minute) }
+		h.reconcile()
+		require.Equal(t, sandboxv1alpha1.BatchSandboxPhasePending, h.bs.Status.Phase)
+		require.False(t, hasTrueBatchSandboxCondition(h.bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionPodFailed))
+		require.Eventually(t, func() bool {
+			return apierrors.IsNotFound(h.r.Get(testContext, client.ObjectKeyFromObject(h.pod), &corev1.Pod{}))
+		}, 5*time.Second, 20*time.Millisecond)
+		assert.True(t, strings.Contains(strings.Join(h.events(), "\n"), "Normal ReplacedStuckPod"))
+
+		h.reconcile()
+		replacement := &corev1.Pod{}
+		require.Eventually(t, func() bool {
+			return h.r.Get(testContext, client.ObjectKeyFromObject(h.pod), replacement) == nil
+		}, 5*time.Second, 20*time.Millisecond)
+		replacement.Status.Phase = corev1.PodRunning
+		replacement.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		require.NoError(t, apiClient.Status().Update(testContext, replacement))
+		h.sync(replacement)
+		h.reconcile()
+		require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, h.bs.Status.Phase)
 	})
 }

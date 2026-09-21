@@ -40,7 +40,8 @@ const (
 // Provisioning failure conditions. The recovery loop is generic; new
 // conditions plug in as additional detectors.
 const (
-	recoveryConditionImagePull = "ImagePull"
+	recoveryConditionImagePull        = "ImagePull"
+	recoveryConditionKubeletAdmission = "KubeletAdmission"
 )
 
 // Skip reasons for the podRecoverySkips metric.
@@ -77,6 +78,23 @@ type provisioningFailure struct {
 // CreateContainerConfigError and terminal failures are excluded on purpose.
 var recoverableImagePullReasons = sets.New("ImagePullBackOff", "ErrImagePull")
 
+// Kubelet admission rejection reasons a replacement can recover. The "OutOf"
+// prefix covers OutOfcpu / OutOfmemory / OutOfephemeral-storage / OutOfpods.
+var recoverableAdmissionReasons = sets.New(
+	"NodeNotSchedulable",
+	"KubeletNotReady",
+	"UnexpectedAdmissionError",
+	"Evicted",
+)
+
+func isRecoverableAdmissionFailure(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodFailed {
+		return false
+	}
+	reason := pod.Status.Reason
+	return strings.HasPrefix(reason, "OutOf") || recoverableAdmissionReasons.Has(reason)
+}
+
 // permanentImagePullFailureMarkers are kubelet pull error message fragments
 // that indicate the image itself cannot be pulled from any node; unmatched
 // messages fall through to the replacement path.
@@ -108,6 +126,13 @@ func isPermanentImagePullFailure(message string) bool {
 func detectProvisioningFailure(pod *corev1.Pod) (provisioningFailure, bool) {
 	if pod.DeletionTimestamp != nil {
 		return provisioningFailure{}, false
+	}
+	if isRecoverableAdmissionFailure(pod) {
+		return provisioningFailure{
+			Condition: recoveryConditionKubeletAdmission,
+			Reason:    pod.Status.Reason,
+			Message:   pod.Status.Message,
+		}, true
 	}
 	for i := range pod.Status.InitContainerStatuses {
 		if failure, ok := imagePullWaitingFailure(&pod.Status.InitContainerStatuses[i]); ok {

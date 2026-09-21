@@ -15,9 +15,14 @@ The sandbox stays `Pending` forever: kubelet keeps retrying on the same broken n
 
 ## Behavior
 
-The controller watches sandboxes that have **never been Ready** (`Phase` is `Pending` or empty):
+The controller watches sandboxes that have **never been Ready** (`Phase` is `Pending` or empty). A pod is considered stuck when it stays in one of the tracked failure conditions longer than the threshold. Today's tracked conditions:
 
-1. If a pod stays stuck in a tracked failure condition (`ImagePullBackOff` or `ErrImagePull` today) longer than the threshold, the controller deletes it. The sandbox recreates the pod from its template and the pod is rescheduled like any new pod.
+- **Image pull failures** — `ImagePullBackOff` / `ErrImagePull`, typically caused by a broken node (for example a full disk).
+- **Kubelet admission rejections** — the scheduler placed the pod, but kubelet's local resource ledger disagreed (insufficient CPU, memory, or ephemeral storage; node cordoned or not ready; node-pressure eviction). These pods land in `Failed` with reasons like `OutOfcpu`, `OutOfmemory`, `OutOfephemeral-storage`, `Evicted`, `NodeNotSchedulable`, `KubeletNotReady`, or `UnexpectedAdmissionError`, and Kubernetes never retries them on its own.
+
+For a stuck pod:
+
+1. The controller deletes it. The sandbox recreates the pod from its template and the pod is rescheduled like any new pod.
 2. Replacement attempts are bounded: after `pod-recovery-max-attempts` replacements, the controller stops and records a `PodRecoveryLimitReached` warning event. The sandbox stays `Pending` and needs operator attention.
 3. Updating the sandbox template (for example, fixing the image) resets the replacement attempts.
 
