@@ -166,6 +166,10 @@ export default defineConfig({
               link: "/architecture/fast-sandbox/scheduling",
             },
             { text: "Networking", link: "/architecture/fast-sandbox/networking" },
+            {
+              text: "Pause, Resume, and Snapshots",
+              link: "/architecture/fast-sandbox/checkpoints",
+            },
             { text: "High Availability", link: "/architecture/fast-sandbox/ha" },
             { text: "Storage", link: "/architecture/fast-sandbox/storage" },
             {
