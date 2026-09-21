@@ -93,7 +93,7 @@ jobs:
       # published"), so the SDK must be visible on the index before its
       # dependents go out. Each publish is followed by an index-visibility
       # poll — PyPI's simple index can lag minutes behind a successful
-      # upload, so the poll window is generous (12 x 15s) and a lag alone
+      # upload, so the poll window is generous (20 x 15s) and a lag alone
       # must not fail the leg.
       - name: Publish PyPI packages
         if: ${{ inputs.publish }}
@@ -110,7 +110,7 @@ jobs:
             fi
             echo "::group::uv publish ${name}"
             uv publish "$dist"/*
-            for i in $(seq 1 12); do
+            for i in $(seq 1 20); do
               if pip index versions "$name" 2>/dev/null | grep -q "$VERSION"; then
                 echo "verified ${name} ${VERSION} on PyPI"; echo "::endgroup::"; return 0
               fi
@@ -200,7 +200,7 @@ jobs:
             fi
             echo "::group::npm publish ${package} (dist-tag: ${DIST_TAG})"
             pnpm publish "$tarball" --access public --no-git-checks --tag "$DIST_TAG"
-            for i in $(seq 1 12); do
+            for i in $(seq 1 20); do
               if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
                 echo "verified ${package} ${VERSION} on npm"; echo "::endgroup::"; return 0
               fi
@@ -283,7 +283,7 @@ jobs:
               --api-key "$NUGET_API_KEY" \
               --source "https://api.nuget.org/v3/index.json" \
               --skip-duplicate
-            for i in $(seq 1 12); do
+            for i in $(seq 1 20); do
               if dotnet package search "$package" --exact-match 2>/dev/null | grep -q "$VERSION"; then
                 echo "verified ${package} ${VERSION} on NuGet"; echo "::endgroup::"; return 0
               fi
