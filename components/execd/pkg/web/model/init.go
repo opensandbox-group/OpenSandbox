@@ -21,17 +21,16 @@ import (
 // RuntimeInitRequest carries the sandbox-scoped parameters applied by
 // POST /internal/init. Container templates only keep configuration that does not
 // change during the container lifetime; everything tied to a sandbox
-// allocation arrives here. /internal/init is strictly one-shot: the first valid call
-// consumes the init slot for the container's lifetime.
+// allocation arrives here. Calls perform complete initialization by default;
+// snapshot restore callers may explicitly preserve the existing runtime state.
 type RuntimeInitRequest struct {
 	// SandboxID is the authoritative sandbox identity, replacing any
 	// OPENSANDBOX_ID injected into the container environment.
 	SandboxID string `json:"sandboxId"`
 
-	// Generation is the control-plane-assigned allocation counter. It acts
-	// as the identity of this one-shot init (reported on /ready and in
-	// metrics); it is not compared monotonically because a second /internal/init is
-	// always rejected.
+	// Generation is the control-plane-assigned allocation counter. It is
+	// reported on /ready and in metrics. Execd treats it as an opaque binding
+	// identity and does not compare it monotonically.
 	Generation uint64 `json:"generation"`
 
 	// EntrypointPolicy controls what happens to the user entrypoint:
@@ -58,12 +57,18 @@ type RuntimeInitRequest struct {
 	// Lifecycle replaces the creation-time lifecycle configuration
 	// (preStart runs before the entrypoint; periodic hooks replace the
 	// previous generation's hooks). Omitted means: keep the template-level
-	// lifecycle.
+	// lifecycle. PreserveRuntimeState leaves the active lifecycle untouched.
 	Lifecycle *lifecycle.Config `json:"lifecycle,omitempty"`
 
 	// Telemetry carries dynamic observability attributes (tenant, plan...)
 	// attached to metrics alongside sandbox_id/generation.
 	Telemetry *RuntimeInitTelemetry `json:"telemetry,omitempty"`
+
+	// PreserveRuntimeState skips the destructive runtime reset and only
+	// replaces the sandbox-scoped binding. Control planes restoring a runtime
+	// snapshot set this explicitly so restored processes and sessions survive.
+	// The default false value performs a complete initialization.
+	PreserveRuntimeState bool `json:"preserveRuntimeState,omitempty"`
 }
 
 // RuntimeInitTelemetry groups the observability part of the request.

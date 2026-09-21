@@ -16,14 +16,14 @@
 # Smoke test for the execd runtime-init API (POST /init, GET /ready).
 #
 # Starts two throwaway execd instances on dedicated ports and asserts the
-# full one-shot init contract:
+# full runtime-init and rebind contract:
 #   Phase 1 (gated, EXECD_RUNTIME_INIT=1): /ready 503 and business APIs 503
-#     until /init; malformed /init does not consume the slot; after a valid
-#     /init the token hash replaces the legacy container token and /init
-#     envs reach user processes; any second /init conflicts (409).
+#     until /init; after a valid /init the token hash replaces the legacy
+#     container token and /init envs reach user processes; an explicit
+#     preserve request replaces the binding without restarting processes.
 #   Phase 2 (legacy fallback): /ready turns 200 after the template-driven
-#     startup; a late /init is accepted once, switches auth to the binding
-#     hash, and further calls conflict.
+#     startup; a late /init switches auth to the binding hash, and an explicit
+#     preserve request may replace it without runtime cleanup.
 #
 # Prerequisites: ./bin/execd (run `make build` first), python3 + requests.
 #
@@ -81,7 +81,7 @@ NEW_TOKEN="$NEW_TOKEN" \
 python3 tests/runtime_init_smoke.py
 
 # Phase 2: legacy fallback — the template-driven startup owns readiness and
-# a late /init is accepted exactly once.
+# explicit preserve requests may replace the binding.
 LEGACY_PID="$(start_execd "$LEGACY_PORT" legacy.log)"
 MODE=legacy \
 BASE_URL="http://localhost:$LEGACY_PORT" \

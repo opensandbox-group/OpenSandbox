@@ -139,7 +139,7 @@ def smoke_gated():
         f"gated /metrics with legacy token expected 503, got {r.status_code}",
     )
 
-    # A malformed /internal/init must not consume the one-shot slot.
+    # A malformed /internal/init must not initialize the runtime.
     r = requests.post(f"{BASE_URL}/internal/init", json={"sandboxId": "x", "generation": 0}, timeout=5)
     expect(r.status_code == 400, f"invalid /internal/init expected 400, got {r.status_code}")
 
@@ -168,14 +168,15 @@ def smoke_gated():
     out = run_background_command(NEW_TOKEN, 'printf %s "$SMOKE_INIT_VAR"')
     expect("bound-by-init" in out, f"/internal/init envs did not reach the command: {out!r}")
 
-    # Strictly one-shot: identical and different retries all conflict.
-    r = requests.post(f"{BASE_URL}/internal/init", json=init_payload(), timeout=5)
-    expect(r.status_code == 409, f"identical retry expected 409, got {r.status_code}")
-    expect(r.json().get("code") == "ALREADY_INITIALIZED", f"unexpected 409 body: {r.text}")
+    # Explicit preserve replaces the binding without the default runtime reset.
     r = requests.post(
-        f"{BASE_URL}/internal/init", json=init_payload(sandboxId="sandbox-other", generation=9), timeout=5
+        f"{BASE_URL}/internal/init",
+        json=init_payload(sandboxId="sandbox-other", generation=9, preserveRuntimeState=True),
+        timeout=5,
     )
-    expect(r.status_code == 409, f"different-identity retry expected 409, got {r.status_code}")
+    expect(r.status_code == 200, f"preserving rebind expected 200, got {r.status_code}")
+    ready = requests.get(f"{BASE_URL}/ready", timeout=5).json()
+    expect(ready.get("sandboxId") == "sandbox-other", f"ready did not expose rebound identity: {ready}")
 
 
 def smoke_legacy():
@@ -207,9 +208,13 @@ def smoke_legacy():
     r = requests.get(f"{BASE_URL}/metrics", headers=auth(NEW_TOKEN), timeout=5)
     expect(r.status_code == 200, f"new-token /metrics expected 200 after init, got {r.status_code}")
 
-    # Still strictly one-shot.
-    r = requests.post(f"{BASE_URL}/internal/init", json=init_payload(), timeout=5)
-    expect(r.status_code == 409, f"second /internal/init expected 409, got {r.status_code}")
+    # Explicit preserve is independent of whether this is the first call.
+    r = requests.post(
+        f"{BASE_URL}/internal/init",
+        json=init_payload(preserveRuntimeState=True),
+        timeout=5,
+    )
+    expect(r.status_code == 200, f"preserving /internal/init expected 200, got {r.status_code}")
 
 
 def main():

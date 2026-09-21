@@ -140,38 +140,57 @@ func TestApplyEntrypointPolicyValidation(t *testing.T) {
 	_, _, status, err := manager.Apply(req)
 	require.Error(t, err)
 	require.Equal(t, http.StatusBadRequest, status)
-	require.False(t, manager.accepted.Load(), "invalid policy must not consume the slot")
 }
 
-func TestApplyStrictlyOnce(t *testing.T) {
+func TestApplyDefaultsToCompleteInitializationOnEveryCall(t *testing.T) {
 	clearInitManager(t)
 	prev := binding.Apply(nil)
 	t.Cleanup(func() { binding.Apply(prev) })
 
-	manager := newTestInitManager(t, RuntimeInitConfig{})
+	resetter := &recordingResetter{}
+	manager := newTestInitManager(t, RuntimeInitConfig{IsolatedResetter: resetter})
 
 	_, _, status, err := manager.Apply(validInitRequest())
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, int32(1), resetter.resets.Load())
 
-	// Any second call is rejected — identical retry or different sandbox.
-	for name, req := range map[string]*model.RuntimeInitRequest{
-		"identical retry":   {SandboxID: "sandbox-123", Generation: 7},
-		"different sandbox": {SandboxID: "sandbox-other", Generation: 8},
-		"generation replay": {SandboxID: "sandbox-123", Generation: 6},
-		"higher generation": {SandboxID: "sandbox-123", Generation: 99},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, code, status, err := manager.Apply(req)
-			require.ErrorIs(t, err, ErrAlreadyInitialized)
-			require.Equal(t, model.ErrorCodeAlreadyInitialized, code)
-			require.Equal(t, http.StatusConflict, status)
-		})
+	reinitialize := &model.RuntimeInitRequest{
+		SandboxID:       "sandbox-restored",
+		Generation:      8,
+		AccessTokenHash: binding.HashAccessToken("restored-token"),
+		Envs:            map[string]string{"RESTORED_ENV": "visible-to-new-processes"},
+	}
+	_, _, status, err = manager.Apply(reinitialize)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, int32(2), resetter.resets.Load(), "default init must reset existing sessions")
+	require.Equal(t, "sandbox-restored", binding.Current().SandboxID)
+}
+
+func TestApplyPreservesRuntimeStateWhenExplicitlyRequested(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	resetter := &recordingResetter{}
+	manager := newTestInitManager(t, RuntimeInitConfig{IsolatedResetter: resetter})
+	rebind := &model.RuntimeInitRequest{
+		SandboxID:            "sandbox-restored",
+		Generation:           8,
+		AccessTokenHash:      binding.HashAccessToken("restored-token"),
+		Envs:                 map[string]string{"RESTORED_ENV": "visible-to-new-processes"},
+		PreserveRuntimeState: true,
 	}
 
-	// The applied binding was never replaced.
-	require.Equal(t, "sandbox-123", binding.Current().SandboxID)
-	require.EqualValues(t, 7, binding.Current().Generation)
+	_, _, status, err := manager.Apply(rebind)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.Zero(t, resetter.resets.Load(), "explicit preserve must not reset restored sessions")
+	require.Equal(t, "sandbox-restored", binding.Current().SandboxID)
+	require.EqualValues(t, 8, binding.Current().Generation)
+	require.Equal(t, "visible-to-new-processes", binding.Current().Envs["RESTORED_ENV"])
+	require.True(t, binding.Current().VerifyAccessToken("restored-token"))
 }
 
 func TestApplyInvalidRequestDoesNotConsumeSlot(t *testing.T) {
@@ -181,11 +200,10 @@ func TestApplyInvalidRequestDoesNotConsumeSlot(t *testing.T) {
 
 	manager := newTestInitManager(t, RuntimeInitConfig{})
 
-	// A malformed call is rejected without consuming the one-shot slot.
+	// A malformed call is rejected without changing the binding.
 	_, _, status, err := manager.Apply(&model.RuntimeInitRequest{Generation: 1})
 	require.Error(t, err)
 	require.Equal(t, http.StatusBadRequest, status)
-	require.False(t, manager.accepted.Load())
 	require.Nil(t, binding.Current())
 
 	// The next valid call initializes normally.
@@ -195,7 +213,7 @@ func TestApplyInvalidRequestDoesNotConsumeSlot(t *testing.T) {
 	require.True(t, manager.ready.Load())
 }
 
-func TestApplyFailedApplyConsumesSlot(t *testing.T) {
+func TestApplyFailedInitialApplyCanBeRetried(t *testing.T) {
 	clearInitManager(t)
 	prev := binding.Apply(nil)
 	t.Cleanup(func() { binding.Apply(prev) })
@@ -208,17 +226,16 @@ func TestApplyFailedApplyConsumesSlot(t *testing.T) {
 	req := validInitRequest()
 	req.EntrypointPolicy = model.EntrypointPolicyRestart
 
-	// The apply fails (500) but consumes the slot...
+	// The initial apply fails and the runtime remains uninitialized.
 	_, _, status, err := manager.Apply(req)
 	require.ErrorIs(t, err, errFakeEntrypoint)
 	require.Equal(t, http.StatusInternalServerError, status)
 	require.False(t, manager.ready.Load())
 
-	// ...so a retry is rejected: the control plane recycles the container.
-	_, code, status, err := manager.Apply(validInitRequest())
-	require.ErrorIs(t, err, ErrAlreadyInitialized)
-	require.Equal(t, model.ErrorCodeAlreadyInitialized, code)
-	require.Equal(t, http.StatusConflict, status)
+	// A valid retry runs the initial sequence again and can succeed.
+	_, _, status, err = manager.Apply(validInitRequest())
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
 }
 
 func TestApplyValidationFailures(t *testing.T) {

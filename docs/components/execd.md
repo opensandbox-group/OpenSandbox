@@ -446,7 +446,8 @@ POST /internal/init
     "periodic": []
   },
   "telemetry": {"attributes": {"tenant_id": "tenant-a"}},
-  "entrypointPolicy": "restart"
+  "entrypointPolicy": "restart",
+  "preserveRuntimeState": false
 }
 ```
 
@@ -454,30 +455,29 @@ Processing order:
 
 1. Validate the request (sandbox id, generation, env keys, token hash,
    lifecycle, telemetry attributes, entrypoint policy).
-2. Stop the previous generation: periodic hooks, user sessions (commands,
-   bash, PTY, jupyter kernels), isolated sessions, and — unless the
-   entrypoint policy is `keep` — the previous entrypoint process tree.
+2. Unless `preserveRuntimeState=true`, stop existing workloads: periodic
+   hooks, user sessions (commands, bash, PTY, jupyter kernels), isolated
+   sessions, and — unless the entrypoint policy is `keep` — the previous
+   entrypoint process tree.
 3. Apply the RuntimeBinding atomically — API authentication, environment
    resolution, and telemetry attribution switch to the new sandbox in one
    swap. eBPF audit attribution binds the new sandbox id.
-4. Run `preStart`, start the periodic hooks.
-5. Apply the entrypoint policy (see below).
+4. Unless runtime state is preserved, run `preStart` and start the periodic
+   hooks.
+5. Unless runtime state is preserved, apply the entrypoint policy (see below).
 6. Mark execd ready: `GET /ready` returns 200.
 
 Semantics:
 
-- **Strictly one-shot**: the first *valid* call consumes the init slot for
-  the container's lifetime — regardless of whether the apply succeeds. Any
-  later call is rejected with `409 ALREADY_INITIALIZED` without waiting;
-  malformed requests (`400`) do not consume the slot. There is no re-init
-  and no idempotent replay: if a response is lost, reconcile with
-  `GET /ready` (it reports the applied `sandboxId` and `generation`); if an
-  apply fails (`500`, e.g. preStart or entrypoint failure), the control
-  plane recycles the container.
+- **Explicit state preservation**: every call performs the complete cleanup
+  and startup sequence by default. When `preserveRuntimeState=true`, the call
+  only atomically replaces the RuntimeBinding and preserves processes,
+  sessions, lifecycle hooks, and the entrypoint. Snapshot restore callers set
+  this field explicitly to deliver the new sandbox identity, token, env, and
+  telemetry without destroying restored state.
 - **Generation**: the control-plane-assigned allocation counter. It is the
-  identity of this one-shot init (echoed by `/ready` and stamped onto
-  metrics); it is not compared monotonically because a second `/internal/init` is
-  always rejected.
+  identity of the current binding (echoed by `/ready` and stamped onto
+  metrics); execd treats it as opaque and does not compare it monotonically.
 - **Entrypoint policy** (`entrypointPolicy`, default `keep`): by default
   execd never starts or restarts the user entrypoint.
   - `keep`: a running entrypoint (legacy fallback path) is adopted as-is —
@@ -499,8 +499,9 @@ Semantics:
   (`EXECD_ACCESS_TOKEN`, `JUPYTER_TOKEN`, ...) are rejected.
 - **Lifecycle**: when the `lifecycle` field is omitted, the template-level
   configuration keeps applying; when present (even empty), it replaces it.
-  Binding a new generation stops the previous periodic hooks before preStart
-  runs.
+  This replacement applies during complete initialization. A call with
+  `preserveRuntimeState=true` preserves the existing lifecycle hooks together
+  with the restored process state.
 - **Telemetry**: the OTLP exporter is created at execd startup; `/internal/init` only
   updates the dynamic attributes. Metrics are stamped with the current
   `sandbox_id`, `generation`, and the request's attributes at record time.

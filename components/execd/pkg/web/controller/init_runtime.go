@@ -35,10 +35,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// ErrAlreadyInitialized is returned when /internal/init is called after the
-// one-shot init slot has been consumed.
-var ErrAlreadyInitialized = errors.New("runtime init already accepted")
-
 // maxInitTelemetryAttrs bounds the /internal/init telemetry attribute map.
 const maxInitTelemetryAttrs = 64
 
@@ -72,16 +68,10 @@ type RuntimeInitConfig struct {
 // RuntimeInitManager serializes POST /internal/init handling and owns the active
 // periodic-hook manager. It also tracks readiness for GET /ready.
 //
-// /internal/init is strictly one-shot: the first VALID call consumes the init slot
-// (accepted) regardless of whether the apply succeeds. Subsequent calls are
-// rejected with 409 without waiting; a failed apply is not retried — the
-// control plane recycles the container.
+// Each /internal/init either runs the full startup sequence or, when requested,
+// only replaces the sandbox-scoped binding while preserving runtime state.
 type RuntimeInitManager struct {
 	cfg RuntimeInitConfig
-
-	// accepted guards the one-shot slot. It is armed only after request
-	// validation passes, so malformed calls never burn the slot.
-	accepted atomic.Bool
 
 	mu    sync.Mutex
 	ready atomic.Bool
@@ -179,9 +169,9 @@ func (c *InitController) Ready() {
 	c.ctx.JSON(status, resp)
 }
 
-// Init implements POST /internal/init: validate, consume the one-shot init slot,
-// apply the RuntimeBinding, run preStart, start the entrypoint, and mark
-// execd ready.
+// Init implements POST /internal/init. By default it performs a complete
+// initialization. Callers restoring a snapshot may explicitly request a
+// binding-only update that preserves runtime state.
 func (c *InitController) Init() {
 	manager := GetRuntimeInitManager()
 	if manager == nil {
@@ -208,10 +198,10 @@ func (c *InitController) Init() {
 	})
 }
 
-// Apply runs the one-shot /internal/init sequence. Status mapping: 400 invalid
-// request (the slot is not consumed), 409 the init slot was already
-// consumed by any earlier valid call, 500 startup failure after apply (no
-// retry: the slot stays consumed).
+// Apply runs the /internal/init sequence. Status mapping: 400 invalid request,
+// 500 startup failure. PreserveRuntimeState atomically replaces the
+// RuntimeBinding without resetting user processes, sessions, lifecycle hooks,
+// or the entrypoint; the default path always performs complete initialization.
 func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, model.ErrorCode, int, error) {
 	warnings, err := validateInitRequest(req)
 	if err != nil {
@@ -228,16 +218,15 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 	}
 	policy := req.EntrypointPolicy
 
-	// Strictly once: the first valid call consumes the slot regardless of
-	// the apply outcome. A concurrent or later caller is rejected without
-	// waiting; the control plane reconciles via GET /ready.
-	if !m.accepted.CompareAndSwap(false, true) {
-		return nil, model.ErrorCodeAlreadyInitialized, http.StatusConflict,
-			fmt.Errorf("%w; /internal/init is strictly one-shot (see GET /ready)", ErrAlreadyInitialized)
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if req.PreserveRuntimeState {
+		m.applyBinding(req, tokenHash, hasToken)
+		m.MarkReady()
+		log.Info("runtime init: binding replaced with runtime state preserved sandbox_id=%s generation=%d", req.SandboxID, req.Generation)
+		return warnings, "", http.StatusOK, nil
+	}
+	m.ready.Store(false)
 
 	// 1. Stop any workloads started before init (legacy fallback path may
 	// have run the template-driven startup already). With keep the
@@ -263,24 +252,8 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 
 	// 2. Apply the RuntimeBinding atomically: auth, env resolution, and
 	// telemetry attribution switch to the new sandbox in one swap.
-	newBinding := &binding.RuntimeBinding{
-		SandboxID:       req.SandboxID,
-		Generation:      req.Generation,
-		AccessTokenHash: tokenHash,
-		HasAccessToken:  hasToken,
-		Envs:            req.Envs,
-	}
-	if req.Telemetry != nil {
-		newBinding.TelemetryAttrs = req.Telemetry.Attributes
-	}
-	binding.Apply(newBinding)
+	m.applyBinding(req, tokenHash, hasToken)
 	log.Info("runtime init: binding applied sandbox_id=%s generation=%d", req.SandboxID, req.Generation)
-
-	// Sandbox attribution for the eBPF observation layer (no-op for builds
-	// without it).
-	if state, msg := ebpf.SetSandboxID(req.SandboxID); state != "" {
-		runtime.SetEbpfState(runtime.LayerState{State: state, Message: msg})
-	}
 
 	// 3. Run preStart, then start periodic hooks. An omitted lifecycle keeps
 	// the template-level config (migration compatibility); a present one
@@ -320,6 +293,26 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 
 	m.MarkReady()
 	return warnings, "", http.StatusOK, nil
+}
+
+func (m *RuntimeInitManager) applyBinding(req *model.RuntimeInitRequest, tokenHash [32]byte, hasToken bool) {
+	newBinding := &binding.RuntimeBinding{
+		SandboxID:       req.SandboxID,
+		Generation:      req.Generation,
+		AccessTokenHash: tokenHash,
+		HasAccessToken:  hasToken,
+		Envs:            req.Envs,
+	}
+	if req.Telemetry != nil {
+		newBinding.TelemetryAttrs = req.Telemetry.Attributes
+	}
+	binding.Apply(newBinding)
+
+	// Sandbox attribution for the eBPF observation layer (no-op for builds
+	// without it).
+	if state, msg := ebpf.SetSandboxID(req.SandboxID); state != "" {
+		runtime.SetEbpfState(runtime.LayerState{State: state, Message: msg})
+	}
 }
 
 // runPreStart executes the lifecycle preStart hook, mirroring the legacy

@@ -176,7 +176,7 @@ func TestNewRouterServesInitRoutes(t *testing.T) {
 
 	// /internal/init routes through to the handler: an invalid payload
 	// fails validation (400) instead of a routing error (404), and the
-	// failed request does not consume the one-shot slot.
+	// failed request does not initialize the runtime.
 	w = doRequest(t, r, http.MethodPost, "/internal/init", `{"sandboxId":"s","generation":0}`)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
