@@ -83,6 +83,11 @@ type BatchSandboxReconciler struct {
 	StatusRVExpectation expectations.ResourceVersionExpectation
 	// ResumePullSecret is the K8s Secret name for pulling snapshot images during resume.
 	ResumePullSecret string
+	// FeatureConfig provides feature configuration loaded from the controller
+	// ConfigMap. Nil uses built-in defaults.
+	FeatureConfig *FeatureConfig
+	// podRecoveryNow overrides the clock used by pod recovery; tests only.
+	podRecoveryNow func() time.Time
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -217,6 +222,8 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if !poolStrategy.IsPooledMode() &&
 		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused &&
 		!hasTerminalPodFailureCondition(batchSbx.Status.Conditions) {
+		// Bounded replacement of stuck provisioning pods; scale recreates them.
+		r.recoverStuckPods(ctx, batchSbx, pods)
 		err := r.scaleBatchSandbox(ctx, batchSbx, batchSbx.Spec.Template, pods)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to scale batch sandbox %w", err)
