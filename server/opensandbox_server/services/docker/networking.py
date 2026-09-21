@@ -493,9 +493,10 @@ class DockerNetworkingMixin:
                 if key not in skip_keys and value is not None:
                     sidecar_env.append(f"{key}={value}")
 
+        publish_host = self.app_config.docker.publish_host
         sidecar_port_bindings: dict[str, tuple[str, int]] = {
-            "44772": ("0.0.0.0", host_execd_port),
-            "8080": ("0.0.0.0", host_http_port),
+            "44772": (publish_host, host_execd_port),
+            "8080": (publish_host, host_http_port),
         }
         if extra_port_bindings:
             sidecar_port_bindings.update(extra_port_bindings)

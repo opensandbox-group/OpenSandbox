@@ -798,7 +798,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
                 egress_token = generate_egress_token()
                 labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = egress_token
-                sidecar_port_bindings = allocate_port_bindings([*exposed_ports, "18080"], min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
+                sidecar_port_bindings = allocate_port_bindings(
+                    [*exposed_ports, "18080"],
+                    min_port=self.app_config.docker.port_range_min,
+                    max_port=self.app_config.docker.port_range_max,
+                    publish_host=self.app_config.docker.publish_host,
+                )
                 reserved_port_bindings = sidecar_port_bindings
                 host_execd_port = sidecar_port_bindings["44772"][1]
                 host_http_port = sidecar_port_bindings["8080"][1]
@@ -842,7 +847,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     gpu_count=effective_gpu_count,
                 )
                 if self.network_mode != HOST_NETWORK_MODE:
-                    port_bindings = allocate_port_bindings(exposed_ports, min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
+                    port_bindings = allocate_port_bindings(
+                        exposed_ports,
+                        min_port=self.app_config.docker.port_range_min,
+                        max_port=self.app_config.docker.port_range_max,
+                        publish_host=self.app_config.docker.publish_host,
+                    )
                     reserved_port_bindings = port_bindings
                     host_execd_port = port_bindings["44772"][1]
                     host_http_port = port_bindings["8080"][1]
@@ -932,6 +942,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                                 exposed_ports,
                                 min_port=self.app_config.docker.port_range_min,
                                 max_port=self.app_config.docker.port_range_max,
+                                publish_host=self.app_config.docker.publish_host,
                             )
                             reserved_port_bindings = port_bindings
                             host_execd_port = port_bindings["44772"][1]

@@ -70,6 +70,10 @@ network_mode = "bridge"
 # Narrow the range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports.
 port_range_min = 40000
 port_range_max = 60000
+# The host address sandbox ports are published on (0.0.0.0 = every interface). Set an IP to keep
+# execd and the sandbox ports off public interfaces: 127.0.0.1 when the server runs on the host,
+# or the Docker bridge gateway (e.g. 172.17.0.1) when the server runs in a container.
+# publish_host = "127.0.0.1"
 # Drop dangerous capabilities and block privilege escalation
 drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
 no_new_privileges = true

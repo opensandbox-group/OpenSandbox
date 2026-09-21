@@ -1049,6 +1049,17 @@ class DockerConfig(BaseModel):
             "Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar)."
         ),
     )
+    publish_host: str = Field(
+        default="0.0.0.0",
+        description=(
+            "Host address Docker publishes bridge-mode sandbox ports on (the HostIp of every port "
+            "binding, the egress sidecar's included). The default 0.0.0.0 publishes on every host "
+            "interface. Set an IP address to keep sandbox ports off public interfaces: 127.0.0.1 "
+            "when the server runs on the host, or the Docker bridge gateway (e.g. 172.17.0.1) when "
+            "the server runs in a container and reaches sandboxes through host-published ports. "
+            "Must be an IP address (Docker does not resolve names in port bindings)."
+        ),
+    )
     pids_limit: Optional[int] = Field(
         default=4096,
         ge=1,
@@ -1071,6 +1082,21 @@ class DockerConfig(BaseModel):
             "volumes. Useful for mounting a private CA certificate into all sandboxes."
         ),
     )
+
+    @field_validator("publish_host")
+    @classmethod
+    def validate_publish_host(cls, value: str) -> str:
+        host = (value or "").strip()
+        if not host:
+            return "0.0.0.0"
+        try:
+            ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise ValueError(
+                f"docker.publish_host must be an IP address (got {value!r}): Docker publishes ports "
+                "on addresses, not names."
+            ) from exc
+        return host
 
     @model_validator(mode="after")
     def validate_port_range(self) -> "DockerConfig":

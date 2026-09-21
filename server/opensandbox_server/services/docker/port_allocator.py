@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import errno
 import random
 import socket
 from threading import Lock
@@ -76,22 +77,38 @@ def normalize_port_bindings(
     return normalized
 
 
+def _port_is_free(port: int, probe_host: str) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            # This does not listen for or accept connections; it mirrors the
+            # later Docker publish binding to catch host-wide port conflicts.
+            # codeql[py/bind-socket-all-network-interfaces]
+            sock.bind((probe_host, port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRNOTAVAIL and probe_host != PORT_PROBE_HOST:
+                # The publish host is not an address of this network namespace (the
+                # server runs in a container and publishes on the host's bridge
+                # gateway): the closest probe left is the wildcard, as before.
+                return _port_is_free(port, PORT_PROBE_HOST)
+            return False
+    return True
+
+
 def allocate_host_port(
     min_port: int = 40000,
     max_port: int = 60000,
     attempts: int = 50,
+    probe_host: str = PORT_PROBE_HOST,
 ) -> Optional[int]:
+    """Find a free TCP port in the range.
+
+    ``probe_host`` is the address Docker will publish on ([docker].publish_host),
+    so the probe and the later binding see the same conflicts.
+    """
     for _ in range(attempts):
         port = random.randint(min_port, max_port)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                # This does not listen for or accept connections; it mirrors the
-                # later Docker publish binding to catch host-wide port conflicts.
-                # codeql[py/bind-socket-all-network-interfaces]
-                sock.bind((PORT_PROBE_HOST, port))
-            except OSError:
-                continue
+        if _port_is_free(port, probe_host):
             return port
     return None
 
@@ -100,12 +117,14 @@ def _reserve_host_port(
     min_port: int = 40000,
     max_port: int = 60000,
     attempts: int = 50,
+    probe_host: str = PORT_PROBE_HOST,
 ) -> Optional[int]:
     for _ in range(attempts):
         port = allocate_host_port(
             min_port=min_port,
             max_port=max_port,
             attempts=attempts,
+            probe_host=probe_host,
         )
         if port is None:
             return None
@@ -121,13 +140,19 @@ def allocate_port_bindings(
     container_ports: list[str],
     min_port: int = 40000,
     max_port: int = 60000,
+    publish_host: str = DOCKER_PUBLISH_HOST,
 ) -> Dict[str, tuple[str, int]]:
-    """Allocate distinct random host ports for each container port spec."""
+    """Allocate distinct random host ports for each container port spec.
+
+    Every binding is published on ``publish_host`` ([docker].publish_host):
+    0.0.0.0 by default, or one address to keep sandbox ports off the other
+    interfaces of the host.
+    """
     bindings: Dict[str, tuple[str, int]] = {}
     completed = False
     try:
         for container_port in container_ports:
-            host_port = _reserve_host_port(min_port=min_port, max_port=max_port)
+            host_port = _reserve_host_port(min_port=min_port, max_port=max_port, probe_host=publish_host)
             if host_port is None:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -136,7 +161,7 @@ def allocate_port_bindings(
                         "message": "Failed to allocate host ports for sandbox container.",
                     },
                 )
-            bindings[container_port] = (DOCKER_PUBLISH_HOST, host_port)
+            bindings[container_port] = (publish_host, host_port)
         completed = True
         return bindings
     finally:

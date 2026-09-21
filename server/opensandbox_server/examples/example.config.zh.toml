@@ -66,6 +66,9 @@ network_mode = "bridge"
 # 可根据防火墙策略缩小范围 — 例如 100 个并发沙箱 ≈ 需要 300 个端口。
 port_range_min = 40000
 port_range_max = 60000
+# 沙箱端口发布到的宿主机地址（0.0.0.0 = 所有网卡）。设置为具体 IP 可让 execd 与沙箱端口不暴露在公网网卡上：
+# server 直接运行在宿主机上时用 127.0.0.1；server 运行在容器中时用 Docker 网桥网关（如 172.17.0.1）。
+# publish_host = "127.0.0.1"
 # Drop dangerous capabilities and block privilege escalation
 drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
 no_new_privileges = true

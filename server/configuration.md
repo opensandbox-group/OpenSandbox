@@ -128,6 +128,7 @@ Configuration for the server-side reverse-proxy routes.
 | `sandbox_binds` | string[] | `[]` | Host bind mounts applied to **every** sandbox container, Docker `-v` syntax (`host:container[:mode]`); prepended to binds derived from a request's `volumes`. |
 | `port_range_min` | integer | `40000` | Lower bound of the host port range used by bridge-mode sandbox port allocation. Must be less than `port_range_max`. Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar). Narrow this range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports. |
 | `port_range_max` | integer | `60000` | Upper bound of the host port range. Range must span ≥ 100 ports for reliable allocation. |
+| `publish_host` | string | `"0.0.0.0"` | The host **address** Docker publishes bridge-mode sandbox ports on (the `HostIp` of every port binding, the egress sidecar's included). `0.0.0.0` publishes on every interface of the host. Set an IP to keep sandbox ports (execd, the sandbox HTTP port, the egress API) off public interfaces: `127.0.0.1` when the server runs on the host, or the Docker bridge gateway (e.g. `172.17.0.1`) when the server runs in a container and reaches sandboxes through host-published ports (`host_ip` / `eip` then name that same address for clients). Must be an IP address, not a name. |
 
 ---
 
