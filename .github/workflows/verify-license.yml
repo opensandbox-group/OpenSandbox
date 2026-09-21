@@ -1,8 +1,14 @@
 name: Verify License Headers
 
+# pull_request_target runs the workflow definition from the base branch, so
+# fork PRs and first-time contributors trigger it without manual approval.
+# Safety: only this trusted script from the base branch is executed. The PR
+# tree is checked out into a separate directory and scanned as data; nothing
+# from the PR is ever executed.
 on:
-  pull_request:
-    branches: [ main ]
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -16,10 +22,16 @@ jobs:
     name: Verify license headers
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout base branch (trusted verification script)
         uses: actions/checkout@v6
+
+      - name: Checkout pull request tree (scanned as data, never executed)
+        uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: pr
 
       - name: Run license verification
         run: |
           chmod +x scripts/verify-license.sh
-          ./scripts/verify-license.sh
+          ./scripts/verify-license.sh pr
