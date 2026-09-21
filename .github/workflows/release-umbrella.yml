@@ -13,13 +13,13 @@ name: Umbrella Release
 # staging tags instead of release tags.
 #
 # Package legs (PyPI, npm, Maven, NuGet) run through the reusable
-# release-packages.yml workflow: hold-only on dry runs AND on rc
-# builds; ordered verify-then-continue publish only for stable releases
-# with publish gates open AND the BOM PR merged (all images green +
-# code-owner approval). Helm charts
-# are not published — they ship in-repo at the release tag. The legacy
-# tag-triggered publish-* workflows have been deleted; the umbrella is
-# the only release path.
+# release-packages.yml workflow: build-only on dry runs AND on rc
+# builds; direct build-then-publish with verify-then-continue only for
+# stable releases with publish gates open AND the BOM PR merged (all
+# images green + code-owner approval). Helm charts are not published —
+# they ship in-repo at the release tag. The legacy tag-triggered
+# publish-* workflows have been deleted; the umbrella is the only
+# release path.
 #
 # Re-runs are idempotent: release tags are treated as immutable. Images,
 # packages, git tags, and the GitHub Release that already exist for the
@@ -385,15 +385,15 @@ jobs:
           retention-days: 14
 
   packages:
-    name: SDK / CLI / server packages (hold${{ inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true' && ' + publish' || '' }})
+    name: SDK / CLI / server packages
     needs: [resolve, preflight, scan, bom]
-    # hold legs still rehearse when the BOM was skipped (e.g. a failed leg
-    # on a dry run), but the publish leg fires only after the BOM PR has
-    # merged — every image green + code-owner approval — so packages can
-    # never go out against a partially-built release
+    # package builds still rehearse when the BOM was skipped (e.g. a failed
+    # leg on a dry run), but the publish steps fire only after the BOM PR
+    # has merged — every image green + code-owner approval — so packages
+    # can never go out against a partially-built release
     if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') && (needs.bom.result == 'success' || needs.bom.result == 'skipped') }}
-    # the called workflow's publish leg attests held bytes — grant it
-    # id-token/attestations here or the workflow fails validation
+    # the called workflow's publish jobs declare id-token/attestations —
+    # grant them here or the workflow fails validation
     permissions:
       contents: read
       id-token: write
@@ -402,16 +402,16 @@ jobs:
     with:
       version: ${{ needs.resolve.outputs.version }}
       channel: ${{ needs.resolve.outputs.channel }}
-      # packages are published for stable releases only — rc builds hold
-      # them to validate the fan-out without touching immutable registries
+      # packages are published for stable releases only — rc builds run the
+      # build legs as a rehearsal without touching immutable registries
       #
-      # TODO(GA): with rc holding packages, the publish legs (registry
+      # TODO(GA): with rc builds rehearsing only, the publish legs (registry
       # credentials, verify-then-continue, rollback ledger) execute for
       # real only at a line's first stable release. Before opening the
-      # gates for 1.1.0, rehearse the publish path end-to-end — e.g. a
-      # staging-registry rehearsal mode, or a one-off gated publish of a
-      # throwaway version per ecosystem — and record the result in the
-      # release runbook.
+      # gates for a line's first stable release, rehearse the publish path
+      # end-to-end — e.g. a staging-registry rehearsal mode, or a one-off
+      # gated publish of a throwaway version per ecosystem — and record
+      # the result in the release runbook.
       publish: ${{ needs.bom.result == 'success' && inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true' && needs.resolve.outputs.channel == 'stable' }}
     secrets: inherit
 

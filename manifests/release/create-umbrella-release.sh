@@ -34,7 +34,7 @@
 #   5. mint the umbrella tag + the Go companion tag on C_bom
 #   6. optional: push, create the GitHub Release
 #
-# The build-hold-publish fan-out lives in .github/workflows/release-umbrella.yml.
+# The build-publish fan-out lives in .github/workflows/release-umbrella.yml.
 
 set -euo pipefail
 
