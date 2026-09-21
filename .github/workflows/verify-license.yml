@@ -30,6 +30,7 @@ jobs:
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           path: pr
+          allow-unsafe-pr-checkout: true
 
       - name: Run license verification
         run: |
