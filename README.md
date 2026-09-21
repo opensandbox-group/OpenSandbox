@@ -20,17 +20,16 @@
   <hr />
 </div>
 
-OpenSandbox is a **general-purpose sandbox platform** for AI applications, offering multi-language SDKs, unified sandbox APIs, and Docker/Kubernetes runtimes for scenarios like Coding Agents, GUI Agents, Agent Evaluation, AI Code Execution, and RL Training.
+OpenSandbox is a **general-purpose sandbox platform** for AI applications. It gives Coding Agents, GUI Agents, Agent Evaluation, AI Code Execution, and RL Training workloads a secure, scalable place to run — with the same API from a laptop to a large cluster.
 
 ## Features
 
-- 🧩 **SDKs, CLI, and MCP**: Provides multi-language SDKs, the osb CLI, and MCP server integration for sandbox creation, command execution, and file operations. See [SDKs](#sdks), [CLI](#cli), and [MCP](#mcp).
-- 📜 **Sandbox Protocol**: Defines sandbox lifecycle management APIs and sandbox execution APIs so you can extend custom sandbox runtimes. See [API specs](specs/README.md).
-- 🚀 **Sandbox Runtime**: Built-in lifecycle management supporting Docker and high-performance Kubernetes runtime, enabling both local runs and large-scale distributed scheduling. See [Kubernetes runtime](./kubernetes).
-- 🖥️ **Sandbox Environments**: Built-in Command, Filesystem, and Code Interpreter implementations. Examples cover Coding Agents (e.g., Claude Code), browser automation (Chrome, Playwright), and desktop environments (VNC, VS Code).
-- 🚦 **Network Policy**: Unified ingress gateway with multiple routing strategies plus per-sandbox egress controls. See [Ingress Gateway](components/ingress) and [egress controls](components/egress).
-- 🔑 **Credential Vault**: Secure credential injection for sandbox outbound requests without exposing real secrets to workloads. See [Credential Vault](docs/guides/credential-vault.md).
-- 🏰 **Strong Isolation**: Supports secure container runtimes like gVisor, Kata Containers, and Firecracker microVM for enhanced isolation between sandbox workloads and the host. See [Secure Container Runtime Guide](docs/guides/secure-container.md) for details.
+- 🧩 **SDKs, CLI, and MCP**: Native SDKs for Python, Java/Kotlin, TypeScript, C#/.NET, and Go, plus the `osb` CLI and an MCP server — one API surface for sandbox creation, command execution, and file operations. See [SDKs](#sdks), [CLI](#cli), and [MCP](#mcp).
+- 📜 **Open Protocol**: Sandbox lifecycle and execution APIs are defined as public OpenAPI contracts, so custom runtimes can plug in without changing client code. See [API specs](specs/README.md).
+- 🚀 **Sandbox Runtime and Environments**: Docker and Kubernetes runtimes behind the same SDK calls, with built-in Command, Filesystem, and Code Interpreter environments — covering Coding Agents (e.g., Claude Code), browser automation (Chrome, Playwright), and desktop environments (VNC, VS Code). See [Kubernetes runtime](./kubernetes).
+- ⚡ **Hybrid Deployment**: Mix long-running, Kubernetes-native container workloads with short-lived microVM sandboxes in one cluster. Pre-warmed, Firecracker-backed pools give constant-time admission and ~80ms startup; snapshot-based pause/resume releases compute and resumes on a different host. See [Fast Sandbox](docs/architecture/fast-sandbox/) and [Pause & Resume](docs/guides/pause-resume.md).
+- 🚦 **Network Policy and Credential Vault**: Unified ingress gateway with multiple routing strategies, per-sandbox egress controls, and secure credential injection that keeps real secrets away from sandbox workloads. See [Ingress Gateway](components/ingress), [egress controls](components/egress), and [Credential Vault](docs/guides/credential-vault.md).
+- 🏰 **Strong Isolation**: Run workloads under gVisor, Kata Containers, or Firecracker microVMs for strong isolation from the host. See the [Secure Container Runtime Guide](docs/guides/secure-container.md).
 
 ## Official Container Images
 
