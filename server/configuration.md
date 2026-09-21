@@ -207,7 +207,7 @@ Used with the **kubernetes-sigs/agent-sandbox** Sandbox CRD provider.
 ## `[ingress]`
 
 Controls how **ingress exposure** is described for sandbox endpoints (especially behind gateways). **When `runtime.type = "docker"`, only `mode = "direct"` is allowed.**
-`secureAccess` is currently supported only for **Kubernetes** sandboxes when **`ingress.mode = "gateway"`**.
+`secureAccess` is enforced by the ingress gateway on **Kubernetes** (**`ingress.mode = "gateway"`**, signed routes too) and by `execd` itself on **Docker** (a per-sandbox `X-EXECD-ACCESS-TOKEN`; no signed routes).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
