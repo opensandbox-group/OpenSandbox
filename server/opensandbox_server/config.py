@@ -1057,7 +1057,8 @@ class DockerConfig(BaseModel):
             "interface. Set an IP address to keep sandbox ports off public interfaces: 127.0.0.1 "
             "when the server runs on the host, or the Docker bridge gateway (e.g. 172.17.0.1) when "
             "the server runs in a container and reaches sandboxes through host-published ports. "
-            "Must be an IP address (Docker does not resolve names in port bindings)."
+            "Must be an IPv4 address (Docker does not resolve names in port bindings, and the port "
+            "probe is IPv4-only)."
         ),
     )
     pids_limit: Optional[int] = Field(
@@ -1090,12 +1091,19 @@ class DockerConfig(BaseModel):
         if not host:
             return "0.0.0.0"
         try:
-            ipaddress.ip_address(host)
+            parsed = ipaddress.ip_address(host)
         except ValueError as exc:
             raise ValueError(
                 f"docker.publish_host must be an IP address (got {value!r}): Docker publishes ports "
                 "on addresses, not names."
             ) from exc
+        if not isinstance(parsed, ipaddress.IPv4Address):
+            # The port allocator probes with an AF_INET socket: an IPv6 literal would pass here and
+            # then fail every probe (gaierror, not EADDRNOTAVAIL), so say so at config load.
+            raise ValueError(
+                f"docker.publish_host must be an IPv4 address (got {value!r}): the port allocator "
+                "probes with an IPv4 socket."
+            )
         return host
 
     @model_validator(mode="after")

@@ -59,6 +59,15 @@ def test_publish_host_rejects_a_name() -> None:
         DockerConfig(publish_host="host.docker.internal")
 
 
+def test_publish_host_rejects_ipv6() -> None:
+    # The allocator probes with an AF_INET socket: an IPv6 literal would pass ip_address() and then
+    # fail every probe with gaierror (not EADDRNOTAVAIL, so no wildcard fallback) — every sandbox
+    # creation a 500. Refused at config load instead.
+    for v6 in ("::", "::1", "fe80::1"):
+        with pytest.raises(ValueError, match="publish_host must be an IPv4 address"):
+            DockerConfig(publish_host=v6)
+
+
 def test_allocate_port_bindings_publish_on_the_configured_host(monkeypatch) -> None:
     probes: list[str] = []
 
