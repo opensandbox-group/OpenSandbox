@@ -1,7 +1,7 @@
 # Umbrella release BOM — rendered by create-umbrella-release.sh from this
 # template. The BOM is authoritative for image digests. Entries marked
 # PENDING are pinned by the release-umbrella workflow during the
-# build-hold-publish fan-out.
+# build-publish fan-out.
 # Placeholders (written as ${NAME}): VERSION LINE CHANNEL RELEASE_DATE
 #   GIT_COMMIT SPEC_SANDBOX_LIFECYCLE_SHA256 SPEC_EXECD_API_SHA256
 #   SPEC_EGRESS_API_SHA256 SPEC_DIAGNOSTIC_API_SHA256
@@ -12,7 +12,7 @@ metadata:
   line: "1.1"
   channel: stable
   releaseDate: "2026-09-21"
-  gitCommit: 451f69732887e784a7a5f309984acb9a563b168f
+  gitCommit: b00c96b0a89c07fc18409fcfe72d170b4c96c8a7
 
 compatibility:
   kubernetes:
