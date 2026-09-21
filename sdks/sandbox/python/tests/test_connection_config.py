@@ -22,8 +22,8 @@ from opensandbox.config import ConnectionConfig, ConnectionConfigSync
 # Regression: the default User-Agent version is hand-maintained and must be
 # bumped together with the package version. Update this expectation when releasing.
 def test_default_user_agent_matches_package_version() -> None:
-    assert ConnectionConfig().user_agent == "OpenSandbox-Python-SDK/0.1.17.dev0"
-    assert ConnectionConfigSync().user_agent == "OpenSandbox-Python-SDK/0.1.17.dev0"
+    assert ConnectionConfig().user_agent == "OpenSandbox-Python-SDK/1.1.0"
+    assert ConnectionConfigSync().user_agent == "OpenSandbox-Python-SDK/1.1.0"
 
 
 def test_protocol_validation() -> None:

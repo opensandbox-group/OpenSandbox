@@ -44,7 +44,7 @@ classifiers = [
 dependencies = [
     # `command run --argv` passes a list to commands.run; the SDK accepts a
     # list there from 0.1.17. Release the CLI only after that SDK is published.
-    "opensandbox>=0.1.17,<0.2.0",
+    "opensandbox>=1.1.0,<2.0.0",
     "click>=8.1.0,<9.0",
     "rich>=13.0.0,<14.0",
     "pyyaml>=6.0,<7.0",

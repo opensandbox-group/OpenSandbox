@@ -39,7 +39,7 @@ const (
 	DefaultCodeInterpreterTimeoutSeconds = 900
 
 	// Version is the SDK version reported in the User-Agent header.
-	Version = "1.0.5"
+	Version = "1.1.0"
 
 	// APIVersion is the lifecycle API version prefix.
 	APIVersion = "v1"
