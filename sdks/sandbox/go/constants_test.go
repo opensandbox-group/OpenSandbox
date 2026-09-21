@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import "testing"
 // reported in the User-Agent header and must be bumped together with the
 // released module tag. Update this expectation when releasing.
 func TestVersion_MatchesReleasedTag(t *testing.T) {
-	const want = "1.0.5"
+	const want = "1.1.0"
 	if Version != want {
 		t.Fatalf("Version = %q, want %q; bump this together with the release tag", Version, want)
 	}

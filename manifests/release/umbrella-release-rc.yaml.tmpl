@@ -1,0 +1,100 @@
+# Umbrella release BOM, rc channel — rendered by create-umbrella-release.sh
+# from this template. The BOM is authoritative for image digests. Entries
+# marked PENDING are pinned by the release-umbrella workflow during the
+# build-hold-publish fan-out.
+# server/cli/sdks are omitted: rc builds hold packages; they publish and
+# appear in the BOM at the stable release (umbrella-release.yaml.tmpl).
+# Placeholders (written as ${NAME}): VERSION LINE CHANNEL RELEASE_DATE
+#   GIT_COMMIT SPEC_SANDBOX_LIFECYCLE_SHA256 SPEC_EXECD_API_SHA256
+#   SPEC_EGRESS_API_SHA256 SPEC_DIAGNOSTIC_API_SHA256
+apiVersion: opensandbox.io/v1
+kind: UmbrellaRelease
+metadata:
+  version: ${VERSION}
+  line: "${LINE}"
+  channel: ${CHANNEL}
+  releaseDate: "${RELEASE_DATE}"
+  gitCommit: ${GIT_COMMIT}
+
+compatibility:
+  kubernetes:
+    minVersion: v1.21
+    maxVersion: v1.34
+  crd:
+    - group: sandbox.opensandbox.io
+      versions: [v1alpha1]
+
+images:
+  server:
+    image: docker.io/opensandbox/server
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  execd:
+    image: docker.io/opensandbox/execd
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  ingress:
+    image: docker.io/opensandbox/ingress
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  egress:
+    image: docker.io/opensandbox/egress
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  imageCommitter:
+    image: docker.io/opensandbox/image-committer
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  controller:
+    image: docker.io/opensandbox/controller
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  taskExecutor:
+    image: docker.io/opensandbox/task-executor
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  nodeAgent:
+    image: docker.io/opensandbox/nodeagent
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  # fast-sandbox runtime family (fsb- prefix, linux/amd64; same mirror set)
+  fsbController:
+    image: docker.io/opensandbox/fsb-controller
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  fsbFastlet:
+    image: docker.io/opensandbox/fsb-fastlet
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  fsbFastletProxy:
+    image: docker.io/opensandbox/fsb-fastlet-proxy
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  fsbJanitor:
+    image: docker.io/opensandbox/fsb-janitor
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  fsbFirecrackerRuntime:
+    image: docker.io/opensandbox/fsb-firecracker-runtime
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+  fsbSandboxtemplateBuilder:
+    image: docker.io/opensandbox/fsb-sandboxtemplate-builder
+    tag: release-${VERSION}
+    digest: sha256:PENDING
+
+# Charts ship in-repo at the release tag; not published to a chart repo.
+helm:
+  chart: opensandbox
+  version: "${VERSION}"
+  appVersion: "${VERSION}"
+
+specs:
+  - path: specs/sandbox-lifecycle.yml
+    sha256: ${SPEC_SANDBOX_LIFECYCLE_SHA256}
+  - path: specs/execd-api.yaml
+    sha256: ${SPEC_EXECD_API_SHA256}
+  - path: specs/egress-api.yaml
+    sha256: ${SPEC_EGRESS_API_SHA256}
+  - path: specs/diagnostic-api.yml
+    sha256: ${SPEC_DIAGNOSTIC_API_SHA256}

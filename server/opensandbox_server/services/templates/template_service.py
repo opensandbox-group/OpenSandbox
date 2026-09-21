@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -124,7 +124,7 @@ class FastSandboxTemplateService:
         )
         if informer is None:
             logger.warning(
-                "Template status watches disabled (informer_enabled=false); "
+                f"Template status watch failed to start for namespace {namespace!r}; "
                 "rows converge on reads only"
             )
             return

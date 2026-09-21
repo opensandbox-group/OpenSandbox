@@ -32,7 +32,10 @@ An rc is always cut on the **line-birth version** (`X.Y.0-rc.N` — there
 is no `X.Y.Z-rc` for `Z > 0`). It validates that the platform deploys
 and the fan-out runs: images are published, **all packages are held
 (not published)**, and only the umbrella tag is minted (marked
-`--prerelease` on GitHub).
+`--prerelease` on GitHub). rc runs are approval-free: no `release`
+environment gate, and the BOM PR merges without waiting for review (if
+the release-branch ruleset still mandates review, add a ruleset bypass
+for the release bot — the workflow fails fast instead of waiting).
 
 ```bash
 # 1. bump (channel=rc is derived from the suffix)
@@ -58,21 +61,23 @@ Maven / Go hide them; npm publishes under the `rc` dist-tag).
 ## Release Execution (workflow)
 
 Dispatch `.github/workflows/release-umbrella.yml`
-(`dry_run=false`, `version`, `channel`, `release_branch`). A release
-approver other than the triggerer must approve the `release`
-environment. The workflow then runs:
+(`dry_run=false`, `version`, `channel`, `release_branch`). Stable
+releases require a release approver other than the triggerer to approve
+the `release` environment; rc releases and dry runs run approval-free.
+The workflow then runs:
 
 | Stage | What happens |
 |---|---|
 | preflight | commit reachability + notes presence (`docs/releases/<version>.md`) |
 | scan | version-consistency scan (release-blocking) |
-| build | 13 images pushed to staging tags; all packages built and held |
-| BOM | digests pinned into `docs/releases/<version>.yaml`, pushed to a `release/<version>` branch; the workflow opens a PR to the release branch, a code owner approves it (required by the `main` ruleset), and the workflow merges it (`C_bom`) |
-| publish | images promoted `staging → release-X.Y.Z` (same digest); packages published in verify-then-continue order (PyPI → npm → NuGet → Maven Central last) |
+| build | 13 images built and pushed directly to `release-X.Y.Z` (run-scoped staging tags while the `UMBRELLA_PUBLISH_ENABLED` gate is closed); all packages built and held |
+| BOM | digests pinned into `docs/releases/<version>.yaml`, pushed to a `release/<version>` branch; the workflow opens a PR to the release branch and merges it (`C_bom`) — stable waits for a code-owner approval (required by the branch ruleset), rc merges immediately |
+| publish | once the BOM PR merges (all images green + code-owner approval), packages publish in verify-then-continue order (PyPI → npm → NuGet → Maven Central last); images are already public at `release-X.Y.Z` from the build stage |
 | tag | `release-X.Y.Z` + `sdks/sandbox/go/vX.Y.Z` minted on `C_bom`, GitHub Release created with the notes and BOM |
 
-Any failure before the tag step leaves no trace consumers can resolve;
-the weekly scheduled dry-run (`dry_run=true`) keeps the fan-out healthy
+A failed release never mints its git tag or GitHub Release, so the
+release feed never shows a partial release; the weekly scheduled
+dry-run (`dry_run=true`) keeps the fan-out healthy
 between release windows.
 
 ### Dry runs
@@ -137,10 +142,12 @@ Anything that is not a qualifying CVE waits for the next line birth.
 
 ### Staging cleanup
 
-Staging image tags (`staging-<sha>-<runid>`) are namespaced and never
-referenced by user-facing surfaces; a scheduled job deletes staging tags
-whose run did not complete within 14 days. Held package artifacts use
-the default 14-day workflow-artifact retention.
+Run-scoped staging image tags (`staging-<sha>-<runid>`) exist only when
+a run does not publish release tags (dry runs, or real runs while the
+`UMBRELLA_PUBLISH_ENABLED` gate is still closed). They are namespaced
+and never referenced by user-facing surfaces; a scheduled job deletes
+staging tags whose run did not complete within 14 days. Held package
+artifacts use the default 14-day workflow-artifact retention.
 
 ## Legacy Releases
 

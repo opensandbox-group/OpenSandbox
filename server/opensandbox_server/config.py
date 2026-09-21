@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -616,13 +616,6 @@ class KubernetesRuntimeConfig(BaseModel):
     kubeconfig_path: Optional[str] = Field(
         default=None,
         description="Absolute path to the kubeconfig file used for API authentication.",
-    )
-    informer_enabled: bool = Field(
-        default=True,
-        description=(
-            "[Beta] Enable informer-backed cache for workload reads. "
-            "Keeps a watch to reduce API pressure; set false to disable."
-        ),
     )
     informer_resync_seconds: int = Field(
         default=300,

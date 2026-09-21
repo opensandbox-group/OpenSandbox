@@ -55,10 +55,10 @@ the spec's millisecond ladder (`0, 5, 10, … 10000`), so every realistic latenc
 into the single `le=5` bucket and the quantiles would be meaningless.
 
 The head resolves a cache hit (sub-millisecond) up to one upstream timeout
-(`OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT`, 5s by default). The coarse tail exists because
+(`OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT`, 2s by default). The coarse tail exists because
 the recorded duration covers the **whole resolver chain**: forwarding walks the upstreams
 serially, each with the full timeout, so a query can legitimately take
-`timeout x len(upstreams)` — 15s is three resolvers at the default, and 120s is the cap a
+`timeout x len(upstreams)` — 6s is three resolvers at the default, and 120s is the cap a
 single exchange can be configured to wait. A late **success** lands in the tail too, not only an exhausted failure: a query can
 succeed on the second resolver after the first burned a full timeout. The chain has no finite
 worst case either (`OPENSANDBOX_EGRESS_DNS_UPSTREAM` accepts an unbounded resolver list), so

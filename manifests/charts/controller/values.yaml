@@ -58,8 +58,8 @@ controller:
   # -- Pause/Resume snapshot configuration
   snapshot:
     # -- Image used for commit operations.
-    # DockerHub: opensandbox/image-committer:release-1.1.0-rc.1
-    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0-rc.1"
+    # DockerHub: opensandbox/image-committer:release-1.1.0
+    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0"
     # -- PodTemplateSpec overlay for image-committer commit Job Pods.
     imageCommitterPodTemplate: {}
     # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag.

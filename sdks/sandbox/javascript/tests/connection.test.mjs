@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ test("ConnectionConfig default userAgent matches package version", () => {
     domain: "https://api.opensandbox.test",
   });
 
-  assert.equal(connectionConfig.userAgent, "OpenSandbox-JS-SDK/0.1.11");
+  assert.equal(connectionConfig.userAgent, "OpenSandbox-JS-SDK/1.1.0");
 });
 
 test("ConnectionConfig.disableMetrics is preserved by withTransportIfMissing", () => {

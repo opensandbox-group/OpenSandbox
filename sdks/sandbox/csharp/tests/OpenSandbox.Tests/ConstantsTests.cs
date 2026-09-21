@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -94,6 +94,6 @@ public class ConstantsTests
     [Fact]
     public void DefaultUserAgent_ShouldMatchPackageVersion()
     {
-        Constants.DefaultUserAgent.Should().Be("OpenSandbox-CSharp-SDK/0.1.5");
+        Constants.DefaultUserAgent.Should().Be("OpenSandbox-CSharp-SDK/1.1.0");
     }
 }

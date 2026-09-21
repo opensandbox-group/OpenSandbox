@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -318,7 +318,7 @@ class KubernetesSnapshotRuntime:
             return
         if informer is None:
             logger.debug(
-                f"Informers disabled; snapshot {namespace}/{_PLURAL} converges via reads only"
+                f"Snapshot watch failed to start; snapshot {namespace}/{_PLURAL} converges via reads only"
             )
             return
         with self._watch_lock:

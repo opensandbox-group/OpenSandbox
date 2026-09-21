@@ -2,18 +2,21 @@ name: Umbrella Release
 
 # OSEP-0016 unified umbrella release — build-hold-publish fan-out.
 #
-# Phase 1 (this file): preflight, version-consistency scan, staging image
-# builds, and BOM assembly. The BOM commit lands on the release branch
+# Phase 1 (this file): preflight, version-consistency scan, image builds,
+# and BOM assembly. The BOM commit lands on the release branch
 # through an auto-merge PR from release/<version> — main is protected by a
-# repository ruleset that requires pull requests. Publish-facing
-# steps (image promotion to release-X.Y.Z, tags, GitHub Release) are
-# gated behind dry_run=false AND the UMBRELLA_PUBLISH_ENABLED repo
-# variable, which stays unset until GA.
+# repository ruleset that requires pull requests. Images are tagged
+# release-X.Y.Z and pushed directly by the build jobs; publish-facing
+# behavior (release tags, tags, GitHub Release) is gated behind
+# dry_run=false AND the UMBRELLA_PUBLISH_ENABLED repo variable, which
+# stays unset until GA — until the gates open, images land on run-scoped
+# staging tags instead of release tags.
 #
 # Package legs (PyPI, npm, Maven, NuGet) run through the reusable
 # release-packages.yml workflow: hold-only on dry runs AND on rc
 # builds; ordered verify-then-continue publish only for stable releases
-# with publish gates open. Helm charts
+# with publish gates open AND the BOM PR merged (all images green +
+# code-owner approval). Helm charts
 # are not published — they ship in-repo at the release tag. The legacy
 # tag-triggered publish-* workflows have been deleted; the umbrella is
 # the only release path.
@@ -37,8 +40,10 @@ concurrency:
 on:
   schedule:
     # Weekly dry-run (OSEP-0016 test plan): exercises the fan-out so the
-    # chain cannot rot between real release windows. No side effects:
-    # images stay on staging tags, packages are held, no git tags.
+    # chain cannot rot between real release windows. No publish-facing
+    # side effects: component images are built locally, fast-sandbox
+    # images land on run-scoped staging tags, packages are held, no git
+    # tags.
     - cron: '0 3 * * 3'
   workflow_dispatch:
     inputs:
@@ -91,7 +96,9 @@ jobs:
     if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
     uses: ./.github/workflows/release-preflight.yml
     with:
-      require_approval: ${{ !inputs.dry_run }}
+      # only stable requires the release-environment approval; rc releases
+      # and dry runs run approval-free
+      require_approval: ${{ !inputs.dry_run && needs.resolve.outputs.channel == 'stable' }}
 
   scan:
     name: Version-consistency scan
@@ -110,7 +117,7 @@ jobs:
             --skip-remote-check
 
   build-images:
-    name: Build and stage ${{ matrix.component }} image
+    name: Build ${{ matrix.component }} image
     needs: [resolve, preflight, scan]
     # tolerate the scheduled-run scan skip, but never run after a failure
     if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
@@ -175,8 +182,7 @@ jobs:
         uses: imjasonh/setup-crane@v0.3
 
       # idempotent re-runs: if the component is already released to every
-      # target registry, skip the build and reuse the existing digest (the
-      # staged digest is not needed because promote will skip it too).
+      # target registry, skip the build and reuse the existing digest.
       # Skipped on dry runs so weekly rehearsals always rehearse the build.
       - name: Check if release images already exist
         id: already_released
@@ -211,33 +217,36 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
-      - name: Build and push staging image
+      - name: Build and push image
         id: build
         if: steps.already_released.outputs.released != 'true'
         env:
           COMPONENT: ${{ matrix.component }}
-          STAGING_TAG: staging-${{ github.sha }}-${{ github.run_id }}
+          # publish gate: release tags are pushed directly once the repo
+          # variable opens the publish phase; before that, images land on
+          # run-scoped staging tags instead. Dry runs push nothing.
+          IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
           PUSH: ${{ inputs.dry_run == false }}
         run: |
-          GHCR_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          GHCR_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
           export GHCR_REPO
           cd "${{ matrix.dir }}"
-          export TAG="$STAGING_TAG"
+          export TAG="$IMAGE_TAG"
           chmod +x build.sh
           ./build.sh
 
           if [ "$PUSH" = "true" ]; then
-            DIGEST="$(docker buildx imagetools inspect "docker.io/opensandbox/${COMPONENT}:${STAGING_TAG}" --format '{{.Manifest.Digest}}')"
+            DIGEST="$(docker buildx imagetools inspect "docker.io/opensandbox/${COMPONENT}:${IMAGE_TAG}" --format '{{.Manifest.Digest}}')"
           else
             # dry-run: local image ID (config digest) as the rehearsal digest
-            DIGEST="$(docker image inspect --format '{{.Id}}' "opensandbox/${COMPONENT}:${STAGING_TAG}")"
+            DIGEST="$(docker image inspect --format '{{.Id}}' "opensandbox/${COMPONENT}:${IMAGE_TAG}")"
           fi
           if [[ -z "$DIGEST" ]]; then
-            echo "Unable to resolve staging digest" >&2
+            echo "Unable to resolve image digest" >&2
             exit 1
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "staging_tag=$STAGING_TAG" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Record digest in manifest
         if: steps.already_released.outputs.released != 'true'
@@ -264,7 +273,7 @@ jobs:
           retention-days: 14
 
   build-fast-sandbox:
-    name: Build and stage fast-sandbox images
+    name: Build fast-sandbox images
     needs: [resolve, preflight, scan]
     if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
     runs-on: ubuntu-latest
@@ -329,26 +338,28 @@ jobs:
           fi
           echo "released=$([[ "$missing" -eq 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push staging images
+      - name: Build and push images
         if: steps.already_released.outputs.released != 'true'
         env:
-          STAGING_TAG: staging-${{ github.sha }}-${{ github.run_id }}
+          # same publish gate as build-images (release tags once the gate
+          # opens, run-scoped staging tags before that)
+          IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
         run: |
           GHCR_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
           export GHCR_REPO
           # fast-sandbox images publish under the unified opensandbox/*
           # namespace with an fsb- prefix (fsb-controller disambiguates from
           # the k8s controller image) and get the full registry mirror set.
-          TAG="$STAGING_TAG" ./manifests/release/build-fast-sandbox.sh --push
+          TAG="$IMAGE_TAG" ./manifests/release/build-fast-sandbox.sh --push
 
       - name: Record digests in manifest
         if: steps.already_released.outputs.released != 'true'
         env:
-          STAGING_TAG: staging-${{ github.sha }}-${{ github.run_id }}
+          IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
         run: |
           jq -n '{}' > digest-fast-sandbox.json
           for img in fsb-controller fsb-fastlet fsb-fastlet-proxy fsb-janitor fsb-firecracker-runtime fsb-sandboxtemplate-builder; do
-            d="$(docker buildx imagetools inspect "docker.io/opensandbox/${img}:${STAGING_TAG}" --format '{{.Manifest.Digest}}')"
+            d="$(docker buildx imagetools inspect "docker.io/opensandbox/${img}:${IMAGE_TAG}" --format '{{.Manifest.Digest}}')"
             jq --arg k "${img}" --arg v "${d}" '. + {($k): $v}' digest-fast-sandbox.json > tmp.json && mv tmp.json digest-fast-sandbox.json
           done
           cat digest-fast-sandbox.json
@@ -375,8 +386,12 @@ jobs:
 
   packages:
     name: SDK / CLI / server packages (hold${{ inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true' && ' + publish' || '' }})
-    needs: [resolve, preflight, scan]
-    if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
+    needs: [resolve, preflight, scan, bom]
+    # hold legs still rehearse when the BOM was skipped (e.g. a failed leg
+    # on a dry run), but the publish leg fires only after the BOM PR has
+    # merged — every image green + code-owner approval — so packages can
+    # never go out against a partially-built release
+    if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') && (needs.bom.result == 'success' || needs.bom.result == 'skipped') }}
     # the called workflow's publish leg attests held bytes — grant it
     # id-token/attestations here or the workflow fails validation
     permissions:
@@ -397,7 +412,7 @@ jobs:
       # staging-registry rehearsal mode, or a one-off gated publish of a
       # throwaway version per ecosystem — and record the result in the
       # release runbook.
-      publish: ${{ inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true' && needs.resolve.outputs.channel == 'stable' }}
+      publish: ${{ needs.bom.result == 'success' && inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true' && needs.resolve.outputs.channel == 'stable' }}
     secrets: inherit
 
   bom:
@@ -454,20 +469,23 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # main is protected by a repository ruleset: changes must land through
-      # a pull request, with 1 approving code-owner review and all review
-      # threads resolved before merge (allowed methods include rebase). The
-      # bot cannot approve its own PR, so this step opens the BOM PR and
-      # waits until a code owner approves; once the PR is mergeable the bot
-      # merges it (rebase, head-SHA-guarded) and downstream stages continue.
+      # Changes land on the release branch through a pull request: the
+      # bot cannot approve its own PR, so for stable releases this step
+      # opens the BOM PR and waits until a code owner approves; once the
+      # PR is mergeable the bot merges it (rebase, head-SHA-guarded) and
+      # downstream stages continue. rc releases are approval-free: the
+      # bot merges as soon as the PR is mergeable (a branch ruleset that
+      # mandates review still wins — the step then fails fast with a
+      # hint instead of waiting).
       # Also requires the repo setting "Allow GitHub Actions to create and
       # approve pull requests" — pull-requests: write alone does not
       # override it being disabled.
-      - name: Open BOM PR and wait for code-owner approval
+      - name: Open BOM PR and merge
         if: steps.bom.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
           RELEASE_BRANCH: ${{ needs.resolve.outputs.release_branch }}
           HEAD_BRANCH: release/${{ needs.resolve.outputs.version }}
         run: |
@@ -493,8 +511,16 @@ jobs:
           # --match-head-commit so a concurrent same-version run cannot swap
           # the head under us (same-version dispatches are additionally
           # serialized by the workflow concurrency group)
-          echo "Waiting for code-owner approval on BOM PR #${pr_num}..."
-          deadline=$((SECONDS + 90 * 60))
+          # stable waits up to 90 minutes for a code-owner approval;
+          # rc is approval-free — merge as soon as the PR is mergeable,
+          # with a short grace window for transient merge states only
+          if [ "$CHANNEL" = "rc" ]; then
+            echo "rc release: merging BOM PR #${pr_num} without waiting for approval..."
+            deadline=$((SECONDS + 120))
+          else
+            echo "Waiting for code-owner approval on BOM PR #${pr_num}..."
+            deadline=$((SECONDS + 90 * 60))
+          fi
           while :; do
             read -r pr_state merge_state <<<"$(gh pr view "$HEAD_BRANCH" \
               --json state,mergeStateStatus --jq '.state + " " + .mergeStateStatus')"
@@ -511,87 +537,20 @@ jobs:
                 ;;
             esac
             if (( SECONDS >= deadline )); then
-              echo "Timed out waiting for approval/merge of BOM PR #${pr_num} (state=${pr_state}/${merge_state})." >&2
+              if [ "$CHANNEL" = "rc" ]; then
+                echo "BOM PR #${pr_num} is not mergeable without review (state=${pr_state}/${merge_state})." >&2
+                echo "rc releases are approval-free: if the release-branch ruleset mandates review, add a bypass for the release bot or approve this PR once." >&2
+              else
+                echo "Timed out waiting for approval/merge of BOM PR #${pr_num} (state=${pr_state}/${merge_state})." >&2
+              fi
               exit 1
             fi
             sleep 30
           done
 
-  # Phase 1: publish-facing steps below stay locked behind the repo
-  # variable UMBRELLA_PUBLISH_ENABLED (and dry_run=false). Phase 2 adds
-  # the per-ecosystem package legs before this gate is opened.
-  promote:
-    name: Promote images to release tag
-    needs: [resolve, bom, packages]
-    if: ${{ inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Login to registries
-        run: echo "logins are performed per-registry below"
-
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-      - name: Login to ACR
-        uses: docker/login-action@v3
-        with:
-          registry: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install crane
-        uses: imjasonh/setup-crane@v0.3
-
-      - name: Promote staged images to release-${{ needs.resolve.outputs.version }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.resolve.outputs.version }}
-          STAGING_TAG: staging-${{ github.sha }}-${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          components=(server execd ingress egress image-committer controller task-executor nodeagent)
-          registries=(
-            "docker.io/opensandbox"
-            "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
-            "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox"
-          )
-          for comp in "${components[@]}"; do
-            for reg in "${registries[@]}"; do
-              # release tags are immutable: never re-tag over an existing one
-              if crane manifest "${reg}/${comp}:release-${VERSION}" >/dev/null 2>&1; then
-                echo "::warning::${reg}/${comp}:release-${VERSION} already exists — skipping promotion"
-                continue
-              fi
-              crane tag "${reg}/${comp}:${STAGING_TAG}" "release-${VERSION}"
-              echo "promoted ${reg}/${comp}:${STAGING_TAG} -> release-${VERSION}"
-            done
-          done
-          # fast-sandbox family (same namespace + mirror set as components)
-          fs_images=(fsb-controller fsb-fastlet fsb-fastlet-proxy fsb-janitor fsb-firecracker-runtime fsb-sandboxtemplate-builder)
-          for img in "${fs_images[@]}"; do
-            for reg in "${registries[@]}"; do
-              if crane manifest "${reg}/${img}:release-${VERSION}" >/dev/null 2>&1; then
-                echo "::warning::${reg}/${img}:release-${VERSION} already exists — skipping promotion"
-                continue
-              fi
-              crane tag "${reg}/${img}:${STAGING_TAG}" "release-${VERSION}"
-              echo "promoted ${reg}/${img}:${STAGING_TAG} -> release-${VERSION}"
-            done
-          done
-
   release:
     name: Mint tags and publish GitHub Release
-    needs: [resolve, promote, packages]
+    needs: [resolve, bom, packages]
     if: ${{ inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:

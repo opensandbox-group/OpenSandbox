@@ -1,3 +1,17 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -183,6 +197,40 @@ test("warmup initial delay is capped by the readiness deadline with one final at
     await eventually(async () => (await pool.snapshot()).idleCount === 1);
     assert.equal(healthChecks, 1);
     assert.ok(Date.now() - startedAt < 500);
+  } finally {
+    await pool.shutdown(false);
+  }
+});
+
+test("capped warmup initial delay makes its final attempt even when the delay timer resolves early", async (t) => {
+  // Timers can fire before performance.now() crosses the readiness deadline.
+  // Skew the clock so the capped delay ends with budget left, then let the check push it past the deadline.
+  const realNow = performance.now.bind(performance);
+  let skewMillis = 0;
+  t.mock.method(performance, "now", () => realNow() - skewMillis);
+  let creates = 0;
+  let healthChecks = 0;
+  const pool = SandboxPool.create(poolOptions({
+    warmupSkipHealthCheck: false,
+    warmupReadyTimeoutSeconds: 0.05,
+    warmupHealthCheckInitialDelayMillis: 1_000,
+    sandboxCreator: async () => {
+      creates += 1;
+      setTimeout(() => { skewMillis = 25; }, 10);
+      return fakeSandbox(`early-timer-${creates}`);
+    },
+    warmupHealthCheck: async () => {
+      healthChecks += 1;
+      skewMillis = 0;
+      return true;
+    },
+  }));
+
+  try {
+    await pool.start();
+    await eventually(async () => (await pool.snapshot()).idleCount === 1, 500);
+    assert.equal(creates, 1);
+    assert.equal(healthChecks, 1);
   } finally {
     await pool.shutdown(false);
   }

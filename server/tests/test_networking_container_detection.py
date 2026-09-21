@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -93,6 +93,42 @@ def test_proxy_host_falls_back_to_loopback_on_bare_metal(monkeypatch):
     _no_container_env(monkeypatch)
     fake_self = SimpleNamespace(
         app_config=SimpleNamespace(server=SimpleNamespace(host="0.0.0.0")),
+        _get_docker_host_ip=lambda: "host.docker.internal",
+    )
+    assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "127.0.0.1"
+
+
+def test_proxy_host_uses_docker_host_ip_for_loopback_bind_in_container(monkeypatch):
+    """A server bound to loopback inside a container (the safe default beside the sandboxes'
+    network) still dials host-mapped ports at ``[docker].host_ip``: its own 127.0.0.1 is never
+    where they answer, so the sidecar probe must not go there."""
+    _only_these_paths_exist(monkeypatch, "/.dockerenv")
+    _no_container_env(monkeypatch)
+    for host in ("127.0.0.1", "::1", "localhost"):
+        fake_self = SimpleNamespace(
+            app_config=SimpleNamespace(server=SimpleNamespace(host=host, eip=None)),
+            _get_docker_host_ip=lambda: "host.docker.internal",
+        )
+        assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "host.docker.internal"
+        assert networking.DockerNetworkingMixin._resolve_public_host(fake_self) == "host.docker.internal"
+
+
+def test_proxy_host_keeps_explicit_non_loopback_bind_in_container(monkeypatch):
+    """An explicit non-loopback bind is the operator's statement; ``host_ip`` does not override it."""
+    _only_these_paths_exist(monkeypatch, "/.dockerenv")
+    _no_container_env(monkeypatch)
+    fake_self = SimpleNamespace(
+        app_config=SimpleNamespace(server=SimpleNamespace(host="10.0.0.5", eip=None)),
+        _get_docker_host_ip=lambda: "host.docker.internal",
+    )
+    assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "10.0.0.5"
+
+
+def test_proxy_host_loopback_bind_on_bare_metal_stays_loopback(monkeypatch):
+    _only_these_paths_exist(monkeypatch)
+    _no_container_env(monkeypatch)
+    fake_self = SimpleNamespace(
+        app_config=SimpleNamespace(server=SimpleNamespace(host="127.0.0.1", eip=None)),
         _get_docker_host_ip=lambda: "host.docker.internal",
     )
     assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "127.0.0.1"

@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@ apiVersion: v2
 name: opensandbox-server
 description: OpenSandbox Lifecycle API server for sandbox creation and management
 type: application
-version: 1.1.0-rc.1
-appVersion: "1.1.0-rc.1"
+version: 1.1.0
+appVersion: "1.1.0"
 # execd bootstrap.sh installed to /opt/opensandbox (flattened from /opt/opensandbox/bin)
 
 keywords:

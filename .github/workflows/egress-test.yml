@@ -107,6 +107,20 @@ jobs:
           chmod +x tests/smoke-dns-upstream-probe.sh
           ./tests/smoke-dns-upstream-probe.sh
 
+      - name: Run dns upstream blackhole test
+        working-directory: components/egress
+        run: |
+          chmod +x tests/smoke-dns-upstream-blackhole.sh
+          ./tests/smoke-dns-upstream-blackhole.sh
+
+      - name: Upload blackhole smoke egress log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: blackhole-smoke-egress-log
+          path: components/egress/tests/egress-smoke-dns-upstream-blackhole.egress.log
+          retention-days: 5
+
   fast-sandbox-smoke:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'

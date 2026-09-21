@@ -296,29 +296,60 @@ versions (`==X.Y.Z`), Helm
 ```yaml
 apiVersion: opensandbox.io/v1
 kind: UmbrellaRelease
-metadata: { version: 1.4.0, line: "1.4", channel: stable, releaseDate: "2026-10-15", gitCommit: 6b1e… }
-compatibility: { kubernetes: { minVersion: v1.24, maxVersion: v1.34 }, crd: [{ group: sandbox.opensandbox.io, versions: [v1alpha1] }] }
+metadata:
+  version: 1.4.0
+  line: "1.4"
+  channel: stable
+  releaseDate: "2026-10-15"
+  gitCommit: 6b1e…
+compatibility:
+  kubernetes:
+    minVersion: v1.21
+    maxVersion: v1.34
+  crd:
+    - group: sandbox.opensandbox.io
+      versions: [v1alpha1]
 images:
-  execd: { image: docker.io/opensandbox/execd, tag: release-1.4.0, digest: sha256:… }
-  fsbController: { image: docker.io/opensandbox/fsb-controller, tag: release-1.4.0, digest: sha256:… }
+  execd:
+    image: docker.io/opensandbox/execd
+    tag: release-1.4.0
+    digest: sha256:…
+  fsbController:
+    image: docker.io/opensandbox/fsb-controller
+    tag: release-1.4.0
+    digest: sha256:…
   # …one entry per platform image (see table above). Sandbox template
   #   images are NOT part of the umbrella.
-helm:   { chart: opensandbox, version: "1.4.0", appVersion: "1.4.0" }  # in-repo at the tag; not published
-server: { pypi: opensandbox-server==1.4.0 }
-cli:    { pypi: opensandbox-cli==1.4.0 }
+helm:
+  chart: opensandbox
+  version: "1.4.0"
+  appVersion: "1.4.0"  # in-repo at the tag; not published
+server:
+  pypi: opensandbox-server==1.4.0
+cli:
+  pypi: opensandbox-cli==1.4.0
 sdks:
-  - { product: sandbox, language: python, package: "pypi:opensandbox==1.4.0" }
-  - { product: sandbox, language: kotlin, package: "maven:com.alibaba.opensandbox:sandbox:1.4.0" }
+  - product: sandbox
+    language: python
+    package: "pypi:opensandbox==1.4.0"
+  - product: sandbox
+    language: kotlin
+    package: "maven:com.alibaba.opensandbox:sandbox:1.4.0"
   # …one entry per SDK per product/language (python ×3, js ×2,
   #   kotlin ×5, csharp ×2, go ×2)
 specs:
-  - { path: specs/sandbox-lifecycle.yml, sha256: … }
-attestation: { bomSha256: …, signatures: […] }
+  - path: specs/sandbox-lifecycle.yml
+    sha256: …
+attestation:
+  bomSha256: …
+  signatures: […]
 ```
 
 The BOM is authoritative for **digests**, not versions — the version is
 the file name. It is workflow-generated, so version-string drift is
-impossible (~4 KB per release).
+impossible (~4 KB per release). RC BOMs omit the `server`, `cli`, and
+`sdks` sections entirely: packages are held at rc and only publish (and
+appear in the BOM) at the stable release of the line.
 
 **Release notes are hand-authored.** The release manager writes
 `docs/releases/X.Y.Z.md` from the template at `docs/releases/TEMPLATE.md`

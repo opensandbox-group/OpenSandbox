@@ -87,6 +87,13 @@ Sandboxes are ephemeral. Once you have called `acquire()`, the sandbox is yours 
 sandboxes borrowed by application code and not the number of sandboxes produced by
 `DIRECT_CREATE` fallback.
 
+In Python's `SandboxPoolAsync`, ownership transfers when `acquire()` returns.
+If the call fails or is cancelled after connecting to or creating a sandbox,
+the pool attempts to kill that sandbox and closes its local resources before
+propagating the error. Cancellation during renewal or the final pool-state checks,
+including repeated cancellation during cleanup, does not skip that cleanup.
+Once acquisition succeeds, the caller remains responsible for disposal.
+
 ## Empty-buffer behavior: `AcquirePolicy`
 
 All four pool SDKs expose these policies. Acquire consumes a candidate; it does not

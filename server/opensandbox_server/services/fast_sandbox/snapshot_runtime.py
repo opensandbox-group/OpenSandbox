@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -257,7 +257,7 @@ class FastSandboxSnapshotRuntime:
             return
         if informer is None:
             logger.debug(
-                f"Informers disabled; fsb snapshot {namespace}/{PLURAL} converges via reads only"
+                f"fsb snapshot watch failed to start; fsb snapshot {namespace}/{PLURAL} converges via reads only"
             )
             return
         with self._watch_lock:

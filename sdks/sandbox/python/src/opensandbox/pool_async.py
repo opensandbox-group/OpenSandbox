@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -347,59 +347,13 @@ class SandboxPoolAsync:
                 # NOT a candidate-specific problem, so we must not treat it as "stale idle"
                 # and burn another retry. Dispose the sandbox and surface the error.
                 try:
-                    if sandbox_timeout is not None:
-                        await sandbox.renew(sandbox_timeout)
-                    await self._ensure_pool_namespace_active_after_create(sandbox)
-                    await self._ensure_acquire_run_active(operation_generation)
-                except PoolDestroyedException:
+                    return await self._finish_acquire(
+                        sandbox, sandbox_timeout, operation_generation
+                    )
+                finally:
                     self._schedule_kill_discarded_alive(
                         pool_name, tuple(pending_kill), source="acquire"
                     )
-                    raise
-                except Exception as exc:
-                    # Renew failed against a healthy sandbox. try_take_idle already popped this
-                    # id out of the store; a bare close() would only release local resources and
-                    # leave the remote sandbox alive-but-untracked until its server-side TTL
-                    # expires. Kill it best-effort, then close local resources and re-raise.
-                    logger.warning(
-                        "Acquire renew failed after idle connect; killing remote sandbox and "
-                        "not retrying (renew errors are not candidate-specific): "
-                        "pool_name=%s sandbox_id=%s policy=%s error=%s",
-                        pool_name,
-                        sandbox_id,
-                        policy.value,
-                        exc,
-                    )
-                    try:
-                        await sandbox.kill()
-                    except Exception as kill_exc:
-                        logger.warning(
-                            "Best-effort kill after renew failure failed: "
-                            "pool_name=%s sandbox_id=%s error=%s",
-                            pool_name,
-                            sandbox_id,
-                            kill_exc,
-                        )
-                    try:
-                        await sandbox.close()
-                    except Exception as close_exc:
-                        # Best-effort local resource release; original renew error must be the
-                        # one that surfaces, so log at debug and continue with the raise below.
-                        logger.debug(
-                            "Best-effort close after renew failure failed: "
-                            "pool_name=%s sandbox_id=%s error=%s",
-                            pool_name,
-                            sandbox_id,
-                            close_exc,
-                        )
-                    self._schedule_kill_discarded_alive(
-                        pool_name, tuple(pending_kill), source="acquire"
-                    )
-                    raise
-                self._schedule_kill_discarded_alive(
-                    pool_name, tuple(pending_kill), source="acquire"
-                )
-                return sandbox
 
             self._schedule_kill_discarded_alive(
                 pool_name, tuple(pending_kill), source="acquire"
@@ -428,7 +382,7 @@ class SandboxPoolAsync:
                 )
             await self._ensure_acquire_run_active(operation_generation)
             try:
-                sandbox = await self._direct_create(sandbox_timeout, policy=policy)
+                sandbox = await self._direct_create(policy=policy)
             except (AssertionError, PoolDestroyedException):
                 raise
             except Exception as exc:
@@ -441,12 +395,9 @@ class SandboxPoolAsync:
                 except PoolNotRunningException as retired:
                     raise retired from exc
                 raise
-            try:
-                await self._ensure_acquire_run_active(operation_generation)
-            except PoolNotRunningException:
-                await self._cleanup_uncommitted_warmup(sandbox)
-                raise
-            return sandbox
+            return await self._finish_acquire(
+                sandbox, sandbox_timeout, operation_generation, policy=policy
+            )
         finally:
             await self._end_operation()
 
@@ -977,7 +928,6 @@ class SandboxPoolAsync:
 
     async def _direct_create(
         self,
-        sandbox_timeout: timedelta | None,
         policy: AcquirePolicy = AcquirePolicy.DIRECT_CREATE,
     ) -> Sandbox:
         # policy-aware namespace check: if the state store is down and the policy is a
@@ -993,18 +943,6 @@ class SandboxPoolAsync:
                 health_check_polling_interval=self._config.acquire_health_check_polling_interval,
                 skip_health_check=self._config.acquire_skip_health_check,
                 health_check=self._config.acquire_health_check,
-            )
-            if sandbox_timeout is not None:
-                try:
-                    await sandbox.renew(sandbox_timeout)
-                except BaseException:
-                    try:
-                        await sandbox.kill()
-                    finally:
-                        await sandbox.close()
-                    raise
-            await self._ensure_pool_namespace_active_after_create(
-                sandbox, policy=policy
             )
             return sandbox
 
@@ -1027,16 +965,36 @@ class SandboxPoolAsync:
             health_check_polling_interval=self._config.acquire_health_check_polling_interval,
             skip_health_check=self._config.acquire_skip_health_check,
         )
-        if sandbox_timeout is not None:
-            try:
+        return sandbox
+
+    async def _finish_acquire(
+        self,
+        sandbox: Sandbox,
+        sandbox_timeout: timedelta | None,
+        operation_generation: int,
+        *,
+        policy: AcquirePolicy | None = None,
+    ) -> Sandbox:
+        # Ownership transfers to the caller only after renew and both fences
+        # succeed. Until then cancellation must dispose of the sandbox too.
+        try:
+            if sandbox_timeout is not None:
                 await sandbox.renew(sandbox_timeout)
-            except BaseException:
-                try:
-                    await sandbox.kill()
-                finally:
-                    await sandbox.close()
-                raise
-        await self._ensure_pool_namespace_active_after_create(sandbox, policy=policy)
+            await self._ensure_pool_namespace_active_after_create(sandbox, policy)
+            await self._ensure_acquire_run_active(operation_generation)
+        except BaseException:
+            try:
+                # Reuse the shielded cleanup so repeated cancellation cannot
+                # interrupt the remote kill or leave the local client open.
+                await self._cleanup_uncommitted_warmup(sandbox)
+            except Exception as exc:
+                logger.warning(
+                    "Acquire cleanup failed: pool_name=%s sandbox_id=%s error=%s",
+                    self._config.pool_name,
+                    sandbox.id,
+                    exc,
+                )
+            raise
         return sandbox
 
     async def _ensure_pool_namespace_active(self) -> None:
@@ -1121,49 +1079,6 @@ class SandboxPoolAsync:
                     sandbox.id,
                 )
                 return
-            # Fall through to the fence-triggered cleanup path below.
-            try:
-                await sandbox.kill()
-            except Exception as exc:
-                logger.warning(
-                    "Pool sandbox cleanup after store-outage fence failed: pool_name=%s "
-                    "sandbox_id=%s operation=kill error=%s",
-                    self._config.pool_name,
-                    sandbox.id,
-                    exc,
-                )
-            try:
-                await sandbox.close()
-            except Exception as exc:
-                logger.warning(
-                    "Pool sandbox cleanup after store-outage fence failed: pool_name=%s "
-                    "sandbox_id=%s operation=close error=%s",
-                    self._config.pool_name,
-                    sandbox.id,
-                    exc,
-                )
-            raise
-        except BaseException:
-            try:
-                await sandbox.kill()
-            except Exception as exc:
-                logger.warning(
-                    "Pool sandbox cleanup after fence failed: pool_name=%s "
-                    "sandbox_id=%s operation=kill error=%s",
-                    self._config.pool_name,
-                    sandbox.id,
-                    exc,
-                )
-            try:
-                await sandbox.close()
-            except Exception as exc:
-                logger.warning(
-                    "Pool sandbox cleanup after fence failed: pool_name=%s "
-                    "sandbox_id=%s operation=close error=%s",
-                    self._config.pool_name,
-                    sandbox.id,
-                    exc,
-                )
             raise
 
     async def _stop_after_pool_namespace_destroyed(self) -> None:

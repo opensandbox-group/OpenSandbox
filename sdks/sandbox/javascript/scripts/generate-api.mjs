@@ -21,7 +21,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const LICENSE_OWNER = "The OpenSandbox Authors";
-const LICENSE_MARKER_REGEX = new RegExp(`Copyright [0-9]{4} (${LICENSE_OWNER}|Alibaba Group Holding Ltd\\.)`);
+const LICENSE_MARKER_REGEX = new RegExp(`Copyright [0-9]{4} ${LICENSE_OWNER}`);
 
 function buildLicenseText() {
   const year = new Date().getFullYear();

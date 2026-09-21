@@ -26,13 +26,18 @@ echo "User: $(whoami)"
 echo "Working directory: $(pwd)"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Optional argument: an existing checkout of the repository tree to verify.
+# Defaults to the tree containing this script. CI passes a separate PR
+# checkout so the trusted script from the base branch scans PR content as
+# data only (pull_request_target safety: nothing from the target tree is
+# ever executed).
+TARGET_ROOT="${1:-$REPO_ROOT}"
+TARGET_ROOT="$(cd "$TARGET_ROOT" && pwd)"
 CURRENT_YEAR="$(date +%Y)"
 MIN_YEAR="2025"
 LICENSE_OWNER="The OpenSandbox Authors"
-# Dual acceptance is intentional during the transition period following donation to AAIF.
-# Allows verification to pass while remaining legacy files are migrated in follow-up PRs.
-# TODO: Once the codebase-wide migration is complete, drop the Alibaba Group Holding Ltd. fallback branch.
-LICENSE_REGEX="Copyright [0-9]{4} (${LICENSE_OWNER// / }|Alibaba Group Holding Ltd\.)"
+LICENSE_REGEX="Copyright [0-9]{4} ${LICENSE_OWNER// / }"
+echo "Target tree: $TARGET_ROOT"
 
 # File extensions that are expected to carry a license header.
 LICENSE_EXTS=(
@@ -80,7 +85,7 @@ is_generated_to_skip() {
   return 1
 }
 
-cd "$REPO_ROOT"
+cd "$TARGET_ROOT"
 
 is_ignored() {
   local file="$1"
@@ -145,7 +150,7 @@ while IFS= read -r file; do
   if [[ -z "$found_year" || "$found_year" -gt "$CURRENT_YEAR" || "$found_year" -lt "$MIN_YEAR" ]]; then
     missing+=("$file")
   fi
-done < <(git -C "$REPO_ROOT" ls-files)
+done < <(git -C "$TARGET_ROOT" ls-files)
 
 if ((${#missing[@]} > 0)); then
   echo "Missing license header in the following files:"

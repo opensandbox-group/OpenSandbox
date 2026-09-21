@@ -102,10 +102,10 @@ jobs:
 
       - name: Run exact-package Kind smoke
         # The packaged chart defaults to release-<appVersion> images, which only
-        # exist after the umbrella release promotes them — so deployment-level
+        # exist after the umbrella release publishes them — so deployment-level
         # verification is a release-window activity, not a per-PR one. PRs run
         # the package/metadata/render checks above; dispatch this workflow after
-        # the umbrella promotion to run the full kind smoke against published
+        # the umbrella release to run the full kind smoke against published
         # images. (Historically PRs passed by accident: legacy v-tag images
         # existed in registries.)
         if: github.event_name == 'workflow_dispatch'

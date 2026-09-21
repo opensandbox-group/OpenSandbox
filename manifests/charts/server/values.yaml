@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 # Default values for opensandbox-server.
 
 # -- Override the name of the chart
@@ -27,7 +27,7 @@ server:
     # -- Server image repository.
     repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server
     # -- Server image tag. Defaults to the chart appVersion when empty.
-    tag: "release-1.1.0-rc.1"
+    tag: "release-1.1.0"
 
   # -- Number of server replicas. Keep one active server; multi-replica HA is not supported yet.
   replicaCount: 1
@@ -116,17 +116,16 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.1.0-rc.1"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.1.0"
 
   [kubernetes]
   kubeconfig_path = ""
   namespace = "opensandbox"
-  informer_enabled = true
   informer_resync_seconds = 300
   informer_watch_timeout_seconds = 60
   workload_provider = "batchsandbox"
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
   
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.1.0-rc.1"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.1.0"
   mode = "dns+nft"

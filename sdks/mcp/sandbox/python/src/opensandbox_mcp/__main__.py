@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,6 +31,17 @@ def main() -> None:
         choices=("stdio", "streamable-http"),
         default="stdio",
         help="Transport to use. Default uses the MCP SDK default.",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="HTTP bind host for streamable-http transport.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="HTTP bind port for streamable-http transport.",
     )
     parser.add_argument(
         "--api-key",
@@ -81,7 +92,9 @@ def main() -> None:
 
     if args.transport == "streamable-http":
         mcp.run(
-            transport="streamable-http"
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
         )
         return
 

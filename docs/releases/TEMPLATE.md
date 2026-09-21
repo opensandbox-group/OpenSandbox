@@ -122,6 +122,3 @@ go get github.com/alibaba/OpenSandbox/sdks/sandbox/go@vX.Y.Z
 # Run the server locally
 uvx opensandbox-server==X.Y.Z
 ```
-
-Verify what you installed against the BOM: see
-[Release Verification](/community/release-verification).

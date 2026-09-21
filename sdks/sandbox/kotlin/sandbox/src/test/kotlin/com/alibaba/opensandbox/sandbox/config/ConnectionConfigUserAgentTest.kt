@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,6 @@ class ConnectionConfigUserAgentTest {
     fun `default userAgent matches package version`() {
         val config = ConnectionConfig.builder().build()
 
-        assertEquals("OpenSandbox-Kotlin-SDK/1.0.19", config.userAgent)
+        assertEquals("OpenSandbox-Kotlin-SDK/1.1.0", config.userAgent)
     }
 }
