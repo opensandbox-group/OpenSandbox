@@ -29,10 +29,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CURRENT_YEAR="$(date +%Y)"
 MIN_YEAR="2025"
 LICENSE_OWNER="The OpenSandbox Authors"
-# Dual acceptance is intentional during the transition period following donation to AAIF.
-# Allows verification to pass while remaining legacy files are migrated in follow-up PRs.
-# TODO: Once the codebase-wide migration is complete, drop the Alibaba Group Holding Ltd. fallback branch.
-LICENSE_REGEX="Copyright [0-9]{4} (${LICENSE_OWNER// / }|Alibaba Group Holding Ltd\.)"
+LICENSE_REGEX="Copyright [0-9]{4} ${LICENSE_OWNER// / }"
 
 # File extensions that are expected to carry a license header.
 LICENSE_EXTS=(

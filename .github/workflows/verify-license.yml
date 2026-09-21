@@ -1,0 +1,25 @@
+name: Verify License Headers
+
+on:
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-license:
+    name: Verify license headers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Run license verification
+        run: |
+          chmod +x scripts/verify-license.sh
+          ./scripts/verify-license.sh
