@@ -1,4 +1,4 @@
 # OpenSandbox Server
 
-Documentation: [docs/components/server.md](../docs/components/server.md)
+Documentation: [docs/architecture/control-plane/server.md](../docs/architecture/control-plane/server.md)
 

@@ -1,6 +1,6 @@
 # OpenSandbox execd
 
-Documentation: [docs/components/execd.md](../../docs/components/execd.md)
+Documentation: [docs/architecture/data-plane/execd.md](../../docs/architecture/data-plane/execd.md)
 
 ## Known issue / TODO: execd-ebpf selection is not wired end to end
 

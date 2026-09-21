@@ -355,7 +355,7 @@ snapshot_recovery_interval_seconds = 15
 export OPENSANDBOX_STORE_POSTGRESQL_DSN='postgresql://opensandbox:password@postgres:5432/opensandbox?sslmode=require'
 ```
 
-For Kubernetes configuration, see [Kubernetes Deployment](../docs/kubernetes/deployment.md#use-postgresql-for-server-persistence).
+For Kubernetes configuration, see [Kubernetes Deployment](../docs/deployment/index.md#use-postgresql-for-server-persistence).
 
 ---
 

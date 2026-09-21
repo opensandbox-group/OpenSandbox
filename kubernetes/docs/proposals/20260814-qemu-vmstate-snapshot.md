@@ -24,7 +24,7 @@ a Kubernetes RuntimeClass.
 
 This document records the design and its boundaries. Workload authors and
 cluster operators should follow the
-[QEMU VMState operations guide](../../../docs/kubernetes/qemu-vmstate-snapshots.md)
+[QEMU VMState operations guide](../../../docs/guides/qemu-vmstate-snapshots.md)
 for image preparation, Helm deployment, Kind validation, and troubleshooting.
 
 ## Motivation

@@ -1,4 +1,4 @@
 # OpenSandbox Egress
 
-Documentation: [docs/components/egress.md](../../docs/components/egress.md)
+Documentation: [docs/architecture/network/egress.md](../../docs/architecture/network/egress.md)
 

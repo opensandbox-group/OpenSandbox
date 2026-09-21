@@ -62,7 +62,7 @@ helm install opensandbox-server "${CHART_URL}" \
   --values values-server.yaml
 ```
 
-See the [Kubernetes deployment guide](../../docs/kubernetes/deployment.md) for production configuration, verification, and upgrades.
+See the [Kubernetes deployment guide](../../../docs/deployment/index.md) for production configuration, verification, and upgrades.
 
 ## Install from local source
 

@@ -42,6 +42,6 @@ See the
 [design proposal](../../../../docs/proposals/20260814-qemu-vmstate-snapshot.md)
 for the artifact model, pause/resume sequence, compatibility boundaries, and
 design decisions. See the
-[operations guide](../../../../../docs/kubernetes/qemu-vmstate-snapshots.md)
+[operations guide](../../../../../docs/guides/qemu-vmstate-snapshots.md)
 for workload image preparation, the annotation and launch-manifest contract,
 Helm deployment, Kind setup, and command-by-command validation.

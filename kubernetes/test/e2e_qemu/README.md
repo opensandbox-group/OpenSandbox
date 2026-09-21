@@ -2,7 +2,7 @@
 
 Run `make test-e2e-qemu` from `kubernetes/` on a Linux amd64 host with `/dev/kvm`. The test allocates a warm QEMU Pod from a `Pool`, pauses it, and restores a standalone Pod from the published rootfs and VMState images. It checks Pool replenishment and detachment, immutable digest references, VMState loader completion, snapshot cleanup, an outer-rootfs marker, a raw Guest disk token, an anonymous mmap token, the Guest boot ID, and a live counter.
 
-See [QEMU VMState Snapshots](../../../docs/kubernetes/qemu-vmstate-snapshots.md) for the workload contract, dependencies, security model, and validation criteria.
+See [QEMU VMState Snapshots](../../../docs/guides/qemu-vmstate-snapshots.md) for the workload contract, dependencies, security model, and validation criteria.
 
 Set `KEEP_QEMU_E2E_CLUSTER=true` to retain the dedicated cluster for diagnostics. Set `QEMU_E2E_GOPROXY` when the default Go module proxy is not reachable from Docker builds.
 
