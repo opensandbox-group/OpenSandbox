@@ -54,6 +54,7 @@ func (hp *HTTPProxy) newReverseProxy(targetURL *url.URL) *httputil.ReverseProxy 
 		req.URL.RawQuery = targetURL.RawQuery
 		req.Host = targetURL.Host
 		req.Header.Del(SandboxIngress)
+		req.Header.Del(AccessRenew)
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
 		for _, observe := range hp.responseObservers {

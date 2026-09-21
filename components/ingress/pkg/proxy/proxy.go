@@ -141,7 +141,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.renewIntentPublisher != nil {
+	// OSEP-0009 per-request opt-out: a request carrying
+	// "OpenSandbox-Access-Renew: skip" is proxied normally but must not
+	// publish a renew intent (and must not touch throttle state).
+	if p.renewIntentPublisher != nil && !IsAccessRenewSkip(r.Header) {
 		p.renewIntentPublisher.PublishIntent(host.namespace, host.ingressKey, host.port, host.requestURI)
 	}
 
@@ -153,6 +156,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Host = targetURL.Host
 	r.Header.Del(SandboxIngress)
 	r.Header.Del(DeprecatedSandboxIngress)
+	r.Header.Del(AccessRenew)
 	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
 	r.Header.Del(sandbox.FastSandboxCredential)
 	// Host is carried by r.Host, not r.Header. The Phase 1a Fast Sandbox provider

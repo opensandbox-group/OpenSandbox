@@ -30,6 +30,15 @@ var (
 	// Deprecated: use SandboxIngress instead.
 	DeprecatedSandboxIngress = http.CanonicalHeaderKey("OPEN-SANDBOX-INGRESS")
 
+	// AccessRenew is the per-request opt-out header for OSEP-0009
+	// auto-renew-on-access. The exact sentinel value AccessRenewSkipValue
+	// ("skip") suppresses publishing a renew intent for that one request;
+	// unknown values are ignored for forward compatibility. Like
+	// SandboxIngress, it is stripped before forwarding upstream so backend
+	// applications never observe it.
+	AccessRenew          = http.CanonicalHeaderKey("OpenSandbox-Access-Renew")
+	AccessRenewSkipValue = "skip"
+
 	ReverseProxyServerPowerBy = http.CanonicalHeaderKey("Reverse-Proxy-Server-PowerBy")
 
 	// WebSocket handshake headers passed through to the upgrader.
@@ -51,3 +60,9 @@ var (
 	HopByHopUpgrade          = http.CanonicalHeaderKey("Upgrade")
 	HopByHopProxyConnection  = http.CanonicalHeaderKey("Proxy-Connection")
 )
+
+// IsAccessRenewSkip reports whether the request opts out of access renew
+// intents for this single request (OSEP-0009 per-request opt-out).
+func IsAccessRenewSkip(header http.Header) bool {
+	return header.Get(AccessRenew) == AccessRenewSkipValue
+}

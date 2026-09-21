@@ -62,6 +62,16 @@ SERVER_GENERATED_RESPONSE_HEADERS = {
     "server",
 }
 
+# OSEP-0009 per-request opt-out, mirroring ingress pkg/proxy/header.go.
+# Exact sentinel only; unknown values are ignored (forward compatible).
+ACCESS_RENEW_HEADER = "opensandbox-access-renew"  # "OpenSandbox-Access-Renew"
+ACCESS_RENEW_SKIP_VALUE = "skip"
+
+# Hop-control headers consumed by the proxy itself; never forwarded upstream.
+PROXY_CONTROL_HEADERS = {
+    ACCESS_RENEW_HEADER,
+}
+
 SENSITIVE_HEADERS = {
     "authorization",
     "cookie",
@@ -131,7 +141,9 @@ def _filter_proxy_headers(
     (e.g. ``/networkpolicy``) rather than from the external ``/proxy/{port}``
     path, so egress-auth credentials resolved from the endpoint are preserved.
     """
-    excluded = set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS) | set(FORWARDED_HEADERS)
+    excluded = (
+        set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS) | set(FORWARDED_HEADERS) | PROXY_CONTROL_HEADERS
+    )
     if extra_excluded:
         excluded.update(extra_excluded)
     if connection_header:
@@ -212,6 +224,8 @@ def _rewrite_proxy_location(
 
 
 def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None:
+    if request.headers.get(ACCESS_RENEW_HEADER, "") == ACCESS_RENEW_SKIP_VALUE:
+        return
     proxy_renew = getattr(request.app.state, "proxy_renew_coordinator", None)
     if proxy_renew is not None:
         proxy_renew.schedule(sandbox_id)

@@ -67,6 +67,21 @@ The shadow endpoint always answers `200` with `OK` or `DEGRADED` and never gates
 
 When enabled, the ingress publishes a **renew-intent** event for each proxied request (after the sandbox resolves), and the lifecycle server extends the expiration of sandboxes that opted in at creation. Publishing is throttled per sandbox and delivery is best-effort — an idle sandbox still expires; a busy one stays alive without client changes.
 
+### Per-request opt-out
+
+A single request can opt out of renew-intent publishing with a control header:
+
+```text
+OpenSandbox-Access-Renew: skip
+```
+
+- Honored by both proxy paths — the ingress gateway and the server's `/sandboxes/{id}/proxy/{port}/...` route — so behavior does not depend on which path serves the traffic.
+- The exact sentinel value `skip` suppresses the intent for that one request (it bypasses the per-sandbox throttle entirely); unknown values are ignored for forward compatibility.
+- The header is stripped before forwarding upstream, like `OpenSandbox-Ingress-To`, so backend applications never observe it.
+- Typical use: health probes and other background traffic hitting an opted-in sandbox without extending its lifetime.
+
+WebSocket upgrades carry the header on the handshake request; long-lived connections do not produce per-request intents anyway.
+
 ## Fast Sandbox routes
 
 The `FastSandboxProvider` serves authenticated `f1.` route scopes by resolving endpoints through FastPath v2 and forwarding traffic to Fastlet pods. It can run standalone or share one ingress process with the legacy Kubernetes providers; route-scope verification uses the same signing key ring as the server. See [Fast Sandbox: Networking](/architecture/fast-sandbox/networking).

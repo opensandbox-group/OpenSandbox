@@ -1539,4 +1539,104 @@ def test_networkpolicy_route_forwards_egress_auth_header(
     assert len(egress_headers) == 1
     assert egress_headers[0][1] == "injected-egress-token"
 
+class _StubRenewCoordinator:
+    def __init__(self) -> None:
+        self.scheduled: list[str] = []
 
+    def schedule(self, sandbox_id: str) -> None:
+        self.scheduled.append(sandbox_id)
+
+
+def _install_renew_coordinator(client: TestClient) -> _StubRenewCoordinator:
+    coordinator = _StubRenewCoordinator()
+    cast(Any, client.app).state.proxy_renew_coordinator = coordinator
+    return coordinator
+
+
+def _proxy_ok_fake() -> _FakeAsyncClient:
+    fake = _FakeAsyncClient()
+    fake.response = _FakeStreamingResponse(
+        status_code=200, headers={"content-type": "text/plain"}, chunks=[b"ok"]
+    )
+    return fake
+
+
+class _RenewStubService:
+    @staticmethod
+    def get_endpoint(
+        sandbox_id: str,
+        port: int,
+        resolve_internal: bool = False,
+        use_proxy_host: bool = False,
+    ) -> Endpoint:
+        return Endpoint(endpoint="127.0.0.1:44772")
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_proxy_renew_intent_scheduled_by_default(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setattr(lifecycle, "sandbox_service", _RenewStubService())
+    fake_client = _proxy_ok_fake()
+    _set_http_client(client, fake_client)
+    coordinator = _install_renew_coordinator(client)
+
+    response = client.get(
+        f"{prefix}/sandboxes/sbx-renew/proxy/3000/status",
+        headers=auth_headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert coordinator.scheduled == ["sbx-renew"]
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_proxy_renew_skip_header_suppresses_intent_and_strips_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setattr(lifecycle, "sandbox_service", _RenewStubService())
+    fake_client = _proxy_ok_fake()
+    _set_http_client(client, fake_client)
+    coordinator = _install_renew_coordinator(client)
+
+    response = client.get(
+        f"{prefix}/sandboxes/sbx-renew/proxy/3000/status",
+        headers={**auth_headers, "OpenSandbox-Access-Renew": "skip"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert coordinator.scheduled == []
+    forwarded = fake_client.built["headers"]
+    assert all(k.lower() != "opensandbox-access-renew" for k in forwarded)
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_proxy_renew_skip_header_unknown_value_still_renews_but_strips(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setattr(lifecycle, "sandbox_service", _RenewStubService())
+    fake_client = _proxy_ok_fake()
+    _set_http_client(client, fake_client)
+    coordinator = _install_renew_coordinator(client)
+
+    response = client.get(
+        f"{prefix}/sandboxes/sbx-renew/proxy/3000/status",
+        headers={**auth_headers, "OpenSandbox-Access-Renew": "later"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert coordinator.scheduled == ["sbx-renew"]
+    forwarded = fake_client.built["headers"]
+    assert all(k.lower() != "opensandbox-access-renew" for k in forwarded)
