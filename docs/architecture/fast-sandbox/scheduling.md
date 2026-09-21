@@ -37,4 +37,4 @@ The Sandbox CR carries the lifecycle in three fields:
 
 Task execution is part of admission: the request's entrypoint is delivered as a task to the sandbox rather than baked into the pod, which is what allows a pre-warmed Fastlet to serve arbitrary templates (see [Templates](/architecture/fast-sandbox/templates)).
 
-Snapshots and pause/resume follow the same submit-and-converge pattern as every other mutation — see [High Availability](/architecture/fast-sandbox/ha).
+Snapshots and pause/resume follow the same submit-and-converge pattern as every other mutation — see [Pause, Resume, and Snapshots](/architecture/fast-sandbox/checkpoints) and [High Availability](/architecture/fast-sandbox/ha).

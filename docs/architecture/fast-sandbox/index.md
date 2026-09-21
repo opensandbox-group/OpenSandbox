@@ -26,7 +26,7 @@ The adapter and endpoint integration live in this repository. FastPath, the Fast
 | Sandbox CRDs (`sandbox.fast.io`) | Durable record of intent, placement, policy bindings, and observations per sandbox | Intent survives every component failure; the CR is the source of truth |
 | Fastlet (pre-warmed pod) | Hosts many sandboxes in one network domain; provides runtime capacity and shared services | Density with isolation: pre-provisioned network slots, shared egress and DNS amortized across sandboxes |
 | Runtime agent (per node) | Owns Firecracker VM lifecycle over a unix socket; node readiness checks and self-labeling; installs assets | Node autonomy: the control plane delegates, the node verifies itself before admitting workloads |
-| DART (per node) | Peer-to-peer artifact delivery between node state roots | Amortize the origin: each block fetched from the store roughly once cluster-wide |
+| [DART](https://github.com/data-accelerator/dart) (per node) | Peer-to-peer artifact delivery between node state roots | Amortize the origin: each block fetched from the store roughly once cluster-wide |
 | Egress process (per Fastlet) | Multi-sandbox outbound policy: subjects, Sandbox Actions handler, DNS and network enforcement | Fail-closed per-sandbox policy without per-sandbox sidecars — policy may be late, never open |
 | Template builder | Converts OCI images into golden-image artifacts (guest wiring, init, execd baked in) | Workload fixed before any request: creates express intent, not configuration |
 | Janitor | Sweeps orphaned resources of failed operations | Reconciliation finishes interrupted work; the janitor removes what should no longer exist |
@@ -46,6 +46,7 @@ The adapter and endpoint integration live in this repository. FastPath, the Fast
 | [Templates](/architecture/fast-sandbox/templates) | Template catalog, golden-image builds, artifact publication |
 | [Scheduling](/architecture/fast-sandbox/scheduling) | Pools and Fastlets, the create hot path, lifecycle and pause/resume |
 | [Networking](/architecture/fast-sandbox/networking) | Network slots, inbound route scopes and resolution, outbound egress enforcement |
+| [Pause, Resume, and Snapshots](/architecture/fast-sandbox/checkpoints) | Checkpoint artifacts, pause/resume across Fastlets, snapshot publication and restore |
 | [High Availability](/architecture/fast-sandbox/ha) | What survives which failure: control plane, nodes, sandboxes |
 | [Storage](/architecture/fast-sandbox/storage) | Artifact store, peer-to-peer block delivery, node state roots |
 | [Firecracker](/architecture/fast-sandbox/firecracker) | Host requirements, per-VM networking model, agent delegation |

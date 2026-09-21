@@ -12,13 +12,13 @@ Fast Sandbox reduces storage to one shape: **everything a sandbox runs or resume
 ## Where artifacts come from
 
 - **Template builds** convert an OCI image (plus guest wiring and, for microVM runtimes, a kernel) into a golden-image artifact and publish it; the SandboxTemplate CR records the manifest reference and digest (see [Templates](/architecture/fast-sandbox/templates)).
-- **Pause checkpoints and snapshots** are written by the same machinery: the runtime state is captured, pushed, and recorded digest-first in the SandboxSnapshot CR. Resume never trusts a mutable tag.
+- **Pause checkpoints and snapshots** are written by the same machinery: the runtime state is captured, pushed, and recorded digest-first in the SandboxSnapshot CR (see [Pause, Resume, and Snapshots](/architecture/fast-sandbox/checkpoints)). Resume never trusts a mutable tag.
 
 ## Where artifacts go
 
 Nodes keep a **private state root** — an XFS-reflink-backed cache local to each node, never shared between nodes. This is deliberate: a fastlet's instant starts come from node-local artifacts, and cross-node state sharing would turn every node into part of every other node's failure domain.
 
-The cost of private caches is duplicate downloads, and that is what **DART** eliminates: a node-local delivery daemon per node, peer-aware through a headless Service roster. Block-level fetches (4 MiB) follow `cache → peer → origin` — each block is fetched from the origin roughly once cluster-wide, then served peer-to-peer. Per-node block source counters make the delivery path observable.
+The cost of private caches is duplicate downloads, and that is what **[DART](https://github.com/data-accelerator/dart)** eliminates: a node-local delivery daemon per node, peer-aware through a headless Service roster. Block-level fetches (4 MiB) follow `cache → peer → origin` — each block is fetched from the origin roughly once cluster-wide, then served peer-to-peer. Per-node block source counters make the delivery path observable.
 
 ## What is deliberately *not* stored
 
