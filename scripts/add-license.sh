@@ -68,10 +68,10 @@ comment_header() {
   local text="$2"
   case "$style" in
     "line:#")
-      printf '%s\n' "$text" | sed 's/^/# /'
+      printf '%s\n' "$text" | sed -e 's/^/# /' -e 's/[[:space:]]*$//'
       ;;
     "line://")
-      printf '%s\n' "$text" | sed 's:^:// :'
+      printf '%s\n' "$text" | sed -e 's:^:// :' -e 's/[[:space:]]*$//'
       ;;
     "block:html")
       printf "<!--\n%s\n-->\n" "$text"
