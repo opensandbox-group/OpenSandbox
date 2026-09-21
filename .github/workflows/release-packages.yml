@@ -272,9 +272,19 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # Verify against the flat-container index, not `dotnet package
+          # search`: the search service lags the feed by tens of minutes,
+          # which reads as a failed publish (a re-push is harmless thanks to
+          # --skip-duplicate, but it stalls the leg and misleads on-call).
+          # The flat container updates within seconds of a successful push.
+          flat_versions() {
+            curl -fsSL \
+              "https://api.nuget.org/v3-flatcontainer/$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')/index.json" \
+              2>/dev/null
+          }
           publish_one() {
             local dir="$1" package="$2"
-            if dotnet package search "$package" --exact-match 2>/dev/null | grep -qE "(^|[ ,])${VERSION}([ ,]|\$)"; then
+            if flat_versions "$package" | grep -q "\"${VERSION}\""; then
               echo "::warning::${package} ${VERSION} is already on NuGet — skipping publish"
               return 0
             fi
@@ -284,7 +294,7 @@ jobs:
               --source "https://api.nuget.org/v3/index.json" \
               --skip-duplicate
             for i in $(seq 1 20); do
-              if dotnet package search "$package" --exact-match 2>/dev/null | grep -q "$VERSION"; then
+              if flat_versions "$package" | grep -q "\"${VERSION}\""; then
                 echo "verified ${package} ${VERSION} on NuGet"; echo "::endgroup::"; return 0
               fi
               sleep 15
