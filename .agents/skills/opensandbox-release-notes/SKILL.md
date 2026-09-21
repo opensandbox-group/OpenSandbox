@@ -111,7 +111,7 @@ Classify by auto-labels first (`.github/workflows/pr-label-check.yml` infers the
 Rules:
 
 - A PR with multiple component labels can appear in more than one
-  section — mention it where it matters most, cross-reference `(#NNNN)` in the second place.
+  section — mention it where it matters most, cross-reference `[#NNNN](…)` in the second place.
 - `components/code-interpreter` is the sandbox-image side (out of the
   umbrella, versioned in opensandbox-group/sandbox-images) — its *runtime component* changes go under Misc unless they are clearly server/execd behavior. The code-interpreter **SDK** is in scope and belongs under SDKs.
 - Spec changes (`specs/`) that accompany a feature belong to that
@@ -145,10 +145,10 @@ Writing rules:
   Networking section into `### egress` and `### ingress` subsections (shared items go at the end of the more relevant one, labeled). Split the SDKs section into one `### <Language>` subsection per language (Python, JavaScript, Kotlin, C#, Go) with fsb/feature entries distributed to their language; cross-language items stay as lead bullets directly under `## SDKs` — never use a "Cross-SDK" subheading. Cross-SDK changes always go first.
 - **Do not copy PR titles** — synthesize; each entry is tight and
   dense: problem → change → key scope, in 1–3 sentences, no filler.
-- **Group only PRs that are the same story.** Cite several `(#NNNN)`
-  in one entry only when they implement one user story (e.g. the same feature across languages, or one coordinated fix campaign). Never bundle unrelated fixes into a "misc correctness" entry just because they share a component — give each its own bullet instead.
-- **Reference every PR** as `(#NNNN)` at the end of its entry
-  (space-separated for groups); never full URLs — GitHub auto-links.
+- **Group only PRs that are the same story.** Cite several `[#NNNN](…pull/NNNN)`
+  links in one entry only when they implement one user story (e.g. the same feature across languages, or one coordinated fix campaign). Never bundle unrelated fixes into a "misc correctness" entry just because they share a component — give each its own bullet instead.
+- **Reference every PR** as a full markdown link `[#NNNN](https://github.com/<owner>/<repo>/pull/NNNN)` at the end of its entry
+  (space-separated for groups, each inside one shared parenthesis).
 - **User-facing** — what operators/consumers need, not internals.
 - The opening paragraph states the headline and who should upgrade;
   for a first umbrella / GA (e.g. `1.1.0`), also state the unified-versioning context and the `1.0.0` gap rationale per the umbrella governance OSEP.
@@ -184,8 +184,9 @@ Filter bots from the list before writing.
 Write to `docs/releases/<version>.md` in the repo working tree (this is the authoritative in-repo copy the workflow later commits to the release branch). Verify:
 
 - No HTML comments remain; no empty sections remain
-- Every entry cites `(#NNNN)`; every collected PR appears exactly once
+- Every entry cites a `[#NNNN](…pull/NNNN)` link; every collected PR appears exactly once
   (or is deliberately skipped as noise — say so in the handoff)
+- No bare `#NNNN` references remain — all are full markdown links to `https://github.com/<owner>/<repo>/pull/NNNN`
 - Title and all version strings match `<version>` exactly
 
 Print the file path when done.
