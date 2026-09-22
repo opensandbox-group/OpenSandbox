@@ -48,6 +48,8 @@ jobs:
         run: |
           sudo chown -R "$(id -u):$(id -g)" /data/fast-sandbox-env 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" .fast-sandbox-env 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/uv" 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.local/share/uv" 2>/dev/null || true
 
       # Unprivileged: the suite only talks to the server/gateway on
       # loopback; running it as root would leave root-owned venv/pycache
