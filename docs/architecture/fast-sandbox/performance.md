@@ -5,7 +5,7 @@ description: Measured performance characteristics of the fast-sandbox integratio
 
 # Performance
 
-This page collects performance figures measured by the Firecracker integration verification harness (`integration-env.sh verify-all`) on real hardware. Figures are reported as the harness emitted them — single-run observations, not tuned benchmark medians.
+This page collects performance figures measured on real hardware: runtime paths come from the Firecracker integration verification harness (`integration-env.sh verify-all`), and the create hot path additionally includes a sustained concurrent-create benchmark through the full OpenSandbox stack. Figures are reported as the tools emitted them — single-run observations, not tuned benchmark medians.
 
 Performance here is a consequence of the architecture, not an optimization pass: creates are constant-time admissions into pre-warmed capacity (see [Scheduling](/architecture/fast-sandbox/scheduling)), warm creates restore from a snapshot instead of booting a kernel (see [Firecracker](/architecture/fast-sandbox/firecracker)), and pause/resume rides the submit-and-converge mutation path (see [High Availability](/architecture/fast-sandbox/ha)).
 
@@ -38,6 +38,18 @@ Notes:
 
 - Restore phases: acquire 0.15 ms, rootfs reflink 0.7 ms, launch 20.7 ms, configure 2.8 ms, vmstate boot 0.3 ms.
 - Burst growth in total time comes from the harness's sequential probe loop (queue-to-probe up to 2.1 s), not from platform admission: every create RPC returned in 60–71 ms and every first probe hit 200 in ~53 ms.
+
+### Sustained concurrent creates (full OpenSandbox stack)
+
+Measured through the full OpenSandbox stack — Python SDK create → lifecycle server → FastPath → fast-sandbox, on the same reference host (see [Environment](#environment) and [Reproducing](#reproducing)). Method: 100 creates issued as batches of 10 concurrent creates across 2 Fastlet pods (20 slots), 5 s between batches for slot reclamation, template artifacts already in the node cache. 0 of 100 creates failed.
+
+| Metric | Measured |
+|---|---|
+| End-to-end create → Ready, 100 runs | p50 235 ms · p90 285 ms · p99 325 ms (avg 236 ms) |
+| Range | min 138 ms – max 330 ms |
+| Reference: sequential warm create (batch warmup) | 80–100 ms |
+
+Even at 10-way concurrency, p99 stays under 0.35 s with zero failures. The gap between the ~115 ms single-create figure above and the ~235 ms p50 is concurrency overhead — 10 concurrent restores sharing the Fastlet slots plus the lifecycle-server and SDK round trips — not a change in the restore path itself, which stays a ~35 ms snapshot resume.
 
 ## Request latency
 
@@ -109,6 +121,6 @@ The figures come from the fast-sandbox integration harness. To reproduce:
 3. **Environment**: `./scripts/integration-env.sh up` builds the images and brings up the two-node kind cluster (KVM passthrough), the MinIO artifact store, the SandboxTemplate golden image, and the pool.
 4. **Figures**: `./scripts/integration-env.sh verify-all` runs the verification battery — base delivery (create timings), DART P2P evidence, execd API battery, live snapshot, cross-host pause/resume, egress matrix — and prints the timings shown on this page. Evidence logs land under the workspace's `logs/` directory (workspace default: `/data/fast-sandbox-env`).
 
-To measure through the OpenSandbox layers instead, this repository ships the equivalent full-stack environment — fast-sandbox at the same pinned commit plus the source-built server, ingress gateway, and egress — as `scripts/fast-sandbox-env/integration-env.sh up`.
+To measure through the OpenSandbox layers instead, this repository ships the equivalent full-stack environment — fast-sandbox at the same pinned commit plus the source-built server, ingress gateway, and egress — as `scripts/fast-sandbox-env/integration-env.sh up`. The sustained concurrent-create figures under [Create](#create) come from this environment: create 100 sandboxes through the Python SDK as batches of 10 concurrent creates with a 5 s pause between batches, and report the create → Ready latency percentiles.
 
 When re-measuring, pin: node hardware, kernel version, Firecracker version, template digest, pool shape, and artifact-store placement — otherwise the numbers are not comparable across runs.
