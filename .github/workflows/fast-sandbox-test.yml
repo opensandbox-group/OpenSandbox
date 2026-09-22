@@ -26,6 +26,9 @@ jobs:
     runs-on: [self-hosted, kvm]
     timeout-minutes: 180
     steps:
+      - name: Fix workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - name: Checkout code
         uses: actions/checkout@v6
 
@@ -40,15 +43,18 @@ jobs:
       - name: Run integration tests
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
-      - name: Run SDK e2e
-        timeout-minutes: 30
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
-
-      - name: Fix workspace ownership
+      - name: Restore workspace ownership
         if: always()
         run: |
           sudo chown -R "$(id -u):$(id -g)" /data/fast-sandbox-env 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" .fast-sandbox-env 2>/dev/null || true
+
+      # Unprivileged: the suite only talks to the server/gateway on
+      # loopback; running it as root would leave root-owned venv/pycache
+      # files in the workspace and break the next checkout.
+      - name: Run SDK e2e
+        timeout-minutes: 30
+        run: ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       - name: Upload logs
         if: always()
