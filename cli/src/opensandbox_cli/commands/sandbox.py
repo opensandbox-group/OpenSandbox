@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import click
+from opensandbox.adapters.converter.metrics_model_converter import MetricsModelConverter
+from opensandbox.api.execd.models import Metrics
 from opensandbox.models.sandboxes import (
     CredentialProxyConfig,
     NetworkPolicy,
@@ -555,7 +557,9 @@ def _parse_metric_stream_line(line: str) -> tuple[SandboxMetrics | None, str | N
     decoded: Any = json.loads(payload)
     if isinstance(decoded, dict) and decoded.get("error"):
         return None, f"Metrics stream error: {decoded['error']}"
-    return SandboxMetrics.model_validate(decoded), None
+    # execd streams wire-format field names (cpu_used_pct, mem_total_mib, ...),
+    # so validate against the API model and convert, like the non-watch path.
+    return MetricsModelConverter.to_sandbox_metrics(Metrics.from_dict(decoded)), None
 
 
 def _describe_create_timeout(

@@ -648,9 +648,9 @@ class TestSandboxMetrics:
         class _FakeResponse:
             def __init__(self) -> None:
                 self.lines = [
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 12.5, "memory_total_in_mib": 1024, "memory_used_in_mib": 256, "timestamp": 1710000000000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 12.5, "mem_total_mib": 1024, "mem_used_mib": 256, "timestamp": 1710000000000}',
                     "",
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 18.0, "memory_total_in_mib": 1024, "memory_used_in_mib": 300, "timestamp": 1710000001000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 18.0, "mem_total_mib": 1024, "mem_used_mib": 300, "timestamp": 1710000001000}',
                 ]
 
             def __enter__(self) -> _FakeResponse:
@@ -683,9 +683,9 @@ class TestSandboxMetrics:
         class _FakeResponse:
             def __init__(self) -> None:
                 self.lines = [
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 12.5, "memory_total_in_mib": 1024, "memory_used_in_mib": 256, "timestamp": 1710000000000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 12.5, "mem_total_mib": 1024, "mem_used_mib": 256, "timestamp": 1710000000000}',
                     'data: {"error": "failed to get CPU percent"}',
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 18.0, "memory_total_in_mib": 1024, "memory_used_in_mib": 300, "timestamp": 1710000001000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 18.0, "mem_total_mib": 1024, "mem_used_mib": 300, "timestamp": 1710000001000}',
                 ]
 
             def __enter__(self) -> _FakeResponse:
