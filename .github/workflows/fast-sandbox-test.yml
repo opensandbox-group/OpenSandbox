@@ -26,21 +26,11 @@ jobs:
     runs-on: [self-hosted, kvm]
     timeout-minutes: 180
     steps:
-      # The script escalates to sudo internally for the few privileged
-      # operations (XFS mount, sysctl, MinIO data), so everything here runs
-      # as the runner user — single file ownership throughout. This janitor
-      # clears state left by ANY earlier run, root or not.
-      - name: Clean up previous run state
-        run: |
-          ./scripts/fast-sandbox-env/integration-env.sh down 2>/dev/null || true
-          sudo ./scripts/fast-sandbox-env/integration-env.sh down 2>/dev/null || true
-          sudo rm -rf /data/fast-sandbox-env .fast-sandbox-env "$HOME/.cache/uv" "$HOME/.local/share/uv"
-          # /data itself is root-owned on the runner: recreate the script's
-          # default WORK directory owned by the runner user.
-          if [[ -d /data ]]; then
-            sudo mkdir -p /data/fast-sandbox-env
-            sudo chown "$(id -u):$(id -g)" /data/fast-sandbox-env
-          fi
+      # actions/checkout always executes as the runner user; the script
+      # steps below run as root and leave root-owned files (venv, pycache)
+      # in the workspace, so hand ownership back before every checkout.
+      - name: Reset workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
 
       - name: Checkout code
         uses: actions/checkout@v6
@@ -54,23 +44,12 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Run integration tests
-        run: ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
       - name: Run SDK e2e
         timeout-minutes: 30
-        run: ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: fast-sandbox-env-logs
-          path: |
-            /data/fast-sandbox-env/logs/
-            .fast-sandbox-env/logs/
-          retention-days: 5
-          if-no-files-found: ignore
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       - name: Teardown
         if: always()
-        run: ./scripts/fast-sandbox-env/integration-env.sh down
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down
