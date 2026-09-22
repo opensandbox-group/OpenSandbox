@@ -35,6 +35,12 @@ jobs:
           ./scripts/fast-sandbox-env/integration-env.sh down 2>/dev/null || true
           sudo ./scripts/fast-sandbox-env/integration-env.sh down 2>/dev/null || true
           sudo rm -rf /data/fast-sandbox-env .fast-sandbox-env "$HOME/.cache/uv" "$HOME/.local/share/uv"
+          # /data itself is root-owned on the runner: recreate the script's
+          # default WORK directory owned by the runner user.
+          if [[ -d /data ]]; then
+            sudo mkdir -p /data/fast-sandbox-env
+            sudo chown "$(id -u):$(id -g)" /data/fast-sandbox-env
+          fi
 
       - name: Checkout code
         uses: actions/checkout@v6
