@@ -68,6 +68,17 @@ jobs:
                 path.startsWith("tests/") ||
                 path === "scripts/python-execd-init-e2e.sh" ||
                 path === "scripts/python-execd-hardening-e2e.sh",
+              "fast-sandbox": (path) =>
+                workflowChanged(path, "fast-sandbox-test.yml") ||
+                path.startsWith("scripts/fast-sandbox-env/") ||
+                path.startsWith("manifests/") ||
+                path.startsWith("server/") ||
+                path.startsWith("components/egress/") ||
+                path.startsWith("components/ingress/") ||
+                path.startsWith("components/internal/") ||
+                path === "tests/python/tests/test_fsb_e2e.py" ||
+                path === "tests/python/pyproject.toml" ||
+                path === "tests/python/uv.lock",
               egress: (path) =>
                 workflowChanged(path, "egress-test.yml") ||
                 path.startsWith("components/egress/") ||

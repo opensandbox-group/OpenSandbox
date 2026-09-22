@@ -1,0 +1,79 @@
+name: Fast Sandbox Integration Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: fast-sandbox
+
+  integration:
+    name: Integration Env (self-hosted kvm)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    # Bare-metal Linux host with /dev/kvm, Docker, cgroup v2 and
+    # passwordless sudo (integration-env.sh mounts an XFS StateRoot and
+    # bumps a sysctl; every step runs the script under sudo).
+    runs-on: [self-hosted, kvm]
+    timeout-minutes: 180
+    env:
+      # Workspace + logs + XFS loop file + MinIO data. Per-job unique and
+      # cleaned up by the runner afterwards; override on the runner if the
+      # temp volume is too small for the 20G+ headroom preflight.
+      WORK: ${{ runner.temp }}/fast-sandbox-env
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Preflight (Linux + KVM + Docker)
+        run: |
+          [[ "$(uname -s)" == "Linux" ]] || { echo "requires a Linux host with KVM"; exit 1; }
+          [[ -e /dev/kvm ]] || { echo "/dev/kvm is missing on this runner"; exit 1; }
+          docker info >/dev/null
+
+      # up = full stack + end-to-end verify + pause/resume + snapshot verify;
+      # --auto-clean tears the stack down when a stage fails. The script
+      # needs root for the XFS loop mount and sysctl, hence sudo.
+      - name: Bring up the integration environment
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
+
+      - name: Run Python SDK e2e (tests/python/tests/test_fsb_e2e.py)
+        timeout-minutes: 30
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      - name: Dump environment status
+        if: always()
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status || true
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fast-sandbox-env-logs
+          path: ${{ runner.temp }}/fast-sandbox-env/logs/
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Teardown
+        if: always()
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down
