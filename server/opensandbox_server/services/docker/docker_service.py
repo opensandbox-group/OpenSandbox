@@ -889,10 +889,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 )
                 environment = inject_windows_user_ports(environment, exposed_ports)
 
-            # Inject CAP_SYS_ADMIN + unconfined AppArmor when bwrap isolation is requested.
-            # bwrap needs pivot_root/mount which require CAP_SYS_ADMIN and are blocked
-            # by Docker's default AppArmor profile.
-            if (request.extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
+            # Inject the container permissions required by bwrap isolation.
+            # bwrap needs pivot_root/mount, including a fresh procfs, which are blocked
+            # by Docker's default AppArmor, seccomp, and protected-system-path settings.
+            isolation_requested = (
+                (request.extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY)
+                == "enable"
+            )
+            if isolation_requested:
                 cap_add = set(host_config_kwargs.get("cap_add") or [])
                 cap_add.add("SYS_ADMIN")
                 host_config_kwargs["cap_add"] = sorted(cap_add)
@@ -906,7 +910,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 host_config_kwargs["tmpfs"] = tmpfs
                 logger.warning(
                     f"sandbox {sandbox_id}: granting CAP_SYS_ADMIN + "
-                    "apparmor/seccomp=unconfined + tmpfs for bwrap isolation "
+                    "apparmor/seccomp/system paths unconfined + tmpfs for bwrap isolation "
                     "(bootstrap.execd.isolation=enable)"
                 )
 
@@ -922,6 +926,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                             host_config_kwargs,
                             container_exposed_ports,
                             request.platform,
+                            unconfine_system_paths=isolation_requested,
                         )
                         break
                     except Exception as exc:
@@ -962,6 +967,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     host_config_kwargs,
                     container_exposed_ports,
                     request.platform,
+                    unconfine_system_paths=isolation_requested,
                 )
         except Exception:
             if sidecar_container is not None:

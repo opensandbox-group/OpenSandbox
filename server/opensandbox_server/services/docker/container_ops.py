@@ -409,6 +409,7 @@ class DockerContainerOpsMixin:
         host_config_kwargs: Dict[str, Any],
         exposed_ports: Optional[list[str]],
         platform: Optional[PlatformSpec],
+        unconfine_system_paths: bool = False,
     ):
         requested_windows_platform = is_windows_platform(platform)
         bootstrap_command = normalize_bootstrap_command(
@@ -418,6 +419,9 @@ class DockerContainerOpsMixin:
         docker_platform = resolve_docker_platform(platform)
 
         host_config = self.docker_client.api.create_host_config(**host_config_kwargs)
+        if unconfine_system_paths:
+            host_config["MaskedPaths"] = []
+            host_config["ReadonlyPaths"] = []
         container = None
         container_id: Optional[str] = None
         try:

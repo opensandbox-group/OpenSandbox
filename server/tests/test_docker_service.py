@@ -191,6 +191,53 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
     assert host_config.get("cap_drop") == service.app_config.docker.drop_capabilities
     assert host_config.get("pids_limit") == service.app_config.docker.pids_limit
 
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_unconfines_system_paths_for_bwrap_isolation(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_host_config.return_value = {
+        "MaskedPaths": ["/proc/kcore"],
+        "ReadonlyPaths": ["/proc/sys"],
+    }
+    mock_client.api.create_container.return_value = {"Id": "cid"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+        extensions={"bootstrap.execd.isolation": "enable"},
+    )
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 40001),
+                "8080": ("0.0.0.0", 40002),
+            },
+        ),
+    ):
+        await service.create_sandbox(request)
+
+    host_config_kwargs = mock_client.api.create_host_config.call_args.kwargs
+    assert "SYS_ADMIN" in host_config_kwargs["cap_add"]
+    assert "apparmor=unconfined" in host_config_kwargs["security_opt"]
+    assert "seccomp=unconfined" in host_config_kwargs["security_opt"]
+    host_config = mock_client.api.create_container.call_args.kwargs["host_config"]
+    assert host_config["MaskedPaths"] == []
+    assert host_config["ReadonlyPaths"] == []
+
+
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
 async def test_create_sandbox_applies_config_sandbox_env_and_binds(mock_docker):
@@ -4559,6 +4606,7 @@ async def test_create_sandbox_retries_on_host_port_publish_error(mock_docker):
         host_config_kwargs,
         container_exposed_ports,
         platform,
+        unconfine_system_paths=False,
     ):
         calls.append((dict(labels), dict(host_config_kwargs)))
         if len(calls) == 1:
