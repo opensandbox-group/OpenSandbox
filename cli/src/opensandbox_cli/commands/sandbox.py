@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import click
+from opensandbox.adapters.converter import MetricsModelConverter
+from opensandbox.api.execd.models import Metrics
 from opensandbox.models.sandboxes import (
     CredentialProxyConfig,
     NetworkPolicy,
@@ -555,6 +557,8 @@ def _parse_metric_stream_line(line: str) -> tuple[SandboxMetrics | None, str | N
     decoded: Any = json.loads(payload)
     if isinstance(decoded, dict) and decoded.get("error"):
         return None, f"Metrics stream error: {decoded['error']}"
+    if isinstance(decoded, dict) and "cpu_used_pct" in decoded:
+        return MetricsModelConverter.to_sandbox_metrics(Metrics.from_dict(decoded)), None
     return SandboxMetrics.model_validate(decoded), None
 
 
