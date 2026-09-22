@@ -44,6 +44,12 @@ jobs:
         timeout-minutes: 30
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
+      - name: Fix workspace ownership
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" /data/fast-sandbox-env 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" .fast-sandbox-env 2>/dev/null || true
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v7
