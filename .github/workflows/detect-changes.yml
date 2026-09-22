@@ -76,6 +76,9 @@ jobs:
                 path.startsWith("components/egress/") ||
                 path.startsWith("components/ingress/") ||
                 path.startsWith("components/internal/") ||
+                (path.startsWith("kubernetes/") &&
+                  !path.startsWith("kubernetes/docs/")) ||
+                path.startsWith("sdks/") ||
                 path === "tests/python/tests/test_fsb_e2e.py" ||
                 path === "tests/python/pyproject.toml" ||
                 path === "tests/python/uv.lock",
