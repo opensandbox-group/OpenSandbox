@@ -425,6 +425,11 @@ pushes `:latest`. Images are linux/amd64 only.
 
 ### 2. Prepare the cluster
 
+Prepare each node's `firecrackerRuntime.stateRoot` on a filesystem with reflink
+support before deploying the runtime. See the
+[state-disk operations guide](../docs/architecture/fast-sandbox/storage.md#prepare-the-node-state-disk)
+for dedicated-disk setup, the loop-backed XFS helper, sizing, and readiness checks.
+
 ```bash
 # Nodes need bare-metal KVM (/dev/kvm); no manual labeling — the
 # firecracker-runtime readiness loop verifies each host, installs the
