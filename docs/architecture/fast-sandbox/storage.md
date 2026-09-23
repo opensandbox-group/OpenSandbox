@@ -32,9 +32,11 @@ The artifact store is plain S3-compatible object storage; capacity planning redu
 
 ### Prepare the node state disk
 
-The Firecracker chart mounts `firecrackerRuntime.stateRoot` from the host
+The `fast-sandbox` chart mounts `runtime.stateRoot` from the host
 (default `/var/lib/fast-sandbox/firecracker`). `DirectoryOrCreate` creates a
 directory on the existing filesystem; it does not provision a separate disk.
+When using the `opensandbox` umbrella chart, set `fast-sandbox.runtime.stateRoot`.
+Set the chart value to the same directory used as the helper's mountpoint.
 Prepare this mount **before deploying the runtime DaemonSet** on each node.
 Otherwise, drain the node's sandboxes and restart the runtime Pods after mounting:
 an already-running container may continue seeing the old filesystem.
@@ -95,9 +97,11 @@ needed for recovery, and expect artifacts to be downloaded again after cleanup.
 After provisioning, verify the filesystem and the runtime's readiness report:
 
 ```bash
-findmnt -M /var/lib/fast-sandbox/firecracker
-df -h /var/lib/fast-sandbox/firecracker
-sudo xfs_info /var/lib/fast-sandbox/firecracker   # expect reflink=1
+# Use your configured runtime.stateRoot (for example /data/firecracker):
+STATE_ROOT=/var/lib/fast-sandbox/firecracker
+findmnt -M "$STATE_ROOT"
+df -h "$STATE_ROOT"
+sudo xfs_info "$STATE_ROOT"   # expect reflink=1
 kubectl -n opensandbox-system get daemonsets
 # Use the deployed Firecracker runtime DaemonSet name:
 kubectl -n opensandbox-system rollout restart daemonset/<runtime-daemonset>
