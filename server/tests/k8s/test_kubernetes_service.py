@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -936,6 +937,7 @@ class TestWaitForSandboxReady:
 
     @pytest.mark.asyncio
     async def test_wait_fails_immediately_for_terminal_pod(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.subscribe_workload.return_value = None
         clock = SimpleNamespace(now=0.0)
 
         async def advance_clock(seconds: float) -> None:
@@ -954,7 +956,7 @@ class TestWaitForSandboxReady:
 
         with (
             patch(
-                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                "opensandbox_server.services.k8s.kubernetes_service.time.monotonic",
                 side_effect=lambda: clock.now,
             ),
             patch(
@@ -1077,6 +1079,7 @@ class TestWaitForSandboxReady:
     async def test_wait_accumulates_pool_capacity_across_transient_recovery(
         self, k8s_service, mock_workload
     ):
+        k8s_service.workload_provider.subscribe_workload.return_value = None
         clock = SimpleNamespace(now=0.0)
 
         async def advance_clock(seconds: float) -> None:
@@ -1104,7 +1107,7 @@ class TestWaitForSandboxReady:
 
         with (
             patch(
-                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                "opensandbox_server.services.k8s.kubernetes_service.time.monotonic",
                 side_effect=lambda: clock.now,
             ),
             patch(
@@ -2811,3 +2814,144 @@ class TestSharedNamespaceTenantIsolation:
             k8s_service.workload_provider.resume_sandbox.assert_not_called()
         finally:
             self._clear_tenant(previous)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notification", [
+    "MODIFIED", "ADDED", "SYNC", "during_read", "DELETED", "replaced",
+    "missing_version", "deleting", "burst",
+])
+async def test_create_wait_uses_event_object(k8s_service, notification):
+    provider = k8s_service.workload_provider
+    pending_seen = asyncio.Event()
+    unsubscribe = MagicMock()
+    callback = None
+    pending = {
+        "metadata": {"name": "test-sandbox-id", "uid": "uid-1", "resourceVersion": "one"},
+        "status": {"state": "Pending", "reason": "", "message": "pending"},
+    }
+    ready = {
+        "metadata": {**pending["metadata"], "resourceVersion": "two"},
+        "status": {"state": "Running", "reason": "", "message": "ready"},
+    }
+    event = {**ready, "metadata": dict(ready["metadata"])}
+    if notification == "replaced":
+        event["metadata"]["uid"] = "different"
+    elif notification == "missing_version":
+        event["metadata"].pop("resourceVersion")
+    elif notification == "deleting":
+        event["metadata"]["deletionTimestamp"] = "2026-09-23T00:00:00Z"
+
+    def subscribe(sandbox_id, namespace, notify):
+        nonlocal callback
+        callback = notify
+        return unsubscribe
+
+    provider.subscribe_workload.side_effect = subscribe
+    reads = 0
+
+    def read(**kwargs):
+        nonlocal reads
+        reads += 1
+        assert callback is not None
+        if reads == 1:
+            if notification == "during_read":
+                callback("MODIFIED", event)
+            return pending
+        return ready
+
+    provider.get_workload.side_effect = read
+
+    def status(workload):
+        pending_seen.set()
+        return workload["status"]
+
+    provider.get_status.side_effect = status
+    task = asyncio.create_task(k8s_service._wait_for_sandbox_ready(
+        "test-sandbox-id", timeout_seconds=60, poll_interval_seconds=1,
+    ))
+    try:
+        await asyncio.wait_for(pending_seen.wait(), timeout=1)
+        assert callback is not None
+        if notification != "during_read":
+            def dispatch():
+                if notification == "burst":
+                    callback("MODIFIED", pending)
+                callback(notification if notification in ("ADDED", "SYNC", "DELETED") else "MODIFIED", event)
+            await asyncio.to_thread(dispatch)
+        result = await asyncio.wait_for(task, timeout=0.5)
+        direct_event = notification in ("MODIFIED", "ADDED", "SYNC", "burst")
+        assert result is (event if direct_event else ready)
+        assert provider.get_workload.call_count == (1 if direct_event else 2)
+        unsubscribe.assert_called_once_with()
+        callback("MODIFIED", event)  # Late delivery after cleanup is harmless.
+        await asyncio.sleep(0)
+        assert provider.get_workload.call_count == (1 if direct_event else 2)
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subscription", ["supported", "unsupported", "failed"])
+async def test_create_wait_falls_back_without_notifications(k8s_service, mock_workload, subscription):
+    provider = k8s_service.workload_provider
+    unsubscribe = MagicMock()
+    provider.subscribe_workload.return_value = unsubscribe if subscription == "supported" else None
+    if subscription == "failed":
+        provider.subscribe_workload.side_effect = RuntimeError("watch unavailable")
+    provider.get_workload.return_value = mock_workload
+    provider.get_status.side_effect = [
+        {"state": "Pending", "reason": "", "message": "pending"},
+        {"state": "Running", "reason": "", "message": "ready"},
+    ]
+    result = await asyncio.wait_for(k8s_service._wait_for_sandbox_ready(
+        "test-sandbox-id", timeout_seconds=10, poll_interval_seconds=0.01,
+    ), timeout=1)
+    assert result == mock_workload
+    if subscription == "supported":
+        unsubscribe.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["ready", "failed", "timeout", "pool_timeout", "cancelled"])
+async def test_create_wait_cleans_up_and_honors_deadlines(k8s_service, mock_workload, outcome):
+    provider = k8s_service.workload_provider
+    unsubscribe = MagicMock()
+    provider.subscribe_workload.return_value = unsubscribe
+    provider.get_workload.return_value = mock_workload
+    observed = asyncio.Event()
+
+    def status(workload):
+        observed.set()
+        return {
+            "state": {"ready": "Running", "failed": "Failed"}.get(outcome, "Pending"),
+            "reason": "POOL_CAPACITY_EXHAUSTED" if outcome == "pool_timeout" else "",
+            "message": "test",
+        }
+
+    provider.get_status.side_effect = status
+    task = asyncio.create_task(k8s_service._wait_for_sandbox_ready(
+        "test-sandbox-id", timeout_seconds=1 if outcome == "timeout" else 60,
+        poll_interval_seconds=30, pool_acquisition_timeout_seconds=0.02,
+    ))
+    try:
+        await asyncio.wait_for(observed.wait(), timeout=1)
+        if outcome == "cancelled":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif outcome == "ready":
+            assert await asyncio.wait_for(task, timeout=1) == mock_workload
+        else:
+            with pytest.raises(HTTPException) as exc_info:
+                await asyncio.wait_for(task, timeout=2)
+            assert exc_info.value.status_code == {"failed": 500, "timeout": 504, "pool_timeout": 429}[outcome]
+        unsubscribe.assert_called_once_with()
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task

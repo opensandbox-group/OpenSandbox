@@ -354,7 +354,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             f"Waiting for sandbox {sandbox_id} to be Running with IP (timeout: {timeout_seconds}s)"
         )
         
-        start_time = time.time()
+        start_time = time.monotonic()
         last_state = None
         last_message = None
         pool_capacity_started_at: float | None = None
@@ -366,120 +366,205 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             float(timeout_seconds),
         )
         
-        while time.time() - start_time < timeout_seconds:
-            try:
-                workload = await asyncio.to_thread(
-                    self.workload_provider.get_workload,
-                    sandbox_id=sandbox_id,
-                    namespace=self._resolve_namespace(),
+        loop = asyncio.get_running_loop()
+        changed = asyncio.Event()
+        active = True
+
+        pending_workload: Dict[str, Any] | None = None
+        reading_workload = True
+        workload_identity: tuple[str, str] | None = None
+
+        def accept_event(event_type: str, obj: Dict[str, Any], during_read: bool) -> None:
+            nonlocal pending_workload
+            if not active:
+                return
+            metadata = obj.get("metadata") or {}
+            # Never let an event overlapping a GET replace that GET's result.
+            # Deleted/replaced objects must also be resolved by a normal read.
+            pending_workload = (
+                obj
+                if not during_read and not reading_workload
+                and event_type in ("ADDED", "MODIFIED", "SYNC")
+                and metadata.get("resourceVersion")
+                and not metadata.get("deletionTimestamp")
+                and workload_identity is not None
+                and (metadata.get("name"), metadata.get("uid")) == workload_identity
+                else None
+            )
+            changed.set()
+
+        def notify(event_type: str, obj: Dict[str, Any]) -> None:
+            if active:
+                loop.call_soon_threadsafe(accept_event, event_type, obj, reading_workload)
+
+        unsubscribe = None
+        try:
+            unsubscribe = self.workload_provider.subscribe_workload(
+                sandbox_id, self._resolve_namespace(), notify
+            )
+        except Exception as exc:
+            logger.warning(f"Cannot subscribe to sandbox {sandbox_id}; using polling: {exc}")
+
+        async def wait_for_change() -> None:
+            now = time.monotonic()
+            remaining = timeout_seconds - (now - start_time)
+            if pool_capacity_started_at is not None:
+                remaining = min(
+                    remaining,
+                    effective_pool_acquisition_timeout_seconds
+                    - pool_capacity_blocked_seconds
+                    - (now - pool_capacity_started_at),
                 )
+            delay = max(0.0, min(poll_interval_seconds, remaining))
+            if unsubscribe is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
 
-                if not workload:
-                    logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
-                    await asyncio.sleep(poll_interval_seconds)
-                    continue
-                
-                status_info = _normalize_create_status(
-                    self.workload_provider.get_status(workload)
-                )
-                current_state = status_info["state"]
-                current_reason = status_info["reason"]
-                current_message = status_info["message"]
-
-                if current_state != last_state or current_message != last_message:
-                    logger.info(
-                        f"Sandbox {sandbox_id} state: {current_state} - {current_message}"
-                    )
-                    last_state = current_state
-                    last_message = current_message
-
-                if current_state in ("Running", "Allocated"):
-                    return workload
-                if _is_unschedulable_status(status_info):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail={
-                            "code": SandboxErrorCodes.INVALID_PARAMETER,
-                            "message": (
-                                f"Sandbox {sandbox_id} is unschedulable: "
-                                f"{current_message or current_reason or 'no scheduler details'}"
-                            ),
-                        },
-                    )
-                if current_state == "Failed":
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail={
-                            "code": SandboxErrorCodes.K8S_POD_FAILED,
-                            "message": (
-                                f"Sandbox {sandbox_id} failed: "
-                                f"{current_message or current_reason or 'no failure details'}"
-                            ),
-                        },
-                    )
-                if _is_quota_exhausted_status(status_info):
-                    # Quota admission rejection is terminal (controller cannot
-                    # create the Pod until quota is raised) — fail fast instead
-                    # of blind-waiting until POD_READY_TIMEOUT.
-                    raise _build_quota_exceeded_error(
-                        current_message or current_reason or "no quota details"
-                    )
-
-                now = time.time()
-                pool_capacity_exhausted = _is_pool_capacity_exhausted_status(
-                    status_info
-                )
-                if pool_capacity_exhausted:
-                    if pool_capacity_started_at is None:
-                        pool_capacity_started_at = now
-                elif pool_capacity_started_at is not None:
-                    pool_capacity_blocked_seconds += now - pool_capacity_started_at
-                    pool_capacity_started_at = None
-
-                current_pool_capacity_blocked_seconds = pool_capacity_blocked_seconds
-                if pool_capacity_started_at is not None:
-                    current_pool_capacity_blocked_seconds += (
-                        now - pool_capacity_started_at
-                    )
+        try:
+            while time.monotonic() - start_time < timeout_seconds:
                 if (
-                    current_pool_capacity_blocked_seconds
+                    pool_capacity_started_at is not None
+                    and pool_capacity_blocked_seconds
+                    + time.monotonic() - pool_capacity_started_at
                     >= effective_pool_acquisition_timeout_seconds
                 ):
-                    raise self._pool_capacity_exhausted_error(
-                        pool_acquisition_timeout_seconds
+                    raise self._pool_capacity_exhausted_error(pool_acquisition_timeout_seconds)
+                # Clear before reading so changes during the read remain observable.
+                changed.clear()
+                try:
+                    workload = pending_workload
+                    pending_workload = None
+                    if workload is None:
+                        reading_workload = True
+                        try:
+                            workload = await asyncio.to_thread(
+                                self.workload_provider.get_workload,
+                                sandbox_id=sandbox_id,
+                                namespace=self._resolve_namespace(),
+                            )
+                        finally:
+                            reading_workload = False
+                        metadata = workload.get("metadata") if isinstance(workload, dict) else None
+                        workload_identity = (
+                            (metadata["name"], metadata["uid"])
+                            if isinstance(metadata, dict) and metadata.get("name") and metadata.get("uid") else None
+                        )
+
+                    if not workload:
+                        logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
+                        await wait_for_change()
+                        continue
+
+                    status_info = _normalize_create_status(
+                        self.workload_provider.get_status(workload)
+                    )
+                    current_state = status_info["state"]
+                    current_reason = status_info["reason"]
+                    current_message = status_info["message"]
+
+                    if current_state != last_state or current_message != last_message:
+                        logger.info(
+                            f"Sandbox {sandbox_id} state: {current_state} - {current_message}"
+                        )
+                        last_state = current_state
+                        last_message = current_message
+
+                    if current_state in ("Running", "Allocated"):
+                        return workload
+                    if _is_unschedulable_status(status_info):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                                "message": (
+                                    f"Sandbox {sandbox_id} is unschedulable: "
+                                    f"{current_message or current_reason or 'no scheduler details'}"
+                                ),
+                            },
+                        )
+                    if current_state == "Failed":
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail={
+                                "code": SandboxErrorCodes.K8S_POD_FAILED,
+                                "message": (
+                                    f"Sandbox {sandbox_id} failed: "
+                                    f"{current_message or current_reason or 'no failure details'}"
+                                ),
+                            },
+                        )
+                    if _is_quota_exhausted_status(status_info):
+                        # Quota admission rejection is terminal (controller cannot
+                        # create the Pod until quota is raised) — fail fast instead
+                        # of blind-waiting until POD_READY_TIMEOUT.
+                        raise _build_quota_exceeded_error(
+                            current_message or current_reason or "no quota details"
+                        )
+
+                    now = time.monotonic()
+                    pool_capacity_exhausted = _is_pool_capacity_exhausted_status(
+                        status_info
+                    )
+                    if pool_capacity_exhausted:
+                        if pool_capacity_started_at is None:
+                            pool_capacity_started_at = now
+                    elif pool_capacity_started_at is not None:
+                        pool_capacity_blocked_seconds += now - pool_capacity_started_at
+                        pool_capacity_started_at = None
+
+                    current_pool_capacity_blocked_seconds = pool_capacity_blocked_seconds
+                    if pool_capacity_started_at is not None:
+                        current_pool_capacity_blocked_seconds += (
+                            now - pool_capacity_started_at
+                        )
+                    if (
+                        current_pool_capacity_blocked_seconds
+                        >= effective_pool_acquisition_timeout_seconds
+                    ):
+                        raise self._pool_capacity_exhausted_error(
+                            pool_acquisition_timeout_seconds
+                        )
+
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"Error checking sandbox {sandbox_id} status: {e}",
+                        exc_info=True
                     )
 
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.warning(
-                    f"Error checking sandbox {sandbox_id} status: {e}",
-                    exc_info=True
+                await wait_for_change()
+
+            end_time = time.monotonic()
+            elapsed = end_time - start_time
+            if pool_capacity_started_at is not None:
+                pool_capacity_blocked_seconds += end_time - pool_capacity_started_at
+            if (
+                pool_capacity_blocked_seconds
+                >= effective_pool_acquisition_timeout_seconds
+            ):
+                raise self._pool_capacity_exhausted_error(
+                    pool_acquisition_timeout_seconds
                 )
-
-            await asyncio.sleep(poll_interval_seconds)
-
-        end_time = time.time()
-        elapsed = end_time - start_time
-        if pool_capacity_started_at is not None:
-            pool_capacity_blocked_seconds += end_time - pool_capacity_started_at
-        if (
-            pool_capacity_blocked_seconds
-            >= effective_pool_acquisition_timeout_seconds
-        ):
-            raise self._pool_capacity_exhausted_error(
-                pool_acquisition_timeout_seconds
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POD_READY_TIMEOUT,
+                    "message": (
+                        f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
+                        f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
+                    ),
+                },
             )
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail={
-                "code": SandboxErrorCodes.K8S_POD_READY_TIMEOUT,
-                "message": (
-                    f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
-                    f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
-                ),
-            },
-        )
+
+        finally:
+            active = False
+            if unsubscribe is not None:
+                unsubscribe()
 
     @staticmethod
     def _pool_capacity_exhausted_error(

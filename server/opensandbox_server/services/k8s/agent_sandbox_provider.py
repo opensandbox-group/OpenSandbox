@@ -20,7 +20,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 
 from opensandbox_server.config import AppConfig
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
@@ -348,6 +348,18 @@ class AgentSandboxProvider(WorkloadProvider):
         )
 
         return pod_spec
+
+    def subscribe_workload(
+        self, sandbox_id: str, namespace: str, callback: Callable[[str, Dict[str, Any]], None]
+    ) -> Optional[Callable[[], None]]:
+        return self.k8s_client.subscribe_custom_objects(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            names=self._resource_name_candidates(sandbox_id),
+            callback=callback,
+        )
 
     def get_workload(self, sandbox_id: str, namespace: str) -> Optional[Dict[str, Any]]:
         """Get Sandbox CRD by sandbox ID, trying all candidate resource names."""

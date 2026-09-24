@@ -596,3 +596,76 @@ class TestWorkloadInformerEventHandlers:
         informer._dispatch_event("ADDED", {"metadata": {"name": "snap-1"}})
 
         assert seen == ["ADDED"]
+
+
+@pytest.mark.parametrize("event_type", ["ADDED", "MODIFIED", "DELETED", "SYNC"])
+def test_named_subscriptions_are_isolated_and_removable(event_type):
+    informer = _make_informer(list_fn=MagicMock(return_value=_list_response("alpha")))
+    alpha, beta, second_alpha = MagicMock(), MagicMock(), MagicMock()
+    unsubscribe = informer.subscribe(["alpha", "alpha"], alpha)
+    remove_second = informer.subscribe(["alpha"], second_alpha)
+    remove_beta = informer.subscribe(["beta"], beta)
+
+    def dispatch():
+        if event_type == "SYNC":
+            informer._full_resync()
+        else:
+            informer._handle_event({
+                "type": event_type,
+                "object": {"metadata": {"name": "alpha", "resourceVersion": "2"}},
+            })
+
+    dispatch()
+    assert alpha.call_count == 1
+    assert second_alpha.call_count == 1
+    assert alpha.call_args.args[0] == event_type
+    assert alpha.call_args.args[1]["metadata"]["name"] == "alpha"
+    beta.assert_not_called()
+    unsubscribe()
+    unsubscribe()
+    dispatch()
+    assert alpha.call_count == 1
+    assert second_alpha.call_count == 2
+    remove_second()
+    remove_beta()
+    assert informer._subscribers == {}
+
+
+def test_subscriber_can_read_updated_cache_and_unregister():
+    informer = _make_informer(list_fn=MagicMock(return_value=_list_response("alpha")))
+    informer._full_resync()
+    observed = []
+
+    def callback(event_type, obj):
+        observed.append(informer.get_if_synced("alpha"))
+        unsubscribe()
+
+    unsubscribe = informer.subscribe(["alpha"], callback)
+    obj = {"metadata": {"name": "alpha", "resourceVersion": "2"}}
+    informer._handle_event({"type": "MODIFIED", "object": obj})
+    assert observed == [obj]
+    assert informer._subscribers == {}
+
+
+def test_subscriber_failure_does_not_block_other_waiters():
+    informer = _make_informer()
+    informer.subscribe(["alpha"], MagicMock(side_effect=RuntimeError("closed loop")))
+    callback = MagicMock()
+    informer.subscribe(["alpha"], callback)
+    informer._handle_event({
+        "type": "MODIFIED",
+        "object": {"metadata": {"name": "alpha", "resourceVersion": "2"}},
+    })
+    callback.assert_called_once_with("MODIFIED", {"metadata": {"name": "alpha", "resourceVersion": "2"}})
+
+
+def test_subscriber_receives_object_while_cache_is_invalid():
+    informer = _make_informer(list_fn=MagicMock(return_value=_list_response("alpha")))
+    informer._full_resync()
+    informer.invalidate()
+    callback = MagicMock()
+    informer.subscribe(["alpha"], callback)
+    obj = {"metadata": {"name": "alpha", "uid": "uid-1", "resourceVersion": "2"}}
+    informer._handle_event({"type": "MODIFIED", "object": obj})
+    callback.assert_called_once_with("MODIFIED", obj)
+    assert informer.get_if_synced("alpha") is None

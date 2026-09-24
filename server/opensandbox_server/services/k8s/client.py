@@ -20,7 +20,7 @@ operations. All API access goes through this class.
 import logging
 import threading
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Callable, Any, Dict, List, Optional, Tuple
 
 from kubernetes import client, config
 from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api, V1APIResourceList
@@ -167,6 +167,21 @@ class K8sClient:
         """
         return self._get_informer(group, version, plural, namespace, event_handler)
 
+
+    def subscribe_custom_objects(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        names: List[str],
+        callback: Callable[[str, Dict[str, Any]], None],
+    ) -> Optional[Callable[[], None]]:
+        """Reuse the shared informer to notify a waiter about named resources."""
+        informer = self._get_informer(group, version, plural, namespace)
+        if informer is None:
+            return None
+        return informer.subscribe(names, callback)
 
     def create_custom_object(
         self,

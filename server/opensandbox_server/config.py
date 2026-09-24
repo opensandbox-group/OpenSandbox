@@ -733,7 +733,7 @@ class KubernetesRuntimeConfig(BaseModel):
     sandbox_create_poll_interval_seconds: float = Field(
         default=1.0,
         gt=0,
-        description="Polling interval in seconds when waiting for a sandbox to become ready after creation.",
+        description="Fallback status-check interval in seconds when no workload change notification arrives during creation.",
     )
     execd_init_resources: Optional["ExecdInitResources"] = Field(
         default=None,

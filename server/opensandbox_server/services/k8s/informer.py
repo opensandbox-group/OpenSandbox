@@ -69,6 +69,8 @@ class WorkloadInformer:
             [event_handler] if event_handler is not None else []
         )
 
+        self._subscribers: Dict[str, List[Callable[[str, Dict[str, Any]], None]]] = {}
+
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._resource_version: Optional[str] = None
@@ -133,6 +135,30 @@ class WorkloadInformer:
         with self._lock:
             if event_handler not in self._event_handlers:
                 self._event_handlers.append(event_handler)
+
+    def subscribe(self, names: List[str], callback: Callable[[str, Dict[str, Any]], None]) -> Callable[[], None]:
+        """Subscribe to named resource changes; return an idempotent unsubscribe."""
+        names = list(dict.fromkeys(names))
+        with self._lock:
+            for name in names:
+                self._subscribers.setdefault(name, []).append(callback)
+
+        subscribed = True
+
+        def unsubscribe() -> None:
+            nonlocal subscribed
+            with self._lock:
+                if not subscribed:
+                    return
+                subscribed = False
+                for name in names:
+                    callbacks = self._subscribers.get(name, [])
+                    if callback in callbacks:
+                        callbacks.remove(callback)
+                    if not callbacks:
+                        self._subscribers.pop(name, None)
+
+        return unsubscribe
 
     def invalidate(self) -> None:
         """Make the published cache unavailable after a successful direct mutation.
@@ -230,7 +256,7 @@ class WorkloadInformer:
 
         # React to the snapshot outside the lock: a LIST reconciles objects
         # that changed while no watch was connected (startup, reconnect).
-        if self._event_handlers:
+        if self._event_handlers or self._subscribers:
             for item in new_cache.values():
                 self._dispatch_event("SYNC", item)
         return True
@@ -300,8 +326,15 @@ class WorkloadInformer:
         """Invoke the reactor callbacks; handler failures never kill the watch."""
         with self._lock:
             handlers = tuple(self._event_handlers)
+            callbacks = tuple(self._subscribers.get(obj.get("metadata", {}).get("name"), ()))
         for handler in handlers:
             try:
                 handler(event_type or "", obj)
             except Exception as exc:  # noqa: BLE001 - isolation by design
                 logger.warning(f"Informer event handler failed: {exc}", exc_info=True)
+
+        for callback in callbacks:
+            try:
+                callback(event_type or "", obj)
+            except Exception as exc:  # noqa: BLE001 - isolation by design
+                logger.warning(f"Informer subscriber failed: {exc}", exc_info=True)

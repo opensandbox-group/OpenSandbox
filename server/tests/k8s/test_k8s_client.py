@@ -652,3 +652,50 @@ class TestK8sClient:
         c._read_limiter = mock_limiter
         c.read_runtime_class("gvisor")
         mock_limiter.acquire.assert_called_once()
+
+
+@pytest.mark.parametrize("provider_kind", ["batchsandbox", "agent-sandbox"])
+def test_provider_subscriptions_share_watch_and_respect_namespaces(k8s_runtime_config, provider_kind):
+    from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+    from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+    with patch("kubernetes.config.load_kube_config"), patch(
+        "opensandbox_server.services.k8s.client.WorkloadInformer", WorkloadInformer
+    ), patch.object(WorkloadInformer, "start") as start:
+        client = K8sClient(k8s_runtime_config)
+        provider = (BatchSandboxProvider if provider_kind == "batchsandbox" else AgentSandboxProvider)(client)
+        sandbox_id = "123-test"
+        names = [sandbox_id, "sandbox-123-test"]
+        first, second, other_namespace = MagicMock(), MagicMock(), MagicMock()
+        remove_first = provider.subscribe_workload(sandbox_id, "ns-a", first)
+        remove_second = provider.subscribe_workload(sandbox_id, "ns-a", second)
+        remove_other = provider.subscribe_workload(sandbox_id, "ns-b", other_namespace)
+        assert start.call_count == 2  # One watch per namespace, not per request.
+        informer = client._lookup_informer(provider.group, provider.version, provider.plural, "ns-a")
+        assert informer is not None
+        for name in names:
+            informer._handle_event({
+                "type": "MODIFIED",
+                "object": {"metadata": {"name": name, "resourceVersion": "2"}},
+            })
+        first.assert_called_with("MODIFIED", {"metadata": {"name": names[-1], "resourceVersion": "2"}})
+        assert first.call_count == 2
+        assert second.call_count == 2
+        other_namespace.assert_not_called()
+        assert remove_first is not None and remove_second is not None and remove_other is not None
+        remove_first()
+        remove_second()
+        remove_other()
+        assert informer._subscribers == {}
+        client.stop_informers()
+
+
+def test_subscribe_returns_none_if_informer_cannot_start(k8s_runtime_config):
+    with patch("kubernetes.config.load_kube_config"), patch(
+        "opensandbox_server.services.k8s.client.WorkloadInformer", WorkloadInformer
+    ), patch.object(
+        WorkloadInformer, "start", side_effect=RuntimeError("cannot start")
+    ):
+        client = K8sClient(k8s_runtime_config)
+        assert client.subscribe_custom_objects("group", "v1", "ns", "items", ["name"], MagicMock()) is None
+        assert client._informers == {}
