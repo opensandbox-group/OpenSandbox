@@ -81,8 +81,6 @@ mkdir -p -- "$parent" "$target"
 # Serialize helpers using the same backing directory; noclobber also prevents reuse.
 exec 9>>"$parent/.fast-sandbox-state-root.lock"
 flock -n 9 || die "another setup is running in $parent"
-exec 8<"$target"
-flock -n 8 || die "another setup is using $target"
 mountpoint -q -- "$target" && die "target is already mounted: $target"
 [[ -z $(find "$target" -mindepth 1 -maxdepth 1 -print -quit) ]] || die "target is not empty: $target"
 (set -o noclobber; : > "$backing") || die "refusing to overwrite $backing"

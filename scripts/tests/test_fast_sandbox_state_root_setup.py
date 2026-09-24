@@ -173,17 +173,14 @@ class StateRootSetupTest(unittest.TestCase):
         self.assertNotIn("cp", [op[0] for op in self.operations()])
 
     @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "requires root; disk operations are stubbed")
-    def test_locked_target_is_not_formatted(self):
+    def test_locked_parent_is_not_formatted(self):
         import fcntl
 
-        self.target.mkdir()
-        fd = os.open(self.target, os.O_RDONLY)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.assert_rejected("another setup is using", dry_run=False)
+        lock_path = self.backing.parent / ".fast-sandbox-state-root.lock"
+        with lock_path.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assert_rejected("another setup is running", dry_run=False)
             self.assertFalse(self.backing.exists())
-        finally:
-            os.close(fd)
 
 
 if __name__ == "__main__":
