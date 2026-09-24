@@ -23,7 +23,7 @@ spec:
   type: {{ .Values.server.service.type }}
   ports:
     - port: 80
-      targetPort: 8080
+      targetPort: http
       protocol: TCP
       name: http
       {{- if and .Values.server.service.nodePort (ne .Values.server.service.type "ClusterIP") }}
