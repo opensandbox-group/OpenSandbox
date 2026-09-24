@@ -49,6 +49,8 @@ class TestRootCLI:
         result = runner.invoke(cli, ["--help"])
         for cmd in (
             "sandbox",
+            "template",
+            "snapshot",
             "command",
             "file",
             "egress",
@@ -81,6 +83,20 @@ class TestSandboxHelp:
         result = runner.invoke(cli, ["sandbox", subcmd, "--help"])
         assert result.exit_code == 0
         assert subcmd in result.output.lower() or "usage" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Template & snapshot sub-commands
+# ---------------------------------------------------------------------------
+
+
+class TestTemplateAndSnapshotHelp:
+    @pytest.mark.parametrize("group", ["template", "snapshot"])
+    def test_group_help_lists_subcommands(self, runner: CliRunner, group: str) -> None:
+        result = runner.invoke(cli, [group, "--help"])
+        assert result.exit_code == 0
+        for subcmd in ("create", "get", "list", "delete"):
+            assert subcmd in result.output
 
 
 # ---------------------------------------------------------------------------

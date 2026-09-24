@@ -3,6 +3,7 @@
 `osb` is the command-line interface for OpenSandbox. It is built for the common day-to-day flows:
 
 - create and manage sandboxes
+- build golden-image templates and create sandboxes from templates or snapshots
 - run commands inside a sandbox
 - read and modify sandbox files
 - inspect runtime egress policy
@@ -153,6 +154,55 @@ Create with Credential Vault proxy enabled:
 
 ```bash
 osb sandbox create --image python:3.12 --network-policy-file network-policy.json --credential-proxy -o json
+```
+
+Create from a template (golden image):
+
+```bash
+osb sandbox create --template <template-id> --timeout 30m -o json
+```
+
+Template mode fixes the workload shape on the server: `--image`, `--env`,
+`--resource`, `--entrypoint`, `--volumes-file`, and `--credential-proxy` cannot
+be combined with `--template`. Only `--timeout` (required), `--metadata`,
+`--extension`, and `--network-policy-file` may accompany it. Only templates in
+the `Succeeded` phase can be used. See [Manage templates](#manage-templates).
+
+Create from a snapshot:
+
+```bash
+osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
+```
+
+`--image`, `--template`, and `--snapshot-id` are mutually exclusive.
+
+### Manage templates
+
+Templates are golden-image builds; the build runs asynchronously, so poll
+`template get` until the status phase is `Succeeded`. Template management
+requires a Kubernetes-backed runtime.
+
+```bash
+osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template get <template-id> -o json
+osb template list -o json
+osb template delete <template-id> -o json
+```
+
+`template create` also accepts `--resource cpu=1 memory=512Mi disk=2Gi`,
+`--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata
+KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe`, and
+`--warmup-seconds`.
+
+### Manage snapshots
+
+Snapshots capture a sandbox's state and can back new sandboxes.
+
+```bash
+osb snapshot create <sandbox-id> --name golden -o json
+osb snapshot get <snapshot-id> -o json
+osb snapshot list --sandbox-id <sandbox-id> -o json
+osb snapshot delete <snapshot-id> -o json
 ```
 
 ### List and inspect sandboxes
@@ -329,6 +379,8 @@ Not every command supports every format. Use `--help` on the specific command wh
 The main command groups are:
 
 - `osb sandbox`: lifecycle management
+- `osb template`: golden-image template builds
+- `osb snapshot`: snapshot management
 - `osb command`: command execution and persistent sessions
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
@@ -341,6 +393,8 @@ Explore them directly:
 
 ```bash
 osb sandbox --help
+osb template --help
+osb snapshot --help
 osb command --help
 osb file --help
 osb skills --help

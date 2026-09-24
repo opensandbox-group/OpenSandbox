@@ -93,6 +93,17 @@ def _normalize_sandbox_states(states: tuple[str, ...]) -> list[str] | None:
     help="Registry password or token for pulling a private image.",
 )
 @click.option(
+    "--template",
+    default=None,
+    help="Template ID (tpl_...) of a Succeeded template to create the sandbox from. Mutually exclusive with --image and --snapshot-id.",
+)
+@click.option(
+    "--snapshot-id",
+    "snapshot_id",
+    default=None,
+    help="Snapshot ID to restore the sandbox from. Mutually exclusive with --image and --template.",
+)
+@click.option(
     "--timeout",
     "-t",
     "timeout_raw",
@@ -127,6 +138,8 @@ def sandbox_create(
     image: str | None,
     image_auth_username: str | None,
     image_auth_password: str | None,
+    template: str | None,
+    snapshot_id: str | None,
     timeout_raw: str | None,
     envs: tuple[tuple[str, str], ...],
     metadata_kv: tuple[tuple[str, str], ...],
@@ -140,16 +153,48 @@ def sandbox_create(
     ready_timeout: timedelta | None,
     output_format: str | None,
 ) -> None:
-    """Create a new sandbox."""
+    """Create a new sandbox from an image, a template, or a snapshot."""
     from opensandbox.sync.sandbox import SandboxSync
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
 
-    if image is None:
-        image = obj.resolved_config.get("default_image")
-    if not image:
-        raise click.ClickException(
-            "Sandbox image is required. Pass --image or set defaults.image in the CLI config."
-        )
+    if template and snapshot_id:
+        raise click.ClickException("--template and --snapshot-id are mutually exclusive.")
+
+    if template:
+        conflicts: list[str] = []
+        if image is not None:
+            conflicts.append("--image")
+        if image_auth_username or image_auth_password:
+            conflicts.append("--image-auth-username/--image-auth-password")
+        if envs:
+            conflicts.append("--env")
+        if resources_kv:
+            conflicts.append("--resource")
+        if entrypoint:
+            conflicts.append("--entrypoint")
+        if volumes_file:
+            conflicts.append("--volumes-file")
+        if credential_proxy:
+            conflicts.append("--credential-proxy")
+        if conflicts:
+            raise click.ClickException(
+                "Template mode fixes the workload shape on the server; "
+                f"{', '.join(conflicts)} cannot be combined with --template."
+            )
+    elif snapshot_id:
+        if image is not None:
+            raise click.ClickException("--snapshot-id and --image are mutually exclusive.")
+        if image_auth_username or image_auth_password:
+            raise click.ClickException(
+                "--snapshot-id cannot be combined with image auth options."
+            )
+    else:
+        if image is None:
+            image = obj.resolved_config.get("default_image")
+        if not image:
+            raise click.ClickException(
+                "Sandbox image is required. Pass --image or set defaults.image in the CLI config."
+            )
 
     if bool(image_auth_username) != bool(image_auth_password):
         raise click.ClickException(
@@ -174,59 +219,114 @@ def sandbox_create(
             timeout = parse_nullable_duration(default_timeout)
             timeout_is_set = True
 
-    image_spec: SandboxImageSpec | str = image
-    if image_auth_username and image_auth_password:
-        image_spec = SandboxImageSpec(
-            image=image,
-            auth=SandboxImageAuth(
-                username=image_auth_username,
-                password=image_auth_password,
-            ),
+    if template and not timeout_is_set:
+        raise click.ClickException(
+            "--timeout is required when creating a sandbox from a template (e.g. --timeout 30m)."
         )
 
-    kwargs: dict = {
-        "connection_config": obj.connection_config,
-        "skip_health_check": skip_health_check,
+    with obj.output.spinner("Creating sandbox..."):
+        if template:
+            if timeout is None:
+                raise click.ClickException(
+                    "--timeout none (manual cleanup) is not supported in template mode."
+                )
+            sandbox = SandboxSync.create_from_template(
+                template,
+                timeout=timeout,
+                connection_config=obj.connection_config,
+                skip_health_check=skip_health_check,
+                **_template_optional_kwargs(
+                    ready_timeout=ready_timeout,
+                    metadata_kv=metadata_kv,
+                    extensions_kv=extensions_kv,
+                    network_policy_file=network_policy_file,
+                ),
+            )
+        else:
+            image_spec: SandboxImageSpec | str | None = image
+            if image_auth_username and image_auth_password:
+                image_spec = SandboxImageSpec(
+                    image=image,
+                    auth=SandboxImageAuth(
+                        username=image_auth_username,
+                        password=image_auth_password,
+                    ),
+                )
+            kwargs: dict = {
+                "connection_config": obj.connection_config,
+                "skip_health_check": skip_health_check,
+            }
+            if snapshot_id:
+                kwargs["snapshot_id"] = snapshot_id
+            if timeout_is_set:
+                kwargs["timeout"] = timeout
+            if ready_timeout is not None:
+                kwargs["ready_timeout"] = ready_timeout
+            if envs:
+                kwargs["env"] = dict(envs)
+            if metadata_kv:
+                kwargs["metadata"] = dict(metadata_kv)
+            if extensions_kv:
+                kwargs["extensions"] = dict(extensions_kv)
+            if resources_kv:
+                kwargs["resource"] = dict(resources_kv)
+            if entrypoint:
+                kwargs["entrypoint"] = list(entrypoint)
+            if network_policy_file:
+                kwargs["network_policy"] = _load_network_policy(network_policy_file)
+            if credential_proxy:
+                kwargs["credential_proxy"] = CredentialProxyConfig(enabled=True)
+            if volumes_file:
+                with open(volumes_file) as f:
+                    raw_volumes = json.load(f)
+                if not isinstance(raw_volumes, list):
+                    raise click.ClickException(
+                        f"Volumes file must contain a JSON array, got {type(raw_volumes).__name__}."
+                    )
+                kwargs["volumes"] = [Volume(**item) for item in raw_volumes]
+
+            sandbox = SandboxSync.create(image_spec, **kwargs)
+
+    details: dict[str, Any] = {
+        "id": sandbox.id,
+        "status": "created",
+        "timeout": _describe_create_timeout(timeout_is_set, timeout),
     }
-    if timeout_is_set:
-        kwargs["timeout"] = timeout
+    if template:
+        details["template"] = template
+    elif snapshot_id:
+        details["snapshot_id"] = snapshot_id
+    else:
+        details["image"] = image
+    obj.output.success_panel(
+        details,
+        title="Sandbox Created",
+    )
+
+
+def _load_network_policy(path: str) -> NetworkPolicy:
+    with open(path) as f:
+        return NetworkPolicy(**json.load(f))
+
+
+def _template_optional_kwargs(
+    *,
+    ready_timeout: timedelta | None,
+    metadata_kv: tuple[tuple[str, str], ...],
+    extensions_kv: tuple[tuple[str, str], ...],
+    network_policy_file: str | None,
+) -> dict:
+    """Build the optional keyword arguments accepted in template mode."""
+    kwargs: dict = {}
     if ready_timeout is not None:
         kwargs["ready_timeout"] = ready_timeout
-    if envs:
-        kwargs["env"] = dict(envs)
     if metadata_kv:
         kwargs["metadata"] = dict(metadata_kv)
     if extensions_kv:
         kwargs["extensions"] = dict(extensions_kv)
-    if resources_kv:
-        kwargs["resource"] = dict(resources_kv)
-    if entrypoint:
-        kwargs["entrypoint"] = list(entrypoint)
     if network_policy_file:
-        with open(network_policy_file) as f:
-            kwargs["network_policy"] = NetworkPolicy(**json.load(f))
-    if credential_proxy:
-        kwargs["credential_proxy"] = CredentialProxyConfig(enabled=True)
-    if volumes_file:
-        with open(volumes_file) as f:
-            raw_volumes = json.load(f)
-        if not isinstance(raw_volumes, list):
-            raise click.ClickException(
-                f"Volumes file must contain a JSON array, got {type(raw_volumes).__name__}."
-            )
-        kwargs["volumes"] = [Volume(**item) for item in raw_volumes]
-
-    with obj.output.spinner("Creating sandbox..."):
-        sandbox = SandboxSync.create(image_spec, **kwargs)
-    obj.output.success_panel(
-        {
-            "id": sandbox.id,
-            "image": image,
-            "status": "created",
-            "timeout": _describe_create_timeout(timeout_is_set, timeout),
-        },
-        title="Sandbox Created",
-    )
+        kwargs["network_policy"] = _load_network_policy(network_policy_file)
+    return kwargs
 
 
 # ---- list -----------------------------------------------------------------

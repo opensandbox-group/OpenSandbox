@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -31,7 +31,19 @@ import pytest
 from click.testing import CliRunner
 from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.diagnostics import DiagnosticContent
-from opensandbox.models.sandboxes import SandboxImageSpec
+from opensandbox.models.sandboxes import (
+    PagedSnapshotInfos,
+    PaginationInfo,
+    SandboxImageSpec,
+    SnapshotInfo,
+    SnapshotStatus,
+)
+from opensandbox.models.templates import (
+    CreateTemplateRequest,
+    PagedTemplateInfos,
+    TemplateInfo,
+    TemplateStatus,
+)
 
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
@@ -556,6 +568,205 @@ class TestSandboxCreate:
 
         assert result.exit_code != 0
         assert "--credential-proxy requires --network-policy-file" in result.output
+
+    def test_create_from_template_calls_sdk(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-tpl"
+        policy_path = tmp_path / "network-policy.json"
+        policy_path.write_text(json.dumps({
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "api.example.com"}],
+        }))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create_from_template", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                [
+                    "sandbox",
+                    "create",
+                    "-o",
+                    "json",
+                    "--template",
+                    "tpl_abc",
+                    "--timeout",
+                    "30m",
+                    "--metadata",
+                    "team=infra",
+                    "--extension",
+                    "storage.id=abc123",
+                    "--network-policy-file",
+                    str(policy_path),
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        mock_create.assert_called_once()
+        assert mock_create.call_args.args[0] == "tpl_abc"
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["timeout"].total_seconds() == 1800
+        assert kwargs["metadata"] == {"team": "infra"}
+        assert kwargs["extensions"] == {"storage.id": "abc123"}
+        assert kwargs["network_policy"].egress[0].target == "api.example.com"
+        data = json.loads(result.output)
+        assert data["template"] == "tpl_abc"
+
+    def test_create_from_template_requires_timeout(self, runner: CliRunner) -> None:
+        result = _invoke(runner, ["sandbox", "create", "--template", "tpl_abc"])
+        assert result.exit_code != 0
+        assert "--timeout is required" in result.output
+
+    def test_create_from_snapshot_calls_sdk(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-snap"
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "--snapshot-id", "snap-1", "--timeout", "10m"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert mock_create.call_args.args[0] is None
+        assert mock_create.call_args.kwargs["snapshot_id"] == "snap-1"
+        data = json.loads(result.output)
+        assert data["snapshot_id"] == "snap-1"
+
+
+def _make_template_info(phase: str = "Pending") -> TemplateInfo:
+    return TemplateInfo(
+        template_id="tpl_abc",
+        image="python:3.12",
+        publish="s3://bucket/publish",
+        format="overlaybd",
+        status=TemplateStatus(phase=phase),
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+class TestTemplateCommands:
+    def test_create_builds_request(self, runner: CliRunner) -> None:
+        mock_mgr = MagicMock()
+        mock_mgr.create_template.return_value = _make_template_info()
+
+        result = _invoke(
+            runner,
+            [
+                "template",
+                "create",
+                "--image",
+                "python:3.12",
+                "--publish",
+                "s3://bucket/publish",
+                "--resource",
+                "cpu=1",
+                "--entrypoint",
+                "python",
+                "--env",
+                "FOO=bar",
+                "--metadata",
+                "team=infra",
+                "--readiness-probe",
+                "tcp://127.0.0.1:44772",
+                "-o",
+                "json",
+            ],
+            manager=mock_mgr,
+        )
+
+        assert result.exit_code == 0
+        req = mock_mgr.create_template.call_args.args[0]
+        assert isinstance(req, CreateTemplateRequest)
+        assert req.image == "python:3.12"
+        assert req.publish == "s3://bucket/publish"
+        assert req.resource_limits == {"cpu": "1"}
+        assert req.entrypoint == ["python"]
+        assert req.env == {"FOO": "bar"}
+        assert req.metadata == {"team": "infra"}
+        assert req.readiness is not None
+        assert req.readiness.probe == "tcp://127.0.0.1:44772"
+        data = json.loads(result.output)
+        assert data["template_id"] == "tpl_abc"
+
+    def test_get_list_delete_use_manager(self, runner: CliRunner) -> None:
+        mock_mgr = MagicMock()
+        mock_mgr.get_template.return_value = _make_template_info()
+        mock_mgr.list_templates.return_value = PagedTemplateInfos(
+            template_infos=[_make_template_info()],
+            pagination=PaginationInfo(
+                page=1, page_size=20, total_items=1, total_pages=1, has_next_page=False
+            ),
+        )
+
+        assert _invoke(runner, ["template", "get", "tpl_abc", "-o", "json"], manager=mock_mgr).exit_code == 0
+        assert _invoke(runner, ["template", "list", "-o", "json"], manager=mock_mgr).exit_code == 0
+        assert _invoke(runner, ["template", "delete", "tpl_abc"], manager=mock_mgr).exit_code == 0
+
+        mock_mgr.get_template.assert_called_once_with("tpl_abc")
+        mock_mgr.delete_template.assert_called_once_with("tpl_abc")
+        mock_mgr.list_templates.assert_called_once()
+
+
+def _make_snapshot_info(state: str = "Succeeded") -> SnapshotInfo:
+    return SnapshotInfo(
+        id="snap-1",
+        sandbox_id="sb-123",
+        name="golden",
+        status=SnapshotStatus(state=state),
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+class TestSnapshotCommands:
+    def test_create_calls_manager(self, runner: CliRunner) -> None:
+        mock_mgr = MagicMock()
+        mock_mgr.create_snapshot.return_value = _make_snapshot_info()
+
+        result = _invoke(
+            runner,
+            ["snapshot", "create", "sb-123", "--name", "golden", "-o", "json"],
+            manager=mock_mgr,
+        )
+
+        assert result.exit_code == 0
+        mock_mgr.create_snapshot.assert_called_once_with("sb-123", name="golden")
+        data = json.loads(result.output)
+        assert data["id"] == "snap-1"
+
+    def test_get_list_delete_use_manager(self, runner: CliRunner) -> None:
+        mock_mgr = MagicMock()
+        mock_mgr.get_snapshot.return_value = _make_snapshot_info()
+        mock_mgr.list_snapshots.return_value = PagedSnapshotInfos(
+            snapshot_infos=[_make_snapshot_info()],
+            pagination=PaginationInfo(
+                page=1, page_size=20, total_items=1, total_pages=1, has_next_page=False
+            ),
+        )
+
+        assert _invoke(runner, ["snapshot", "get", "snap-1", "-o", "json"], manager=mock_mgr).exit_code == 0
+        assert _invoke(
+            runner,
+            ["snapshot", "list", "--sandbox-id", "sb-123", "-o", "json"],
+            manager=mock_mgr,
+        ).exit_code == 0
+        assert _invoke(runner, ["snapshot", "delete", "snap-1"], manager=mock_mgr).exit_code == 0
+
+        mock_mgr.get_snapshot.assert_called_once_with("snap-1")
+        mock_mgr.delete_snapshot.assert_called_once_with("snap-1")
+        filt = mock_mgr.list_snapshots.call_args.args[0]
+        assert filt.sandbox_id == "sb-123"
 
 
 class TestSandboxKill:

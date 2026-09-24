@@ -595,15 +595,21 @@ class TestSkillCliAlignment:
         resume_cmd = _command(["sandbox", "resume"])
         endpoint_cmd = _command(["sandbox", "endpoint"])
         metrics_cmd = _command(["sandbox", "metrics"])
+        template_group = _command(["template"])
+        snapshot_group = _command(["snapshot"])
 
         assert {
             "-i", "--image", "-t", "--timeout", "--entrypoint", "--network-policy-file",
             "--credential-proxy", "--volumes-file", "--skip-health-check",
-            "--ready-timeout", "-o", "--output",
+            "--ready-timeout", "--template", "--snapshot-id", "-o", "--output",
         } <= _option_names(create_cmd)
         assert {"--skip-health-check", "--resume-timeout", "-o", "--output"} <= _option_names(resume_cmd)
         assert {"-p", "--port", "-o", "--output"} <= _option_names(endpoint_cmd)
         assert {"--watch", "-o", "--output"} <= _option_names(metrics_cmd)
+        assert isinstance(template_group, Group)
+        assert {"create", "get", "list", "delete"} <= set(template_group.commands)
+        assert isinstance(snapshot_group, Group)
+        assert {"create", "get", "list", "delete"} <= set(snapshot_group.commands)
 
     def test_file_operations_skill_matches_file_cli(self) -> None:
         expected_subcommands = {

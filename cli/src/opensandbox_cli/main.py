@@ -32,6 +32,8 @@ from opensandbox_cli.commands.egress import egress_group
 from opensandbox_cli.commands.file import file_group
 from opensandbox_cli.commands.sandbox import sandbox_group
 from opensandbox_cli.commands.skills import skills_group
+from opensandbox_cli.commands.snapshot import snapshot_group
+from opensandbox_cli.commands.template import template_group
 from opensandbox_cli.config import resolve_config
 
 # ---------------------------------------------------------------------------
@@ -132,6 +134,8 @@ def cli(
 
 # Register sub-command groups
 cli.add_command(sandbox_group)
+cli.add_command(template_group)
+cli.add_command(snapshot_group)
 cli.add_command(command_group)
 cli.add_command(file_group)
 cli.add_command(egress_group)

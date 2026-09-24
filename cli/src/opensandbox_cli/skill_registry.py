@@ -53,12 +53,14 @@ BUILTIN_SKILLS: dict[str, SkillSpec] = {
         package_file="opensandbox-sandbox-lifecycle.md",
         title="OpenSandbox Sandbox Lifecycle",
         summary=(
-            "Create, inspect, renew, pause, resume, and terminate sandboxes "
-            "with the right defaults and follow-up checks."
+            "Create, inspect, renew, pause, resume, and terminate sandboxes, "
+            "manage template (golden-image) builds and snapshots, with the "
+            "right defaults and follow-up checks."
         ),
         trigger_hint=(
-            "Use when the user wants to create or manage a sandbox and needs "
-            "the exact OpenSandbox CLI/API flow."
+            "Use when the user wants to create or manage a sandbox, build or "
+            "use templates, or snapshot and restore sandboxes and needs the "
+            "exact OpenSandbox CLI/API flow."
         ),
         marker_id="opensandbox-sandbox-lifecycle",
     ),

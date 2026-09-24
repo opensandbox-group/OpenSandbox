@@ -1,6 +1,6 @@
 ---
 name: sandbox-lifecycle
-description: Use OpenSandbox CLI lifecycle commands to create, inspect, verify, renew, pause, resume, expose, and terminate sandboxes. Trigger when users want help provisioning a sandbox, choosing create flags, checking runtime state, retrieving endpoints, or safely cleaning up sandboxes.
+description: Use OpenSandbox CLI lifecycle commands to create, inspect, verify, renew, pause, resume, expose, and terminate sandboxes. Also covers template (golden-image) builds and snapshot management. Trigger when users want help provisioning a sandbox, choosing create flags, creating from a template or snapshot, managing templates or snapshots, checking runtime state, retrieving endpoints, or safely cleaning up sandboxes.
 ---
 
 # OpenSandbox Sandbox Lifecycle
@@ -10,6 +10,8 @@ Use OpenSandbox lifecycle commands directly instead of giving generic container 
 ## When To Use
 
 - the user wants to create a sandbox for a task or workflow
+- the user wants to create a sandbox from a template (golden image) or restore a snapshot
+- the user wants to build, inspect, list, or delete templates
 - the user needs to inspect sandbox state or health
 - the user wants to expose a service port through an OpenSandbox endpoint
 - the user wants to renew, pause, resume, or terminate a sandbox
@@ -126,8 +128,43 @@ Use these options deliberately:
 - `--ready-timeout`: increase this when the image or workload needs more startup time
 - `--skip-health-check`: use only when the user explicitly wants object creation without waiting for readiness; do not use it to mask startup problems
 - `--credential-proxy`: enable Credential Vault transparent proxy support; requires `--network-policy-file`
+- `--template <tpl-id>`: create from a `Succeeded` template; mutually exclusive with `--image` and `--snapshot-id`; requires an explicit `--timeout`
+- `--snapshot-id <snap-id>`: restore a sandbox from a snapshot; mutually exclusive with `--image` and `--template`
 
 If the user does not specify an image, recommend one that matches the runtime they need instead of guessing silently.
+
+## Templates And Snapshots
+
+Templates are golden-image builds. The build is asynchronous: `template create` returns a template in `Pending`; poll `template get` until the phase is `Succeeded` (or `Failed`).
+
+```bash
+osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template get <template-id> -o json
+osb template list -o json
+osb template delete <template-id> -o json
+```
+
+Useful `template create` options: `--resource cpu=1 memory=512Mi disk=2Gi`, `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe tcp://127.0.0.1:44772`, `--warmup-seconds 60`.
+
+Create a sandbox from a succeeded template:
+
+```bash
+osb sandbox create --template <template-id> --timeout 30m -o json
+```
+
+Template mode fixes the workload shape on the server: `--image`, `--env`, `--resource`, `--entrypoint`, `--volumes-file`, and `--credential-proxy` cannot be combined with `--template`. Only `--timeout` (required), `--metadata`, `--extension`, and `--network-policy-file` may accompany it.
+
+Snapshots capture a running sandbox's memory and disk state and can back new sandboxes:
+
+```bash
+osb snapshot create <sandbox-id> --name golden -o json
+osb snapshot get <snapshot-id> -o json
+osb snapshot list --sandbox-id <sandbox-id> -o json
+osb snapshot delete <snapshot-id> -o json
+osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
+```
+
+Template-based creation requires a Kubernetes-backed fast-sandbox runtime; snapshot flows depend on the runtime supporting checkpoint/restore.
 
 ## JSON Shapes
 
@@ -236,6 +273,8 @@ Rules:
 - `create` without `--timeout` does not mean manual cleanup; it uses `defaults.timeout` first and otherwise leaves TTL selection to the SDK/server default
 - `pause` is asynchronous; `Pause request accepted` does not mean the sandbox is already paused
 - `pause` and `resume` may depend on the underlying runtime; if the runtime does not support them, avoid promising they will work
+- only templates in the `Succeeded` phase can back `sandbox create --template`; poll `template get` while the build is `Pending`/`Building`
+- `sandbox create --template` requires an explicit finite `--timeout`; `--timeout none` is rejected in template mode
 - host-path volumes depend on server-side allowed host path configuration
 - if creation fails or the sandbox never becomes healthy, switch to `sandbox-troubleshooting` instead of adding more create flags blindly
 
@@ -272,6 +311,23 @@ Create with network policy:
 ```bash
 osb sandbox create --image python:3.12 --network-policy-file network-policy.json -o json
 osb sandbox get <sandbox-id> -o json
+osb sandbox health <sandbox-id> -o json
+```
+
+Build a template, wait for it, and create from it:
+
+```bash
+osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template get <template-id> -o json
+osb sandbox create --template <template-id> --timeout 30m -o json
+osb sandbox health <sandbox-id> -o json
+```
+
+Snapshot a sandbox and restore it:
+
+```bash
+osb snapshot create <sandbox-id> --name golden -o json
+osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
 osb sandbox health <sandbox-id> -o json
 ```
 
