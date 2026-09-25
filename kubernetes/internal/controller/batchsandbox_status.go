@@ -333,7 +333,7 @@ func isResumeInFlight(batchSbx *sandboxv1alpha1.BatchSandbox) bool {
 
 func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
 	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
-		status.FailedPodUIDs = summary.failedPodUIDs
+		status.FailedPodUIDs = nil
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
@@ -353,10 +353,12 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	}
 	if hasFailures {
 		if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseFailed {
+			status.FailedPodUIDs = summary.failedPodUIDs
 			setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
 			// Under informer lag a resume-in-progress failure can be observed while the
 			// cached phase is not Resuming; keep the resume failure semantics anyway.
 			if isResumeInFlight(batchSbx) {
+				status.FailedPodUIDs = nil
 				setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
 			}
 			status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
@@ -384,6 +386,22 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 		)
 		return
 	}
+
+	setConditionInStatus(
+		status,
+		sandboxv1alpha1.BatchSandboxConditionPodFailed,
+		sandboxv1alpha1.ConditionFalse,
+		"",
+		"",
+	)
+
+	if status.Ready > 0 {
+		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
+		return
+	}
+
+	status.Phase = sandboxv1alpha1.BatchSandboxPhasePending
+
 }
 
 func hasTerminalPodFailureCondition(conditions []sandboxv1alpha1.BatchSandboxCondition) bool {
@@ -408,24 +426,28 @@ func hasResumeFailedCondition(conditions []sandboxv1alpha1.BatchSandboxCondition
 	return false
 }
 func hasRecoveredFailedPod(pods []*corev1.Pod, failedPodUIDs []string) bool {
-	failedUIDs := make(map[string]struct{}, len(failedPodUIDs))
-	for _, uid := range failedPodUIDs {
-		failedUIDs[uid] = struct{}{}
+	if len(failedPodUIDs) == 0 {
+		return false
 	}
 
+	podsByUID := make(map[string]*corev1.Pod, len(pods))
 	for _, pod := range pods {
-		if _, failed := failedUIDs[string(pod.UID)]; !failed {
-			continue
-		}
+		podsByUID[string(pod.UID)] = pod
+	}
 
-		if pod.DeletionTimestamp == nil &&
-			pod.Status.Phase == corev1.PodRunning &&
-			utils.IsPodReady(pod) {
-			return true
+	for _, uid := range failedPodUIDs {
+		pod, found := podsByUID[uid]
+		if !found ||
+			pod.DeletionTimestamp != nil ||
+			pod.Status.Phase != corev1.PodRunning ||
+			!utils.IsPodReady(pod) ||
+			len(pod.Status.ContainerStatuses) == 0 ||
+			pod.Status.ContainerStatuses[0].State.Running == nil {
+			return false
 		}
 	}
 
-	return false
+	return true
 }
 
 // isInitialUnallocatedSandbox returns true when the sandbox has just been created
@@ -525,7 +547,21 @@ func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox 
 	log := logf.FromContext(ctx)
 	mergedStatus := newStatus.DeepCopy()
 	mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, batchSandbox.Status.Conditions)
-	patchData, err := json.Marshal(map[string]any{"status": mergedStatus})
+	statusPatch := map[string]any{}
+	statusData, err := json.Marshal(mergedStatus)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status: %w", err)
+	}
+
+	if err := json.Unmarshal(statusData, &statusPatch); err != nil {
+		return fmt.Errorf("failed to unmarshal status: %w", err)
+	}
+
+	if mergedStatus.FailedPodUIDs == nil && batchSandbox.Status.FailedPodUIDs != nil {
+		statusPatch["failedPodUIDs"] = nil
+	}
+
+	patchData, err := json.Marshal(map[string]any{"status": statusPatch})
 	if err != nil {
 		return fmt.Errorf("failed to marshal status patch: %w", err)
 	}

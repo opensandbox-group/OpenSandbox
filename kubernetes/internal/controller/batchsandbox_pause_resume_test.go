@@ -2193,6 +2193,7 @@ func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {
 
 	view := buildRuntimeView(bs, pods)
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	assert.Empty(t, view.status.FailedPodUIDs)
 
 	var resumeFailed *sandboxv1alpha1.BatchSandboxCondition
 	var podFailed *sandboxv1alpha1.BatchSandboxCondition

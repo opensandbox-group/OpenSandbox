@@ -35,6 +35,8 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/expectations"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/fieldindex"
+
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestDeletingPodFailureAttribution(t *testing.T) {
@@ -208,4 +210,193 @@ func TestReconcileDeletingPod(t *testing.T) {
 			require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, bs.Status.Phase)
 		})
 	}
+}
+func TestHasRecoveredFailedPod(t *testing.T) {
+	makeRunningReadyPod := func(uid string, mainRunning bool) *corev1.Pod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				UID: types.UID(uid),
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "main"},
+				},
+			},
+		}
+
+		if mainRunning {
+			pod.Status.ContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{}
+		}
+
+		return pod
+	}
+	t.Run("returns false for same-name pod with different UID", func(t *testing.T) {
+		pod := makeRunningReadyPod("replacement-uid", true)
+		pod.Name = "sandbox-0"
+
+		assert.False(t, hasRecoveredFailedPod(
+			[]*corev1.Pod{pod},
+			[]string{"original-uid"},
+		))
+	})
+	t.Run("returns true when every failed pod recovered", func(t *testing.T) {
+		pods := []*corev1.Pod{
+			makeRunningReadyPod("pod-1", true),
+			makeRunningReadyPod("pod-2", true),
+		}
+
+		assert.True(t, hasRecoveredFailedPod(
+			pods,
+			[]string{"pod-1", "pod-2"},
+		))
+	})
+
+	t.Run("returns false when one failed pod is missing", func(t *testing.T) {
+		pods := []*corev1.Pod{
+			makeRunningReadyPod("pod-1", true),
+		}
+
+		assert.False(t, hasRecoveredFailedPod(
+			pods,
+			[]string{"pod-1", "pod-2"},
+		))
+	})
+
+	t.Run("returns false when main container is not running", func(t *testing.T) {
+		pods := []*corev1.Pod{
+			makeRunningReadyPod("pod-1", false),
+		}
+
+		assert.False(t, hasRecoveredFailedPod(
+			pods,
+			[]string{"pod-1"},
+		))
+	})
+
+	t.Run("returns false with no recorded failed pods", func(t *testing.T) {
+		assert.False(t, hasRecoveredFailedPod(nil, nil))
+	})
+}
+func TestUpdateStatusClearsFailedPodUIDs(t *testing.T) {
+	testEnvironment := &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+		BinaryAssetsDirectory: getFirstFoundEnvTestBinaryDir(),
+	}
+
+	config, err := testEnvironment.Start()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = testEnvironment.Stop()
+	})
+
+	ctx := context.Background()
+
+	apiClient, err := client.New(config, client.Options{Scheme: testscheme})
+	require.NoError(t, err)
+
+	batchSandbox := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "failed-pod-uids-clear-test",
+			Namespace: "default",
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			Pause:    ptr.To(false),
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "snapshot:test",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, apiClient.Create(ctx, batchSandbox))
+
+	batchSandbox.Status.FailedPodUIDs = []string{"old-pod-uid"}
+	require.NoError(t, apiClient.Status().Update(ctx, batchSandbox))
+
+	persisted := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, apiClient.Get(
+		ctx,
+		client.ObjectKeyFromObject(batchSandbox),
+		persisted,
+	))
+	require.Equal(t, []string{"old-pod-uid"}, persisted.Status.FailedPodUIDs)
+
+	r := &BatchSandboxReconciler{
+		Client:              apiClient,
+		Scheme:              testscheme,
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
+	}
+
+	newStatus := persisted.Status.DeepCopy()
+	newStatus.FailedPodUIDs = nil
+
+	require.NoError(t, r.updateStatus(ctx, persisted, newStatus))
+
+	got := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, apiClient.Get(
+		ctx,
+		client.ObjectKeyFromObject(batchSandbox),
+		got,
+	))
+
+	require.Empty(t, got.Status.FailedPodUIDs)
+}
+func TestApplySteadyRuntimePhaseRecoversFailedSandbox(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sandbox-0",
+			UID:  types.UID("failed-pod-uid"),
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "main",
+					State: corev1.ContainerState{
+						Running: &corev1.ContainerStateRunning{},
+					},
+				},
+			},
+		},
+	}
+
+	batchSandbox := &sandboxv1alpha1.BatchSandbox{
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:         sandboxv1alpha1.BatchSandboxPhaseFailed,
+			FailedPodUIDs: []string{"failed-pod-uid"},
+		},
+	}
+
+	status := batchSandbox.Status.DeepCopy()
+	status.Ready = 1
+
+	applySteadyRuntimePhase(batchSandbox, status, []*corev1.Pod{pod})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, status.Phase)
+	assert.Empty(t, status.FailedPodUIDs)
+	assert.False(t, hasTrueBatchSandboxCondition(
+		status.Conditions,
+		sandboxv1alpha1.BatchSandboxConditionPodFailed,
+	))
 }
