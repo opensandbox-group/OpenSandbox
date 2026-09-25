@@ -82,17 +82,19 @@ You should see output similar to:
 
 ```text
 [config] DeerFlow config: /tmp/opensandbox-deerflow-xxxx/config.yaml
-[create] DeerFlow sandbox 8f0f6a3c bound to remote sbx-1a2b3c
-[command] Linux-6.8.0-generic-x86_64-with-glibc2.36
+[create] DeerFlow sandbox c37d0a7b8a926499 bound to remote b5419ac9-f80b-4263-b403-9bd74ee54c43
+[command] Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39
 [file] Wrote /mnt/user-data/workspace/fib.py
 [command] [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
 [file] Read back: def fibonacci(count):
-[list_dir] ['/mnt/user-data/workspace/fib.py']
+[list_dir] ['/mnt/user-data/workspace', '/mnt/user-data/workspace/fib.py']
 [glob] ['/mnt/user-data/workspace/fib.py']
-[grep] /mnt/user-data/workspace/fib.py:2: def fibonacci(count):
-[download] 186 bytes fetched from /mnt/user-data/workspace/fib.py
+[grep] /mnt/user-data/workspace/fib.py:1: def fibonacci(count):
+[download] 170 bytes fetched from /mnt/user-data/workspace/fib.py
 [cleanup] Sandbox destroyed
 ```
+
+The sandbox id, remote id, and platform string differ on each run.
 
 ::: tip
 DeerFlow logs `No models are configured ...` while loading this generated config. That notice
