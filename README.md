@@ -246,6 +246,7 @@ OpenSandbox provides examples covering SDK usage, agent integrations, browser au
 - **[langgraph](docs/examples/langgraph.md)** - LangGraph state-machine workflow that creates/runs a sandbox job with fallback retry.
 - **[google-adk](docs/examples/google-adk.md)** - Google ADK agent using OpenSandbox tools to write/read files and run commands.
 - **[openclaw](docs/examples/openclaw.md)** - Launch an OpenClaw Gateway inside a sandbox.
+- **[deer-flow](docs/examples/deer-flow.md)** - DeerFlow agent turns whose shell, file, and search tools run inside a sandbox through its built-in OpenSandbox provider.
 
 #### 🌐 Browser and Desktop Environments
 
