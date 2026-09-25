@@ -42,6 +42,11 @@ SANDBOX_ORIGIN_TEMPLATE = "template"
 SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY = "opensandbox.io/egress-auth-token"
 OPEN_SANDBOX_SECURE_ACCESS_HEADER = "OpenSandbox-Secure-Access"
 SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY = "opensandbox.io/secure-access-token"
+# execd's own API token (components/execd/pkg/web/model/header.go, pkg/flag/parser.go): the header
+# execd checks on every route but /ping, /ready and /internal/init, and the container env it reads
+# the expected value from. The Docker runtime enforces secureAccess with it, having no gateway.
+EXECD_ACCESS_TOKEN_HEADER = "X-EXECD-ACCESS-TOKEN"
+EXECD_ACCESS_TOKEN_ENV = "EXECD_ACCESS_TOKEN"
 
 # Environment variable name for passing network policy to egress sidecar
 EGRESS_RULES_ENV = "OPENSANDBOX_EGRESS_RULES"
@@ -199,6 +204,8 @@ __all__ = [
     "SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY",
     "OPEN_SANDBOX_SECURE_ACCESS_HEADER",
     "SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY",
+    "EXECD_ACCESS_TOKEN_HEADER",
+    "EXECD_ACCESS_TOKEN_ENV",
     "EGRESS_RULES_ENV",
     "EGRESS_MODE_ENV",
     "OPENSANDBOX_EGRESS_TOKEN",

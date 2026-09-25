@@ -47,12 +47,15 @@ from opensandbox_server.services.constants import (
     SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
     SANDBOX_HTTP_PORT_LABEL,
     SandboxErrorCodes,
+    SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
 )
 from opensandbox_server.services.docker.port_allocator import (
     normalize_container_port_spec,
     normalize_port_bindings,
 )
 from opensandbox_server.services.endpoint_auth import (
+    build_execd_access_headers,
+    build_secure_access_headers,
     build_egress_auth_headers,
     merge_endpoint_headers,
 )
@@ -190,20 +193,17 @@ class DockerNetworkingMixin:
         ensure_egress_runtime_compatible(request.network_policy, self.app_config.secure_runtime)
 
     def _ensure_secure_access_support(self, request) -> None:
-        """Validate that secure access can be honored under the current Docker runtime."""
-        if not request.secure_access:
-            return
+        """secureAccess is honored on the Docker runtime.
 
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": (
-                    "secureAccess is not supported when runtime.type='docker'. "
-                    "Use the Kubernetes runtime to create secured sandboxes."
-                ),
-            },
-        )
+        There is no ingress gateway in front of a Docker sandbox, so the enforcer is execd itself:
+        the create mints a per-sandbox token (``_build_labels_and_env``), execd receives it through
+        ``EXECD_ACCESS_TOKEN`` and rejects every call without ``X-EXECD-ACCESS-TOKEN`` (its /ping
+        and /ready stay open), and ``get_endpoint`` returns that header — plus the
+        ``OpenSandbox-Secure-Access`` header the server proxy already checks on the caller, so a
+        secured Docker sandbox reads exactly like a secured Kubernetes one to a client. Signed
+        short-lived routes (``expires``) still need the gateway and stay Kubernetes-only.
+        """
+        return
 
     def get_endpoint(
         self,
@@ -284,6 +284,7 @@ class DockerNetworkingMixin:
             container = self._get_container_by_sandbox_id(sandbox_id)
             labels = container.attrs.get("Config", {}).get("Labels") or {}
             self._attach_egress_auth_headers(endpoint, labels, port)
+            self._attach_secure_access_headers(endpoint, labels)
             return endpoint
 
         # non-host mode (bridge / user-defined network)
@@ -320,6 +321,7 @@ class DockerNetworkingMixin:
             endpoint = Endpoint(endpoint=f"{public_host}:{http_host_port}")
             if include_egress_auth_headers:
                 self._attach_egress_auth_headers(endpoint, labels, port)
+            self._attach_secure_access_headers(endpoint, labels)
             return endpoint
 
         if execd_host_port is None:
@@ -334,7 +336,19 @@ class DockerNetworkingMixin:
         endpoint = Endpoint(endpoint=f"{public_host}:{execd_host_port}/proxy/{port}")
         if include_egress_auth_headers:
             self._attach_egress_auth_headers(endpoint, labels, port)
+        self._attach_secure_access_headers(endpoint, labels)
         return endpoint
+
+    def _attach_secure_access_headers(self, endpoint: Endpoint, labels: dict[str, str]) -> None:
+        """A secured sandbox's token, as the two headers a caller needs: the one execd checks on the
+        direct path and the one the server proxy checks (and strips) on the proxied path."""
+        token = labels.get(SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY)
+        if not token:
+            return
+        endpoint.headers = merge_endpoint_headers(
+            merge_endpoint_headers(endpoint.headers, build_secure_access_headers(token)),
+            build_execd_access_headers(token),
+        )
 
     def _attach_egress_auth_headers(
         self,
@@ -404,6 +418,7 @@ class DockerNetworkingMixin:
             endpoint = Endpoint(endpoint=f"{ip_address}:{port}")
         labels = container.attrs.get("Config", {}).get("Labels") or {}
         self._attach_egress_auth_headers(endpoint, labels, port)
+        self._attach_secure_access_headers(endpoint, labels)
         return endpoint
 
     # ---------------------------

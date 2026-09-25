@@ -38,7 +38,9 @@ from opensandbox_server.api.schema import (
     CreateSandboxRequest,
     PlatformSpec,
 )
+from opensandbox_server.services.endpoint_auth import generate_secure_access_token
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
@@ -46,6 +48,7 @@ from opensandbox_server.services.constants import (
     SANDBOX_PLATFORM_OS_LABEL,
     SANDBOX_SNAPSHOT_ID_LABEL,
     SandboxErrorCodes,
+    SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
 )
 from opensandbox_server.services.helpers import (
     parse_gpu_request,
@@ -302,15 +305,28 @@ class DockerContainerOpsMixin:
         apply_access_renew_extend_seconds_to_mapping(labels, request.extensions)
         apply_extensions_to_mapping(labels, request.extensions)
 
+        # secureAccess on the Docker runtime: a per-sandbox token that execd ITSELF enforces — a
+        # Docker sandbox has no ingress gateway in front of it, and execd fronts every port through
+        # its /proxy route. Kept on the container the way the egress token is (the same metadata key
+        # the Kubernetes runtime uses), handed to execd through the env it reads the expected value
+        # from, and returned by get_endpoint as the headers every caller must send.
+        secure_access_token = generate_secure_access_token() if request.secure_access else None
+        if secure_access_token:
+            labels[SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY] = secure_access_token
+
         env_dict = {**(self.app_config.docker.sandbox_env or {}), **(request.env or {})}
         environment = []
         for key, value in env_dict.items():
             if value is None:
                 continue
+            if key == EXECD_ACCESS_TOKEN_ENV and secure_access_token:
+                continue  # the server's token wins over anything the request carried
             environment.append(f"{key}={value}")
         if self.app_config and self.app_config.runtime.execd_run_as_init:
             environment.append("EXECD_INIT=1")
         environment.append(f"OPENSANDBOX_ID={sandbox_id}")
+        if secure_access_token:
+            environment.append(f"{EXECD_ACCESS_TOKEN_ENV}={secure_access_token}")
         return labels, environment
 
     def _resolve_image_auth(

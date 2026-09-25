@@ -37,6 +37,8 @@ from opensandbox_server.config import (
 )
 from opensandbox_server.extensions import ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
+    SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
     EGRESS_MODE_ENV,
     OTEL_EXPORTER_OTLP_ENDPOINT,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
@@ -1163,32 +1165,52 @@ async def test_create_sandbox_network_policy_enables_mitm_only_for_credential_pr
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
-async def test_create_sandbox_rejects_secure_access_on_docker_runtime(mock_docker):
+async def test_create_sandbox_secure_access_on_docker_runtime_is_enforced_by_execd(mock_docker):
+    """secureAccess on Docker: a per-sandbox token on the container (the Kubernetes metadata key)
+    and in execd's EXECD_ACCESS_TOKEN env — the request cannot smuggle its own — and nothing of it
+    when the request does not ask."""
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
+    mock_client.api.create_host_config.return_value = {}
+    mock_client.api.create_container.return_value = {"Id": "cid"}
+    mock_client.containers.get.return_value = MagicMock()
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
 
-    req = CreateSandboxRequest(
-        image=ImageSpec(uri="python:3.11"),
-        timeout=120,
-        resourceLimits=ResourceLimits(root={}),
-        env={},
-        metadata={},
-        entrypoint=["python"],
-        secureAccess=True,
-    )
+    def req(secure: bool) -> CreateSandboxRequest:
+        return CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            timeout=120,
+            resourceLimits=ResourceLimits(root={}),
+            env={"EXECD_ACCESS_TOKEN": "mine"},
+            metadata={},
+            entrypoint=["python"],
+            secureAccess=secure,
+        )
 
-    with pytest.raises(HTTPException) as exc:
-        await service.create_sandbox(req)
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={"44772": ("0.0.0.0", 40001), "8080": ("0.0.0.0", 40002)},
+        ),
+    ):
+        await service.create_sandbox(req(True))
+        secured = mock_client.api.create_container.call_args.kwargs
+        await service.create_sandbox(req(False))
+        plain = mock_client.api.create_container.call_args.kwargs
 
-    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
-    assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
-    assert "secureAccess is not supported when runtime.type='docker'" in exc.value.detail["message"]
-    mock_client.api.create_container.assert_not_called()
+    token = secured["labels"].get(SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY)
+    assert token and len(token) >= 32
+    assert f"{EXECD_ACCESS_TOKEN_ENV}={token}" in secured["environment"]
+    assert f"{EXECD_ACCESS_TOKEN_ENV}=mine" not in secured["environment"], "the server's token wins"
+
+    assert SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY not in plain["labels"]
+    assert not any(e.startswith(f"{EXECD_ACCESS_TOKEN_ENV}=") and e != f"{EXECD_ACCESS_TOKEN_ENV}=mine" for e in plain["environment"])
 
 
 @pytest.mark.asyncio
