@@ -28,6 +28,7 @@ Run coding CLIs and AI agent frameworks inside isolated sandboxes.
 | [Google ADK](/examples/google-adk) | Google ADK agent using OpenSandbox tools |
 | [OpenClaw](/examples/openclaw) | OpenClaw Gateway inside a sandbox |
 | [NullClaw](/examples/nullclaw) | NullClaw Gateway sandbox integration |
+| [DeerFlow](/examples/deer-flow) | DeerFlow agent turns with tools running in a sandbox |
 
 ## Browser & Desktop
 
