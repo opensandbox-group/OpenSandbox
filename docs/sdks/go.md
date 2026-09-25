@@ -427,6 +427,54 @@ See [Client Pool](/guides/client-pool) for defaults, examples, and cleanup.
 Go does not currently emit built-in pool warmup traces or expose stable remote
 diagnostics; use [CLI or HTTP diagnostics](/api/#diagnostics).
 
+## Time-Window Pool Resize
+
+`TimeWindowPoolResizePolicy` computes an idle target from local wall-clock
+windows and `PoolResizeAdapter` applies it through the pool's existing `Resize`
+method. The policy lives outside the reconciler, so warmup throttling and
+idle-only shrink are unchanged.
+
+| Symbol | Description |
+|--------|-------------|
+| `PoolResizeWindow` | One wall-clock window: `Start`/`End` offsets from local midnight (inclusive/exclusive), `MaxIdle`, and an optional `Weekdays` filter. `End` earlier than `Start` wraps past midnight; for a wrapped window `Weekdays` names the day the window starts on. |
+| `TimeWindowPoolResizePolicy` | Ordered windows, a `Location`, and a `DefaultMaxIdle` for unmatched times. |
+| `NewTimeWindowPoolResizePolicy(windows, location, defaultMaxIdle, interval)` | Validates the configuration and returns a policy. Rejects negative targets, out-of-day or empty windows, and windows that can be active at the same local time on the same day. |
+| `PoolResizeAdapter` | Applies a `PoolResizePolicy` to a `PoolResizeTarget` (satisfied by `*DefaultSandboxPool`). |
+| `NewPoolResizeAdapter(pool, policy)` | Builds an adapter; the policy interval must be positive. |
+| `Apply(ctx)` | Evaluates once. Returns `ErrPoolResizePoolNotRunning` unless the pool is `RUNNING`. |
+| `Run(ctx)` | Evaluates immediately, then every interval, until the context is cancelled or the pool stops. Retries `PoolStateStoreUnavailableError` without returning it. The reconciler converges the idle buffer towards the new target over several ticks, each capped at `WarmupConcurrency` entries. |
+| `Stopped()` | Reports a permanent stop (destroyed namespace, or a draining/stopped pool). Never blocks behind an in-flight `Resize`. |
+| `LastError()` | Most recent error seen by `Apply` or `Run`; cleared on success. After a permanent stop it holds the cause, so a namespace fenced by a peer deploy is distinguishable from a local drain. |
+| `ErrPoolResizePoolNotRunning` | Sentinel for a `NOT_STARTED` or `STARTING` pool. The adapter stays reusable, and the error also unwraps to `*PoolNotRunningError`. |
+
+```go
+policy, err := opensandbox.NewTimeWindowPoolResizePolicy(
+    []opensandbox.PoolResizeWindow{
+        {Name: "overnight", Start: 22 * time.Hour, End: 6 * time.Hour, MaxIdle: 0},
+        {Name: "business-hours", Start: 9 * time.Hour, End: 18 * time.Hour, MaxIdle: 6,
+            Weekdays: []time.Weekday{time.Monday, time.Tuesday, time.Wednesday,
+                time.Thursday, time.Friday}},
+    },
+    location,
+    2,
+    time.Minute,
+)
+if err != nil {
+    return err
+}
+adapter, err := opensandbox.NewPoolResizeAdapter(pool, policy)
+if err != nil {
+    return err
+}
+if err := adapter.Run(ctx); err != nil {
+    return err
+}
+```
+
+See [Time-window sizing (Go)](/guides/client-pool#time-window-sizing-go) for
+window semantics, timezone handling, and multi-process guidance, and
+[Client Pool Resize](/examples/client-pool-resize) for a runnable program.
+
 ## Lifecycle Hooks
 
 Set `Lifecycle` in `SandboxCreateOptions`. `PreStart` completes before the entrypoint starts, while `Periodic` hooks run on their schedules after startup.

@@ -47,6 +47,7 @@ Fundamental sandbox operations and SDK workflows.
 | Example | Description |
 |---------|-------------|
 | [Code Interpreter](/examples/code-interpreter) | End-to-end Code Interpreter SDK workflow |
+| [Client Pool Resize](/examples/client-pool-resize) | Go time-window policy for a pool's idle target |
 | [AIO Sandbox](/examples/aio-sandbox) | All-in-One sandbox setup |
 | [Agent Sandbox](/examples/agent-sandbox) | Kubernetes agent-sandbox integration |
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |

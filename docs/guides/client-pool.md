@@ -151,6 +151,7 @@ camelCase / snake_case naming.
 | `warmup_skip_health_check` | `false` | `false` | Skip the pre-prepare readiness stage during warmup |
 | `idle_timeout` | `24 h` | `24 h` | Server-side TTL for pool-created sandboxes |
 | `drain_timeout` | `30 s` | `30 s` | Max wait for in-flight ops during graceful shutdown |
+| time-window resize policy | not available | `TimeWindowPoolResizePolicy` | Wall-clock schedule for the idle target; Go only, see [Time-window sizing (Go)](#time-window-sizing-go) |
 
 ### JavaScript settings and creator coverage
 
@@ -551,6 +552,96 @@ matching the existing `try_take_idle` outage behavior. `FAIL_FAST` and `RETRY_NE
 stops at a sandbox already taken from the idle buffer: there the check is fail-closed
 and an unreachable store means the sandbox is killed, because nothing else is tracking
 it any more.
+
+## Time-window sizing (Go)
+
+`Resize` changes the idle target. Deciding *when* to call it is a policy
+decision, so the Go SDK ships the policy outside the pool reconciler:
+`TimeWindowPoolResizePolicy` computes a target from local wall-clock windows and
+`PoolResizeAdapter` applies it through the existing `Resize` method. Warmup
+throttling, idle-only shrink, and state-store coordination are unchanged.
+
+```go
+location, err := time.LoadLocation("America/Los_Angeles")
+if err != nil {
+    return err
+}
+policy, err := opensandbox.NewTimeWindowPoolResizePolicy(
+    []opensandbox.PoolResizeWindow{
+        {Name: "overnight", Start: 22 * time.Hour, End: 6 * time.Hour, MaxIdle: 0},
+        {Name: "business-hours", Start: 9 * time.Hour, End: 18 * time.Hour, MaxIdle: 6,
+            Weekdays: []time.Weekday{time.Monday, time.Tuesday, time.Wednesday,
+                time.Thursday, time.Friday}},
+    },
+    location,
+    2,
+    time.Minute,
+)
+if err != nil {
+    return err
+}
+adapter, err := opensandbox.NewPoolResizeAdapter(pool, policy)
+if err != nil {
+    return err
+}
+// Periodic evaluation until ctx is done:
+if err := adapter.Run(ctx); err != nil {
+    return err
+}
+```
+
+A runnable version is in
+[`examples/client-pool-resize`](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/client-pool-resize).
+
+### Windows are wall-clock, not durations
+
+`Start` and `End` are offsets from local midnight. `Start` is inclusive and `End`
+is exclusive, so adjacent windows do not overlap. A window whose `End` is earlier
+than `Start` wraps past midnight, which is how an overnight window is expressed
+as a single entry rather than two. `End` equal to `Start` is rejected, since it
+would be indistinguishable from a full-day window — use the default target
+instead.
+
+Windows are evaluated in the policy's `Location`, not the host's, so every
+process sharing a pool namespace agrees on when a window opens. Use a named
+location such as `America/Los_Angeles` rather than `time.Local`. Window bounds
+are wall-clock, so a daylight-saving transition does not move them: a
+`01:00`–`03:00` window still contains `01:30` on both sides of a transition.
+
+`Weekdays` optionally restricts a window to specific local weekdays; an empty
+list matches every day. For a window that wraps midnight, `Weekdays` names the
+day the window *starts* on, so a Friday 22:00–06:00 window also covers the small
+hours of Saturday. `DefaultMaxIdle` applies when no window matches, which covers
+weekends when only weekday windows are declared. The constructor rejects two
+windows that can be active at the same local time on the same day, because the
+result would otherwise depend on declaration order; windows that merely share a
+weekday or a clock range, but never both at once, are accepted.
+
+### Lifecycle and error handling
+
+`Resize` writes the target and the reconciler works toward it from there.
+`Snapshot().MaxIdle` reports the new target immediately, but the idle buffer
+converges over several ticks: a tick only acts when this node holds the primary
+lock and is not backing off, and each tick moves at most `WarmupConcurrency`
+entries. So a window boundary does not land instantly, and lowering a target
+from 10 to 0 takes multiple ticks rather than one.
+
+Start the pool before calling `Apply` or `Run`. `Run` evaluates immediately and
+then on every policy interval until the context is cancelled;
+`PoolStateStoreUnavailableError` is retried on the next interval without
+returning it; use `Apply` when the caller needs per-call errors, or inspect
+`adapter.LastError()` for the most recent retry. It returns policy errors
+immediately. `Apply` and `Run` return `ErrPoolResizePoolNotRunning` for a
+`NOT_STARTED` or `STARTING` pool; start the pool first. Once a
+`PoolDestroyedError` or a draining/stopped pool is observed, `adapter.Stopped()`
+reports `true` and the adapter stops permanently. A restarted pool needs a new
+adapter; create a new one rather than reusing an adapter that has already
+stopped. Multiple processes sharing one `PoolName` must not each run their own
+schedule: the state store has one target, and the adapter is the only writer of
+the current target. If a window or location changes during a rolling
+deployment, rotate to a new `PoolName` as described above. Otherwise old and
+new policy processes can alternate the shared target on every tick, causing
+warmup/shrink churn and direct sandbox cost while the rollout is in progress.
 
 ## Further reading
 
