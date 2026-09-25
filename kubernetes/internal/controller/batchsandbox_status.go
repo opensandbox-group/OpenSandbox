@@ -225,6 +225,7 @@ type podFailureSummary struct {
 	primaryReason string
 	samplePod     string
 	sampleDetail  string
+	failedPodUIDs []string
 }
 
 func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
@@ -253,6 +254,8 @@ func summarizePodFailuresWith(
 		}
 
 		summary.failed++
+		summary.failedPodUIDs = append(summary.failedPodUIDs, string(pod.UID))
+
 		if _, exists := firstPodByReason[reason]; !exists {
 			firstPodByReason[reason] = pod.Name
 			firstDetailByReason[reason] = message
@@ -330,12 +333,14 @@ func isResumeInFlight(batchSbx *sandboxv1alpha1.BatchSandbox) bool {
 
 func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
 	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
+		status.FailedPodUIDs = summary.failedPodUIDs
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
 		return
 	}
 	if status.Ready > 0 {
+		status.FailedPodUIDs = nil
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
 	}
@@ -360,15 +365,25 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	}
 
 	if status.Phase == sandboxv1alpha1.BatchSandboxPhaseFailed {
-		return
-	}
+		if hasResumeFailedCondition(status.Conditions) {
+			return
+		}
 
-	setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
-	if status.Ready > 0 {
+		if !hasRecoveredFailedPod(pods, status.FailedPodUIDs) {
+			return
+		}
+
+		status.FailedPodUIDs = nil
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
+		setConditionInStatus(
+			status,
+			sandboxv1alpha1.BatchSandboxConditionPodFailed,
+			sandboxv1alpha1.ConditionFalse,
+			"",
+			"",
+		)
 		return
 	}
-	status.Phase = sandboxv1alpha1.BatchSandboxPhasePending
 }
 
 func hasTerminalPodFailureCondition(conditions []sandboxv1alpha1.BatchSandboxCondition) bool {
@@ -381,6 +396,35 @@ func hasTerminalPodFailureCondition(conditions []sandboxv1alpha1.BatchSandboxCon
 			return true
 		}
 	}
+	return false
+}
+func hasResumeFailedCondition(conditions []sandboxv1alpha1.BatchSandboxCondition) bool {
+	for _, condition := range conditions {
+		if condition.Type == sandboxv1alpha1.BatchSandboxConditionResumeFailed &&
+			condition.Status == sandboxv1alpha1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+func hasRecoveredFailedPod(pods []*corev1.Pod, failedPodUIDs []string) bool {
+	failedUIDs := make(map[string]struct{}, len(failedPodUIDs))
+	for _, uid := range failedPodUIDs {
+		failedUIDs[uid] = struct{}{}
+	}
+
+	for _, pod := range pods {
+		if _, failed := failedUIDs[string(pod.UID)]; !failed {
+			continue
+		}
+
+		if pod.DeletionTimestamp == nil &&
+			pod.Status.Phase == corev1.PodRunning &&
+			utils.IsPodReady(pod) {
+			return true
+		}
+	}
+
 	return false
 }
 
