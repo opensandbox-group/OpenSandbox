@@ -3,9 +3,9 @@
 #
 # Two derived artifacts must stay in sync with this commit:
 #   - the companion images built by manifests/release/build-fast-sandbox.sh
-#     (controller, fastlet, fastlet-proxy, sandbox-proxy, janitor,
-#     firecracker-runtime-agent, sandboxtemplate-builder — Firecracker scope
-#     only; boxlite-runtime and sandbox-action-fixture are never built)
+#     (fsb-controller, fsb-fastlet, fsb-fastlet-proxy, fsb-janitor,
+#     fsb-firecracker-runtime, fsb-sandboxtemplate-builder — Firecracker scope
+#     only; boxlite and the sandbox-action-fixture are never built)
 #   - the CRD bundle vendored at manifests/charts/base/files/fast-sandbox-crds.yaml
 #
 # Bump by updating `commit` to a full 40-character SHA, then run:

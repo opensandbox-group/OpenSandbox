@@ -53,7 +53,9 @@ fastSandbox:
     # created. The system namespace (opensandbox-system) is NOT created
     # here: it is owned by the install flow (--create-namespace or the
     # controller/server releases), and a pre-existing namespace without
-    # Helm ownership metadata cannot be adopted into this release.
+    # Helm ownership metadata cannot be adopted into this release. The
+    # created namespace carries helm.sh/resource-policy: keep, so it
+    # survives `helm uninstall` of this chart and must be deleted manually.
     create: true
     # -- Namespace the fast-sandbox control-plane RBAC targets (the shared
     # OpenSandbox system namespace where the fast-sandbox chart's workloads

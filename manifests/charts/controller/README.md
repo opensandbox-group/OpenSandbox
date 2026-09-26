@@ -34,6 +34,12 @@ helm install opensandbox-controller manifests/charts/controller \
 
 The command deploys OpenSandbox Controller on the Kubernetes cluster with default configuration. The [Parameters](#parameters) section lists the parameters that can be configured during installation.
 
+> **Fixed resource names**: resource names in this chart are fixed
+> (`opensandbox-controller-manager` Deployment/ServiceAccount,
+> `opensandbox-manager-role` / `opensandbox-leader-election-role` RBAC).
+> `nameOverride` / `fullnameOverride` affect label values only, and installing
+> more than one release of this chart into a single cluster is not supported.
+
 ## Uninstalling the Chart
 
 To uninstall/delete the `opensandbox-controller` deployment:
@@ -69,7 +75,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.kubeClient.burst | int | `200` | Burst for Kubernetes client rate limiter. |
 | controller.kubeClient.qps | int | `100` | QPS for Kubernetes client rate limiter. |
 | controller.leaderElection | object | `{"enabled":true}` | Enable leader election for controller manager |
-| controller.livenessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":15,"periodSeconds":20,"successThreshold":1,"timeoutSeconds":1}` | Liveness probe configuration |
+| controller.livenessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":15,"periodSeconds":20,"successThreshold":1,"timeoutSeconds":1}` | Liveness probe configuration. The livenessProbe.httpGet.port below also drives --health-probe-bind-address and the health container port. |
 | controller.logLevel | string | `"info"` | Log level for zap logger (debug, info, error) |
 | controller.metrics | object | `{"enabled":false,"port":8080,"secure":false}` | controller-runtime metrics endpoint (Prometheus). Disabled by default to preserve the current behavior (the binary defaults to `--metrics-bind-address=0`). |
 | controller.metrics.enabled | bool | `false` | Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`) |
@@ -80,7 +86,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
 | controller.podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context |
 | controller.priorityClassName | string | `""` | Priority class name for controller pods |
-| controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration |
+| controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration. Shares the health-probe port with livenessProbe. |
 | controller.replicaCount | int | `1` | Number of controller replicas |
 | controller.resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource requests and limits for the controller |
 | controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
@@ -99,9 +105,9 @@ The following table lists the configurable parameters of the chart and their def
 | extraInitContainers | list | `[]` | Additional init containers |
 | extraVolumeMounts | list | `[]` | Additional volume mounts for the controller |
 | extraVolumes | list | `[]` | Additional volumes for the controller |
-| fullnameOverride | string | `""` | Override the full name of the chart |
+| fullnameOverride | string | `""` | Override the full name of the chart (labels only; resource names are fixed) |
 | imagePullSecrets | list | `[]` | Image pull secrets for private registries |
-| nameOverride | string | `""` | Override the name of the chart |
+| nameOverride | string | `""` | Override the name of the chart (labels only; resource names are fixed) |
 | namespaceOverride | string | `""` | Override the namespace where resources will be created If not set, defaults to "opensandbox-system" |
 | rbac.create | bool | `true` | Specifies whether RBAC resources should be created |
 | serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
@@ -265,7 +271,7 @@ kubectl get crd | grep opensandbox
 ### Verify RBAC permissions
 
 ```bash
-kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-controller-manager create pods
+kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-manager create pods
 ```
 
 ## Additional Resources

@@ -1,11 +1,17 @@
 ---
 title: Kubernetes Deployment
-description: Deploy OpenSandbox components on Kubernetes with Helm charts.
+description: Deploy OpenSandbox on Kubernetes — CRDs, controller, lifecycle server, and optional components, with Helm deployment order and configuration.
 ---
 
 # Kubernetes Deployment
 
-This guide covers deploying OpenSandbox on Kubernetes, including the operator, CRDs, and supporting components.
+This guide covers deploying OpenSandbox on Kubernetes: the cluster foundation
+(CRDs), the controller, the lifecycle server, and the optional components
+(ingress gateway, node agent, fast-sandbox runtime).
+
+Charts are versioned sources in the [OpenSandbox repository](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts).
+They are installed from a checkout of a `release-X.Y.Z` tag — standalone chart
+packages are not published.
 
 ## Prerequisites
 
@@ -13,27 +19,77 @@ This guide covers deploying OpenSandbox on Kubernetes, including the operator, C
 - Helm 3.x
 - `kubectl` configured for your cluster
 
-## Install CRDs and Operator
+## Deployment Order
 
-The OpenSandbox Kubernetes operator manages `BatchSandbox`, `Pool`, and `SandboxSnapshot` custom resources.
+Install the charts in this order:
 
-For installation instructions and Helm chart values, see the [Kubernetes operator documentation](https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes).
-
-## Install the Lifecycle Server
-
-Install the controller and CRDs before the lifecycle server. The server runs in the cluster with a `ServiceAccount` and uses the Kubernetes API to create and manage sandbox resources.
-
-Choose a published `opensandbox-server` chart from [GitHub Releases](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-server&expanded=true), then set both versions from that release:
-
-```sh
-CHART_VERSION="<chart-version>"
-APP_VERSION="<app-version>"
-CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${CHART_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
+```text
+base → opensandbox-controller → fast-sandbox* → opensandbox-server → optional components
 ```
 
-::: info Versioning
-The release tag and `.tgz` filename identify the Helm chart version. The server application version is independent and is listed on each GitHub Release.
-:::
+\* `fast-sandbox` is optional, but when used it must be installed **before** the
+server.
+
+| Step | Chart | Why it comes here |
+|------|-------|-------------------|
+| 1 | `base` | Owns the `sandbox.opensandbox.io` CRDs, the fast-sandbox CRDs (`sandbox.fast.io`), and their RBAC. Everything else depends on these objects existing. Install once per cluster. |
+| 2 | `opensandbox-controller` | Reconciles `BatchSandbox`, `Pool`, and `SandboxSnapshot` objects created by you and by the server. Requires the CRDs from `base`. |
+| 3 | `fast-sandbox` (optional) | Firecracker runtime (`sandbox.fast.io`). Must be installed **before the server**: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath...svc:9090`) and watches `sandbox.fast.io` objects at startup. Also consumes the ServiceAccounts from `base` — keep the namespace values in sync with it. Skip if you only use the default Kubernetes runtime. |
+| 4 | `opensandbox-server` | The lifecycle REST API that creates and deletes sandboxes. Requires the CRDs from `base`, a running controller, and — when serving sandboxes through the fsb runtime — the FastPath endpoint from the previous step. |
+| 5 | `ingress-gateway` / `opensandbox-node-agent` | Optional, order-independent. The gateway is announced by the server through `server.gateway.*`; the node agent collects sandbox data. |
+
+If you use the umbrella chart, this order is handled for you in a single release.
+
+## Install
+
+Check out the version you want to deploy:
+
+```bash
+git clone https://github.com/opensandbox-group/OpenSandbox.git
+cd OpenSandbox
+git checkout release-1.1.0   # or main for development
+```
+
+### Option 1: Umbrella chart (recommended)
+
+One release installs every component with the correct ordering:
+
+```bash
+cd manifests/charts
+
+# Package the sub-charts (charts/ is git-ignored, rebuilt every time)
+helm dependency build opensandbox
+
+helm install opensandbox opensandbox \
+  --namespace opensandbox-system \
+  --create-namespace
+```
+
+Optional components default to off; enable what you need:
+
+```bash
+helm install opensandbox opensandbox \
+  --namespace opensandbox-system \
+  --create-namespace \
+  --set ingress-gateway.enabled=true
+```
+
+### Option 2: Per-component releases
+
+```bash
+# 1. Cluster foundation: CRDs + RBAC
+helm install base manifests/charts/base
+
+# 2. Controller
+helm install opensandbox-controller manifests/charts/controller \
+  --namespace opensandbox-system \
+  --create-namespace
+
+# 3. Lifecycle server
+helm install opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --create-namespace
+```
 
 ### Configure API authentication
 
@@ -123,26 +179,20 @@ both replicas use the same PostgreSQL database and the Kubernetes runtime.
 SQLite and Docker snapshot execution do not support this multi-active topology.
 :::
 
-### Install and verify
+### Install the server with the API key and verify
 
-Inspect all available settings before installation:
+Install the server referencing your values file:
 
-```sh
-helm show values "${CHART_URL}"
-```
-
-Install the server from the versioned chart artifact:
-
-```sh
-helm install opensandbox-server "${CHART_URL}" \
+```bash
+helm install opensandbox-server manifests/charts/server \
   --namespace opensandbox-system \
-  --set-string server.image.tag="${APP_VERSION}" \
+  --create-namespace \
   --values values-server.yaml
 ```
 
 Wait for the Deployment and verify the API health endpoint:
 
-```sh
+```bash
 kubectl rollout status deployment/opensandbox-server \
   --namespace opensandbox-system \
   --timeout=180s
@@ -154,7 +204,7 @@ kubectl port-forward \
 
 In another terminal:
 
-```sh
+```bash
 curl --fail http://127.0.0.1:8080/health
 ```
 
@@ -163,11 +213,11 @@ curl --fail http://127.0.0.1:8080/health
 | Value | Purpose | Notes |
 |-------|---------|-------|
 | `server.image.repository` | Server image registry and repository | Override for a private mirror or custom build. |
-| `server.image.tag` | Server image version | The release install command pins it to `APP_VERSION`. |
-| `server.replicaCount` | Number of server Pods | Defaults to `1`; multi-replica Server HA is not supported yet. |
+| `server.image.tag` | Server image version | Defaults to the `release-<appVersion>` image published with the chart version; override only for custom builds. |
+| `server.replicaCount` | Number of server Pods | Defaults to `1`; general multi-replica Server HA is not supported yet. |
 | `server.env` | Additional container environment variables | Use it with `secretKeyRef` for `OPENSANDBOX_SERVER_API_KEY`. |
 | `configToml` | Complete server configuration | Mounted at `/etc/opensandbox/config.toml`; overriding it replaces the complete default TOML, including the workload namespace. |
-| `server.gateway.enabled` | Deploy the ingress gateway with the server | Defaults to `false`. |
+| `server.gateway.enabled` | Announce an ingress gateway to clients | Defaults to `false`. The gateway itself is deployed by the [ingress-gateway chart](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/ingress-gateway). |
 | `server.service.type` | Service type for the server | Defaults to `ClusterIP`. Use `NodePort` or `LoadBalancer` for access from outside the cluster; pin the port with `server.service.nodePort`. |
 | `namespaceOverride` | Namespace used by chart resources | Defaults to `opensandbox-system`. |
 
@@ -181,25 +231,64 @@ Add optional resource settings to the `[egress]` section of `configToml`:
 
 ```toml
 [egress]
-image = "opensandbox/egress:v1.1.7"
+image = "opensandbox/egress:release-1.1.0"
 requests = { cpu = "25m", memory = "64Mi" }
 limits = { cpu = "250m", memory = "256Mi" }
 ```
 
 You can omit either `requests` or `limits`. Treat these values as a starting point and tune them from observed usage; Credential Vault and transparent mitmproxy generally need more headroom than basic DNS/nft enforcement.
 
-### Upgrade
+### Optional: ingress gateway
 
-Select the application and chart versions from the target GitHub Release, update `CHART_URL`, and run:
+Deploy the gateway chart, then announce it from the server so clients receive the gateway address:
 
-```sh
-helm upgrade opensandbox-server "${CHART_URL}" \
+```bash
+helm install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system
+
+helm upgrade opensandbox-server manifests/charts/server \
   --namespace opensandbox-system \
-  --set-string server.image.tag="${APP_VERSION}" \
+  --set server.gateway.enabled=true \
+  --set server.gateway.host=gateway.example.com \
   --values values-server.yaml
 ```
 
-For the complete values reference and local development installation, see the [`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/server).
+Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode`
+of the gateway chart. For signed, expiring sandbox routes, configure the
+shared secure-access key ring on both charts — see [secure-access keys](https://github.com/opensandbox-group/OpenSandbox/blob/main/manifests/HELM-DEPLOYMENT.md#secure-access-keys-osep-0011).
+
+### Optional: fast-sandbox runtime
+
+The `fast-sandbox` chart adds the Firecracker (`sandbox.fast.io`) runtime.
+Install it **before the lifecycle server** (see [Deployment Order](#deployment-order)):
+the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint
+this chart creates. It also requires `base` first, KVM-capable nodes, and
+companion images built from a pinned upstream commit — see the [fast-sandbox runtime deployment guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/manifests/HELM-DEPLOYMENT.md#fast-sandbox-runtime-firecracker).
+
+## Upgrade
+
+Upgrade the umbrella release from a newer checkout:
+
+```bash
+git fetch --tags
+git checkout release-1.2.0
+
+cd manifests/charts
+helm dependency build opensandbox
+helm upgrade opensandbox opensandbox --namespace opensandbox-system
+```
+
+For a per-component server release:
+
+```bash
+git checkout release-1.2.0
+helm upgrade opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --values values-server.yaml
+```
+
+For the complete values reference and local development installation, see the
+[`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/server).
 
 ## Operator Metrics
 
@@ -274,11 +363,32 @@ See [Configuration](/getting-started/configuration) for the full reference.
 
 | Component | Deployment | Purpose |
 |-----------|-----------|---------|
+| CRDs + RBAC (`base`) | Cluster-scoped | `BatchSandbox`, `Pool`, `SandboxSnapshot` and `sandbox.fast.io` API types |
 | Server | Deployment | Lifecycle control plane |
-| Operator | Deployment | Manages BatchSandbox/Pool CRDs |
-| Ingress | DaemonSet/Deployment | Routes traffic to sandboxes |
+| Controller (operator) | Deployment | Manages BatchSandbox/Pool CRDs |
+| Ingress gateway | Deployment | Routes traffic to sandboxes |
 | Egress | Sidecar | Per-sandbox egress policy enforcement |
 | Execd | Built into sandbox images | In-sandbox execution |
+| Node agent | DaemonSet | Optional node-level sandbox data collection |
+| fast-sandbox | Deployment + DaemonSet | Optional Firecracker control plane and node runtime |
+
+## Uninstall
+
+```bash
+helm uninstall opensandbox -n opensandbox-system
+```
+
+CRDs carry the `helm.sh/resource-policy: keep` annotation and are retained
+across uninstalls; the `opensandbox-dataplane` namespace (created by `base`
+for fast-sandbox) is kept as well. Delete them manually once their data is no
+longer needed:
+
+```bash
+kubectl delete crd batchsandboxes.sandbox.opensandbox.io \
+  pools.sandbox.opensandbox.io \
+  sandboxsnapshots.sandbox.opensandbox.io
+kubectl delete namespace opensandbox-dataplane
+```
 
 ## Related
 
@@ -286,3 +396,4 @@ See [Configuration](/getting-started/configuration) for the full reference.
 - [Pause & Resume](/guides/pause-resume) — Snapshot-based pause/resume on Kubernetes
 - [Secure Container](/guides/secure-container) — gVisor and Kata on Kubernetes
 - [Network Isolation](/architecture/network/network-isolation) — Egress policy design for Kubernetes
+- [Helm charts source](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts) — Chart sources and values reference

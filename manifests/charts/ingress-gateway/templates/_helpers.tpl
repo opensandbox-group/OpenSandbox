@@ -78,10 +78,12 @@ ClusterRole name for gateway
 {{- end }}
 
 {{/*
-Gateway image with tag (prepend v to semver if missing)
+Gateway image with tag. Empty tag uses the release-<appVersion> image tag
+published for this chart version; plain semver keeps the legacy 'v' prefix
+(e.g., 1.0.2 -> v1.0.2); other tags pass through as-is.
 */}}
 {{- define "opensandbox-ingress-gateway.image" -}}
-{{- $tag := .Values.gateway.image.tag | default "v1.0.2" }}
+{{- $tag := .Values.gateway.image.tag | default (printf "release-%s" .Chart.AppVersion) }}
 {{- $finalTag := $tag }}
 {{- if and (not (hasPrefix "v" $tag)) (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+" $tag) }}
 {{- $finalTag = printf "v%s" $tag }}

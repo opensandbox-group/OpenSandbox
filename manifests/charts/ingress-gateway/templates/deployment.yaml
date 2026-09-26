@@ -75,7 +75,7 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           args:
             - "--namespace={{ .Values.gateway.dataplaneNamespace }}"
             - "--port={{ .Values.gateway.port }}"

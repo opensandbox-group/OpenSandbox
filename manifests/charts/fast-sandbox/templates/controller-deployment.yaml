@@ -1,4 +1,5 @@
 {{- if .Values.controller.enabled }}
+{{- $builderImage := .Values.controller.sandboxtemplateBuilderImage | default (printf "opensandbox/fsb-sandboxtemplate-builder:release-%s" .Chart.AppVersion) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -32,7 +33,7 @@ spec:
         - --metrics-bind-address=:9091
         - --health-probe-bind-address=:5758
         - --fastpath-bind-address=:9090
-        - --sandboxtemplate-builder-image={{ .Values.controller.sandboxtemplateBuilderImage }}
+        - --sandboxtemplate-builder-image={{ $builderImage }}
         - --fastlet-proxy-image={{ .Values.controller.fastletProxyImage }}
         # The controller's default namespace for the platform
         # runtime-environment ConfigMap is the upstream-hardcoded
@@ -52,7 +53,8 @@ spec:
             secretKeyRef:
               name: {{ .Values.routeKeys.existingSecret | default "fast-sandbox-route-keys" }}
               key: public-key
-        image: {{ include "fast-sandbox.image" .Values.controller.image }}
+        {{- $appVersion := .Chart.AppVersion }}
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.controller.image.repository "tag" .Values.controller.image.tag "appVersion" $appVersion) }}
         imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
         livenessProbe:
           httpGet:

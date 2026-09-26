@@ -20,10 +20,17 @@ ServiceAccount above.
 # (opensandbox-system) is owned by the install flow (--create-namespace or
 # the controller/server releases); a pre-existing namespace without Helm
 # ownership metadata cannot be adopted into this release.
+#
+# The namespace carries helm.sh/resource-policy: keep: uninstalling the base
+# release must not destroy the dataplane namespace together with every
+# fast-sandbox object and fastlet Pod in it (same policy as the CRDs).
+# Delete it manually when its data is no longer needed.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.fastSandbox.namespaces.resources }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "opensandbox-base.labels" . | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox

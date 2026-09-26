@@ -26,8 +26,11 @@ server:
   image:
     # -- Server image repository.
     repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server
-    # -- Server image tag. Defaults to the chart appVersion when empty.
-    tag: "release-1.1.0"
+    # -- Server image pull policy.
+    pullPolicy: IfNotPresent
+    # -- Server image tag. Empty uses the release-<appVersion> image tag
+    # published for this chart version.
+    tag: ""
 
   # -- Number of server replicas. Keep one active server; multi-replica HA is not supported yet.
   replicaCount: 1
@@ -105,6 +108,8 @@ server:
       existingSecret: ""
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
+# [kubernetes].namespace below is the sandbox workload namespace: the chart
+# does not create it, so create it before submitting workloads (see README).
 configToml: |
   [server]
   host = "0.0.0.0"
@@ -125,7 +130,7 @@ configToml: |
   informer_watch_timeout_seconds = 60
   workload_provider = "batchsandbox"
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
-  
+
   [egress]
   image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.1.0"
   mode = "dns+nft"

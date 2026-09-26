@@ -36,8 +36,11 @@ gateway:
   image:
     # -- Gateway image repository.
     repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress
-    # -- Gateway image tag.
-    tag: "release-1.1.0"
+    # -- Gateway image pull policy.
+    pullPolicy: IfNotPresent
+    # -- Gateway image tag. Empty uses the release-<appVersion> image tag
+    # published for this chart version.
+    tag: ""
 
   # -- Number of gateway replicas.
   replicaCount: 2

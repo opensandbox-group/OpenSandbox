@@ -55,10 +55,13 @@ fast-sandbox.io/control-plane-role: all
 {{- end }}
 
 {{/*
-Component image reference.
+Component image reference. Call with a dict: repository, tag, appVersion. An
+empty tag falls back to the release-<appVersion> companion image tag built
+from the source pinned in manifests/third-party/fast-sandbox.commit.
 */}}
 {{- define "fast-sandbox.image" -}}
-{{- printf "%s:%s" .repository .tag }}
+{{- $tag := .tag | default (printf "release-%s" .appVersion) -}}
+{{- printf "%s:%s" .repository $tag -}}
 {{- end }}
 
 {{/*

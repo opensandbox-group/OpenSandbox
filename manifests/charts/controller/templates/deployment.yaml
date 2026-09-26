@@ -51,10 +51,11 @@ spec:
         command:
         - /workspace/server
         args:
+        {{- $healthPort := .Values.controller.livenessProbe.httpGet.port }}
         {{- if .Values.controller.leaderElection.enabled }}
         - --leader-elect
         {{- end }}
-        - --health-probe-bind-address=:8081
+        - --health-probe-bind-address=:{{ $healthPort }}
         - --zap-log-level={{ .Values.controller.logLevel }}
         {{- if $metrics.enabled }}
         - --metrics-bind-address=:{{ $metrics.port | default 8080 }}
@@ -95,7 +96,7 @@ spec:
         {{- end }}
         ports:
         - name: health
-          containerPort: 8081
+          containerPort: {{ .Values.controller.livenessProbe.httpGet.port }}
           protocol: TCP
         {{- if $metrics.enabled }}
         - name: metrics

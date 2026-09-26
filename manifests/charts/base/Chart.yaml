@@ -29,7 +29,6 @@ sources:
 
 maintainers:
   - name: OpenSandbox Team
-    email: opensandbox@example.com
 
 # Kubernetes version constraints
 kubeVersion: ">=1.21.1-0"

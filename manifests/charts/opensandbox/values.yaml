@@ -1,6 +1,14 @@
 # Default values for opensandbox (all-in-one chart).
 # This chart aggregates values from opensandbox-controller and opensandbox-server sub-charts.
 
+# Cluster-scoped resources component values. This sub-chart installs the
+# OpenSandbox CRDs, the fast-sandbox CRDs (sandbox.fast.io) and their RBAC.
+# Disabling it is only useful when the base chart is installed as its own
+# release; every other component requires the CRDs.
+base:
+  # -- Whether the cluster-scoped resources (CRDs + RBAC) are installed.
+  enabled: true
+
 # Controller component values
 opensandbox-controller:
   # Default values are inherited from the sub-chart.
@@ -58,9 +66,5 @@ fast-sandbox:
   # -- Whether the fast-sandbox control plane + node runtime is enabled.
   enabled: false
 
-# Global values (passed to both sub-charts)
-# -- Global values passed to both sub-charts.
-global:
-  # Example: shared image pull secrets
-  # imagePullSecrets:
-  #   - name: my-registry-secret
+# -- Global values passed to all sub-charts (e.g. shared imagePullSecrets).
+global: {}

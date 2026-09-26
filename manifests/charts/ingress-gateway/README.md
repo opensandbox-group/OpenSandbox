@@ -1,6 +1,6 @@
 # ingress-gateway
 
-![Version: 1.1.0](https://img.shields.io/badge/Version-1.1.0-informational?style=flat-square)
+![Version: 1.1.0](https://img.shields.io/badge/Version-1.1.0-informational?style=flat-square) ![AppVersion: 1.1.0](https://img.shields.io/badge/AppVersion-1.1.0-informational?style=flat-square)
 
 Helm chart for deploying the OpenSandbox ingress gateway (components/ingress)
 
@@ -10,7 +10,7 @@ Helm chart for deploying the OpenSandbox ingress gateway (components/ingress)
 
 | Name | Email | Url |
 | ---- | ------ | --- |
-| OpenSandbox Team | <opensandbox@example.com> |  |
+| OpenSandbox Team |  |  |
 
 ## Source Code
 
@@ -32,9 +32,10 @@ Kubernetes: `>=1.21.1-0`
 | gateway.env | list | `[]` | Additional environment variables for the gateway container (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics). |
 | gateway.fastpathEndpoint | string | `""` | FastPath gRPC endpoint for the fast-sandbox provider (--fastpath-endpoint). Required when providerType is "fast-sandbox"; ignored otherwise. Example: fast-sandbox-fastpath.opensandbox-system.svc:9090 |
 | gateway.gatewayRouteMode | string | `"header"` | Gateway route mode: header or uri. Must match server.gateway.gatewayRouteMode. |
-| gateway.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress","tag":"release-1.1.0"}` | Gateway image configuration. |
+| gateway.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress","tag":""}` | Gateway image configuration. |
+| gateway.image.pullPolicy | string | `"IfNotPresent"` | Gateway image pull policy. |
 | gateway.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress"` | Gateway image repository. |
-| gateway.image.tag | string | `"release-1.1.0"` | Gateway image tag. |
+| gateway.image.tag | string | `""` | Gateway image tag. Empty uses the release-<appVersion> image tag published for this chart version. |
 | gateway.logLevel | string | `"info"` | Gateway log level. |
 | gateway.nodeSelector | object | `{}` | Node selector for the gateway pod. |
 | gateway.podAnnotations | object | `{}` | Extra annotations for the gateway pod. |

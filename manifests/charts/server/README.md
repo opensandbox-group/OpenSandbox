@@ -16,16 +16,14 @@ OpenSandbox Lifecycle API server: provides sandbox create/delete and other lifec
 - OpenSandbox CRDs installed (deploy opensandbox-controller first)
 - A sandbox workload namespace matching `[kubernetes].namespace` in `configToml` (default: `opensandbox`)
 
-## Install from a GitHub Release
+## Install
 
-Choose a published `opensandbox-server` chart from [GitHub Releases](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-server&expanded=true). The release tag and package filename use the chart version shown in the release notes; the application version is listed separately.
+Charts are installed from a checkout of this repository — check out the
+version you want (a `release-X.Y.Z` tag, or `main`); standalone chart `.tgz`
+packages are not published.
 
 ```bash
-CHART_VERSION="<chart-version>"
-APP_VERSION="<app-version>"
-CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${CHART_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
-
-helm show values "${CHART_URL}"
+CHART_REF=release-1.1.0   # or main for development
 ```
 
 By default, the server requires an API key for non-interactive startup. Create a Kubernetes Secret and reference it from a values file:
@@ -53,12 +51,12 @@ server:
           key: api-key
 ```
 
-Install the versioned package:
+Install:
 
 ```bash
-helm install opensandbox-server "${CHART_URL}" \
+helm install opensandbox-server manifests/charts/server \
   --namespace opensandbox-system \
-  --set-string server.image.tag="${APP_VERSION}" \
+  --create-namespace \
   --values values-server.yaml
 ```
 
@@ -130,7 +128,7 @@ The following table lists the configurable parameters of the chart and their def
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.1.0\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.1.0\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. |
+| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.1.0\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.1.0\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. [kubernetes].namespace below is the sandbox workload namespace: the chart does not create it, so create it before submitting workloads (see README). |
 | fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
 | imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
 | nameOverride | string | `""` | Override the name of the chart |
@@ -144,9 +142,10 @@ The following table lists the configurable parameters of the chart and their def
 | server.gateway.secureAccess.activeKey | string | `""` | Active signing key id, one character in [0-9a-z]. |
 | server.gateway.secureAccess.existingSecret | string | `""` | Name of an existing Secret holding the signing keys (keys + active-key), as an alternative to plaintext `keys` above (mutually exclusive). The Secret must carry two entries:   keys:       the key ring, "a=<base64-secret>[,b=<base64-secret>...]"   active-key: the active signing key id, one character in [0-9a-z] The chart wires it into the server as environment variables (OPENSANDBOX_SECURE_ACCESS_*), so key material never appears in values, the server ConfigMap, or pod args. The ingress-gateway chart consumes the same Secret for verification. Env-sourced Secrets are read once at container start: after updating the Secret in place, `kubectl rollout restart` the server Deployment (or version the Secret name to get a spec-driven rollout). |
 | server.gateway.secureAccess.keys | list | `[]` | List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }. key_id must be exactly one character in [0-9a-z]. |
-| server.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":"release-1.1.0"}` | Server image configuration |
+| server.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":""}` | Server image configuration |
+| server.image.pullPolicy | string | `"IfNotPresent"` | Server image pull policy. |
 | server.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server"` | Server image repository. |
-| server.image.tag | string | `"release-1.1.0"` | Server image tag. Defaults to the chart appVersion when empty. |
+| server.image.tag | string | `""` | Server image tag. Empty uses the release-<appVersion> image tag published for this chart version. |
 | server.nodeSelector | object | `{}` | Node selector for the server pod. |
 | server.podAnnotations | object | `{}` | Extra annotations for the server pod. |
 | server.podLabels | object | `{}` | Extra labels for the server pod. |
@@ -163,13 +162,11 @@ The following table lists the configurable parameters of the chart and their def
 
 Versioning note:
 
-- The release install and upgrade examples pin `server.image.tag` to `APP_VERSION` so the selected chart release deploys the matching server image.
-- The chart package `version` and the image/app `appVersion` are intentionally
-  separate. A server release branch or tag does not automatically imply a new
-  Helm chart package version.
-- If you want the chart to deploy a specific server release, override
-  `server.image.tag` explicitly or consume a Helm package release whose chart
-  version was published for that purpose.
+- The chart deploys the image tagged `release-<appVersion>` by default; that
+  tag is published together with the chart version by the umbrella release, so
+  a checked-out chart version always has a matching default image.
+- To deploy a specific image build, override `server.image.tag` explicitly
+  (for example `--set server.image.tag=v0.1.13`).
 
 **Gateway**: When `server.gateway.enabled=true`, the chart writes `[ingress] mode = "gateway"` in config.toml so the server returns the gateway address to clients. The gateway workload itself runs from the separate `ingress-gateway` chart (`manifests/charts/ingress-gateway`); its `--mode` must match `server.gateway.gatewayRouteMode`. External access must be configured separately.
 
@@ -178,9 +175,8 @@ Set `[kubernetes].namespace` in config for the sandbox workload namespace and cr
 ## Upgrade and uninstall
 
 ```bash
-helm upgrade opensandbox-server "${CHART_URL}" \
+helm upgrade opensandbox-server manifests/charts/server \
   --namespace opensandbox-system \
-  --set-string server.image.tag="${APP_VERSION}" \
   --values values-server.yaml
 helm uninstall opensandbox-server -n opensandbox-system
 ```

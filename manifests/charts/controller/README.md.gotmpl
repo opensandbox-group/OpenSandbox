@@ -34,6 +34,12 @@ helm install opensandbox-controller manifests/charts/controller \
 
 The command deploys OpenSandbox Controller on the Kubernetes cluster with default configuration. The [Parameters](#parameters) section lists the parameters that can be configured during installation.
 
+> **Fixed resource names**: resource names in this chart are fixed
+> (`opensandbox-controller-manager` Deployment/ServiceAccount,
+> `opensandbox-manager-role` / `opensandbox-leader-election-role` RBAC).
+> `nameOverride` / `fullnameOverride` affect label values only, and installing
+> more than one release of this chart into a single cluster is not supported.
+
 ## Uninstalling the Chart
 
 To uninstall/delete the `opensandbox-controller` deployment:
@@ -212,7 +218,7 @@ kubectl get crd | grep opensandbox
 ### Verify RBAC permissions
 
 ```bash
-kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-controller-manager create pods
+kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-manager create pods
 ```
 
 ## Additional Resources

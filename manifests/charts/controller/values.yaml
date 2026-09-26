@@ -2,9 +2,15 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# -- Override the name of the chart
+# NOTE: resource names in this chart are fixed (Deployment
+# opensandbox-controller-manager, ServiceAccount opensandbox-controller-manager,
+# ClusterRoles opensandbox-manager-role / opensandbox-metrics-*-role). The
+# overrides below change label values only, and installing more than one
+# release of this chart into a single cluster is not supported.
+
+# -- Override the name of the chart (labels only; resource names are fixed)
 nameOverride: ""
-# -- Override the full name of the chart
+# -- Override the full name of the chart (labels only; resource names are fixed)
 fullnameOverride: ""
 
 # -- Override the namespace where resources will be created
@@ -21,10 +27,10 @@ controller:
     pullPolicy: IfNotPresent
     # -- Overrides the image tag whose default is the chart appVersion
     tag: ""
-  
+
   # -- Number of controller replicas
   replicaCount: 1
-  
+
   # -- Resource requests and limits for the controller
   resources:
     limits:
@@ -33,7 +39,7 @@ controller:
     requests:
       cpu: 10m
       memory: 64Mi
-  
+
   # -- Log level for zap logger (debug, info, error)
   logLevel: info
 
@@ -81,8 +87,9 @@ controller:
   # -- Enable leader election for controller manager
   leaderElection:
     enabled: true
-  
-  # -- Liveness probe configuration
+
+  # -- Liveness probe configuration. The livenessProbe.httpGet.port below also
+  # drives --health-probe-bind-address and the health container port.
   livenessProbe:
     enabled: true
     httpGet:
@@ -93,8 +100,8 @@ controller:
     timeoutSeconds: 1
     successThreshold: 1
     failureThreshold: 3
-  
-  # -- Readiness probe configuration
+
+  # -- Readiness probe configuration. Shares the health-probe port with livenessProbe.
   readinessProbe:
     enabled: true
     httpGet:
@@ -105,22 +112,22 @@ controller:
     timeoutSeconds: 1
     successThreshold: 1
     failureThreshold: 3
-  
+
   # -- Node labels for controller pod assignment
   nodeSelector: {}
-  
+
   # -- Tolerations for controller pod assignment
   tolerations: []
-  
+
   # -- Affinity for controller pod assignment
   affinity: {}
-  
+
   # -- Pod security context
   podSecurityContext:
     runAsNonRoot: true
     seccompProfile:
       type: RuntimeDefault
-  
+
   # -- Container security context
   containerSecurityContext:
     allowPrivilegeEscalation: false
@@ -128,13 +135,13 @@ controller:
       drop:
         - "ALL"
     readOnlyRootFilesystem: false
-  
+
   # -- Additional labels for controller pods
   podLabels: {}
-  
+
   # -- Additional annotations for controller pods
   podAnnotations: {}
-  
+
   # -- Priority class name for controller pods
   priorityClassName: ""
 

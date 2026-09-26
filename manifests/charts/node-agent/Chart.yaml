@@ -1,13 +1,47 @@
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 apiVersion: v2
 name: opensandbox-node-agent
 description: Node-level sandbox data collection for OpenSandbox
 type: application
 version: 1.1.0
 appVersion: "1.1.0"
+
+# Kubernetes version constraints
 kubeVersion: ">=1.21.1-0"
+
+keywords:
+  - sandbox
+  - kubernetes
+  - node-agent
+  - logs
+
 home: https://github.com/opensandbox-group/OpenSandbox
 sources:
   - https://github.com/opensandbox-group/OpenSandbox/tree/main/components/nodeagent
+  - https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/node-agent
+
 maintainers:
   - name: OpenSandbox Team
-    email: opensandbox@example.com
+
+annotations:
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/opensandbox-group/OpenSandbox/blob/main/manifests/README.md
+    - name: Support
+      url: https://github.com/opensandbox-group/OpenSandbox/issues
