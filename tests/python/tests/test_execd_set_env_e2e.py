@@ -161,7 +161,9 @@ class TestExecdSetEnvE2E:
         sandbox.commands.set_env("E2E_SETENV_SESSION", "from-set-env")
         sid = sandbox.commands.create_session()
         try:
-            result = sandbox.commands.run_in_session(sid, 'printf "[%s]" "$E2E_SETENV_SESSION"')
+            result = sandbox.commands.run_in_session(
+                sid, 'printf "[%s]" "$E2E_SETENV_SESSION"'
+            )
             assert result.error is None, result.error
             assert result.exit_code == 0
             out = _stdout(result)
