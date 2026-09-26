@@ -103,6 +103,9 @@ const (
 
 	dohBlockV4Set = "doh_block_v4"
 	dohBlockV6Set = "doh_block_v6"
+
+	upstreamProxyV4Set = "upstream_proxy_v4"
+	upstreamProxyV6Set = "upstream_proxy_v6"
 )
 
 // Runner executes an nft script; the default invokes `nft -f -`.
@@ -142,6 +145,14 @@ type Options struct {
 	// executes the same policy on it using the conntrack ORIGINAL
 	// destination. 0 disables the input chain entirely (no MITM).
 	MitmRedirectPort int
+	// UpstreamProxy, when set, drops the chained upstream CONNECT proxy
+	// endpoint for EVERY subject profile-wide (forward and — with MITM —
+	// input path), ahead of the per-subject chains. The mitmdump dial is
+	// locally generated and never policed by this table (the profile
+	// installs no OUTPUT enforcement), so no accept-side exception is
+	// needed; the drop is the source-IP-model equivalent of the sidecar
+	// profile's uid-scoped upstream rules.
+	UpstreamProxy *UpstreamProxyEndpoint
 }
 
 // installedSubject tracks the enforcement state the applier owns in memory;
@@ -169,6 +180,20 @@ type Applier struct {
 	conntrack  func(context.Context) ([]conntrackEntry, error) // injectable for tests
 	now        func() time.Time                                // injectable for tests
 	sandboxMir func(context.Context, subject.Subject, []nftables.ResolvedIP) error
+
+	// upstreamIPs mirrors the DNS-learned upstream-proxy drop-set elements
+	// (a presence set — the elements are permanent in the kernel; expiry is
+	// owned by SyncUpstreamProxyIPs, not kernel timeouts), so table rebuilds
+	// (subject removal, startup reset) re-seed them deterministically
+	// instead of losing the hostname containment until the next refresh
+	// tick. Literal endpoints are not mirrored: they are re-emitted from
+	// Options on every rebuild.
+	upstreamIPs map[netip.Addr]struct{}
+
+	// upstreamSeedTimeout bounds the first-seed retry window of
+	// StartUpstreamProxyRefresh (injectable for tests). Past it the caller
+	// fails startup: fail closed, like every other initialization step.
+	upstreamSeedTimeout time.Duration
 }
 
 // NewApplier returns an Applier using r (nil selects DefaultRunner). Pass
@@ -178,11 +203,13 @@ func NewApplier(r Runner, opts ...Options) *Applier {
 		r = DefaultRunner
 	}
 	a := &Applier{
-		run:       r,
-		subjects:  make(map[subject.Subject]installedSubject),
-		states:    make(map[subject.Subject]*refreshState),
-		conntrack: readConntrack,
-		now:       time.Now,
+		run:                 r,
+		subjects:            make(map[subject.Subject]installedSubject),
+		states:              make(map[subject.Subject]*refreshState),
+		upstreamIPs:         make(map[netip.Addr]struct{}),
+		upstreamSeedTimeout: upstreamProxySeedTimeout,
+		conntrack:           readConntrack,
+		now:                 time.Now,
 	}
 	if len(opts) > 0 {
 		a.opts = opts[0]
@@ -467,6 +494,9 @@ func (a *Applier) writeTableHeader(b *strings.Builder) error {
 		TableName, markChain, markPriority)
 	fmt.Fprintf(b, "add chain inet %s %s { type filter hook forward priority %d; policy accept; }\n",
 		TableName, dispatchChain, dispatchPriority)
+	if a.opts.UpstreamProxy != nil {
+		a.writeUpstreamProxyStatic(b)
+	}
 	fmt.Fprintf(b, "add rule inet %s %s ct state established,related accept\n", TableName, dispatchChain)
 	fmt.Fprintf(b, "add rule inet %s %s tcp dport 853 drop\n", TableName, dispatchChain)
 	fmt.Fprintf(b, "add rule inet %s %s udp dport 853 drop\n", TableName, dispatchChain)
@@ -476,6 +506,9 @@ func (a *Applier) writeTableHeader(b *strings.Builder) error {
 	if a.opts.MitmRedirectPort > 0 {
 		fmt.Fprintf(b, "add chain inet %s %s { type filter hook input priority %d; policy accept; }\n",
 			TableName, inputChain, inputPriority)
+		if a.opts.UpstreamProxy != nil {
+			a.writeUpstreamProxyInputRules(b)
+		}
 		fmt.Fprintf(b, "add rule inet %s %s ct state established,related accept\n", TableName, inputChain)
 	}
 	if !a.opts.BlockDoH443 {

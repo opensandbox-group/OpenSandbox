@@ -52,8 +52,9 @@ func main() {
 	defer log.Logger.Sync()
 
 	// Validate the chained upstream proxy env before profile dispatch: a
-	// configured proxy without transparent mitmproxy, or under fast-sandbox,
-	// fails startup instead of being silently ignored.
+	// configured proxy without transparent mitmproxy (and, outside
+	// fast-sandbox, without dns+nft enforcement) fails startup instead of
+	// being silently ignored.
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
 	upstreamSpec, err := upstreamProxySpecForProfile(profile)
 	if err != nil {
@@ -64,7 +65,7 @@ func main() {
 	// store and the proxy route. Sidecar stays the default; the two profiles
 	// are mutually exclusive deployment forms.
 	if profile == constants.ProfileFastSandbox {
-		runFastSandboxProfile(ctx)
+		runFastSandboxProfile(ctx, upstreamSpec)
 		return
 	}
 

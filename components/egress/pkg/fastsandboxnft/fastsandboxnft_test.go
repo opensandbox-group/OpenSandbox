@@ -557,3 +557,242 @@ func TestInputChainPolicySwap(t *testing.T) {
 	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept")
 	assert.NotContains(t, script, "add rule inet opensandbox-fast-sandbox input ip saddr", "swap must not duplicate the input dispatch rule")
 }
+
+// TestUpstreamProxyForwardDrops: the chained upstream proxy endpoint is
+// infrastructure — a sandbox CONNECTing it directly would relay to
+// otherwise-denied destinations, so the drop rules sit profile-wide in the
+// master dispatch chain, BEFORE the established accept (stale flows from a
+// pre-upstream egress generation must not survive a restart) and before any
+// per-subject jump.
+func TestUpstreamProxyForwardDrops(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{
+		UpstreamProxy: &UpstreamProxyEndpoint{
+			Port:        3128,
+			LiteralIPs:  []netip.Addr{netip.MustParseAddr("10.1.2.3"), netip.MustParseAddr("2001:db8::1")},
+		},
+	})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	script := runner.last()
+	require.Contains(t, script, "add set inet opensandbox-fast-sandbox upstream_proxy_v4 { type ipv4_addr; flags timeout; }")
+	require.Contains(t, script, "add set inet opensandbox-fast-sandbox upstream_proxy_v6 { type ipv6_addr; flags timeout; }")
+	// literal seeds are permanent: no element-level timeout
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.1.2.3 }\n")
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox upstream_proxy_v6 { 2001:db8::1 }\n")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch ip daddr @upstream_proxy_v4 tcp dport 3128 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch ip6 daddr @upstream_proxy_v6 tcp dport 3128 drop")
+	// the drop must precede the established accept (cross-restart staleness)
+	require.Less(t,
+		strings.Index(script, "dispatch ip daddr @upstream_proxy_v4"),
+		strings.Index(script, "dispatch ct state established,related accept"),
+	)
+	// no MITM: no input chain, so no input-path containment either
+	assert.NotContains(t, script, "hook input")
+	assert.NotContains(t, script, "input ct status dnat ct original ip daddr @upstream_proxy_v4")
+}
+
+// TestUpstreamProxyInputDropsWithMITM: intercepted CONNECTs whose ORIGINAL
+// destination is the proxy endpoint die in the input chain, before its
+// established accept — the forward drop never sees DNATed traffic.
+func TestUpstreamProxyInputDropsWithMITM(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{
+		MitmRedirectPort: 18081,
+		UpstreamProxy:    &UpstreamProxyEndpoint{Port: 3128},
+	})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	script := runner.last()
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip daddr @upstream_proxy_v4 ct original proto-dst 3128 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip6 daddr @upstream_proxy_v6 ct original proto-dst 3128 drop")
+	require.Less(t,
+		strings.Index(script, "input ct status dnat ct original ip daddr @upstream_proxy_v4"),
+		strings.Index(script, "input ct state established,related accept"),
+		"input drop must precede the input established accept",
+	)
+}
+
+func TestUpstreamProxyDisabledByDefault(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	assert.NotContains(t, runner.last(), "upstream_proxy", "no upstream proxy: no containment rules")
+
+	// AddUpstreamProxyIPs without an endpoint is a no-op (no nft call, no error)
+	require.NoError(t, a.AddUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.2.3.4"), TTL: time.Minute}}))
+	require.Equal(t, 1, runner.count())
+}
+
+func TestAddUpstreamProxyIPs(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{UpstreamProxy: &UpstreamProxyEndpoint{Port: 3128}})
+	ctx := context.Background()
+	require.NoError(t, a.ApplyReset(ctx))
+	runner.mu.Lock()
+	runner.scripts = nil
+	runner.mu.Unlock()
+
+	// TTLs are deliberately ignored: elements are permanent so containment
+	// survives egress downtime (expiry is owned by SyncUpstreamProxyIPs).
+	require.NoError(t, a.AddUpstreamProxyIPs(ctx, []nftables.ResolvedIP{
+		{Addr: netip.MustParseAddr("10.9.9.9"), TTL: 30 * time.Second},
+		{Addr: netip.MustParseAddr("2001:db8::2"), TTL: 24 * time.Hour},
+	}))
+	script := runner.last()
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.9.9.9 }\n")
+	require.Contains(t, script, "delete element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.9.9.9 }")
+	assert.NotContains(t, script, "10.9.9.9 timeout", "DNS-learned elements must be permanent")
+	assert.NotContains(t, script, "2001:db8::2 timeout", "DNS-learned elements must be permanent")
+
+	// an empty slice is a no-op
+	require.NoError(t, a.AddUpstreamProxyIPs(ctx, nil))
+	require.Equal(t, 1, runner.count())
+}
+
+// TestUpstreamProxyLearnedIPsSurviveRebuild: table rebuilds (subject removal,
+// startup reset) re-seed the DNS-learned drop elements from the in-memory
+// mirror, so hostname containment never lapses between the rebuild and the
+// next refresh tick.
+func TestUpstreamProxyLearnedIPsSurviveRebuild(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{
+		UpstreamProxy: &UpstreamProxyEndpoint{Port: 3128, LiteralIPs: []netip.Addr{netip.MustParseAddr("10.1.2.3")}},
+	})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.AddUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.9.9.9"), TTL: time.Minute}}))
+
+	// subject removal rebuilds the whole table from in-memory state
+	require.NoError(t, a.Remove(ctx, s))
+	script := runner.last()
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.1.2.3 }\n", "literal seed must survive")
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.9.9.9 }\n", "learned element must be re-seeded (permanent)")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch ip daddr @upstream_proxy_v4 tcp dport 3128 drop", "drop rule must survive")
+
+	// startup reset likewise
+	require.NoError(t, a.ApplyReset(ctx))
+	require.Contains(t, runner.last(), "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.9.9.9 }\n")
+	require.Contains(t, runner.last(), "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.1.2.3 }\n")
+}
+
+// TestSyncUpstreamProxyIPs: the refresh loop's sync is the expiry mechanism
+// for the containment — rotation removes stale addresses, and empty or
+// unusable answers never prune the sets to nothing (fail-closed retention).
+func TestSyncUpstreamProxyIPs(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{UpstreamProxy: &UpstreamProxyEndpoint{Port: 3128}})
+	ctx := context.Background()
+	require.NoError(t, a.ApplyReset(ctx))
+	require.NoError(t, a.AddUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.9.9.9")}}))
+
+	// rotation: 10.9.9.9 out, 10.8.8.8 in
+	require.NoError(t, a.SyncUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.8.8.8")}}))
+	script := runner.last()
+	require.Contains(t, script, "delete element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.9.9.9 }")
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.8.8.8 }")
+
+	// the mirror follows the rotation: rebuilds drop the stale address
+	require.NoError(t, a.ApplyReset(ctx))
+	rebuilt := runner.last()
+	require.Contains(t, rebuilt, "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.8.8.8 }\n")
+	assert.NotContains(t, rebuilt, "10.9.9.9")
+
+	// empty or all-unusable answers are errors, never a prune-to-nothing
+	require.Error(t, a.SyncUpstreamProxyIPs(ctx, nil))
+	require.Error(t, a.SyncUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.Addr{}}}))
+	require.NoError(t, a.ApplyReset(ctx))
+	require.Contains(t, runner.last(), "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.8.8.8 }\n", "failed sync must keep the mirror")
+
+	// a failed apply must not commit the rotation either
+	failing := &fakeRunner{}
+	b := NewApplier(failing.Run, Options{UpstreamProxy: &UpstreamProxyEndpoint{Port: 3128}})
+	require.NoError(t, b.ApplyReset(ctx))
+	require.NoError(t, b.AddUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.9.9.9")}}))
+	failing.fail = func(script string) error {
+		if strings.Contains(script, "10.8.8.8") {
+			return fmt.Errorf("nft apply failed")
+		}
+		return nil
+	}
+	require.Error(t, b.SyncUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.8.8.8")}}))
+	require.NoError(t, b.ApplyReset(ctx))
+	assert.NotContains(t, failing.last(), "10.8.8.8", "failed rotation must not leak into the rebuild")
+	require.Contains(t, failing.last(), "10.9.9.9")
+
+	// no endpoint configured: no-op
+	c := NewApplier((&fakeRunner{}).Run)
+	require.NoError(t, c.SyncUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.8.8.8")}}))
+}
+
+// TestStartUpstreamProxyRefreshSeedFailClosed: the first seed retries with
+// bounded backoff and returns an error when the hostname cannot be
+// resolved — the caller fails startup instead of serving sandboxes with an
+// empty drop set.
+func TestStartUpstreamProxyRefreshSeedFailClosed(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{UpstreamProxy: &UpstreamProxyEndpoint{Port: 3128}})
+	a.upstreamSeedTimeout = 80 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// persistent lookup failure: seed retries, then errors with the cause
+	err := a.StartUpstreamProxyRefresh(ctx, "proxy.test", func(context.Context, string) ([]nftables.ResolvedIP, error) {
+		return nil, fmt.Errorf("dns down")
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dns down")
+
+	// NXDOMAIN-everywhere is equally fatal for the first seed
+	err = a.StartUpstreamProxyRefresh(ctx, "proxy.test", func(context.Context, string) ([]nftables.ResolvedIP, error) {
+		return nil, nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no addresses")
+
+	// nothing was seeded: no nft call ever succeeded
+	require.Equal(t, 0, runner.count())
+}
+
+// TestStartUpstreamProxyRefreshSeeds: a resolvable hostname seeds the drop
+// set synchronously (before the caller starts serving) as permanent
+// elements.
+func TestStartUpstreamProxyRefreshSeeds(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{UpstreamProxy: &UpstreamProxyEndpoint{Port: 3128}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, a.StartUpstreamProxyRefresh(ctx, "proxy.test", func(context.Context, string) ([]nftables.ResolvedIP, error) {
+		return []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.9.9.9"), TTL: time.Minute}}, nil
+	}))
+	script := runner.last()
+	require.Contains(t, script, "add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 10.9.9.9 }")
+	assert.NotContains(t, script, "10.9.9.9 timeout", "seeded elements must be permanent")
+}
+
+// TestAddUpstreamProxyIPsFailureKeepsMirror: a failed apply must not commit
+// the mirror (rebuilds stay deterministic against the kernel state).
+func TestAddUpstreamProxyIPsFailureKeepsMirror(t *testing.T) {
+	runner := &fakeRunner{fail: func(script string) error {
+		// fail only the dynamic element update, never the table header
+		if strings.Contains(script, "delete element") && strings.Contains(script, "upstream_proxy") {
+			return fmt.Errorf("nft apply failed")
+		}
+		return nil
+	}}
+	a := NewApplier(runner.Run, Options{UpstreamProxy: &UpstreamProxyEndpoint{Port: 3128}})
+	ctx := context.Background()
+	require.NoError(t, a.ApplyReset(ctx))
+	require.Error(t, a.AddUpstreamProxyIPs(ctx, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.9.9.9"), TTL: time.Minute}}))
+
+	require.NoError(t, a.ApplyReset(ctx))
+	assert.NotContains(t, runner.last(), "10.9.9.9", "failed update must not leak into the rebuild")
+}

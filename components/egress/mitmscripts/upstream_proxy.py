@@ -47,6 +47,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from urllib.parse import urlsplit
 
@@ -95,6 +96,19 @@ def _parse_upstream(raw: str) -> tuple[str, str, int]:
         raise ValueError("invalid port")
     if any(c in host for c in " \t\r\n/@"):
         raise ValueError("invalid host")
+    # Parity with the Go-side parser: a dotless host resolves differently on
+    # the two lookup paths (the egress queries the name verbatim, glibc here
+    # expands it through the search list), so the containment sets could miss
+    # the address actually dialed. Literal IPs are exempt.
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if "." not in host:
+            raise ValueError(
+                "host must be a literal IP or a dotted domain name"
+                " (dotless names resolve differently through the Pod"
+                " resolver's search list)"
+            ) from None
     return url.scheme, host.lower(), port
 
 

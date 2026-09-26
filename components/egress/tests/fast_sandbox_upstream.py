@@ -17,26 +17,35 @@
 """Helper servers + DNS query tool for the fast-sandbox smoke test (tests/smoke-fast-sandbox.sh).
 
 Modes:
-  dns         UDP DNS upstream on 127.0.0.1:5300. Authoritative for *.test:
-              allow.test -> 1.1.1.1, other.test -> 1.1.1.2, everything else
-              NXDOMAIN. Deterministic, no external network.
-  ext         HTTP server on 0.0.0.0:8080 (run inside the "ext" netns,
-              plays the role of the external network).
-  query ARGS  Send a DNS A query (python3 fast_sandbox_upstream.py query <server> <name>)
-              and print "rcode=N [answers=...]".
+  dns          UDP DNS upstream on 127.0.0.1:5300. Authoritative for *.test:
+               allow.test -> 1.1.1.1, other.test -> 1.1.1.2, everything else
+               NXDOMAIN. Deterministic, no external network.
+  ext          HTTP server on 0.0.0.0:8080 (run inside the "ext" netns,
+               plays the role of the external network).
+  connectproxy Chained upstream CONNECT/forward relay on 0.0.0.0:3128 (run in
+               the "ext" netns): the proxy the shared mitmdump chains through
+               when OPENSANDBOX_EGRESS_UPSTREAM_PROXY points here. CONNECT
+               tunnels and absolute-URI GETs are relayed and counted; an
+               origin-form GET (e.g. /_count) answers "relayed=N" so the
+               smoke test can prove a dial traversed the chain.
+  query ARGS   Send a DNS A query (python3 fast_sandbox_upstream.py query <server> <name>)
+               and print "rcode=N [answers=...]".
 """
 
 import http.server
 import os
+import select
 import socket
 import ssl
 import struct
 import sys
 import threading
 import time
+from urllib.parse import urlsplit
 
 TEST_ALLOW_IP = "1.1.1.1"
 TEST_OTHER_IP = "1.1.1.2"
+CONNECT_PROXY_PORT = 3128
 
 
 def build_query(name: str) -> bytes:
@@ -177,6 +186,113 @@ def run_ext_http():
         time.sleep(3600)
 
 
+def run_connect_proxy():
+    # Raw-socket relay (not http.server): the CONNECT tunnel must see every
+    # byte after the request head, and BaseHTTPRequestHandler's buffered
+    # reader can swallow post-head bytes into its lookahead.
+    state = {"relayed": 0}
+    lock = threading.Lock()
+
+    def read_head(conn: socket.socket) -> bytes | None:
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
+    def tunnel(a: socket.socket, b: socket.socket) -> None:
+        for s in (a, b):
+            s.settimeout(None)
+        while True:
+            readable, _, _ = select.select([a, b], [], [], 60)
+            if not readable:
+                return  # idle: close both ends
+            for s in readable:
+                data = s.recv(65536)
+                if not data:
+                    return
+                (b if s is a else a).sendall(data)
+
+    def handle(conn: socket.socket) -> None:
+        conn.settimeout(30)
+        head = read_head(conn)
+        if head is None:
+            conn.close()
+            return
+        method, _, target = head.split(b"\r\n", 1)[0].decode("latin-1").partition(" ")
+        leftover = head.split(b"\r\n\r\n", 1)[1]
+
+        if method == "CONNECT":
+            host, _, port = target.partition(":")
+            try:
+                upstream = socket.create_connection((host, int(port or "443")), timeout=10)
+            except OSError:
+                conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                conn.close()
+                return
+            conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            with lock:
+                state["relayed"] += 1
+            if leftover:
+                upstream.sendall(leftover)
+            tunnel(conn, upstream)
+            conn.close()
+            upstream.close()
+            return
+
+        if method in ("GET", "HEAD") and target.startswith("http://"):
+            # mitmproxy upstream mode sends plain-HTTP flows as absolute-URI
+            # requests; re-send as origin-form (headers forwarded verbatim so
+            # the injected credentials still reach the ext echo server).
+            parts = urlsplit(target)
+            try:
+                upstream = socket.create_connection((parts.hostname, parts.port or 80), timeout=10)
+            except OSError:
+                conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                conn.close()
+                return
+            origin = parts.path or "/"
+            if parts.query:
+                origin += "?" + parts.query
+            lines = head.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
+            forwarded = b"\r\n".join(
+                [f"{method} {origin} HTTP/1.1".encode("latin-1")]
+                + lines[1:]
+                + [b"Connection: close"]
+            )
+            upstream.sendall(forwarded + b"\r\n\r\n" + leftover)
+            with lock:
+                state["relayed"] += 1
+            while True:
+                data = upstream.recv(65536)
+                if not data:
+                    break
+                conn.sendall(data)
+            conn.close()
+            upstream.close()
+            return
+
+        # Origin-form request: management endpoint — report the relay count.
+        with lock:
+            body = f"relayed={state['relayed']}\n".encode()
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+            + b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            + b"Connection: close\r\n\r\n" + body
+        )
+        conn.close()
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", CONNECT_PROXY_PORT))
+    srv.listen(64)
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+
 def do_query(server: str, name: str, port: int = 53) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(3)
@@ -197,6 +313,8 @@ def main() -> int:
         run_dns_upstream()
     elif mode == "ext":
         run_ext_http()
+    elif mode == "connectproxy":
+        run_connect_proxy()
     elif mode == "query":
         port = int(sys.argv[4]) if len(sys.argv) > 4 else 53
         return do_query(sys.argv[2], sys.argv[3], port)

@@ -34,6 +34,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -54,8 +56,11 @@ import (
 )
 
 // runFastSandboxProfile starts the fast-sandbox-profile control plane and blocks until ctx is
-// canceled or a fatal error occurs.
-func runFastSandboxProfile(ctx context.Context) {
+// canceled or a fatal error occurs. upstreamSpec is the validated chained
+// upstream proxy (nil when disabled): containment is enforced profile-wide
+// in the nft table and the proxy hostname is registered as an infra domain
+// on the shared dnsproxy.
+func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.UpstreamProxySpec) {
 	log.Infof("egress profile: fast-sandbox (multi-sandbox control plane)")
 
 	// Erase any stale mitmproxy CA left on the shared volume (root and the
@@ -82,7 +87,7 @@ func runFastSandboxProfile(ctx context.Context) {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
 	}
 
-	podNft := fastsandboxnft.NewApplier(nil, fastSandboxDoHOptions())
+	podNft := fastsandboxnft.NewApplier(nil, fastSandboxNftOptions(upstreamSpec))
 	// Recovery: wipe stale rules from a previous egress generation BEFORE
 	// serving action requests, so no dead subject's policy survives into a
 	// new sandbox. The Fastlet then detects the new handler instanceId and
@@ -137,6 +142,38 @@ func runFastSandboxProfile(ctx context.Context) {
 	proxy, err := dnsproxy.New(nil, dnsAddr, alwaysDeny, alwaysAllow)
 	if err != nil {
 		log.Fatalf("failed to init dns proxy: %v", err)
+	}
+	if upstreamSpec != nil {
+		if _, parseErr := netip.ParseAddr(upstreamSpec.Host); parseErr != nil {
+			// Hostname endpoint: register it as an infrastructure domain so
+			// sandbox lookups resolve without per-subject policy and NEVER
+			// feed the dyn allow sets (the open-relay bypass), while the
+			// answers keep the profile-wide drop sets fresh. The drop-set
+			// refresh resolves through BOTH resolver authorities (see
+			// resolveUpstreamProxyHost): the dnsproxy's forward upstreams and
+			// the Pod's own resolver — the authority the shared mitmdump
+			// dials through, since the profile deliberately installs no
+			// Pod-OUTPUT DNS redirect.
+			host := upstreamSpec.Host
+			proxy.SetInfraDomain(host, func(domain string, ips []nftables.ResolvedIP) {
+				addCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				if err := podNft.AddUpstreamProxyIPs(addCtx, ips); err != nil {
+					log.Warnf("upstream proxy: nft update for %q failed: %v", domain, err)
+				}
+			})
+			if err := podNft.StartUpstreamProxyRefresh(ctx, host, func(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
+				return resolveUpstreamProxyHost(ctx, domain, proxy.ResolveDomain)
+			}); err != nil {
+				// Fail closed like every other startup step: serving sandbox
+				// actions with an unseeded drop set would let any subject
+				// that learns the proxy IP CONNECT it directly.
+				log.Fatalf("fast-sandbox upstream proxy %q: %v", host, err)
+			}
+			log.Infof("upstream proxy: registered infra DNS domain %q (profile-wide sandbox drop, no allow-set feed, dual-resolver refresh)", host)
+		} else {
+			log.Infof("upstream proxy: literal endpoint %s:%d (profile-wide sandbox drop)", upstreamSpec.Host, upstreamSpec.Port)
+		}
 	}
 	proxy.SetQueryPolicySelector(func(remote netip.Addr) (*dnsproxy.QueryPolicy, string) {
 		s, ok := reg.Resolve(subject.SubjectKey{SourceIP: remote})
@@ -203,6 +240,35 @@ func runFastSandboxProfile(ctx context.Context) {
 	_ = os.Stderr.Sync()
 }
 
+// fastSandboxNftOptions assembles the fast-sandbox nft options: the shared
+// DoH-443 blocking env (OPENSANDBOX_EGRESS_BLOCK_DOH_443 strict all-443 drop
+// when the blocklist is empty + OPENSANDBOX_EGRESS_DOH_BLOCKLIST
+// comma-separated IP/CIDR list), the mitm redirect port (Pod-netns INPUT
+// enforcement chain for intercepted (DNATed) traffic; 0 when MITM is off),
+// and — when a chained upstream proxy is configured — the profile-wide
+// endpoint drop. Same semantics as the sidecar profile for the shared parts.
+func fastSandboxNftOptions(upstreamSpec *mitmproxy.UpstreamProxySpec) fastsandboxnft.Options {
+	opts := fastSandboxDoHOptions()
+	opts.UpstreamProxy = fastSandboxUpstreamEndpoint(upstreamSpec)
+	return opts
+}
+
+// fastSandboxUpstreamEndpoint translates the validated chained upstream
+// proxy spec into the fast-sandbox containment endpoint. A literal IP seeds
+// the drop sets permanently; a hostname starts empty (fed by the infra
+// domain DNS path and the self-refresh loop). Port is always non-zero: the
+// spec parser fills the scheme default.
+func fastSandboxUpstreamEndpoint(spec *mitmproxy.UpstreamProxySpec) *fastsandboxnft.UpstreamProxyEndpoint {
+	if spec == nil {
+		return nil
+	}
+	ep := &fastsandboxnft.UpstreamProxyEndpoint{Port: spec.Port}
+	if ip, err := netip.ParseAddr(spec.Host); err == nil {
+		ep.LiteralIPs = []netip.Addr{ip.Unmap()}
+	}
+	return ep
+}
+
 // fastSandboxDoHOptions parses the shared DoH-443 blocking env for the fast-sandbox
 // profile: OPENSANDBOX_EGRESS_BLOCK_DOH_443 (strict all-443 drop when the
 // blocklist is empty) + OPENSANDBOX_EGRESS_DOH_BLOCKLIST (comma-separated
@@ -218,4 +284,84 @@ func fastSandboxDoHOptions() fastsandboxnft.Options {
 		opts.MitmRedirectPort = constants.EnvIntOrDefault(constants.EnvMitmproxyPort, constants.DefaultMitmproxyPort)
 	}
 	return opts
+}
+
+// resolveUpstreamProxyHost resolves the upstream proxy hostname through BOTH
+// resolver authorities that can map it and returns the union. The drop sets
+// would otherwise be seeded only from the dnsproxy's forward upstreams
+// (OPENSANDBOX_EGRESS_DNS_UPSTREAM or /etc/resolv.conf — the answers
+// sandboxes can observe), while the shared mitmdump dials through the fastlet
+// Pod's own resolver: split-horizon or operator-configured DNS can make the
+// two return different address sets, and an address only the Pod resolver
+// returns is exactly one a sandbox could CONNECT directly (the open-relay
+// bypass). dnsLookup is injected for testing; in production it is the shared
+// dnsproxy's ResolveDomain. Pod-resolver answers carry no TTL (the
+// AddUpstreamProxyIPs TTL floor bounds them); an error is returned only when
+// both authorities fail.
+func resolveUpstreamProxyHost(ctx context.Context, domain string, dnsLookup func(context.Context, string) ([]nftables.ResolvedIP, error)) ([]nftables.ResolvedIP, error) {
+	ips, err := unionResolver(ctx, domain, dnsLookup, resolveViaPodResolver)
+	if err != nil {
+		return nil, fmt.Errorf("both resolver authorities failed for %q: %w", domain, err)
+	}
+	return ips, nil
+}
+
+// resolveViaPodResolver resolves through the Go default resolver —
+// /etc/resolv.conf and /etc/hosts, the same sources mitmdump's glibc resolver
+// uses for the chained dial. No TTL is knowable here (the AddUpstreamProxyIPs
+// TTL floor bounds the elements).
+func resolveViaPodResolver(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
+	addrs, err := net.DefaultResolver.LookupIP(ctx, "ip", domain)
+	if err != nil {
+		return nil, err
+	}
+	var ips []nftables.ResolvedIP
+	for _, a := range addrs {
+		if addr, ok := netip.AddrFromSlice(a); ok {
+			ips = append(ips, nftables.ResolvedIP{Addr: addr.Unmap()})
+		}
+	}
+	return ips, nil
+}
+
+// unionResolver runs every lookup and unions the answers, tolerating partial
+// failure: an error is returned only when every authority failed. A
+// consistent-but-empty union (e.g. NXDOMAIN everywhere) is not an error —
+// the refresh loop logs it as "no addresses".
+func unionResolver(ctx context.Context, domain string, lookups ...func(context.Context, string) ([]nftables.ResolvedIP, error)) ([]nftables.ResolvedIP, error) {
+	var (
+		ips  []nftables.ResolvedIP
+		errs []error
+	)
+	for _, lookup := range lookups {
+		resolved, err := lookup(ctx, domain)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		ips = append(ips, resolved...)
+	}
+	if len(errs) == len(lookups) {
+		return nil, errors.Join(errs...)
+	}
+	return unionResolvedIPs(ips), nil
+}
+
+// unionResolvedIPs dedupes per address, preferring the TTL-bearing entry:
+// the pod-resolver path reports TTL 0 and must not shorten a TTL the dnsproxy
+// authority reported for the same address.
+func unionResolvedIPs(ips []nftables.ResolvedIP) []nftables.ResolvedIP {
+	out := make([]nftables.ResolvedIP, 0, len(ips))
+	index := make(map[netip.Addr]int, len(ips))
+	for _, r := range ips {
+		if i, ok := index[r.Addr]; ok {
+			if out[i].TTL == 0 && r.TTL > 0 {
+				out[i] = r
+			}
+			continue
+		}
+		index[r.Addr] = len(out)
+		out = append(out, r)
+	}
+	return out
 }

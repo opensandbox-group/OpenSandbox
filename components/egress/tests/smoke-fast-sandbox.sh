@@ -49,7 +49,9 @@ SAVED_IP_FORWARD=""
 # pids of helpers + egress
 UPSTREAM_PID=""
 EXT_PID=""
+PROXY_PID=""
 EGRESS_PID=""
+HOSTS_BACKUP=""
 
 info() { echo "[$(date +%H:%M:%S)] $*"; }
 pass() { info "PASS: $*"; }
@@ -67,6 +69,13 @@ cleanup() {
   [ -n "${EGRESS_PID}" ] && kill "${EGRESS_PID}" 2>/dev/null
   [ -n "${UPSTREAM_PID}" ] && kill "${UPSTREAM_PID}" 2>/dev/null
   [ -n "${EXT_PID}" ] && kill "${EXT_PID}" 2>/dev/null
+  [ -n "${PROXY_PID}" ] && kill "${PROXY_PID}" 2>/dev/null
+  # Test 13 maps proxy.test in /etc/hosts (the Pod-resolver-only authority);
+  # restore the original file even on failure.
+  if [ -n "${HOSTS_BACKUP}" ] && [ -f "${HOSTS_BACKUP}" ]; then
+    cp -f "${HOSTS_BACKUP}" /etc/hosts
+    rm -f "${HOSTS_BACKUP}"
+  fi
   ip link del veth-a 2>/dev/null
   ip link del veth-ext 2>/dev/null
   ip netns del osb-sandbox-a 2>/dev/null
@@ -208,6 +217,13 @@ start_egress() {
       OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE=true
     )
   fi
+  # Optional chained upstream proxy (Test 13): EGRESS_UPSTREAM_PROXY is only
+  # meaningful together with EGRESS_MITM=1 (validation requires transparent).
+  local upstream="${EGRESS_UPSTREAM_PROXY-}"
+  local upstream_env=()
+  if [ -n "${upstream}" ]; then
+    upstream_env=(OPENSANDBOX_EGRESS_UPSTREAM_PROXY="${upstream}")
+  fi
   # env(1) is required: words produced by "${mitm_env[@]}" expansion are NOT
   # treated as environment assignments by bash (they'd be executed as commands).
   env \
@@ -218,6 +234,7 @@ start_egress() {
   OPENSANDBOX_EGRESS_BLOCK_DOH_443="${block_doh}" \
   OPENSANDBOX_EGRESS_DOH_BLOCKLIST="${doh_blocklist}" \
   "${mitm_env[@]}" \
+  "${upstream_env[@]}" \
   "${EGRESS_BIN}" >"${EGRESS_LOG}" 2>&1 &
   EGRESS_PID=$!
   wait_for 30 "egress healthz" curl -sf "http://127.0.0.1:${POLICY_PORT}/healthz"
@@ -642,6 +659,97 @@ else
   out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' http://10.99.0.2/)"
   echo "${out}" | grep -qi "x-api-key: secret-v1-new" || fail "injection must work after MITM-mode restart; got: ${out}"
   pass "MITM-mode restart recovery (DNAT + CA + action replay + vault re-push + injection)"
+
+  ###############################################################################
+  info "Test 13: chained upstream CONNECT proxy — dual-resolver drop set + profile-wide containment"
+  # The chained proxy endpoint (connectproxy relay) lives in the ext netns on
+  # :3128: the shared mitmdump dials it as locally generated Pod traffic,
+  # while every sandbox path to it must be dropped profile-wide. proxy.test
+  # resolves ONLY through the Pod resolver (/etc/hosts) — the dnsproxy's own
+  # upstream (127.0.0.1:5300) NXDOMAINs it. That is exactly the
+  # split-resolver-authority case from the review: the address mitmdump
+  # actually dials is one the dns-proxy authority never returns, and the drop
+  # set must still cover it (union of both authorities).
+  ip netns exec osb-ext python3 "${SCRIPT_DIR}/fast_sandbox_upstream.py" connectproxy >/dev/null 2>&1 &
+  PROXY_PID=$!
+  wait_for 5 "connect relay up" bash -c "ip netns exec osb-ext curl -s -m 2 http://127.0.0.1:3128/_count | grep -q 'relayed='"
+  relay_count() { ip netns exec osb-ext curl -s -m 2 http://127.0.0.1:3128/_count | sed -n 's/^relayed=//p'; }
+
+  HOSTS_BACKUP="$(mktemp /tmp/fast-sandbox-hosts.XXXXXX)"
+  cp /etc/hosts "${HOSTS_BACKUP}"
+  echo "10.99.0.2 proxy.test" >> /etc/hosts
+
+  kill "${EGRESS_PID}" 2>/dev/null
+  wait "${EGRESS_PID}" 2>/dev/null || true
+  EGRESS_PID=""
+  EGRESS_MITM=1 EGRESS_UPSTREAM_PROXY="http://proxy.test:3128" start_egress
+
+  # Containment seeded from the Pod-resolver authority only (the dnsproxy
+  # authority NXDOMAINs the name): drop element + forward/input drop rules.
+  wait_for 15 "upstream drop set seeded via the Pod resolver" bash -c \
+    "nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2'"
+  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'upstream_proxy_v4 tcp dport 3128 drop' \
+    || fail "profile-wide forward drop rule missing"
+  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'ct original ip daddr @upstream_proxy_v4' \
+    || fail "input-path containment rule missing (intercepted CONNECTs)"
+  pass "drop set seeded from the Pod-resolver authority (split-authority union)"
+
+  # Subject a re-registers with a policy that allows the ext destination and
+  # its IP, so any failure to reach the proxy can only be the profile-wide drop.
+  bind_and_ready a 10.10.0.5 10 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
+  push_vault a '{"credentials":[{"name":"k","source":{"type":"inline","value":"chain-v1"}}],"bindings":[{"name":"b","match":{"schemes":["http","https"],"hosts":["ext.test"]},"auth":{"type":"apiKey","name":"X-Api-Key","credential":"k"}}]}'
+
+  # Chained data plane (sandbox -> DNAT -> shared mitm -> CONNECT relay -> ext):
+  # the injected credential proves interception, the relay counter proves the
+  # upstream dial went through the chained proxy and never direct.
+  before="$(relay_count)"
+  out="$(ip netns exec osb-sandbox-a curl -s -m 8 -H 'Host: ext.test' http://10.99.0.2/)"
+  echo "${out}" | grep -qi "x-api-key: chain-v1" || fail "chained http lost mitm credential injection; got: ${out}"
+  after="$(relay_count)"
+  [ "${after}" -gt "${before}" ] || fail "chained http must traverse the CONNECT relay (count ${before} -> ${after})"
+  out="$(ip netns exec osb-sandbox-a curl -sk -m 8 -H 'Host: ext.test' https://10.99.0.2/)"
+  echo "${out}" | grep -qi "x-api-key: chain-v1" || fail "chained https lost mitm credential injection; got: ${out}"
+  [ "$(relay_count)" -gt "${after}" ] || fail "chained https must traverse the CONNECT tunnel"
+  pass "chained data plane (sandbox -> mitm -> CONNECT relay -> ext, http + https)"
+
+  # Direct sandbox -> proxy is dropped for a policy-scoped subject.
+  if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
+    fail "direct sandbox CONNECT to the chained proxy must be dropped"
+  fi
+  pass "direct proxy CONNECT dropped (policy-scoped subject)"
+
+  # Default-allow subject: still dropped — the containment is profile-wide,
+  # above every per-subject rule. Control first: non-proxy traffic flows, so
+  # only the proxy endpoint is unreachable.
+  set_binding a 10.10.0.5 11 runtime-a-2 att-a-2 '{"defaultAction":"allow"}'
+  lifecycle_hook a runtime-a-2 att-a-2 sandbox.data-plane-ready
+  out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' http://10.99.0.2:8080/)"
+  echo "${out}" | grep -qi "client=10.10.0.5" || fail "default-allow control request failed (subject inactive?); got: ${out}"
+  if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
+    fail "default-allow subject must NOT reach the chained proxy (open-relay bypass)"
+  fi
+  pass "profile-wide containment (default-allow subject still blocked)"
+
+  # Containment survives an egress restart: the drop rule sits ahead of the
+  # established accept, the drop elements are PERMANENT (no kernel timeout —
+  # they persist in the kernel for the whole daemon downtime, like every
+  # other rule in this table), and the chained path works after the replay.
+  kill "${EGRESS_PID}" 2>/dev/null
+  wait "${EGRESS_PID}" 2>/dev/null || true
+  EGRESS_PID=""
+  nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2' \
+    || fail "drop element must persist in the kernel while the egress daemon is down"
+  EGRESS_MITM=1 EGRESS_UPSTREAM_PROXY="http://proxy.test:3128" start_egress
+  wait_for 15 "drop set re-seeded after restart" bash -c \
+    "nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2'"
+  bind_and_ready a 10.10.0.5 12 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
+  push_vault a '{"credentials":[{"name":"k","source":{"type":"inline","value":"chain-v1"}}],"bindings":[{"name":"b","match":{"schemes":["http","https"],"hosts":["ext.test"]},"auth":{"type":"apiKey","name":"X-Api-Key","credential":"k"}}]}'
+  if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
+    fail "containment must survive egress restart"
+  fi
+  out="$(ip netns exec osb-sandbox-a curl -s -m 8 -H 'Host: ext.test' http://10.99.0.2/)"
+  echo "${out}" | grep -qi "x-api-key: chain-v1" || fail "chained path must work after restart; got: ${out}"
+  pass "upstream containment across egress restart (drop re-seeded + chained path intact)"
 fi
 
 ###############################################################################

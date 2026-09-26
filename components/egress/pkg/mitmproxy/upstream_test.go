@@ -63,6 +63,9 @@ func TestParseUpstreamProxyRejectsInvalid(t *testing.T) {
 		"http://proxy:3128?",              // empty query marker is still a query
 		"http://proxy:3128#",              // empty fragment marker is still a fragment
 		"http://proxy:3128/%2F",           // encoded separator is still a non-root path
+		"http://proxy:3128",               // dotless host resolves differently through the search list
+		"https://proxy",                   // dotless host, scheme default port
+		"http://localhost:3128",           // dotless even when resolvable locally
 	}
 	for _, raw := range tests {
 		_, err := parseUpstreamProxy(raw)

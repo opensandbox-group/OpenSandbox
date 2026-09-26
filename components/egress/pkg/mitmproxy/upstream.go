@@ -16,6 +16,7 @@ package mitmproxy
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -109,6 +110,13 @@ func parseUpstreamProxy(raw string) (UpstreamProxySpec, error) {
 	}
 	if strings.ContainsAny(host, " \t\r\n/@") {
 		return UpstreamProxySpec{}, fmt.Errorf("invalid host")
+	}
+	// A dotless host resolves differently on the two lookup paths in play:
+	// the egress queries the name verbatim while mitmdump's glibc resolver
+	// expands it through the Pod's DNS search list, so the containment sets
+	// could miss the address actually dialed. Literal IPs are exempt.
+	if _, err := netip.ParseAddr(host); err != nil && !strings.Contains(host, ".") {
+		return UpstreamProxySpec{}, fmt.Errorf("host %q must be a literal IP or a dotted domain name (dotless names resolve differently through the Pod resolver's search list)", host)
 	}
 	return UpstreamProxySpec{Scheme: u.Scheme, Host: strings.ToLower(host), Port: port}, nil
 }

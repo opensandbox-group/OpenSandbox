@@ -24,8 +24,11 @@ import (
 
 // upstreamProxySpecForProfile validates the chained upstream proxy env at
 // startup, before any profile dispatch. A configured proxy without
-// transparent mitmproxy, or under the fast-sandbox profile, is a hard error
-// rather than silently ignored.
+// transparent mitmproxy is a hard error rather than silently ignored. The
+// sidecar profile additionally requires the dns+nft enforcement mode; the
+// fast-sandbox profile always enforces through its source-IP-keyed nft
+// table and never reads the mode env, so only transparent mitmproxy is
+// required there.
 func upstreamProxySpecForProfile(profile string) (*mitmproxy.UpstreamProxySpec, error) {
 	spec, err := mitmproxy.UpstreamProxyFromEnv()
 	if err != nil {
@@ -38,7 +41,7 @@ func upstreamProxySpecForProfile(profile string) (*mitmproxy.UpstreamProxySpec, 
 		return nil, fmt.Errorf("%s requires %s=true", constants.EnvUpstreamProxy, constants.EnvMitmproxyTransparent)
 	}
 	if profile == constants.ProfileFastSandbox {
-		return nil, fmt.Errorf("%s is not supported with %s=%s", constants.EnvUpstreamProxy, constants.EnvEgressProfile, constants.ProfileFastSandbox)
+		return spec, nil
 	}
 	mode, err := constants.ParseEgressMode(os.Getenv(constants.EnvEgressMode))
 	if err != nil || mode != constants.PolicyDnsNft {
