@@ -114,6 +114,7 @@ osb sandbox create --image python:3.12 --ready-timeout 90s -o json
 osb sandbox create --image python:3.12 --network-policy-file network-policy.json -o json
 osb sandbox create --image python:3.12 --network-policy-file network-policy.json --credential-proxy -o json
 osb sandbox create --image python:3.12 --volumes-file volumes.json -o json
+osb sandbox create -f sandbox-request.json -o json
 ```
 
 Use these options deliberately:
@@ -130,6 +131,7 @@ Use these options deliberately:
 - `--credential-proxy`: enable Credential Vault transparent proxy support; requires `--network-policy-file`
 - `--template <tpl-id>`: create from a `Succeeded` template; mutually exclusive with `--image` and `--snapshot-id`; requires an explicit `--timeout`
 - `--snapshot-id <snap-id>`: restore a sandbox from a snapshot; mutually exclusive with `--image` and `--template`
+- `-f <request-file>`: read the full request from a JSON file in the public `CreateSandboxRequest` wire format (camelCase: `image`/`templateId`/`snapshotId`, `timeout` in seconds or `null`, `resourceLimits`, `networkPolicy`, `volumes`, `lifecycle`, ...); mutually exclusive with request-building flags (`--skip-health-check`, `--ready-timeout`, `-o` still apply). Prefer this when the user already has a request document or needs fields without dedicated flags.
 
 If the user does not specify an image, recommend one that matches the runtime they need instead of guessing silently.
 
@@ -139,12 +141,13 @@ Templates are golden-image builds. The build is asynchronous: `template create` 
 
 ```bash
 osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template create -f template-request.json -o json
 osb template get <template-id> -o json
 osb template list -o json
 osb template delete <template-id> -o json
 ```
 
-Useful `template create` options: `--resource cpu=1 memory=512Mi disk=2Gi`, `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe tcp://127.0.0.1:44772`, `--warmup-seconds 60`.
+Useful `template create` options: `--resource cpu=1 memory=512Mi disk=2Gi`, `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe tcp://127.0.0.1:44772`, `--warmup-seconds 60`. `-f <request-file>` reads the full request as public `CreateTemplateRequest` JSON (camelCase: `image`, `publish`, `resourceLimits`, `entrypoint`, `env`, `metadata`, `format`, `readiness.probe`, `readiness.warmupSeconds`), mutually exclusive with those flags.
 
 Create a sandbox from a succeeded template:
 

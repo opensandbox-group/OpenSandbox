@@ -24,12 +24,15 @@ from opensandbox.models.templates import (
     TemplateFilter,
     TemplateReadiness,
 )
+from pydantic import ValidationError
 
 from opensandbox_cli.utils import (
     KEY_VALUE,
     handle_errors,
+    load_json_object,
     output_option,
     prepare_output,
+    validation_message,
 )
 
 
@@ -42,12 +45,30 @@ def template_group(ctx: click.Context) -> None:
 
 
 @template_group.command("create")
-@click.option("--image", "-i", required=True, help="Source OCI image reference the golden image is built from.")
+@click.option(
+    "--image",
+    "-i",
+    default=None,
+    help="Source OCI image reference the golden image is built from. Required unless --file is used.",
+)
 @click.option(
     "--publish",
     "-p",
-    required=True,
-    help="S3-compatible publish target for the built artifacts (e.g. s3://bucket/publish).",
+    default=None,
+    help="S3-compatible publish target for the built artifacts (e.g. s3://bucket/publish). Required unless --file is used.",
+)
+@click.option(
+    "--file",
+    "-f",
+    "request_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help=(
+        "JSON request file in the public CreateTemplateRequest wire format "
+        "(camelCase keys: image, publish, resourceLimits, entrypoint, env, metadata, "
+        "format, readiness.probe, readiness.warmupSeconds). Mutually exclusive with "
+        "request-building flags; -o still applies."
+    ),
 )
 @click.option(
     "--resource",
@@ -94,8 +115,8 @@ def template_group(ctx: click.Context) -> None:
 @handle_errors
 def template_create(
     obj,
-    image: str,
-    publish: str,
+    image: str | None,
+    publish: str | None,
     resources_kv: tuple[tuple[str, str], ...],
     entrypoint: tuple[str, ...],
     envs: tuple[tuple[str, str], ...],
@@ -103,34 +124,80 @@ def template_create(
     image_format: str | None,
     readiness_probe: str | None,
     warmup_seconds: int | None,
+    request_file: str | None,
     output_format: str | None,
 ) -> None:
     """Create a template and start its asynchronous golden-image build."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
+
+    if request_file is not None:
+        file_conflicts: list[str] = []
+        if image is not None:
+            file_conflicts.append("--image")
+        if publish is not None:
+            file_conflicts.append("--publish")
+        if resources_kv:
+            file_conflicts.append("--resource")
+        if entrypoint:
+            file_conflicts.append("--entrypoint")
+        if envs:
+            file_conflicts.append("--env")
+        if metadata_kv:
+            file_conflicts.append("--metadata")
+        if image_format is not None:
+            file_conflicts.append("--format")
+        if readiness_probe is not None:
+            file_conflicts.append("--readiness-probe")
+        if warmup_seconds is not None:
+            file_conflicts.append("--warmup-seconds")
+        if file_conflicts:
+            raise click.ClickException(
+                f"--file cannot be combined with: {', '.join(file_conflicts)}."
+            )
+        data = load_json_object(request_file)
+        try:
+            request = CreateTemplateRequest.model_validate(data)
+        except ValidationError as exc:
+            raise click.ClickException(
+                f"Invalid request file '{request_file}': {validation_message(exc)}"
+            ) from exc
+    else:
+        if image is None or publish is None:
+            missing = [
+                name
+                for name, value in (("--image", image), ("--publish", publish))
+                if not value
+            ]
+            raise click.ClickException(
+                f"Missing required options: {', '.join(missing)} (or pass --file)."
+            )
+        readiness = None
+        if readiness_probe is not None or warmup_seconds is not None:
+            readiness = TemplateReadiness(probe=readiness_probe, warmupSeconds=warmup_seconds)
+
+        request = CreateTemplateRequest(
+            image=image,
+            publish=publish,
+            resourceLimits=dict(resources_kv) if resources_kv else None,
+            entrypoint=list(entrypoint) if entrypoint else None,
+            env=dict(envs) if envs else None,
+            metadata=dict(metadata_kv) if metadata_kv else None,
+            format=cast(Literal["native", "overlaybd"] | None, image_format),
+            readiness=readiness,
+        )
     mgr = obj.get_manager()
 
-    readiness = None
-    if readiness_probe is not None or warmup_seconds is not None:
-        readiness = TemplateReadiness(probe=readiness_probe, warmupSeconds=warmup_seconds)
-
-    request = CreateTemplateRequest(
-        image=image,
-        publish=publish,
-        resourceLimits=dict(resources_kv) if resources_kv else None,
-        entrypoint=list(entrypoint) if entrypoint else None,
-        env=dict(envs) if envs else None,
-        metadata=dict(metadata_kv) if metadata_kv else None,
-        format=cast(Literal["native", "overlaybd"] | None, image_format),
-        readiness=readiness,
-    )
     with obj.output.spinner("Creating template..."):
         info = mgr.create_template(request)
+    details = {
+        "template_id": info.template_id,
+        "image": info.image,
+        "status": info.status.phase,
+    }
+    if request_file is not None:
+        details["request_file"] = request_file
     obj.output.success_panel(
-        {
-            "template_id": info.template_id,
-            "image": info.image,
-            "status": info.status.phase,
-        },
+        details,
         title="Template Created",
     )
 

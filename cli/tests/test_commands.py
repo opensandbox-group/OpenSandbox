@@ -598,6 +598,239 @@ class TestSandboxCreate:
         data = json.loads(result.output)
         assert data["snapshot_id"] == "snap-1"
 
+    def test_create_from_file_maps_wire_request(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-file"
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({
+            "image": "python:3.12",
+            "timeout": 1800,
+            "resourceLimits": {"cpu": "1", "memory": "2Gi"},
+            "env": {"FOO": "bar"},
+            "metadata": {"team": "infra"},
+            "extensions": {"storage.id": "abc123"},
+            "entrypoint": ["python", "-m", "http.server"],
+        }))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        mock_create.assert_called_once()
+        assert mock_create.call_args.args[0] == "python:3.12"
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["timeout"].total_seconds() == 1800
+        assert kwargs["resource"] == {"cpu": "1", "memory": "2Gi"}
+        assert kwargs["env"] == {"FOO": "bar"}
+        assert kwargs["metadata"] == {"team": "infra"}
+        assert kwargs["extensions"] == {"storage.id": "abc123"}
+        assert kwargs["entrypoint"] == ["python", "-m", "http.server"]
+        data = json.loads(result.output)
+        assert data["request_file"] == str(request_path)
+        assert data["image"] == "python:3.12"
+
+    def test_create_from_file_with_image_auth(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-file"
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({
+            "image": {
+                "uri": "private.example.com/team/app:latest",
+                "auth": {"username": "alice", "password": "secret-token"},
+            },
+            "timeout": 600,
+        }))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        image_arg = mock_create.call_args.args[0]
+        assert isinstance(image_arg, SandboxImageSpec)
+        assert image_arg.image == "private.example.com/team/app:latest"
+        assert image_arg.auth is not None
+        assert image_arg.auth.username == "alice"
+        assert image_arg.auth.password == "secret-token"
+
+    def test_create_from_file_supports_manual_cleanup(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-file"
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"image": "python:3.12", "timeout": None}))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert mock_create.call_args.kwargs["timeout"] is None
+        data = json.loads(result.output)
+        assert data["timeout"] == "manual-cleanup"
+
+    def test_create_from_file_with_snapshot_and_network_policy(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-file"
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({
+            "snapshotId": "snap-1",
+            "timeout": 600,
+            "networkPolicy": {
+                "defaultAction": "deny",
+                "egress": [{"action": "allow", "target": "api.example.com"}],
+            },
+        }))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert mock_create.call_args.args[0] is None
+        assert mock_create.call_args.kwargs["snapshot_id"] == "snap-1"
+        assert mock_create.call_args.kwargs["network_policy"].egress[0].target == "api.example.com"
+
+    def test_create_from_file_with_template_calls_sdk(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-tpl"
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({
+            "templateId": "tpl_abc",
+            "timeout": 1800,
+            "metadata": {"team": "infra"},
+            "extensions": {"storage.id": "abc123"},
+            "networkPolicy": {
+                "defaultAction": "deny",
+                "egress": [{"action": "allow", "target": "api.example.com"}],
+            },
+        }))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create_from_template", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        mock_create.assert_called_once()
+        assert mock_create.call_args.args[0] == "tpl_abc"
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["timeout"].total_seconds() == 1800
+        assert kwargs["metadata"] == {"team": "infra"}
+        assert kwargs["extensions"] == {"storage.id": "abc123"}
+        assert kwargs["network_policy"].egress[0].target == "api.example.com"
+
+    def test_create_from_file_rejects_payload_flags(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"image": "python:3.12"}))
+
+        result = _invoke(
+            runner,
+            ["sandbox", "create", "-f", str(request_path), "--image", "python:3.11"],
+        )
+        assert result.exit_code != 0
+        assert "--file cannot be combined with: --image" in result.output
+
+    def test_create_from_file_requires_startup_source(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"timeout": 600}))
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert "must set one of 'image', 'templateId', or 'snapshotId'" in result.output
+
+    def test_create_from_file_rejects_unknown_fields(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"image": "python:3.12", "snapshot_id": "snap-1"}))
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert "unsupported fields: snapshot_id" in result.output
+
+    def test_create_from_file_rejects_multiple_sources(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"image": "python:3.12", "snapshotId": "snap-1"}))
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert "must set only one of 'image', 'templateId', 'snapshotId'" in result.output
+
+    def test_create_from_file_rejects_template_workload_fields(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({
+            "templateId": "tpl_abc",
+            "timeout": 600,
+            "resourceLimits": {"cpu": "1"},
+        }))
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert "cannot combine 'templateId' with 'resourceLimits'" in result.output
+
+    def test_create_from_file_rejects_invalid_json(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text("{not json")
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert "Invalid JSON in request file" in result.output
+
 
 def _make_template_info(phase: str = "Pending") -> TemplateInfo:
     return TemplateInfo(
@@ -654,6 +887,82 @@ class TestTemplateCommands:
         assert req.readiness.probe == "tcp://127.0.0.1:44772"
         data = json.loads(result.output)
         assert data["template_id"] == "tpl_abc"
+
+    def test_create_from_file_builds_request(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_mgr = MagicMock()
+        mock_mgr.create_template.return_value = _make_template_info()
+        request_path = tmp_path / "template-request.json"
+        request_path.write_text(json.dumps({
+            "image": "python:3.12",
+            "publish": "s3://bucket/publish",
+            "resourceLimits": {"cpu": "1", "memory": "512Mi"},
+            "entrypoint": ["python", "-m", "http.server"],
+            "env": {"FOO": "bar"},
+            "metadata": {"team": "infra"},
+            "readiness": {"probe": "tcp://127.0.0.1:44772", "warmupSeconds": 90},
+        }))
+
+        result = _invoke(
+            runner,
+            ["template", "create", "-f", str(request_path), "-o", "json"],
+            manager=mock_mgr,
+        )
+
+        assert result.exit_code == 0
+        req = mock_mgr.create_template.call_args.args[0]
+        assert isinstance(req, CreateTemplateRequest)
+        assert req.image == "python:3.12"
+        assert req.publish == "s3://bucket/publish"
+        assert req.resource_limits == {"cpu": "1", "memory": "512Mi"}
+        assert req.entrypoint == ["python", "-m", "http.server"]
+        assert req.env == {"FOO": "bar"}
+        assert req.metadata == {"team": "infra"}
+        assert req.readiness is not None
+        assert req.readiness.probe == "tcp://127.0.0.1:44772"
+        assert req.readiness.warmup_seconds == 90
+        data = json.loads(result.output)
+        assert data["request_file"] == str(request_path)
+
+    def test_create_from_file_rejects_payload_flags(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "template-request.json"
+        request_path.write_text(json.dumps({
+            "image": "python:3.12",
+            "publish": "s3://bucket/publish",
+        }))
+
+        result = _invoke(
+            runner,
+            ["template", "create", "-f", str(request_path), "--image", "python:3.11"],
+            manager=MagicMock(),
+        )
+        assert result.exit_code != 0
+        assert "--file cannot be combined with: --image" in result.output
+
+    def test_create_requires_image_and_publish_without_file(
+        self, runner: CliRunner
+    ) -> None:
+        result = _invoke(runner, ["template", "create"], manager=MagicMock())
+        assert result.exit_code != 0
+        assert "Missing required options: --image, --publish (or pass --file)." in result.output
+
+    def test_create_from_file_rejects_invalid_request(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "template-request.json"
+        request_path.write_text(json.dumps({"image": "python:3.12"}))
+
+        result = _invoke(
+            runner,
+            ["template", "create", "-f", str(request_path)],
+            manager=MagicMock(),
+        )
+        assert result.exit_code != 0
+        assert "Invalid request file" in result.output
+        assert "publish" in result.output
 
     def test_get_list_delete_use_manager(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()

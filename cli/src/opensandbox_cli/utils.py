@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import functools
+import json
 import re
 import sys
 from datetime import timedelta
 
 import click
+from pydantic import ValidationError
 
 from opensandbox_cli.client import ClientContext
 
@@ -106,6 +108,30 @@ class KeyValueType(click.ParamType):
 
 
 KEY_VALUE = KeyValueType()
+
+
+def load_json_object(path: str) -> dict:
+    """Load a JSON object from a file, with CLI-friendly errors."""
+    with open(path, encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(
+                f"Invalid JSON in request file '{path}': {exc}"
+            ) from exc
+    if not isinstance(data, dict):
+        raise click.ClickException(
+            f"Request file '{path}' must contain a JSON object."
+        )
+    return data
+
+
+def validation_message(exc: ValidationError) -> str:
+    """Format a pydantic ``ValidationError`` as a compact one-line message."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+        for error in exc.errors()
+    )
 
 
 def output_option(

@@ -176,6 +176,40 @@ osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
 
 `--image`, `--template`, and `--snapshot-id` are mutually exclusive.
 
+Create from a request file (`-f`, like `kubectl apply -f`):
+
+```bash
+osb sandbox create -f sandbox-request.json -o json
+```
+
+`sandbox-request.json` uses the public `CreateSandboxRequest` JSON format
+(camelCase keys):
+
+```json
+{
+  "image": "python:3.12",
+  "timeout": 1800,
+  "resourceLimits": { "cpu": "1", "memory": "2Gi" },
+  "entrypoint": ["python", "-m", "http.server"],
+  "networkPolicy": {
+    "defaultAction": "deny",
+    "egress": [{ "action": "allow", "target": "pypi.org" }]
+  }
+}
+```
+
+- Exactly one of `image` (string or `{ "uri": ..., "auth": { "username": ..., "password": ... } }`),
+  `templateId`, or `snapshotId` is required; `timeout` is integer seconds, or
+  `null` for manual cleanup.
+- Supported fields: `image`, `templateId`, `snapshotId`, `platform`, `timeout`,
+  `resourceLimits`, `resourceRequests`, `env`, `metadata`, `extensions`,
+  `entrypoint`, `networkPolicy`, `credentialProxy`, `secureAccess`, `volumes`,
+  `lifecycle`.
+- `-f` cannot be combined with request-building flags; `--skip-health-check`,
+  `--ready-timeout`, and `-o` still apply. In template mode the file may only
+  set `timeout`, `metadata`, `extensions`, and `networkPolicy` alongside
+  `templateId` (a finite `timeout` is required).
+
 ### Manage templates
 
 Templates are golden-image builds; the build runs asynchronously, so poll
@@ -192,7 +226,21 @@ osb template delete <template-id> -o json
 `template create` also accepts `--resource cpu=1 memory=512Mi disk=2Gi`,
 `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata
 KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe`, and
-`--warmup-seconds`.
+`--warmup-seconds`. Or pass a request file in the public `CreateTemplateRequest`
+JSON format:
+
+```bash
+osb template create -f template-request.json -o json
+```
+
+```json
+{
+  "image": "python:3.12",
+  "publish": "s3://bucket/publish",
+  "resourceLimits": { "cpu": "1", "memory": "512Mi" },
+  "readiness": { "probe": "tcp://127.0.0.1:44772", "warmupSeconds": 60 }
+}
+```
 
 ### Manage snapshots
 
