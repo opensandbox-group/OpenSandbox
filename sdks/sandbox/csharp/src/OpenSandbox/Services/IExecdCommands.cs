@@ -67,6 +67,24 @@ public interface IExecdCommands
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Persists an environment variable for future commands and sessions.
+    /// Appends <c>KEY=VALUE</c> to the sandbox env file that the runtime loads for
+    /// every command and session (the file named by the sandbox's <c>EXECD_ENVS</c>
+    /// variable, resolved inside the sandbox). Keys must match
+    /// <c>[A-Za-z_][A-Za-z0-9_]*</c>; values are stored verbatim with proper escaping.
+    /// The env file is append-only: the last write for a key wins.
+    /// </summary>
+    /// <param name="key">Environment variable name.</param>
+    /// <param name="value">Environment variable value.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="key"/> or <paramref name="value"/> is invalid.</exception>
+    /// <exception cref="SandboxException">Thrown when the sandbox fails to persist the variable.</exception>
+    Task SetEnvAsync(
+        string key,
+        string value,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Interrupts the current execution in the given session.
     /// </summary>
     /// <param name="sessionId">The session ID to interrupt.</param>
