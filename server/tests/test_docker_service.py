@@ -1890,6 +1890,23 @@ def test_pause_sandbox_without_egress_sidecar_preserves_main_only_behavior():
     main.pause.assert_called_once_with()
 
 
+def test_pause_sandbox_rejects_already_paused_main_without_mutating_containers():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=True, egress_expected=True)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars") as get_egress_sidecars,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        service.pause_sandbox("sandbox-id")
+
+    assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.SANDBOX_NOT_RUNNING
+    get_egress_sidecars.assert_not_called()
+    main.pause.assert_not_called()
+
+
 def test_resume_sandbox_without_egress_sidecar_preserves_main_only_behavior():
     service = DockerSandboxService(config=_app_config())
     main = _lifecycle_container("main-id", running=True, paused=True)
