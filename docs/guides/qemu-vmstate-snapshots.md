@@ -317,11 +317,13 @@ metadata:
     sandbox.opensandbox.io/qemu-required-node-class: shenlong-v1
 ```
 
-Snapshot image names are generated below the configured Registry prefix. A
+By default, snapshot image names are generated below the configured Registry prefix. A
 QEMU sandbox produces normal container rootfs images such as
 `<prefix>/<sandbox>-<container>:<tag>` and a VMState image such as
-`<prefix>/<sandbox>-vmstate:<tag>`. Resume resolves and uses their immutable
-manifest digests.
+`<prefix>/<sandbox>-vmstate:<tag>`. Both artifact names can be customized with
+[`--snapshot-image-uri-template`](/guides/pause-resume#custom-image-names); VM-state
+artifacts receive `ContainerName` and `ArtifactKind` equal to `vmstate`. Resume
+resolves and uses their immutable manifest digests.
 
 ## Validation
 

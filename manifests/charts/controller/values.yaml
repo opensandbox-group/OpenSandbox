@@ -68,6 +68,8 @@ controller:
     commitJobTimeout: "10m"
     # -- OCI registry prefix used for snapshot images.
     registry: ""
+    # -- Go named-field template for snapshot image URIs. Empty preserves default naming.
+    imageURITemplate: ""
     # -- Use insecure registry mode when pushing snapshot images.
     registryInsecure: false
     # -- Secret name used by commit Jobs to push snapshot images.

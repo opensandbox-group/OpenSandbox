@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // Embed timezone data for snapshot image naming.
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -219,6 +220,9 @@ func main() {
 	var snapshotRegistry string
 	flag.StringVar(&snapshotRegistry, "snapshot-registry", "", "OCI registry for snapshot images (e.g., registry.example.com/snapshots).")
 
+	var snapshotImageURITemplateValue string
+	flag.StringVar(&snapshotImageURITemplateValue, "snapshot-image-uri-template", "", "Go named-field template for snapshot image URIs; empty uses "+controller.DefaultSnapshotImageURITemplate+".")
+
 	var snapshotRegistryInsecure bool
 	flag.BoolVar(&snapshotRegistryInsecure, "snapshot-registry-insecure", false, "Use insecure registry mode when pushing snapshot images.")
 
@@ -252,6 +256,12 @@ func main() {
 	ctrl.SetLogger(logger)
 
 	setupLog.Info("Starting controller", "commitID", commitID, "buildDate", buildDate)
+
+	snapshotImageURITemplate, err := controller.ParseSnapshotImageURITemplate(snapshotImageURITemplateValue)
+	if err != nil {
+		setupLog.Error(err, "invalid snapshot image URI template")
+		os.Exit(1)
+	}
 
 	imageCommitterPodTemplate, err := loadImageCommitterPodTemplate(imageCommitterPodTemplateFile)
 	if err != nil {
@@ -480,6 +490,7 @@ func main() {
 		ContainerdSocketPath:      containerdSocketPath,
 		CommitJobTimeout:          commitJobTimeout,
 		SnapshotRegistry:          snapshotRegistry,
+		SnapshotImageURITemplate:  snapshotImageURITemplate,
 		SnapshotRegistryInsecure:  snapshotRegistryInsecure,
 		SnapshotPushSecret:        snapshotPushSecret,
 		ImageCommitterPullSecret:  imageCommitterPullSecret,

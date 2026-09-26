@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"text/template"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -80,6 +81,9 @@ type SandboxSnapshotReconciler struct {
 
 	// SnapshotRegistry is the OCI registry for snapshot images (from Controller Manager startup params)
 	SnapshotRegistry string
+
+	// SnapshotImageURITemplate overrides image naming; nil uses DefaultSnapshotImageURITemplate.
+	SnapshotImageURITemplate *template.Template
 
 	// SnapshotPushSecret is the K8s Secret name for pushing to registry (from Controller Manager startup params)
 	SnapshotPushSecret string

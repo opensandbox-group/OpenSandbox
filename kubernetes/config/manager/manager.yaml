@@ -64,6 +64,8 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --snapshot-registry=docker-registry.default.svc.cluster.local:5000
+          # Empty uses the default named-field template; see docs/guides/pause-resume.md.
+          - --snapshot-image-uri-template=
           - --snapshot-registry-insecure=true
           - --snapshot-push-secret=registry-snapshot-push-secret
           - --resume-pull-secret=registry-pull-secret
