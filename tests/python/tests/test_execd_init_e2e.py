@@ -85,6 +85,55 @@ def _process_count(sandbox) -> int:
     return int(_run_command(sandbox, "ls -d /proc/[0-9]* | wc -l").strip())
 
 
+def _start_long_sleeper(sandbox) -> tuple[int, int, float]:
+    out = _run_command(
+        sandbox,
+        "sleep 10 & pid=$!; "
+        'IFS= read -r stat < "/proc/$pid/stat" || exit 1; '
+        "stat=${stat##*) }; set -- $stat; shift 19 || exit 1; "
+        'printf "%s:%s" "$pid" "$1"',
+    )
+    pid, start_ticks = map(int, out.strip().split(":"))
+    assert pid > 0 and start_ticks > 0, f"invalid sleeper identity: {out!r}"
+    # Response receipt is an upper bound on launch time. Allow the ten-second
+    # workload plus two seconds for scheduling/reaping; never restart this clock.
+    return pid, start_ticks, time.monotonic() + 12
+
+
+def _wait_for_long_sleepers(sandbox, sleepers: list[tuple[int, int, float]]) -> None:
+    remaining = {(pid, start): deadline for pid, start, deadline in sleepers}
+    while remaining:
+        expected_pids = {pid for pid, _ in remaining}
+        pids = " ".join(str(pid) for pid in sorted(expected_pids))
+        out = _run_command(
+            sandbox,
+            f"for pid in {pids}; do "
+            'if IFS= read -r stat < "/proc/$pid/stat" 2>/dev/null; then '
+            "stat=${stat##*) }; set -- $stat; state=$1; shift 19 || exit 1; "
+            'printf "%s:%s:%s " "$pid" "$1" "$state"; '
+            'else [ ! -e "/proc/$pid/stat" ] || exit 1; fi; done',
+        )
+        current = {}
+        for record in out.split():
+            pid, start, state = record.split(":")
+            identity = (int(pid), int(start))
+            assert identity[0] in expected_pids and identity[1] > 0, record
+            assert len(state) == 1 and state in "RSDZTtXxKWPI", record
+            assert identity not in current, f"duplicate process identity: {record}"
+            current[identity] = state
+        now = time.monotonic()
+        for identity, deadline in list(remaining.items()):
+            if identity not in current:
+                del remaining[identity]
+                continue
+            assert current[identity] != "Z", (
+                f"owned sleeper became a zombie: {identity}"
+            )
+            assert now < deadline, f"owned sleeper outlived its deadline: {identity}"
+        if remaining:
+            time.sleep(min(0.2, max(0, min(remaining.values()) - now)))
+
+
 def _create_sandbox(
     entrypoint: list[str] | None = None,
     tag: str = "execd-init-e2e",
@@ -280,6 +329,7 @@ class TestExecdInitE2E:
         baseline = _process_count(sandbox)
         deadline = time.monotonic() + 30
         round_n = 0
+        sleepers = []
         while time.monotonic() < deadline:
             round_n += 1
             # /command churn: short-lived orphans in a tight loop.
@@ -287,7 +337,7 @@ class TestExecdInitE2E:
             # Every few rounds spawn a long background sleeper that stays
             # alive across rounds (reparented to PID 1, must not zombie).
             if round_n % 3 == 0:
-                _run_command(sandbox, "sleep 10 &")
+                sleepers.append(_start_long_sleeper(sandbox))
             time.sleep(0.2)
             zombies = _zombie_count(sandbox)
             assert zombies == 0, (
@@ -296,6 +346,9 @@ class TestExecdInitE2E:
         time.sleep(1)
         zombies = _zombie_count(sandbox)
         assert zombies == 0, f"zombies under pid 1 at end: {zombies}"
+        _wait_for_long_sleepers(sandbox, sleepers)
+        zombies = _zombie_count(sandbox)
+        assert zombies == 0, f"zombies under pid 1 after drain: {zombies}"
         total = _process_count(sandbox)
         assert total <= baseline + 12, (
             f"process table grew over sustained churn: {baseline} -> {total}"
