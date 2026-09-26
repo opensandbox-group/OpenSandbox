@@ -41,7 +41,8 @@ type ConnectionConfig struct {
 	UseServerProxy bool
 
 	// RequestTimeout is the timeout for non-streaming HTTP requests.
-	// Zero means no timeout. Defaults to DefaultRequestTimeout.
+	// Zero means DefaultRequestTimeout (30s); there is currently no way to
+	// select "no timeout".
 	RequestTimeout time.Duration
 
 	// Headers are custom HTTP headers added to all requests.

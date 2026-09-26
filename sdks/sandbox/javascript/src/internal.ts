@@ -44,6 +44,7 @@ export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
 export { IsolatedSessionsAdapter } from "./adapters/isolatedSessionsAdapter.js";
+export { EndpointCache } from "./core/endpointCache.js";
 
 // Client-IP detection helpers (advanced/testing).
 export {

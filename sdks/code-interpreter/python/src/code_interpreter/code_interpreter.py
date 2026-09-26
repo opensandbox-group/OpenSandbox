@@ -64,7 +64,7 @@ class CodeInterpreter:
 
     Key Features:
 
-    - Multi-language Code Execution: Support for Python, JavaScript, Bash, Java, Kotlin
+    - Multi-language Code Execution: Python, JavaScript, TypeScript, Go, Bash
     - Session Management: Persistent execution contexts with variable state
     - Sandbox Integration: Full access to underlying sandbox file system and command execution
     - Streaming Execution: Real-time code execution with output streaming
@@ -73,11 +73,12 @@ class CodeInterpreter:
     Usage Example:
 
     ```python
-    # First create a sandbox instance
-
+    # The sandbox must use the opensandbox/code-interpreter image (or a
+    # derivative); the strict health check requires the Jupyter runtime.
     sandbox = await Sandbox.create(
-        "python:3.11",
-        resource={"cpu": "1", "memory": "2Gi"}
+        "opensandbox/code-interpreter:latest",
+        entrypoint=["/opt/code-interpreter/code-interpreter.sh"],
+        resource={"cpu": "1", "memory": "2Gi"},
     )
 
     # Then create a code interpreter wrapping the sandbox
@@ -87,9 +88,10 @@ class CodeInterpreter:
     from code_interpreter.models.code import SupportedLanguage
     context = await interpreter.codes.create_context(SupportedLanguage.PYTHON)
     result = await interpreter.codes.run("print('Hello World')", context=context)
-    print(result.logs.stdout)  # Output: Hello World
+    print(result.text)  # Output: Hello World
 
     # Access underlying sandbox for file operations
+    from opensandbox.models.filesystem import WriteEntry
     await interpreter.sandbox.files.write_files([
         WriteEntry(path="data.txt", data="Hello")
     ])
@@ -98,10 +100,16 @@ class CodeInterpreter:
         context=context,
     )
 
-    # Always clean up resources
+    # Clean up: closing the interpreter releases its HTTP clients; the
+    # underlying sandbox lifecycle stays caller-owned.
+    await interpreter.aclose()
     await sandbox.kill()
     await sandbox.close()
     ```
+
+    CodeInterpreter also supports the async context-manager protocol; exiting
+    the ``async with`` block releases the interpreter's HTTP clients (not the
+    sandbox).
     """
 
     def __init__(self, sandbox: Sandbox, code_service: Codes) -> None:
@@ -160,6 +168,24 @@ class CodeInterpreter:
             Service for command execution
         """
         return self._sandbox.commands
+
+    async def aclose(self) -> None:
+        """
+        Release resources owned by the code interpreter.
+
+        Closes the HTTP clients used by the code execution service. The
+        underlying sandbox is NOT affected; manage its lifecycle separately
+        (``sandbox.kill()`` / ``sandbox.close()``). Safe to call multiple times.
+        """
+        aclose = getattr(self._code_service, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    async def __aenter__(self) -> "CodeInterpreter":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
 
     @property
     def metrics(self):

@@ -711,20 +711,26 @@ type RunCommandRequest struct {
 	Command string `json:"command,omitempty"`
 	// Argv must contain a non-empty executable at index 0; no element may contain NUL.
 	// These constraints are validated by the server.
-	Argv       []string          `json:"argv,omitempty"`
-	Cwd        string            `json:"cwd,omitempty"`
-	Background bool              `json:"background,omitempty"`
-	Timeout    int64             `json:"timeout,omitempty"`
-	UID        *int32            `json:"uid,omitempty"`
-	GID        *int32            `json:"gid,omitempty"`
-	Envs       map[string]string `json:"envs,omitempty"`
+	Argv []string `json:"argv,omitempty"`
+	Cwd  string   `json:"cwd,omitempty"`
+	// Background runs the command asynchronously when true.
+	Background bool `json:"background,omitempty"`
+	// Timeout is the maximum command duration in milliseconds. Zero means the
+	// server default applies. Note this differs from the second-based
+	// TimeoutSeconds fields elsewhere in the SDK.
+	Timeout int64             `json:"timeout,omitempty"`
+	UID     *int32            `json:"uid,omitempty"`
+	GID     *int32            `json:"gid,omitempty"`
+	Envs    map[string]string `json:"envs,omitempty"`
 }
 
 // RunInSessionRequest is the request body for running a command in an existing bash session.
 type RunInSessionRequest struct {
 	Command string `json:"command"`
 	Cwd     string `json:"cwd,omitempty"`
-	Timeout int64  `json:"timeout,omitempty"`
+	// Timeout is the maximum command duration in milliseconds. Zero means the
+	// server default applies.
+	Timeout int64 `json:"timeout,omitempty"`
 }
 
 // CommandStatusResponse contains the status of a command execution.

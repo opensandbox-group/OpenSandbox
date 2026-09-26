@@ -111,7 +111,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// <param name="sandboxId">The sandbox ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The sandbox information.</returns>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sandboxId"/> is null or empty.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<SandboxInfo> GetSandboxInfoAsync(
         string sandboxId,
@@ -128,7 +127,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// <param name="patch">Metadata merge patch. Non-null values add or replace keys; null values delete keys.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The current sandbox information after applying the patch.</returns>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sandboxId"/> is null or empty.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<SandboxInfo> PatchSandboxMetadataAsync(
         string sandboxId,
@@ -144,7 +142,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// </summary>
     /// <param name="sandboxId">The sandbox ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sandboxId"/> is null or empty.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task KillSandboxAsync(
         string sandboxId,
@@ -159,7 +156,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// </summary>
     /// <param name="sandboxId">The sandbox ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sandboxId"/> is null or empty.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task PauseSandboxAsync(
         string sandboxId,
@@ -174,7 +170,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// </summary>
     /// <param name="sandboxId">The sandbox ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sandboxId"/> is null or empty.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task ResumeSandboxAsync(
         string sandboxId,
@@ -190,7 +185,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// <param name="sandboxId">The sandbox ID.</param>
     /// <param name="timeoutSeconds">The new timeout in seconds from now.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <exception cref="InvalidArgumentException">Thrown when arguments are invalid.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public async Task RenewSandboxAsync(
         string sandboxId,
@@ -249,7 +243,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// <param name="request">The create template request.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The created template.</returns>
-    /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<TemplateInfo> CreateTemplateAsync(
         CreateTemplateRequest request,

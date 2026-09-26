@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestIsolatedCapabilities_ModeAvailabilityWireFormat(t *testing.T) {
@@ -557,5 +558,41 @@ func TestIsolationWithSession_DeletesOnCallbackError(t *testing.T) {
 
 	if atomic.LoadInt32(&deleteCalled) != 1 {
 		assert.Fail(t, "delete should still be called on callback error")
+	}
+}
+
+// Regression: the session-scoped files client used to drop the parent
+// sandbox's ConnectionConfig (retry, request timeout, custom transport), so
+// session file operations ran with untuned defaults.
+func TestNewIsolationSession_ForwardsConnectionConfig(t *testing.T) {
+	cfg := ConnectionConfig{
+		Domain:         "127.0.0.1:8080",
+		Protocol:       "http",
+		RequestTimeout: 42 * time.Second,
+		Retry:          &RetryConfig{MaxRetries: 2},
+	}
+	sandbox := &Sandbox{
+		id:     "sbx-iso",
+		config: &cfg,
+		execd: NewExecdClient("http://127.0.0.1:8080", "",
+			WithHeaders(map[string]string{"X-EXECD-ACCESS-TOKEN": "tok"}),
+			WithRetry(RetryConfig{MaxRetries: 2}),
+			WithTimeout(42*time.Second),
+		),
+	}
+
+	session := sandbox.newIsolationSession(&IsolatedSessionInfo{SessionID: "sess-1"})
+
+	if session.files.client.baseURL != "http://127.0.0.1:8080/v1/isolated/session/sess-1" {
+		assert.Fail(t, fmt.Sprintf("unexpected files baseURL: %s", session.files.client.baseURL))
+	}
+	if session.files.client.retry == nil || session.files.client.retry.MaxRetries != 2 {
+		assert.Fail(t, "files client lost the retry config")
+	}
+	if session.files.client.timeout == nil || *session.files.client.timeout != 42*time.Second {
+		assert.Fail(t, "files client lost the request timeout")
+	}
+	if session.files.client.headers["X-EXECD-ACCESS-TOKEN"] != "tok" {
+		assert.Fail(t, "files client lost the endpoint auth headers")
 	}
 }

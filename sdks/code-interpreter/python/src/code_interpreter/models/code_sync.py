@@ -27,6 +27,7 @@ class SupportedLanguageSync:
     GO = "go"
     TYPESCRIPT = "typescript"
     BASH = "bash"
+    JAVASCRIPT = "javascript"
 
 
 class CodeContextSync(BaseModel):

@@ -636,3 +636,31 @@ func TestRetry_CustomRetryableStatusCodes(t *testing.T) {
 	require.Equal(t, "sbx-500-retried", got.ID)
 	require.Equal(t, int32(2), attempts.Load())
 }
+
+func TestBackoff_UnsetMultiplierBehavesAsConstant(t *testing.T) {
+	// Regression: a zero-value Multiplier used to collapse every delay to zero
+	// via math.Pow(0, n), producing an immediate retry hammer.
+	cfg := RetryConfig{
+		InitialBackoff: 500 * time.Millisecond,
+		Jitter:         0,
+	}
+	for _, attempt := range []int{0, 1, 2, 5} {
+		got := cfg.backoff(attempt)
+		if got != 500*time.Millisecond {
+			assert.Fail(t, fmt.Sprintf("backoff(%d) = %v, want 500ms (constant)", attempt, got))
+		}
+	}
+}
+
+func TestBackoff_UnsetMaxBackoffDoesNotCapToZero(t *testing.T) {
+	// Regression: an unset MaxBackoff used to cap every delay to zero.
+	cfg := RetryConfig{
+		InitialBackoff: 100 * time.Millisecond,
+		Multiplier:     2.0,
+		Jitter:         0,
+	}
+	got := cfg.backoff(4) // 100ms * 16 = 1.6s
+	if got != 1600*time.Millisecond {
+		assert.Fail(t, fmt.Sprintf("backoff(4) = %v, want 1.6s (uncapped)", got))
+	}
+}

@@ -20,9 +20,11 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
@@ -126,5 +128,55 @@ class EndpointCacheTest {
             cache.getOrFetch(key) { throw RuntimeException("network error") }
         }
         assertEquals(0, cache.size)
+    }
+
+    @Test
+    fun `stale in-flight completion does not clobber a newer fetch`() {
+        val cache = EndpointCache(maxSize = 10, ttl = Duration.ofMinutes(1))
+        val key = EndpointCacheKey("sb-1", 8080, false)
+
+        // Deterministic ordering: t1 registers its in-flight entry, then the
+        // invalidate() runs, then both fetches are released.
+        val registered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val fetches = AtomicInteger(0)
+
+        val t1 =
+            thread {
+                cache.getOrFetch(key) {
+                    fetches.incrementAndGet()
+                    registered.countDown()
+                    release.await()
+                    ep("stale")
+                }
+            }
+        registered.await()
+
+        cache.invalidate("sb-1")
+
+        val done = CountDownLatch(1)
+        var secondValue: SandboxEndpoint? = null
+        val t2 =
+            thread {
+                secondValue =
+                    cache.getOrFetch(key) {
+                        fetches.incrementAndGet()
+                        release.countDown()
+                        ep("fresh")
+                    }
+                done.countDown()
+            }
+
+        t1.join()
+        assertTrue(done.await(5, TimeUnit.SECONDS), "second fetch did not finish")
+
+        // The stale completion must not have poisoned the cache.
+        assertEquals("fresh", secondValue?.endpoint)
+
+        // A third caller is served from the cache, not with a new fetch.
+        val before = fetches.get()
+        val value = cache.getOrFetch(key) { ep("extra-${fetches.incrementAndGet()}") }
+        assertEquals("fresh", value.endpoint)
+        assertEquals(before, fetches.get())
     }
 }

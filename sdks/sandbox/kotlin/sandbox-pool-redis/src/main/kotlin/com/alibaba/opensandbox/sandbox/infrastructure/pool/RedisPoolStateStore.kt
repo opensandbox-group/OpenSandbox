@@ -41,10 +41,11 @@ import java.util.Base64
  * Compound operations use Lua scripts so take, put, and owner-checked lock updates are atomic.
  *
  * This store intentionally does not create, configure, or close the Redis client. Callers own
- * the lifecycle and may pass any Jedis [UnifiedJedis] implementation appropriate for their environment.
- * The provided client must be safe for concurrent use because pool acquire, reconcile, resize,
- * snapshot, and release operations may call the store from different threads. [redis.clients.jedis.JedisPooled]
- * is the recommended client type. Do not share a single non-pooled Jedis connection across pool threads.
+ * the lifecycle and may pass any standalone or pooled Jedis [UnifiedJedis] implementation; Redis
+ * Cluster and Sentinel deployments are not supported (see the module README). The provided client
+ * must be safe for concurrent use because pool acquire, reconcile, resize, snapshot, and release
+ * operations may call the store from different threads. [redis.clients.jedis.JedisPooled] is the
+ * recommended client type. Do not share a single non-pooled Jedis connection across pool threads.
  */
 class RedisPoolStateStore(
     private val redis: UnifiedJedis,

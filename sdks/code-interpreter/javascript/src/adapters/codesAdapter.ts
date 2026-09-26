@@ -123,9 +123,14 @@ export class CodesAdapter implements Codes {
     throwOnOpenApiFetchError({ error, response }, "Delete code contexts failed");
   }
 
-  async interrupt(contextId: string): Promise<void> {
+  async interrupt(executionId: string): Promise<void> {
+    // The query id targets an *execution*, not a context (mirrors the Python
+    // SDK's interrupt(execution_id)); a context id silently fails server-side.
+    if (!executionId?.trim()) {
+      throw new InvalidArgumentException({ message: "executionId cannot be empty" });
+    }
     const { error, response } = await this.client.DELETE("/code", {
-      params: { query: { id: contextId } },
+      params: { query: { id: executionId } },
     });
     throwOnOpenApiFetchError({ error, response }, "Interrupt code failed");
   }
@@ -166,8 +171,12 @@ export class CodesAdapter implements Codes {
       throw new InvalidArgumentException({ message: "Code cannot be empty" });
     }
 
-    if (opts.context && opts.language) {
-      throw new InvalidArgumentException({ message: "Provide either opts.context or opts.language, not both" });
+    // Only a *mismatch* is an error (aligned with the Python SDK); a matching
+    // pair is accepted and the context wins.
+    if (opts.context && opts.language && opts.context.language !== opts.language) {
+      throw new InvalidArgumentException({
+        message: `language '${opts.language}' must match context.language '${opts.context.language}'`,
+      });
     }
 
     const context: CodeContext =

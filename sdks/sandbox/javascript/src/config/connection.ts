@@ -319,6 +319,8 @@ export class ConnectionConfig {
   private _closeTransport: () => Promise<void>;
   private _closePromise: Promise<void> | null = null;
   private _transportInitialized = false;
+  /** Whether this instance allocated the transport it wraps. */
+  private _ownsTransport = false;
 
   /**
    * Create a connection configuration.
@@ -369,7 +371,7 @@ export class ConnectionConfig {
     this._fetch = null;
     this._sseFetch = null;
     this._closeTransport = async () => {
-      // Init with empty close call
+      // No transport allocated yet; nothing to close.
     };
     this._transportInitialized = false;
   }
@@ -392,7 +394,6 @@ export class ConnectionConfig {
     }
     return `${this.protocol}://${stripV1Suffix(this.domain)}/v1`;
   }
-
   private initializeTransport(): void {
     if (this._transportInitialized) return;
 
@@ -413,20 +414,37 @@ export class ConnectionConfig {
     });
     this._closeTransport = close;
     this._transportInitialized = true;
+    this._ownsTransport = true;
   }
+
   /**
    * Ensure this configuration has transport helpers (fetch/SSE) allocated.
    *
    * On Node.js this creates a dedicated `undici` dispatcher; on browsers it
    * simply reuses the global fetch. Returns either `this` or a cloned config
    * with the transport initialized.
+   *
+   * Ownership: an uninitialized input yields a clone the SDK may close; an
+   * already-initialized input is returned as-is and stays caller-owned.
    */
   withTransportIfMissing(): ConnectionConfig {
     if (this._transportInitialized) {
       return this;
     }
+    const clone = this.cloneWithOptions();
+    clone.initializeTransport();
+    return clone;
+  }
 
-    const clone = new ConnectionConfig({
+  /** Return a clone that always allocates a fresh transport it owns. */
+  withFreshTransport(): ConnectionConfig {
+    const fresh = this.cloneWithOptions();
+    fresh.initializeTransport();
+    return fresh;
+  }
+
+  private cloneWithOptions(): ConnectionConfig {
+    return new ConnectionConfig({
       domain: this.domain,
       protocol: this.protocol,
       apiKey: this.apiKey,
@@ -440,15 +458,15 @@ export class ConnectionConfig {
       disableMetrics: this.disableMetrics,
       enableTracing: this.enableTracing,
     });
-    clone.initializeTransport();
-    return clone;
   }
 
   /**
    * Close the Node.js agent owned by this configuration.
+   *
+   * Only configs that allocated their transport actually close it.
    */
   async closeTransport(): Promise<void> {
-    if (!this._transportInitialized) return;
+    if (!this._transportInitialized || !this._ownsTransport) return;
     this._closePromise ??= this._closeTransport();
     await this._closePromise;
   }

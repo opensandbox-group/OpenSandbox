@@ -233,9 +233,12 @@ class ExecutionHandlers(BaseModel):
             # Can perform async operations
             await log_to_database(msg.text)
 
+        async def handle_stderr(msg: OutputMessage):
+            print(f"Error: {msg.text}")
+
         handlers = ExecutionHandlers(
             on_stdout=handle_stdout,
-            on_stderr=lambda msg: print(f"Error: {msg.text}"),
+            on_stderr=handle_stderr,
         )
         ```
     """

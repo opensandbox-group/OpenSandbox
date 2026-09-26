@@ -351,38 +351,10 @@ internal class CommandsAdapter(
         throw response.toSandboxApiException(message = failureMessage)
     }
 
-    private fun decodeEventLine(line: String): EventNode? {
-        if (line.isBlank()) {
-            return null
+    private fun decodeEventLine(line: String): EventNode? =
+        ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
+            logger.error("Failed to parse SSE line: {}", failingLine, error)
         }
 
-        val payload =
-            when {
-                line.startsWith(":") -> return null
-                line.startsWith("event:") -> return null
-                line.startsWith("id:") -> return null
-                line.startsWith("retry:") -> return null
-                line.startsWith("data:") -> line.drop(5).trim()
-                else -> line
-            }
-
-        if (payload.isBlank()) {
-            return null
-        }
-
-        return try {
-            jsonParser.decodeFromString<EventNode>(payload)
-        } catch (e: Exception) {
-            logger.error("Failed to parse SSE line: {}", line, e)
-            null
-        }
-    }
-
-    private fun inferForegroundExitCode(execution: Execution): Int? {
-        return if (execution.error != null) {
-            execution.error?.value?.toIntOrNull()
-        } else {
-            if (execution.complete != null) 0 else null
-        }
-    }
+    private fun inferForegroundExitCode(execution: Execution): Int? = ExecdEventSupport.inferForegroundExitCode(execution)
 }

@@ -611,10 +611,16 @@ export class FilesystemAdapter implements SandboxFiles {
     const body = res.body as ReadableStream<Uint8Array> | null;
     if (!body) return;
     const reader = body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      if (value) yield value;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        if (value) yield value;
+      }
+    } finally {
+      // Release the body lock on early exit or error (#1528/#1532).
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
   }
 

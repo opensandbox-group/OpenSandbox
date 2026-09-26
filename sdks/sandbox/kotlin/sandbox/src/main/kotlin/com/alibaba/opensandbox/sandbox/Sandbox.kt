@@ -82,12 +82,13 @@ import java.time.OffsetDateTime
  *     .build()
  *
  * // Use the sandbox
- * sandbox.writeFile("script.py", "print('Hello World')")
- * val result = sandbox.execute("python script.py")
- * println(result.stdout) // Output: Hello World
+ * sandbox.files().writeFile("script.py", "print('Hello World')")
+ * val result = sandbox.commands().run("python script.py")
+ * println(result.logs.stdout.firstOrNull()?.text) // Output: Hello World
  *
  * // Always clean up resources
- * sandbox.terminate()
+ * sandbox.kill()
+ * sandbox.close()
  * ```
  *
  */
@@ -652,10 +653,11 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Gets the current status of this sandbox.
+     * Gets the public endpoint for a sandbox service port.
      *
-     * @return Current sandbox status including state and metadata
-     * @throws SandboxException if status cannot be retrieved
+     * @param port The port number to get the endpoint for
+     * @return Endpoint address and request headers for the service
+     * @throws SandboxException if the endpoint cannot be resolved
      */
     fun getEndpoint(port: Int): SandboxEndpoint {
         return sandboxService.getSandboxEndpoint(id, port, httpClientProvider.config.useServerProxy)
@@ -676,9 +678,9 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Gets the current status of this sandbox.
+     * Gets current resource metrics (CPU/memory) for this sandbox.
      *
-     * @return Current sandbox status including state and metadata
+     * @return Latest reported metrics snapshot
      */
     fun getMetrics(): SandboxMetrics {
         return metricsService.getMetrics(id)

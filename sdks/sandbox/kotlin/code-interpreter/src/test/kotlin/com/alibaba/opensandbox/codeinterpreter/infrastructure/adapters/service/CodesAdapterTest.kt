@@ -147,7 +147,9 @@ class CodesAdapterTest {
         assertEquals("Hello World", receivedOutput.toString())
         assertEquals(100L, executionTime)
         assertEquals(100L, execution.complete?.executionTimeInMillis)
-        assertEquals(null, execution.exitCode)
+        // A completion event implies success (aligned with the commands
+        // adapter and the Codes.run KDoc, which promises an exit code).
+        assertEquals(0, execution.exitCode)
 
         val recordedRequest = mockWebServer.takeRequest()
         assertEquals("/code", recordedRequest.path)
@@ -249,5 +251,35 @@ class CodesAdapterTest {
         assertEquals(Duration.ofSeconds(2), ex.retryAfter)
         assertEquals(responseBody, ex.responseBody)
         assertTrue(ex.isRetryable)
+    }
+
+    @Test
+    fun `run parses SSE data-framed lines and comments, not just raw JSON`() {
+        // Regression: run() used to treat every non-blank line as a whole JSON
+        // event, so any SSE-framing hop (data:/event: fields) silently dropped
+        // every event.
+        val body =
+            """
+            data: {"type":"stdout","text":"framed","timestamp":1}
+
+            event: message
+            data: {"type":"stderr","text":"oops","timestamp":2}
+
+            : keepalive
+            data: {"type":"execution_complete","execution_time":7,"timestamp":3}
+
+            """.trimIndent() + "\n"
+
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(body),
+        )
+
+        val execution = codesAdapter.run(RunCodeRequest.builder().code("1+1").build())
+
+        assertEquals("framed", execution.logs.stdout.firstOrNull()?.text)
+        assertEquals("oops", execution.logs.stderr.firstOrNull()?.text)
+        assertEquals(0, execution.exitCode)
     }
 }

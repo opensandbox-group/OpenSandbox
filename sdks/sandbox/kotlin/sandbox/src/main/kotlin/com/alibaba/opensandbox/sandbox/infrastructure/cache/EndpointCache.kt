@@ -61,7 +61,7 @@ class EndpointCache(
     private class InflightEntry {
         @Volatile var result: SandboxEndpoint? = null
 
-        @Volatile var error: Exception? = null
+        @Volatile var error: Throwable? = null
         val latch = java.util.concurrent.CountDownLatch(1)
     }
 
@@ -123,8 +123,12 @@ class EndpointCache(
 
         if (existingInflight != null) {
             existingInflight.latch.await()
+            // The fetcher may have died with a non-Exception Throwable (never
+            // recorded) or before publishing a result; surface a descriptive
+            // error instead of a bare NPE from `result!!`.
             existingInflight.error?.let { throw it }
-            return existingInflight.result!!
+            return existingInflight.result
+                ?: throw IllegalStateException("Endpoint fetch for $key produced no result")
         }
 
         try {
@@ -136,9 +140,10 @@ class EndpointCache(
             }
             myInflight!!.result = endpoint
             return endpoint
-        } catch (e: Exception) {
-            myInflight!!.error = e
-            throw e
+        } catch (t: Throwable) {
+            // Record every failure so waiters surface the real cause.
+            myInflight!!.error = t
+            throw t
         } finally {
             lock.withLock { inflight.remove(key) }
             myInflight!!.latch.countDown()

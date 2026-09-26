@@ -45,7 +45,10 @@ export interface Codes {
     signal?: AbortSignal,
   ): AsyncIterable<ServerStreamEvent>;
 
-  interrupt(contextId: string): Promise<void>;
+  /**
+   * Interrupt a running code execution by its execution id.
+   */
+  interrupt(executionId: string): Promise<void>;
 
   /**
    * Optional execd daemon ping capability.

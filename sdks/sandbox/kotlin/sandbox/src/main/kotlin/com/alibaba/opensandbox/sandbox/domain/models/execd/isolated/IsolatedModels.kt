@@ -104,6 +104,11 @@ data class IsolatedRunRequest(
  */
 data class IsolatedRunOpts(
     val envs: Map<String, String>? = null,
+    /**
+     * Foreground-only: applies to [IsolationSession.run]. Background runs are
+     * deliberately not time-limited, so this value is ignored by
+     * [IsolationSession.runBackground].
+     */
     val timeoutSeconds: Int? = null,
 )
 

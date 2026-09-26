@@ -38,10 +38,10 @@ class Codes(Protocol):
     Supported Languages:
 
     - Python: Full Python 3.x support with package management
-    - JavaScript/Node.js: ES6+ with npm package support
+    - JavaScript: ES6+ with npm package support
+    - TypeScript
+    - Go
     - Bash: Shell scripting with full system access
-    - Java: Compilation and execution with classpath management
-    - Kotlin: Script and compiled Kotlin execution
 
     Key Features:
 

@@ -117,6 +117,8 @@ class ReadinessBudget:
             if not done:
                 raise self.expired()
             result = task.result()
+            # Late completions after the deadline are deliberately rejected
+            # (pinned by test_connect_endpoint_readiness).
             self.remaining()
             return result
         finally:
@@ -150,11 +152,15 @@ class ReadinessBudget:
                 if await self.run(action):
                     return
                 self.last_error = None
+            except SandboxReadyTimeoutException:
+                # Re-raise as-is so the cause stays the last *real* error.
+                raise
             except Exception as error:
                 if auth_fail_fast and is_readiness_auth_error(error):
                     raise
-                self.remaining()
+                # Record before the budget check so a raised timeout carries it.
                 self.last_error = error
+                self.remaining()
             await asyncio.sleep(min(self.interval, self.remaining()))
 
     def run_sync(self, action: Callable[[], T]) -> T:
@@ -163,12 +169,14 @@ class ReadinessBudget:
         try:
             result = action()
         except Exception as error:
-            if self.last_error is None:
-                self.last_error = error
+            # Record the latest error so a later expired() reports it.
+            self.last_error = error
             self.remaining()
             raise
         finally:
             _sync_budget.reset(token)
+        # Late completions after the deadline are deliberately rejected
+        # (pinned by test_connect_endpoint_readiness).
         self.remaining()
         return result
 
@@ -197,9 +205,13 @@ class ReadinessBudget:
                 if self.run_sync(action):
                     return
                 self.last_error = None
+            except SandboxReadyTimeoutException:
+                # Re-raise as-is so the cause stays the last *real* error.
+                raise
             except Exception as error:
                 if auth_fail_fast and is_readiness_auth_error(error):
                     raise
-                self.remaining()
+                # Record before the budget check so a raised timeout carries it.
                 self.last_error = error
+                self.remaining()
             time.sleep(min(self.interval, self.remaining()))

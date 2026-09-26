@@ -104,7 +104,24 @@ func (m *SandboxPoolManager) Destroy(ctx context.Context, poolName string, optio
 			break
 		}
 		drained++
-		if err := m.manager.KillSandbox(ctx, sandboxID); err != nil {
+		// Bound each kill by the remaining drain budget.
+		killCtx := ctx
+		var cancelKill context.CancelFunc
+		if drainTimeout > 0 {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, &PoolDestroyIncompleteError{
+					PoolName: poolName,
+					Reason:   fmt.Sprintf("drain timed out after %v with %d idle sandboxes drained", drainTimeout, drained),
+				}
+			}
+			killCtx, cancelKill = context.WithTimeout(ctx, remaining)
+		}
+		err = m.manager.KillSandbox(killCtx, sandboxID)
+		if cancelKill != nil {
+			cancelKill()
+		}
+		if err != nil {
 			m.logger.Warn("pool destroy failed to kill idle sandbox (best-effort)",
 				"pool_name", poolName,
 				"sandbox_id", sandboxID,

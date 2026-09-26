@@ -45,9 +45,11 @@ import java.util.concurrent.TimeUnit
  * ## Usage Example
  *
  * ```kotlin
- * // First create a sandbox instance
+ * // The sandbox must use the opensandbox/code-interpreter image (or a
+ * // derivative); the strict health check requires the Jupyter runtime.
  * val sandbox = Sandbox.builder()
- *     .image("python:3.11")
+ *     .image("opensandbox/code-interpreter:latest")
+ *     .entrypoint(listOf("/opt/code-interpreter/code-interpreter.sh"))
  *     .resource { put("memory", "2Gi") }
  *     .build()
  *
@@ -64,7 +66,7 @@ import java.util.concurrent.TimeUnit
  *         .context(context)
  *         .build()
  * )
- * println(result.stdout) // Output: Hello World
+ * println(result.logs.stdout.firstOrNull()?.text) // Output: Hello World
  *
  * // Access underlying sandbox for file operations
  * interpreter.sandbox().files().writeFile("data.txt", "Hello")
@@ -75,9 +77,9 @@ import java.util.concurrent.TimeUnit
  *         .build()
  * )
  *
- * // Always clean up resources
- * interpreter.kill()
- * interpreter.sandbox().close()
+ * // Always clean up resources (lifecycle lives on the sandbox)
+ * sandbox.kill()
+ * sandbox.close()
  * ```
  */
 class CodeInterpreter internal constructor(
@@ -406,8 +408,9 @@ class CodeInterpreter internal constructor(
          *
          * By default a strict health check runs before the interpreter is
          * returned: the code execution service (execd) must answer
-         * `GET /ping` within the configured [readyTimeout]. Opt out via
-         * [skipHealthCheck].
+         * `GET /ping` AND the code interpreter runtime (Jupyter kernel
+         * gateway) must be serving, both within the configured
+         * [readyTimeout]. Opt out via [skipHealthCheck].
          *
          * @return CodeInterpreter instance wrapping the specified sandbox
          * @throws InvalidArgumentException if no sandbox was specified via fromSandbox()

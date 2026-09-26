@@ -82,6 +82,6 @@ try {
   and scheduling jitter.
 - Redis outages are surfaced as `PoolStateStoreUnavailableException`; the pool does not silently bypass shared state.
 
-TODO: If production deployments need stronger protection against accidental mixed pool definitions,
-add an optional pool definition version or fingerprint check that fails fast when nodes sharing the
-same Redis namespace disagree.
+If production deployments need stronger protection against accidental mixed pool definitions,
+an optional pool definition version or fingerprint check that fails fast when nodes sharing the
+same Redis namespace disagree would be a natural extension.

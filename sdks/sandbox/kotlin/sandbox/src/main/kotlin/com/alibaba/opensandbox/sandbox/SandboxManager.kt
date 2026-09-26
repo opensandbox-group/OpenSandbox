@@ -63,7 +63,7 @@ import java.time.OffsetDateTime
  *
  * // List all running sandboxes
  * val runningSandboxes = manager.listSandboxInfos(
- *     SandboxFilter.builder().state("RUNNING").build()
+ *     SandboxFilter.builder().states(SandboxState.RUNNING).build()
  * )
  *
  * // Individual operations

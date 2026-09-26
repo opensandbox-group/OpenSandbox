@@ -107,6 +107,10 @@ internal sealed class CommandsAdapter : IExecdCommands
         ExecutionHandlers? handlers = null,
         CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrEmpty(command))
+        {
+            throw new InvalidArgumentException("command cannot be null or empty");
+        }
         _logger.LogDebug("Running command (commandLength={CommandLength})", command.Length);
         return await ConsumeExecutionAsync(
             RunStreamAsync(command, options, cancellationToken),

@@ -136,6 +136,15 @@ class CodesAdapterSync(CodesSync):
             f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
         )
 
+    def close(self) -> None:
+        """Release the adapter-owned HTTP clients.
+
+        The generated API client reuses the injected ``httpx.Client``, so
+        closing the main client and the SSE client is sufficient.
+        """
+        self._httpx_client.close()
+        self._sse_client.close()
+
     def create_context(self, language: str) -> CodeContextSync:
         """
         Create a new execution context for code interpretation (sync).

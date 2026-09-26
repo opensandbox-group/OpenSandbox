@@ -85,6 +85,15 @@ class FileReadResponse(BaseModel):
     content: str = Field(description="File content.")
 
 
+def _borrowed_config(state: ServerState) -> ConnectionConfig:
+    """Clone the shared config for one Sandbox/Manager call without ownership
+    of the server-wide transport, so per-call close() never tears down
+    connections still used by other registered sandboxes."""
+    config = state.connection_config.model_copy()
+    config._owns_transport = False
+    return config
+
+
 def register_tools(
     mcp: MCPServer,
     *,
@@ -110,19 +119,21 @@ def register_tools(
         *,
         connect_if_missing: bool,
     ) -> Sandbox:
-        sandbox = await state.get(sandbox_id)
-        if sandbox is not None:
-            return sandbox
-        if not connect_if_missing:
-            raise ValueError(
-                "Sandbox not found in local registry. Call sandbox_connect or "
-                "set connect_if_missing=True with connection parameters."
+        # Lock held across get -> connect -> add to avoid duplicate connects.
+        async with state.lock:
+            sandbox = state.sandboxes.get(sandbox_id)
+            if sandbox is not None:
+                return sandbox
+            if not connect_if_missing:
+                raise ValueError(
+                    "Sandbox not found in local registry. Call sandbox_connect or "
+                    "set connect_if_missing=True with connection parameters."
+                )
+            sandbox = await Sandbox.connect(
+                sandbox_id, connection_config=_borrowed_config(state)
             )
-        sandbox = await Sandbox.connect(
-            sandbox_id, connection_config=state.connection_config
-        )
-        await state.add(sandbox)
-        return sandbox
+            state.sandboxes[sandbox_id] = sandbox
+            return sandbox
 
     @tool()
     async def sandbox_create(
@@ -168,7 +179,7 @@ def register_tools(
             entrypoint: Entrypoint command list.
 
         Returns:
-            A dict with:
+            SandboxInfoResponse with:
                 sandbox_id: The new sandbox identifier.
                 info: Sandbox info payload from the SDK.
 
@@ -212,7 +223,7 @@ def register_tools(
                 milliseconds=health_check_polling_interval_ms
             ),
             skip_health_check=skip_health_check,
-            connection_config=state.connection_config,
+            connection_config=_borrowed_config(state),
         )
         await state.add(sandbox)
         if ctx:
@@ -244,7 +255,7 @@ def register_tools(
             skip_health_check: If True, return before readiness checks complete.
 
         Returns:
-            A dict with:
+            SandboxInfoResponse with:
                 sandbox_id: The sandbox identifier.
                 info: Sandbox info payload from the SDK.
 
@@ -253,7 +264,7 @@ def register_tools(
         """
         sandbox = await Sandbox.connect(
             sandbox_id,
-            connection_config=state.connection_config,
+            connection_config=_borrowed_config(state),
             connect_timeout=timedelta(seconds=connect_timeout_seconds),
             health_check_polling_interval=timedelta(
                 milliseconds=health_check_polling_interval_ms
@@ -279,7 +290,7 @@ def register_tools(
         sandbox = await state.remove(sandbox_id)
         if sandbox is None:
             manager = await SandboxManager.create(
-                connection_config=state.connection_config
+                connection_config=_borrowed_config(state)
             )
             try:
                 await manager.kill_sandbox(sandbox_id)
@@ -308,7 +319,7 @@ def register_tools(
         if sandbox is not None:
             return await sandbox.get_info()
         manager = await SandboxManager.create(
-            connection_config=state.connection_config
+            connection_config=_borrowed_config(state)
         )
         try:
             info = await manager.get_sandbox_info(sandbox_id)
@@ -335,7 +346,7 @@ def register_tools(
             await ctx.report_progress(progress=0.1, total=1.0, message="Listing sandboxes")
         filter = filter or SandboxFilter()
         manager = await SandboxManager.create(
-            connection_config=state.connection_config
+            connection_config=_borrowed_config(state)
         )
         try:
             result = await manager.list_sandbox_infos(filter)
@@ -363,7 +374,7 @@ def register_tools(
         sandbox = await state.get(sandbox_id)
         if sandbox is None:
             manager = await SandboxManager.create(
-                connection_config=state.connection_config
+                connection_config=_borrowed_config(state)
             )
             try:
                 response = await manager.renew_sandbox(
@@ -437,7 +448,8 @@ def register_tools(
             connect_if_missing: Connect if sandbox not in local registry.
 
         Returns:
-            Execution result dict with id, exit_code, logs, and duration.
+            Execution result with id, exit code, and streamed logs; timing
+            lives on the ``complete`` event (``execution_time_in_millis``).
 
         Example:
             result = await command_run("sbx_123", "ls -la", working_directory="/")

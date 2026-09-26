@@ -410,18 +410,19 @@ async def test_async_create_one_sandbox_renews_before_returning_id() -> None:
 
 @pytest.mark.asyncio
 async def test_async_schedule_kill_discarded_alive_does_not_block_caller() -> None:
-    """Async counterpart: scheduling must return synchronously without awaiting kills."""
+    """Async counterpart: scheduling must not await the kill RPCs."""
     manager = _RecordingAsyncManager(per_call_delay=0.1)
     pool = _build_async_pool(manager)
     pool._sandbox_manager = manager  # type: ignore[assignment]
 
     ids = ("a", "b", "c")
     start = asyncio.get_event_loop().time()
-    pool._schedule_kill_discarded_alive("kill-pool", ids, source="acquire")
+    await pool._schedule_kill_discarded_alive("kill-pool", ids, source="acquire")
     elapsed = asyncio.get_event_loop().time() - start
 
-    # _schedule is sync (asyncio.create_task), so it should return in microseconds.
-    assert elapsed < 0.01, (
+    # The scheduling call only creates a background task, so it should return
+    # in microseconds instead of awaiting the (0.1s each) kill RPCs.
+    assert elapsed < 0.05, (
         f"_schedule_kill_discarded_alive blocked for {elapsed:.3f}s; "
         "expected immediate return via create_task"
     )
@@ -434,3 +435,31 @@ async def test_async_schedule_kill_discarded_alive_does_not_block_caller() -> No
     ):
         await asyncio.sleep(0.02)
     assert sorted(manager.killed) == sorted(ids)
+
+
+async def test_async_schedule_kill_discarded_alive_falls_back_to_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the RuntimeError fallback used to silently drop the cleanup.
+
+    When ``asyncio.create_task`` is unavailable the kills must still run
+    (inline), matching the sync pool's "better to slow the caller than to drop
+    the cleanup" contract.
+    """
+    manager = _RecordingAsyncManager(per_call_delay=0.0)
+    pool = _build_async_pool(manager)
+    pool._sandbox_manager = manager  # type: ignore[assignment]
+
+    def _raise_runtime_error(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no running event loop")
+
+    monkeypatch.setattr(
+        "opensandbox.pool_async.asyncio.create_task", _raise_runtime_error
+    )
+
+    ids = ("x", "y")
+    await pool._schedule_kill_discarded_alive("kill-pool", ids, source="acquire")
+
+    assert sorted(manager.killed) == sorted(ids), (
+        "discarded-alive kill was silently dropped when create_task raised"
+    )

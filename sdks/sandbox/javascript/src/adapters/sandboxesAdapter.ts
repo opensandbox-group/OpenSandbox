@@ -439,24 +439,15 @@ export class SandboxesAdapter implements Sandboxes {
     signal?: AbortSignal,
   ): Promise<Endpoint> {
     signal?.throwIfAborted();
-    if (signal) {
-      const cached = this.endpointCache?.get(sandboxId, port, useServerProxy);
-      if (cached) return cached;
-      const endpoint = await this.fetchSandboxEndpoint(
-        sandboxId,
-        port,
-        useServerProxy,
-        signal,
-      );
-      this.endpointCache?.put(sandboxId, port, useServerProxy, endpoint);
-      return endpoint;
+    const cached = this.endpointCache?.get(sandboxId, port, useServerProxy);
+    if (cached) return cached;
+    if (!this.endpointCache) {
+      return this.fetchSandboxEndpoint(sandboxId, port, useServerProxy, signal);
     }
-    if (this.endpointCache) {
-      return this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
-        this.fetchSandboxEndpoint(sandboxId, port, useServerProxy)
-      );
-    }
-    return this.fetchSandboxEndpoint(sandboxId, port, useServerProxy);
+    // getOrFetch gives the signal path the same dedup + generation guards.
+    return this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
+      this.fetchSandboxEndpoint(sandboxId, port, useServerProxy, signal)
+    );
   }
 
   private async fetchSandboxEndpoint(

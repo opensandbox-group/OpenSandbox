@@ -35,10 +35,11 @@ type RetryConfig struct {
 	// InitialBackoff is the delay before the first retry.
 	InitialBackoff time.Duration
 
-	// MaxBackoff caps the delay between retries.
+	// MaxBackoff caps the delay between retries. Zero means no cap.
 	MaxBackoff time.Duration
 
-	// Multiplier scales the backoff after each retry attempt.
+	// Multiplier scales the backoff after each retry attempt. Values less
+	// than or equal to zero are treated as 1 (constant backoff).
 	Multiplier float64
 
 	// Jitter adds randomness to avoid thundering herd. Expressed as a
@@ -132,8 +133,13 @@ func isTransientError(err error, cfg *RetryConfig) bool {
 
 // backoff computes the delay for attempt n (0-indexed) with optional jitter.
 func (r *RetryConfig) backoff(attempt int) time.Duration {
-	delay := float64(r.InitialBackoff) * math.Pow(r.Multiplier, float64(attempt))
-	if delay > float64(r.MaxBackoff) {
+	// A zero-value Multiplier would collapse every delay to zero.
+	multiplier := r.Multiplier
+	if multiplier <= 0 {
+		multiplier = 1
+	}
+	delay := float64(r.InitialBackoff) * math.Pow(multiplier, float64(attempt))
+	if r.MaxBackoff > 0 && delay > float64(r.MaxBackoff) {
 		delay = float64(r.MaxBackoff)
 	}
 	if r.Jitter > 0 {

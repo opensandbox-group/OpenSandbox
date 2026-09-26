@@ -24,14 +24,13 @@ import com.alibaba.opensandbox.codeinterpreter.infrastructure.adapters.converter
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.execd.CodeInterpretingApi
 import com.alibaba.opensandbox.sandbox.api.execd.HealthApi
-import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
-import kotlinx.serialization.decodeFromString
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.ExecdEventSupport
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.Headers.Companion.toHeaders
@@ -148,18 +147,22 @@ class CodesAdapter(
                 response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                     val dispatcher = ExecutionEventDispatcher(execution, request.handlers)
                     reader.lineSequence()
-                        .filter(String::isNotBlank)
                         .forEach { line ->
+                            val eventNode =
+                                ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
+                                    logger.error("Failed to parse SSE line: {}", failingLine, error)
+                                } ?: return@forEach
                             try {
-                                val eventNode = jsonParser.decodeFromString<EventNode>(line)
                                 dispatcher.dispatch(eventNode)
                             } catch (e: Exception) {
-                                logger.error("Failed to parse SSE line: {}", line, e)
+                                logger.error("Failed to dispatch SSE event: {}", eventNode, e)
                             }
                         }
                 }
             }
 
+            // Same exit-code inference as the commands adapter.
+            execution.exitCode = ExecdEventSupport.inferForegroundExitCode(execution)
             return execution
         } catch (e: Exception) {
             logger.error("Failed to run code (length: {})", request.code.length, e)

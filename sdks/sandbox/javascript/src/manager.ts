@@ -189,8 +189,6 @@ export class SandboxManager {
    * Release the HTTP agent resources allocated for this manager instance.
    *
    * Each manager clone owns a scoped `ConnectionConfig` clone.
-   *
-   * This mirrors the Python SDK's default transport lifecycle.
    */
   async close(): Promise<void> {
     await this.connectionConfig.closeTransport();

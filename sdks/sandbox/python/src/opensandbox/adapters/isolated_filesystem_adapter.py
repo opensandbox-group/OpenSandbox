@@ -202,7 +202,7 @@ class IsolatedFilesystemAdapter(Filesystem):
                     content_type = "application/octet-stream"
                 elif isinstance(entry.data, str):
                     encoding = entry.encoding or "utf-8"
-                    content = entry.data
+                    content = entry.data.encode(encoding)
                     content_type = f"text/plain; charset={encoding}"
                 elif isinstance(entry.data, IOBase):
                     if isinstance(entry.data, TextIOBase):

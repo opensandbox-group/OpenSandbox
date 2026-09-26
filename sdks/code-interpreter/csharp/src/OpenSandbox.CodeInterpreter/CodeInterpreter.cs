@@ -283,7 +283,8 @@ public sealed class CodeInterpreter
             var execution = await Sandbox.Commands.RunAsync(
                 CodeInterpreterHealthCheck.RuntimeCheckCommand,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            return execution?.Error == null;
+            // A non-zero exit without an error event is still a failure.
+            return execution is { Error: null, ExitCode: null or 0 };
         }
         catch (Exception ex)
         {

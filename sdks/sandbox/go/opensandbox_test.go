@@ -2771,3 +2771,25 @@ func TestSandboxBackgroundResultAcknowledgesStartup(t *testing.T) {
 	require.NotNil(t, result.Complete)
 	require.True(t, result.ExitCode == nil, "startup does not establish a process exit code")
 }
+
+func TestCreateSession_SendsCwd(t *testing.T) {
+	var gotCwd string
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session" {
+			assert.Fail(t, fmt.Sprintf("expected /session, got %s", r.URL.Path))
+		}
+		var req CreateSessionRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotCwd = req.Cwd
+		jsonResponse(w, http.StatusCreated, Session{ID: "sess-cwd"})
+	})
+
+	got, err := client.CreateSession(context.Background(), CreateSessionRequest{Cwd: "/workspace"})
+	require.NoErrorf(t, err, "CreateSession")
+	if got.ID != "sess-cwd" {
+		assert.Fail(t, fmt.Sprintf("ID = %q, want sess-cwd", got.ID))
+	}
+	if gotCwd != "/workspace" {
+		assert.Fail(t, fmt.Sprintf("cwd = %q, want /workspace (regression: request body was dropped)", gotCwd))
+	}
+}

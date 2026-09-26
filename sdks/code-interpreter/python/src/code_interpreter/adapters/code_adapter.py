@@ -72,14 +72,8 @@ class CodesAdapter(Codes):
     """
     Adapter implementation for code execution service.
 
-    This adapter wraps auto-generated API clients and provides the concrete
-    implementation of the Codes interface. It handles both standard
-    API calls and SSE streaming for real-time code execution output.
-
-    Similar to CommandServiceAdapter, this adapter uses:
-    - Generated API clients for simple operations (create_context, interrupt)
-    - Direct httpx SSE streaming for run
-    - ExceptionConverter for unified exception handling
+    Handles standard API calls plus direct httpx SSE streaming for
+    real-time code execution output.
     """
 
     RUN_CODE_PATH = "/code"
@@ -157,6 +151,15 @@ class CodesAdapter(Codes):
     async def _get_sse_client(self) -> httpx.AsyncClient:
         """Return SSE client (read timeout disabled) for execd streaming."""
         return self._sse_client
+
+    async def aclose(self) -> None:
+        """Release the adapter-owned HTTP clients.
+
+        The generated API client reuses the injected ``httpx.AsyncClient``, so
+        closing the main client and the SSE client is sufficient.
+        """
+        await self._httpx_client.aclose()
+        await self._sse_client.aclose()
 
     async def create_context(self, language: str) -> CodeContext:
         """
@@ -268,7 +271,7 @@ class CodesAdapter(Codes):
         """
         Executes code within the specified context using SSE streaming.
 
-        Similar to CommandServiceAdapter.run, this uses direct httpx
+        Uses direct httpx
         streaming to handle SSE responses from the execd service.
         """
         if not code.strip():

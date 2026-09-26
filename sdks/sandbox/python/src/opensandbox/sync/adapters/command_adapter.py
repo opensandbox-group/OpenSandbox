@@ -17,22 +17,32 @@
 Synchronous command adapter implementation (including SSE streaming).
 """
 
-import json
 import logging
 from datetime import timedelta
 
 import httpx
 
+from opensandbox.adapters.converter.command_execution import (
+    build_run_command_request_body as _build_run_command_request_body,
+)
+from opensandbox.adapters.converter.command_execution import (
+    build_run_in_session_request_body as _build_run_in_session_request_body,
+)
+from opensandbox.adapters.converter.command_execution import (
+    decode_sse_event_data as _decode_sse_event_data,
+)
+from opensandbox.adapters.converter.command_execution import (
+    infer_foreground_exit_code as _infer_foreground_exit_code,
+)
+from opensandbox.adapters.converter.command_execution import (
+    resolve_run_in_session_timeout as _resolve_run_in_session_timeout,
+)
 from opensandbox.adapters.converter.env_entry import (
     build_set_env_command,
     raise_for_set_env_failure,
 )
-from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
-)
-from opensandbox.adapters.converter.execution_converter import (
-    ExecutionConverter,
 )
 from opensandbox.adapters.converter.response_handler import (
     build_api_exception_from_httpx,
@@ -56,61 +66,6 @@ from opensandbox.sync.services.command import CommandsSync
 from opensandbox.transport import unwrap_retry_transport
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
-    if timeout is None:
-        return None
-    if isinstance(timeout, timedelta):
-        if timeout < timedelta(0):
-            raise InvalidArgumentException("timeout must be positive")
-        timeout_ms = int(timeout.total_seconds() * 1000)
-        return timeout_ms
-    raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
-
-
-def _infer_foreground_exit_code(execution: Execution) -> int | None:
-    if execution.error is not None:
-        try:
-            return int(execution.error.value)
-        except (TypeError, ValueError):
-            return None
-    if execution.complete is not None:
-        return 0
-    return None
-
-
-def _build_run_command_request_body(command: str | list[str], opts: RunCommandOpts):
-    return ExecutionConverter.to_api_run_command_request(command, opts)
-
-
-def _build_run_in_session_request_body(
-    command: str,
-    working_directory: str | None,
-    timeout: int | None,
-):
-    from opensandbox.api.execd.models.run_in_session_request import (
-        RunInSessionRequest,
-    )
-    from opensandbox.api.execd.types import UNSET
-
-    return RunInSessionRequest(
-        command=command,
-        cwd=working_directory if working_directory else UNSET,
-        timeout=timeout if timeout is not None else UNSET,
-    )
-
-
-def _decode_sse_event_data(data: str) -> EventNode | None:
-    if not data.strip():
-        return None
-
-    try:
-        event_dict = json.loads(data)
-        return EventNode(**event_dict)
-    except Exception as e:
-        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
-        return None
 
 
 class CommandsAdapterSync(CommandsSync):
@@ -205,8 +160,8 @@ class CommandsAdapterSync(CommandsSync):
                 if event_node is None:
                     continue
                 dispatcher.dispatch(event_node)
-                # Foreground responses drain to EOF: older servers may emit
-                # trailing output after the completion event.
+                # Foreground responses drain to EOF (no break below): older
+                # servers may emit trailing output after the completion event.
                 if is_background and event_node.type == "execution_complete":
                     # Background commands are done once execution_complete
                     # arrives; do not wait for the chunked terminator, which

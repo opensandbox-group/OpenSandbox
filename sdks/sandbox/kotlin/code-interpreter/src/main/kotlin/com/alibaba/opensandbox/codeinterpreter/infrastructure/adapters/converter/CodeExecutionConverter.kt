@@ -25,7 +25,7 @@ object CodeExecutionConverter {
     fun RunCodeRequest.toApiRunCodeRequest(): ApiRunCodeRequest {
         return ApiRunCodeRequest(
             code = this.code,
-            context = this.context?.toApiCodeContext(),
+            context = this.context.toApiCodeContext(),
         )
     }
 
