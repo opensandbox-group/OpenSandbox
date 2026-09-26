@@ -36,6 +36,7 @@ jobs:
           - module: sdks/sandbox/go
           - module: tests/go
           - module: examples/chrome
+          - module: examples/client-pool-resize
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -50,6 +51,11 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+
+      - name: Type-check the client-pool-resize example
+        if: matrix.module == 'examples/client-pool-resize'
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
 
   uv-lockfiles:
     name: uv.lock (${{ matrix.project }})

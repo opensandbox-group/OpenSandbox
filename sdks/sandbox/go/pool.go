@@ -691,6 +691,26 @@ func (p *DefaultSandboxPool) ReleaseAllIdleParallel(ctx context.Context, maxWork
 // Resize dynamically changes the idle target.
 // The new value is persisted to the state store and updated locally so that
 // a subsequent Start() (after stop/restart) uses the latest value.
+//
+// The new target becomes the reconciler's goal, not an instant change.
+// Snapshot().MaxIdle reports it as soon as this call returns, but the idle
+// buffer converges towards it over several ticks: a tick only acts when this
+// node holds the primary lock and is not backing off, and each tick moves at
+// most WarmupConcurrency entries in either direction.
+//
+// Resize deliberately performs no lifecycle check and is therefore callable on
+// a pool that is not RUNNING; callers that require a running pool must check
+// Snapshot themselves. Errors from the state store are propagated unchanged;
+// the bundled stores return:
+//
+//   - *PoolDestroyedError when the namespace is DESTROYING or DESTROYED. The
+//     target is not written.
+//   - *PoolStateStoreUnavailableError when the store is unreachable. The target
+//     is not written and the caller may retry.
+//
+// A concurrent Shutdown does not wait for an in-flight Resize, so a target may
+// be written after Shutdown has returned. Callers that must not outlive the pool
+// should stop issuing Resize calls before shutting it down.
 func (p *DefaultSandboxPool) Resize(ctx context.Context, newMaxIdle int) error {
 	if newMaxIdle < 0 {
 		return fmt.Errorf("opensandbox: pool resize: maxIdle must be >= 0, got %d", newMaxIdle)

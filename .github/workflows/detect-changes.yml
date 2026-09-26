@@ -123,7 +123,8 @@ jobs:
                 workflowChanged(path, "sdk-tests.yml") ||
                 path.startsWith("cli/") ||
                 path.startsWith("sdks/") ||
-                path.startsWith("specs/"),
+                path.startsWith("specs/") ||
+                path.startsWith("examples/client-pool-resize/"),
             };
 
             const area = process.env.AREA;

@@ -252,6 +252,46 @@ concurrency and wait until every drained ID has received a kill attempt.
 `maxWorkers` must be positive. The parallel method is intentionally not part of
 the `SandboxPool` interface, so existing interface implementors remain compatible.
 
+### Size the pool on a schedule
+
+`PoolResizeAdapter` applies a resize policy to a running pool through the
+existing `Resize` method. `TimeWindowPoolResizePolicy` picks an idle target from
+local wall-clock windows, so the policy stays outside the pool reconciler.
+
+```go
+policy, err := opensandbox.NewTimeWindowPoolResizePolicy(
+    []opensandbox.PoolResizeWindow{
+        {Name: "overnight", Start: 22 * time.Hour, End: 6 * time.Hour, MaxIdle: 0},
+        {Name: "business-hours", Start: 9 * time.Hour, End: 18 * time.Hour, MaxIdle: 6,
+            Weekdays: []time.Weekday{time.Monday, time.Tuesday, time.Wednesday,
+                time.Thursday, time.Friday}},
+    },
+    time.UTC,
+    2,                      // default target when no window matches
+    time.Minute,            // evaluation interval
+)
+if err != nil {
+    return err
+}
+adapter, err := opensandbox.NewPoolResizeAdapter(pool, policy)
+if err != nil {
+    return err
+}
+```
+
+Use a named business location (for example, `time.LoadLocation("America/Los_Angeles")`)
+instead of UTC for production schedules. Start the pool before calling
+`adapter.Run(ctx)` or `Apply(ctx)`; otherwise they return
+`ErrPoolResizePoolNotRunning`. Call `Run` for periodic evaluation, or `Apply`
+from an external scheduler. The adapter only calls `Resize`; the pool's existing
+reconciler performs warmup and idle-only shrink. A stopped or destroyed pool
+terminates the adapter instead of being resized again; `adapter.Stopped()` makes
+that state observable. `adapter.LastError()` exposes a retryable state-store
+error that `Run` is still retrying, and the cause of a permanent stop. If the
+pool is restarted, create a new adapter. See the
+[Client Pool guide](../../../docs/guides/client-pool.md#time-window-sizing-go)
+for timezone, overnight-window, and multi-process details.
+
 ## API Reference
 
 ### LifecycleClient
