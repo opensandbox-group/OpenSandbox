@@ -146,15 +146,21 @@ func (s *isolatedSession) start() error {
 		return fmt.Errorf("unknown isolation profile %q", s.opts.Profile)
 	}
 
-	wrapOpts.Workspace.Path = s.opts.WorkspacePath
+	overlayMode := isolation.WorkspaceOverlay
 	switch isolation.WorkspaceMode(s.opts.WorkspaceMode) {
 	case isolation.WorkspaceRW:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceRW
+		overlayMode = isolation.WorkspaceRW
 	case isolation.WorkspaceRO:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceRO
-	default:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceOverlay
+		overlayMode = isolation.WorkspaceRO
 	}
+	// Single-workspace sessions carry one overlay; persist (UpperDir) is
+	// empty unless the controller allocated an upper for overlay mode.
+	wrapOpts.Overlays = []isolation.OverlaySpec{{
+		Path:     s.opts.WorkspacePath,
+		Mode:     overlayMode,
+		UpperDir: s.upperDir,
+		WorkDir:  s.workDir,
+	}}
 
 	if s.opts.ShareNet != nil {
 		wrapOpts.ShareNet = *s.opts.ShareNet
@@ -170,8 +176,6 @@ func (s *isolatedSession) start() error {
 	if s.opts.UidMode != "" {
 		wrapOpts.UidMode = isolation.UidMode(s.opts.UidMode)
 	}
-	wrapOpts.UpperDir = s.upperDir
-	wrapOpts.WorkDir = s.workDir
 
 	lifecycleIsolator, ok := s.isolator.(isolation.LifecycleIsolator)
 	if !ok {

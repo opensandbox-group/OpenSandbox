@@ -219,6 +219,13 @@ jobs:
           sudo cp builddir/bwrap /usr/local/bin/bwrap
           bwrap --version
 
+      - name: Multi-overlay mounts smoke test
+        working-directory: components/execd
+        shell: bash
+        run: |
+          chmod +x tests/smoke_overlays.sh
+          bash tests/smoke_overlays.sh
+
       - name: Build and install native session workload gate
         working-directory: components/execd
         run: |

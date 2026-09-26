@@ -36,11 +36,17 @@ type UpperManager struct {
 	entries   map[string]*UpperEntry
 }
 
-// UpperEntry tracks one allocated upper directory.
-type UpperEntry struct {
+// UpperDirPair is one allocated upper + work directory pair for a single
+// overlay mount.
+type UpperDirPair struct {
 	UpperDir string
 	WorkDir  string
-	InUse    bool
+}
+
+// UpperEntry tracks the directory pairs allocated to one session.
+type UpperEntry struct {
+	Pairs []UpperDirPair
+	InUse bool
 }
 
 // NewUpperManager creates an upper directory manager. As part of startup it
@@ -104,9 +110,11 @@ func (m *UpperManager) reclaimStale() {
 			failed++
 			log.Warn("upper: reclaim stale session dir %s: %v", path, err)
 			m.entries[child.Name()] = &UpperEntry{
-				UpperDir: filepath.Join(path, "upper"),
-				WorkDir:  filepath.Join(path, "work"),
-				InUse:    false,
+				Pairs: []UpperDirPair{{
+					UpperDir: filepath.Join(path, "upper"),
+					WorkDir:  filepath.Join(path, "work"),
+				}},
+				InUse: false,
 			}
 			continue
 		}
@@ -122,39 +130,66 @@ func (m *UpperManager) reclaimStale() {
 
 var ErrUpperLimitExceeded = errors.New("upper: total usage exceeds configured limit")
 
-// Allocate creates a new upper + work directory pair. Returns the session ID
-// and the directories. Returns ErrUpperLimitExceeded if maxBytes > 0 and
-// current usage already meets or exceeds the limit.
+// Allocate creates a new session directory holding a single upper + work
+// pair. Returns the session ID and the directories. Returns
+// ErrUpperLimitExceeded if maxBytes > 0 and current usage already meets or
+// exceeds the limit.
 func (m *UpperManager) Allocate() (sessionID, upperDir, workDir string, err error) {
+	id, pairs, err := m.AllocateN(1)
+	if err != nil {
+		return "", "", "", err
+	}
+	return id, pairs[0].UpperDir, pairs[0].WorkDir, nil
+}
+
+// AllocateN creates a new session directory holding n upper + work pairs,
+// one per overlay mount. Pair 0 lives at <root>/<id>/upper and
+// <root>/<id>/work (the layout reclaimStale recognizes); pair i>0 at
+// <root>/<id>/upper-<i> and work-<i>. Returns the session ID and the pairs.
+// Returns ErrUpperLimitExceeded if maxBytes > 0 and current usage already
+// meets or exceeds the limit.
+func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair, err error) {
+	if n <= 0 {
+		return "", nil, fmt.Errorf("upper: pair count must be positive, got %d", n)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.maxBytes > 0 {
 		usage, usageErr := m.usageLocked()
 		if usageErr == nil && usage >= m.maxBytes {
-			return "", "", "", fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
+			return "", nil, fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
 		}
 	}
 
 	id := newSessionID()
-	upperDir = filepath.Join(m.root, id, "upper")
-	workDir = filepath.Join(m.root, id, "work")
+	sessionDir := filepath.Join(m.root, id)
+	pairs = make([]UpperDirPair, 0, n)
+	for i := range n {
+		upperName, workName := "upper", "work"
+		if i > 0 {
+			upperName = fmt.Sprintf("upper-%d", i)
+			workName = fmt.Sprintf("work-%d", i)
+		}
+		upperDir := filepath.Join(sessionDir, upperName)
+		workDir := filepath.Join(sessionDir, workName)
 
-	if err := os.MkdirAll(upperDir, 0o755); err != nil {
-		return "", "", "", fmt.Errorf("upper: mkdir %s: %w", upperDir, err)
-	}
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		os.RemoveAll(filepath.Dir(upperDir))
-		return "", "", "", fmt.Errorf("upper: mkdir %s: %w", workDir, err)
-	}
-
-	m.entries[id] = &UpperEntry{
-		UpperDir: upperDir,
-		WorkDir:  workDir,
-		InUse:    true,
+		if err := os.MkdirAll(upperDir, 0o755); err != nil {
+			// Best-effort rollback of the partially allocated session dir.
+			_ = m.removeAll(sessionDir)
+			return "", nil, fmt.Errorf("upper: mkdir %s: %w", upperDir, err)
+		}
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			_ = m.removeAll(sessionDir)
+			return "", nil, fmt.Errorf("upper: mkdir %s: %w", workDir, err)
+		}
+		pairs = append(pairs, UpperDirPair{UpperDir: upperDir, WorkDir: workDir})
 	}
 
-	return id, upperDir, workDir, nil
+	m.entries[id] = &UpperEntry{Pairs: pairs, InUse: true}
+
+	return id, pairs, nil
 }
 
 // Release marks an upper directory as available for GC.
@@ -167,6 +202,13 @@ func (m *UpperManager) Release(sessionID string) {
 	}
 }
 
+// sessionDir returns the session directory holding the entry's pairs.
+// All pairs share one execd-allocated parent, so removing it removes every
+// pair. Caller must hold m.mu and the entry must have at least one pair.
+func (e *UpperEntry) sessionDir() string {
+	return filepath.Dir(e.Pairs[0].UpperDir)
+}
+
 // Remove immediately deletes an upper directory.
 func (m *UpperManager) Remove(sessionID string) error {
 	m.mu.Lock()
@@ -176,11 +218,15 @@ func (m *UpperManager) Remove(sessionID string) error {
 	if !ok {
 		return fmt.Errorf("upper: session %s not found", sessionID)
 	}
+	if len(e.Pairs) == 0 {
+		delete(m.entries, sessionID)
+		return nil
+	}
 
 	// Mark the entry released before removal. A transient filesystem error must
 	// leave the directory tracked so CollectWithErrors can retry it later.
 	e.InUse = false
-	upperParent := filepath.Dir(e.UpperDir)
+	upperParent := e.sessionDir()
 	if err := m.removeAll(upperParent); err != nil {
 		return err
 	}
@@ -205,7 +251,12 @@ func (m *UpperManager) CollectWithErrors() ([]string, error) {
 	var cleanupErr error
 	for id, e := range m.entries {
 		if !e.InUse {
-			upperParent := filepath.Dir(e.UpperDir)
+			if len(e.Pairs) == 0 {
+				freed = append(freed, id)
+				delete(m.entries, id)
+				continue
+			}
+			upperParent := e.sessionDir()
 			if err := m.removeAll(upperParent); err != nil {
 				cleanupErr = errors.Join(
 					cleanupErr,
@@ -234,14 +285,16 @@ func (m *UpperManager) Usage() (int64, error) {
 func (m *UpperManager) usageLocked() (int64, error) {
 	var total int64
 	for _, e := range m.entries {
-		size, err := dirSize(e.UpperDir)
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
+		for _, p := range e.Pairs {
+			size, err := dirSize(p.UpperDir)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue
+				}
+				return 0, err
 			}
-			return 0, err
+			total += size
 		}
-		total += size
 	}
 	return total, nil
 }

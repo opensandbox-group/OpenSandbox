@@ -229,6 +229,109 @@ func TestUpperManager_Allocate(t *testing.T) {
 	}
 }
 
+func TestUpperManager_AllocateN(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, pairs, err := mgr.AllocateN(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" {
+		t.Error("empty session ID")
+	}
+	if len(pairs) != 3 {
+		t.Fatalf("len(pairs) = %d, want 3", len(pairs))
+	}
+
+	// Pair 0 keeps the legacy layout (<id>/upper, <id>/work) so startup
+	// reclamation still recognizes the session directory.
+	wantNames := [][2]string{
+		{"upper", "work"},
+		{"upper-1", "work-1"},
+		{"upper-2", "work-2"},
+	}
+	for i, p := range pairs {
+		if filepath.Base(p.UpperDir) != wantNames[i][0] {
+			t.Errorf("pairs[%d].UpperDir = %s, want %s", i, p.UpperDir, wantNames[i][0])
+		}
+		if filepath.Base(p.WorkDir) != wantNames[i][1] {
+			t.Errorf("pairs[%d].WorkDir = %s, want %s", i, p.WorkDir, wantNames[i][1])
+		}
+		if filepath.Dir(p.UpperDir) != filepath.Dir(p.WorkDir) {
+			t.Errorf("pairs[%d] dirs must share the session dir", i)
+		}
+		for _, dir := range []string{p.UpperDir, p.WorkDir} {
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				t.Errorf("directory %s not created", dir)
+			}
+		}
+	}
+
+	// All pairs share one session directory...
+	if filepath.Dir(pairs[0].UpperDir) != filepath.Dir(pairs[2].UpperDir) {
+		t.Error("pairs must live under one session directory")
+	}
+
+	// ...so a single Remove clears every pair.
+	if err := mgr.Remove(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(pairs[0].UpperDir)); !os.IsNotExist(err) {
+		t.Error("session dir should be removed with all pairs")
+	}
+}
+
+func TestUpperManager_AllocateN_InvalidCount(t *testing.T) {
+	mgr := newTestUpperManager(t)
+	if _, _, err := mgr.AllocateN(0); err == nil {
+		t.Error("expected error for AllocateN(0)")
+	}
+	if _, _, err := mgr.AllocateN(-1); err == nil {
+		t.Error("expected error for AllocateN(-1)")
+	}
+}
+
+func TestUpperManager_AllocateN_UsageSumsAllPairs(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	_, pairs, err := mgr.AllocateN(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pairs[0].UpperDir, "a.bin"), make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pairs[1].UpperDir, "b.bin"), make([]byte, 50), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := mgr.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage < 150 {
+		t.Errorf("usage = %d, want at least 150 (both pairs counted)", usage)
+	}
+
+	// Limit accounting must see every pair: 150 bytes used of a 100-byte
+	// budget already blocks the next allocation.
+	root := filepath.Join(t.TempDir(), "isolation")
+	limited, err := NewUpperManager(root, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, lp, err := limited.AllocateN(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lp[0].UpperDir, "big.bin"), make([]byte, 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := limited.AllocateN(1); !errors.Is(err, ErrUpperLimitExceeded) {
+		t.Errorf("got %v, want ErrUpperLimitExceeded", err)
+	}
+}
+
 func TestUpperManager_AllocateUnique(t *testing.T) {
 	mgr := newTestUpperManager(t)
 
