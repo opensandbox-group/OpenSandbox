@@ -66,7 +66,13 @@ ROUND_TRIP_CASES = [
 
 
 def _stdout(result) -> str:
-    return "".join(m.text for m in result.logs.stdout)
+    """Joined stdout text.
+
+    execd emits one stdout event per line and strips the line terminator, so
+    multi-line output arrives as several events; re-join them with newlines
+    (same semantics as Execution.text).
+    """
+    return "\n".join(m.text for m in result.logs.stdout)
 
 
 def _read_env_var(sandbox, key: str) -> str:
