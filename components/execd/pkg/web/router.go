@@ -89,8 +89,12 @@ func NewRouter(accessToken string) *gin.Engine {
 		session.DELETE("/:sessionId", withCode(func(c *controller.CodeInterpretingController) { c.DeleteSession() }))
 	}
 
+	r.GET("/execution/instance", withCode(func(c *controller.CodeInterpretingController) { c.GetOperationInstance() }))
+	r.GET("/execution/operation", withCode(func(c *controller.CodeInterpretingController) { c.GetOperation() }))
+
 	command := r.Group("/command")
 	{
+		command.POST("/operations", withCode(func(c *controller.CodeInterpretingController) { c.CreateCommandOperation() }))
 		command.POST("", withCode(func(c *controller.CodeInterpretingController) { c.RunCommand() }))
 		command.DELETE("", withCode(func(c *controller.CodeInterpretingController) { c.InterruptCommand() }))
 		command.GET("/status/:id", withCode(func(c *controller.CodeInterpretingController) { c.GetCommandStatus() }))
@@ -105,6 +109,7 @@ func NewRouter(accessToken string) *gin.Engine {
 
 	pty := r.Group("/pty")
 	{
+		pty.POST("/operations", withPTY(func(c *controller.PTYController) { c.CreatePTYOperation() }))
 		pty.POST("", withPTY(func(c *controller.PTYController) { c.CreatePTYSession() }))
 		pty.GET("/:sessionId", withPTY(func(c *controller.PTYController) { c.GetPTYSessionStatus() }))
 		pty.DELETE("/:sessionId", withPTY(func(c *controller.PTYController) { c.DeletePTYSession() }))
@@ -193,6 +198,7 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 				abortUnauthorized(ctx)
 				return
 			}
+			ctx.Set("operationPrincipal", presented)
 			ctx.Next()
 			return
 		}
@@ -214,11 +220,19 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 			return
 		}
 
+		ctx.Set("operationPrincipal", legacyToken)
 		ctx.Next()
 	}
 }
 
 func abortUnauthorized(ctx *gin.Context) {
+	switch ctx.Request.URL.Path {
+	case "/execution/instance", "/execution/operation", "/command/operations", "/pty/operations":
+		ctx.AbortWithStatusJSON(http.StatusUnauthorized, model.ErrorResponse{
+			Code: model.ErrorCode("UNAUTHORIZED"), Message: "Invalid or missing execd access token",
+		})
+		return
+	}
 	ctx.AbortWithStatusJSON(http.StatusUnauthorized, map[string]any{
 		"error": "Unauthorized: invalid or missing header " + model.ApiAccessTokenHeader,
 	})
@@ -231,6 +245,10 @@ func abortUnauthorized(ctx *gin.Context) {
 // stay gated since /ready reports 503 too.
 func runtimeInitGate() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		switch ctx.Request.URL.Path {
+		case "/execution/instance", "/execution/operation", "/command", "/pty", "/command/operations", "/pty/operations":
+			ctx.Header("Cache-Control", "no-store")
+		}
 		if !flag.RuntimeInit {
 			ctx.Next()
 			return
@@ -241,6 +259,13 @@ func runtimeInitGate() gin.HandlerFunc {
 		}
 		if controller.GetRuntimeInitManager().Ready() {
 			ctx.Next()
+			return
+		}
+		switch ctx.Request.URL.Path {
+		case "/execution/instance", "/execution/operation", "/command/operations", "/pty/operations":
+			ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, model.ErrorResponse{
+				Code: model.ErrorCodeRuntimeError, Message: "execd is not initialized yet: POST /internal/init must be called first",
+			})
 			return
 		}
 		ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, map[string]any{

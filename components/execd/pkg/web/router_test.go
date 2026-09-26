@@ -15,6 +15,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -107,6 +108,42 @@ func TestAccessTokenPreInitPathsSkipToken(t *testing.T) {
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodGet, "/ping", "").Code)
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodGet, "/ready", "").Code)
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodPost, "/internal/init", "").Code)
+}
+
+func TestOperationMiddlewareErrors(t *testing.T) {
+	for _, mode := range []string{"legacy", "binding", "uninitialized"} {
+		t.Run(mode, func(t *testing.T) {
+			withTestBinding(t, nil)
+			withRuntimeInit(t, mode == "uninitialized")
+			if mode == "binding" {
+				withTestBinding(t, &binding.RuntimeBinding{
+					HasAccessToken: true, AccessTokenHash: mustHash(t, "bound-token"),
+				})
+			}
+			if mode == "uninitialized" {
+				withManager(t, false)
+			}
+			r := NewRouter("legacy-token")
+			for _, endpoint := range []struct{ method, path string }{
+				{http.MethodGet, "/execution/instance"},
+				{http.MethodGet, "/execution/operation"},
+				{http.MethodPost, "/command/operations"},
+				{http.MethodPost, "/pty/operations"},
+			} {
+				w := doRequest(t, r, endpoint.method, endpoint.path, "wrong-token")
+				wantStatus, wantCode := http.StatusUnauthorized, model.ErrorCode("UNAUTHORIZED")
+				if mode == "uninitialized" {
+					wantStatus, wantCode = http.StatusServiceUnavailable, model.ErrorCodeRuntimeError
+				}
+				require.Equal(t, wantStatus, w.Code, endpoint.path)
+				require.Equal(t, "no-store", w.Header().Get("Cache-Control"), endpoint.path)
+				var response model.ErrorResponse
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+				require.Equal(t, wantCode, response.Code, endpoint.path)
+				require.NotEmpty(t, response.Message, endpoint.path)
+			}
+		})
+	}
 }
 
 // withManager installs a fresh runtime-init manager with the given ready

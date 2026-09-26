@@ -208,6 +208,7 @@ export default defineConfig({
             { text: "Secure Container", link: "/guides/secure-container" },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
+            { text: "Execution Creation Recovery", link: "/guides/execution-creation-recovery" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             {
               text: "QEMU VMState Snapshots",

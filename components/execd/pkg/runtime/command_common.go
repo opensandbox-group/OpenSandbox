@@ -218,6 +218,7 @@ func (c *Controller) StartCommandOutputJanitor(ctx context.Context) error {
 		return err
 	}
 	safego.Go(func() {
+		c.cleanupOperations()
 		c.cleanupOrphanedCommandOutputs(time.Now())
 		c.cleanupFinishedCommands(time.Now().Add(-commandOutputRetention))
 		ticker := time.NewTicker(commandOutputSweepInterval)
@@ -227,6 +228,7 @@ func (c *Controller) StartCommandOutputJanitor(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
+				c.cleanupOperations()
 				c.cleanupFinishedCommands(now.Add(-commandOutputRetention))
 				c.cleanupOrphanedCommandOutputs(now)
 			}

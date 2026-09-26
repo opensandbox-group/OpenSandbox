@@ -33,7 +33,6 @@ import (
 	"github.com/alibaba/opensandbox/internal/safego"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
-	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
 const bashShell = "bash"
@@ -214,7 +213,7 @@ func sameProcessGroups(uid uint32) bool {
 
 // runCommand executes shell commands and streams their output.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.commandSessionID(request)
 
 	signals, stopSignals := subscribeCommandSignals()
 	defer stopSignals()
@@ -232,7 +231,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	request.logCommandReceived()
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
@@ -273,7 +272,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EValue:    startErr.Error(),
 			Traceback: []string{startErr.Error()},
 		})
-		log.Error("command: start failed: %v", startErr)
+		request.logCommandError("starting", startErr)
 		return nil
 	}
 
@@ -358,7 +357,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			Traceback: traceback,
 		})
 
-		log.Error("command: run failed: %v", err)
+		request.logCommandError("running", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
@@ -370,7 +369,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 // runBackgroundCommand executes shell commands in detached mode.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.commandSessionID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
@@ -387,7 +386,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer stopSignals()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	request.logCommandReceived()
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
@@ -427,7 +426,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	if err != nil {
 		cancel()
 		startErr := credentialStartHint(err, cred)
-		log.Error("command: start failed: %v", startErr)
+		request.logCommandError("starting", startErr)
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
 		c.markCommandFinished(session, 255, startErr.Error())
@@ -447,7 +446,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		err = mp.Wait()
 		cancel()
 		if err != nil {
-			log.Error("command: run failed: %v", err)
+			request.logCommandError("running", err)
 			exitCode := 1
 			var exitCodeErr exitCoder
 			if errors.As(err, &exitCodeErr) {

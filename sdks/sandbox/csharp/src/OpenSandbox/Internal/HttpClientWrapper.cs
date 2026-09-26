@@ -235,6 +235,12 @@ internal sealed class HttpClientWrapper
         return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<T> SendAsync<T>(HttpRequestMessage request, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
+        return await HandleResponseAsync<T>(response, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<byte[]> GetBytesAsync(
         string path,
         Dictionary<string, string?>? queryParams = null,
@@ -328,7 +334,16 @@ internal sealed class HttpClientWrapper
 
         try
         {
-            return JsonSerializer.Deserialize<T>(content, JsonOptions)!;
+            var result = JsonSerializer.Deserialize<T>(content, JsonOptions);
+            if (result is null)
+            {
+                throw new SandboxApiException(
+                    message: "Unexpected null response body",
+                    statusCode: (int)response.StatusCode,
+                    error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Unexpected null response body"),
+                    rawBody: content);
+            }
+            return result;
         }
         catch (JsonException ex)
         {

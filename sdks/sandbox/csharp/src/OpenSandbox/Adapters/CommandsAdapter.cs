@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -26,13 +27,18 @@ namespace OpenSandbox.Adapters;
 /// <summary>
 /// Adapter for the execd commands service.
 /// </summary>
-internal sealed class CommandsAdapter : IExecdCommands
+internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
 {
     private readonly HttpClientWrapper _client;
     private readonly HttpClient _sseHttpClient;
     private readonly string _baseUrl;
     private readonly IReadOnlyDictionary<string, string> _headers;
     private readonly ILogger _logger;
+    private readonly object _instanceLock = new();
+    private ExecutionInstance? _cachedInstance;
+    private long _instanceFetchedAt;
+    private long _instanceGeneration;
+    private TaskCompletionSource<ExecutionInstance>? _instancePending;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -54,6 +60,137 @@ internal sealed class CommandsAdapter : IExecdCommands
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
+    public async Task<ExecutionInstance> GetExecutionInstanceAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        TaskCompletionSource<ExecutionInstance> pending;
+        bool owner;
+        long generation;
+        long started;
+        lock (_instanceLock)
+        {
+            if (_cachedInstance != null && Stopwatch.GetTimestamp() - _instanceFetchedAt < 60L * Stopwatch.Frequency)
+                return CopyInstance(_cachedInstance);
+            owner = _instancePending == null;
+            pending = _instancePending ??= new TaskCompletionSource<ExecutionInstance>(TaskCreationOptions.RunContinuationsAsynchronously);
+            generation = _instanceGeneration;
+            started = Stopwatch.GetTimestamp();
+        }
+        if (owner)
+        {
+            // The shared fetch belongs to the adapter, not to the first waiter's token.
+            _ = FetchExecutionInstanceAsync(pending, generation, started);
+        }
+        if (cancellationToken.CanBeCanceled)
+        {
+            var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = cancellationToken.Register(() => cancelled.TrySetResult(true));
+            if (await Task.WhenAny(pending.Task, cancelled.Task).ConfigureAwait(false) != pending.Task)
+            {
+                _ = pending.Task.ContinueWith(t => { _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+                throw new OperationCanceledException(cancellationToken);
+            }
+        }
+        return CopyInstance(await pending.Task.ConfigureAwait(false));
+    }
+
+    private async Task FetchExecutionInstanceAsync(TaskCompletionSource<ExecutionInstance> pending, long generation, long started)
+    {
+        try
+        {
+            var result = await _client.GetAsync<ExecutionInstance>("/execution/instance", cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            lock (_instanceLock)
+            {
+                if (generation == _instanceGeneration)
+                {
+                    _cachedInstance = result;
+                    _instanceFetchedAt = started;
+                }
+            }
+            pending.TrySetResult(result);
+        }
+        catch (Exception error) { pending.TrySetException(error); }
+        finally
+        {
+            lock (_instanceLock)
+            {
+                if (ReferenceEquals(_instancePending, pending)) _instancePending = null;
+            }
+        }
+    }
+
+    private static ExecutionInstance CopyInstance(ExecutionInstance value) => new()
+    {
+        InstanceId = value.InstanceId, IssuedAt = value.IssuedAt,
+        RetentionSeconds = value.RetentionSeconds, Capacity = value.Capacity
+    };
+
+    private void InvalidateOperationInstance(SandboxApiException error)
+    {
+        if (error.Error.Code is "operation_instance_mismatch" or "operation_expired")
+        {
+            lock (_instanceLock)
+            {
+                _cachedInstance = null;
+                _instancePending = null;
+                _instanceGeneration++;
+            }
+        }
+    }
+
+    private async Task<ExecutionOperation> OperationAsync(Func<Task<ExecutionOperation>> request)
+    {
+        try { return await request().ConfigureAwait(false); }
+        catch (SandboxApiException error)
+        {
+            InvalidateOperationInstance(error);
+            throw;
+        }
+    }
+
+    public async Task<ExecutionOperation> GetExecutionOperationAsync(string kind, string operationId, CancellationToken cancellationToken = default)
+    {
+        if (kind is not ("command" or "pty")) throw new InvalidArgumentException("kind must be 'command' or 'pty'");
+        if (string.IsNullOrWhiteSpace(operationId)) throw new InvalidArgumentException("operationId is required");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/execution/operation?kind={Uri.EscapeDataString(kind)}");
+        request.Headers.Add("X-EXECD-OPERATION-ID", operationId);
+        return await OperationAsync(() => _client.SendAsync<ExecutionOperation>(request, cancellationToken)).ConfigureAwait(false);
+    }
+
+    public Task<ExecutionOperation> CreateCommandOperationAsync(string operationId, string command, RunCommandOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(operationId)) throw new InvalidArgumentException("operationId is required");
+        ValidateRunOptions(options);
+        return CreateCommandOperationAsync(operationId, BuildRunCommandRequest(command, options), cancellationToken);
+    }
+
+    public Task<ExecutionOperation> CreateCommandOperationAsync(string operationId, IReadOnlyList<string> argv, RunCommandOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(operationId)) throw new InvalidArgumentException("operationId is required");
+        ValidateRunOptions(options);
+        ValidateArgv(argv);
+        var request = BuildRunCommandRequest(null, options);
+        request.Argv = argv.ToArray();
+        return CreateCommandOperationAsync(operationId, request, cancellationToken);
+    }
+
+    private Task<ExecutionOperation> CreateCommandOperationAsync(string operationId, RunCommandRequest request, CancellationToken cancellationToken)
+    {
+        var body = new
+        {
+            operation_id = operationId, command = request.Command, argv = request.Argv,
+            cwd = request.Cwd, background = request.Background, timeout = request.Timeout,
+            uid = request.Uid, gid = request.Gid, envs = request.Envs
+        };
+        return OperationAsync(() => _client.PostAsync<ExecutionOperation>("/command/operations", body, cancellationToken));
+    }
+
+    public Task<ExecutionOperation> CreatePtyOperationAsync(string operationId, string? cwd = null, string? command = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(operationId)) throw new InvalidArgumentException("operationId is required");
+        return OperationAsync(() => _client.PostAsync<ExecutionOperation>("/pty/operations", new { operation_id = operationId, cwd, command }, cancellationToken));
+    }
+
     public IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(
         string command,
         RunCommandOptions? options = null,
@@ -69,11 +206,16 @@ internal sealed class CommandsAdapter : IExecdCommands
         CancellationToken cancellationToken = default)
     {
         ValidateRunOptions(options);
-        if (argv is null || argv.Count == 0 || string.IsNullOrEmpty(argv[0]) || argv.Any(arg => arg is null || arg.Contains('\0')))
-            throw new InvalidArgumentException("Argv requires a non-empty executable and strings without NUL");
+        ValidateArgv(argv);
         var request = BuildRunCommandRequest(null, options);
         request.Argv = argv.ToArray();
         return RunRequestStreamAsync(request, cancellationToken);
+    }
+
+    private static void ValidateArgv(IReadOnlyList<string> argv)
+    {
+        if (argv is null || argv.Count == 0 || string.IsNullOrEmpty(argv[0]) || argv.Any(arg => arg is null || arg.Contains('\0')))
+            throw new InvalidArgumentException("Argv requires a non-empty executable and strings without NUL");
     }
 
     private async IAsyncEnumerable<ServerStreamEvent> RunRequestStreamAsync(

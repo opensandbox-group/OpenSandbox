@@ -38,6 +38,12 @@ Execution modes:
 
 Sessions use Bash when the image provides it and fall back to POSIX `sh` on minimal images — commands sent to a fallback session must be `sh`-compatible. Windows sandboxes are supported (environment names are case-insensitive; batch files require shell syntax).
 
+### Experimental caller-bound creation
+
+Commands and PTY sessions can opt into [execution creation recovery](/guides/execution-creation-recovery). Persist the operation identity and request before creation; if the response is lost, the same identity recovers the original handle within the controller's retention window. This does not guarantee exactly-once script side effects or recovery across controller restarts.
+
+The retained-record limit defaults to `4096`. Set `--operation-capacity` or `EXECD_OPERATION_CAPACITY` to a positive integer at startup; the flag overrides the environment.
+
 ## Code execution
 
 Code contexts are persistent Jupyter kernels managed by execd. You execute code in a context and receive streamed results — standard output, execution results, and errors — across multiple calls that share state, exactly like a notebook.

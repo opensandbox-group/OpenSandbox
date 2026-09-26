@@ -130,7 +130,8 @@ export type {
   SandboxMetrics,
   PingResponse,
 } from "./models/execd.js";
-export type { ExecdCommands } from "./services/execdCommands.js";
+export { getExecutionOperations } from "./services/execdCommands.js";
+export type { ExecdCommands, ExecutionOperations } from "./services/execdCommands.js";
 
 export type {
   Execution,
@@ -218,3 +219,6 @@ export type {
   IsolatedSessionSummary,
   ListIsolatedSessionsResponse,
 } from "./models/isolated.js";
+
+export { newOperationId } from "./models/execd.js";
+export type { ExecutionInstance, ExecutionOperation } from "./models/execd.js";
