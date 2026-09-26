@@ -444,6 +444,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	featureConfig := controller.NewFeatureConfig()
+	if err := featureConfig.SetupWithManager(mgr, os.Getenv("POD_NAMESPACE")); err != nil {
+		setupLog.Error(err, "failed to setup feature config ConfigMap watch")
+		os.Exit(1)
+	}
+
 	poolAllocator := controller.NewDefaultAllocator(mgr.GetClient())
 	if err := controller.SetupCapacityMetricsWithManager(mgr, poolAllocator); err != nil {
 		setupLog.Error(err, "unable to register capacity metrics")
@@ -457,6 +463,7 @@ func main() {
 		ResumePullSecret:    resumePullSecret,
 		ProfileStore:        profileStore,
 		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
+		FeatureConfig:       featureConfig,
 	}).SetupWithManager(mgr, batchSandboxConcurrency); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BatchSandbox")
 		os.Exit(1)

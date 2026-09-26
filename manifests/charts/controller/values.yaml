@@ -55,6 +55,17 @@ controller:
     # -- Burst for Kubernetes client rate limiter.
     burst: 200
 
+  # -- Image pull stuck pod recovery during initial startup (BatchSandbox).
+  # Rendered into the `feature-flags` ConfigMap in the controller namespace;
+  # the controller hot-reloads it without a restart.
+  podRecovery:
+    # -- How long a pod must stay in ImagePullBackOff/ErrImagePull during initial
+    # startup before the controller replaces it (`pod-recovery-stuck-threshold`).
+    stuckThreshold: "1m"
+    # -- Maximum number of stuck-pod replacements per BatchSandbox generation
+    # (`pod-recovery-max-attempts`).
+    maxAttempts: 3
+
   # -- Pause/Resume snapshot configuration
   snapshot:
     # -- Image used for commit operations.

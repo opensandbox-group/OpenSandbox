@@ -50,7 +50,13 @@ The controller communicates allocation state through annotations on BatchSandbox
 - `sandbox.opensandbox.io/alloc-release`: JSON `{"pods":["pod-3"]}` — pods released back to pool
 - `sandbox.opensandbox.io/endpoints`: JSON endpoint list consumed by server-side endpoint resolution
 
+Pod recovery (stuck provisioning pods) deliberately keeps its timer and replacement budget in memory, keyed by pod creation timestamp and sandbox generation — it performs no apiserver writes of its own.
+
 Do not change annotation keys or JSON shapes without updating both writers and all readers, including controller tests and any server-side Kubernetes integration that parses them.
+
+## ConfigMap Contracts
+
+- `feature-flags` (controller's own namespace, discovered via `POD_NAMESPACE`): plain `data` key-value entries for controller feature configuration, hot-reloaded by the controller. Current keys: `pod-recovery-stuck-threshold` (duration), `pod-recovery-max-attempts` (positive int). Missing or invalid keys fall back to built-in defaults. These knobs back the pod provisioning failure recovery, which is generic over conditions (image pull today; more conditions may plug in later).
 
 ## Label Contracts
 

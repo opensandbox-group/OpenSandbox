@@ -89,6 +89,23 @@ func TestDeletingPodWaitingFailure(t *testing.T) {
 	}
 }
 
+func TestAdmissionRejectionNotTerminal(t *testing.T) {
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		Phase:  corev1.PodFailed,
+		Reason: "OutOfcpu",
+	}}
+	bs := &sandboxv1alpha1.BatchSandbox{Status: sandboxv1alpha1.BatchSandboxStatus{Phase: sandboxv1alpha1.BatchSandboxPhasePending}}
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
+	assert.NotEqual(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	assert.False(t, hasTrueBatchSandboxCondition(view.status.Conditions, sandboxv1alpha1.BatchSandboxConditionPodFailed))
+
+	// A real terminal failure next to it still flips the sandbox to Failed.
+	deadPod := pod.DeepCopy()
+	deadPod.Status.Reason = "ContainerFailed"
+	view = buildRuntimeView(bs, []*corev1.Pod{pod, deadPod})
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+}
+
 // Run the real reconciler against an API server, but drive reconciles explicitly
 // so both orders of failure/deletion observation are deterministic. No kubelet
 // runs in envtest; the test publishes its terminal Pod status and releases its finalizer.

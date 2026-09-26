@@ -78,6 +78,9 @@ The following table lists the configurable parameters of the chart and their def
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
+| controller.podRecovery | object | `{"maxAttempts":3,"stuckThreshold":"1m"}` | Image pull stuck pod recovery during initial startup (BatchSandbox). Rendered into the `feature-flags` ConfigMap in the controller namespace; the controller hot-reloads it without a restart. |
+| controller.podRecovery.maxAttempts | int | `3` | Maximum number of stuck-pod replacements per BatchSandbox generation (`pod-recovery-max-attempts`). |
+| controller.podRecovery.stuckThreshold | string | `"1m"` | How long a pod must stay in ImagePullBackOff/ErrImagePull during initial startup before the controller replaces it (`pod-recovery-stuck-threshold`). |
 | controller.podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context |
 | controller.priorityClassName | string | `""` | Priority class name for controller pods |
 | controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration |

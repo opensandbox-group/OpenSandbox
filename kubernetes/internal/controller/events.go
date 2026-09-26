@@ -33,6 +33,11 @@ const (
 	eventReasonPodReleased   = "PodReleased"
 	eventReasonFailedRelease = "FailedRelease"
 
+	// Image pull stuck recovery — recorded on BatchSandbox
+	eventReasonReplacedStuckPod          = "ReplacedStuckPod"
+	eventReasonPodRecoveryLimitReached   = "PodRecoveryLimitReached"
+	eventReasonImagePullPermanentFailure = "ImagePullPermanentFailure"
+
 	// Pod eviction — recorded on Pool
 	eventReasonPodEvicted = "PodEvicted"
 

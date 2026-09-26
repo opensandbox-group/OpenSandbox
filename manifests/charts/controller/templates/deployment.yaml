@@ -130,8 +130,12 @@ spec:
         {{- end }}
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
-        {{- if .Values.extraEnv }}
         env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        {{- if .Values.extraEnv }}
         {{- toYaml .Values.extraEnv | nindent 8 }}
         {{- end }}
         {{- if or .Values.controller.snapshot.imageCommitterPodTemplate .Values.extraVolumeMounts }}
