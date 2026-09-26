@@ -13,7 +13,11 @@
 // limitations under the License.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { CommandsAdapter } from "../dist/internal.js";
 
@@ -35,14 +39,16 @@ function createCaptureAdapter(sseBody = SUCCESS_SSE) {
   return { adapter, requests };
 }
 
-function expectedSetEnvCommand(entry, key = "MY_TOKEN") {
-  const quotedEntry = `'${entry.replaceAll("'", `'\\''`)}'`;
-  return [
-    `if [ -z "\${EXECD_ENVS:-}" ]; then printf '%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable ${key}' >&2; exit 1; fi`,
-    `mkdir -p "$(dirname "$EXECD_ENVS")"`,
-    `printf '%s=%s\\n' ${quotedEntry} >> "$EXECD_ENVS"`,
-  ].join("\n");
-}
+// Round-trip cases: [key, value, the exact line the snippet must append to the
+// env file]. The expected lines are hand-written literals.
+const ROUND_TRIP_CASES = [
+  ["MY_TOKEN", "value", "MY_TOKEN='value'"],
+  ["MY_VAR", "line1\nline2 $HOME \\path", "MY_VAR='line1\nline2 $HOME \\path'"],
+  ["KV", "a=b=c", "KV='a=b=c'"],
+  ["EMPTY", "", "EMPTY=''"],
+  ["GREETING", "it's fine \"quoted\"\ttab", 'GREETING="it\'s fine \\"quoted\\"\\ttab"'],
+  ["PATHY", "it's\nC:\\path", 'PATHY="it\'s\\nC:\\\\path"'],
+];
 
 test("commands.setEnv appends the env entry via the sandbox env file", async () => {
   const { adapter, requests } = createCaptureAdapter();
@@ -50,34 +56,33 @@ test("commands.setEnv appends the env entry via the sandbox env file", async () 
   await adapter.setEnv("MY_TOKEN", "value");
 
   assert.equal(requests.length, 1);
-  assert.deepEqual(requests[0], {
-    command: expectedSetEnvCommand("MY_TOKEN='value'"),
-    background: false,
-  });
-});
-
-test("commands.setEnv keeps $, backslashes and newlines literal via the single-quoted form", async () => {
-  const { adapter, requests } = createCaptureAdapter();
-
-  const value = "line1\nline2 $HOME \\path";
-  await adapter.setEnv("MY_VAR", value);
-
-  assert.equal(requests[0].command, expectedSetEnvCommand("MY_VAR='line1\nline2 $HOME \\path'", "MY_VAR"));
-});
-
-test("commands.setEnv escapes single quotes via the double-quoted form", async () => {
-  const { adapter, requests } = createCaptureAdapter();
-
-  await adapter.setEnv("GREETING", "it's fine \"quoted\"\ttab");
-
+  // Hand-written golden literal (not derived from the implementation).
   assert.equal(
     requests[0].command,
-    expectedSetEnvCommand('GREETING="it\'s fine \\"quoted\\"\\ttab"', "GREETING"),
+    'if [ -z "${EXECD_ENVS:-}" ]; then printf \'%s\\n\' \'EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN\' >&2; exit 1; fi\n'
+    + 'mkdir -p "$(dirname "$EXECD_ENVS")"\n'
+    + `printf '%s\\n' 'MY_TOKEN='\\''value'\\''' >> "$EXECD_ENVS"`,
   );
+  assert.deepEqual(requests[0], { command: requests[0].command, background: false });
+});
+
+test("commands.setEnv snippet appends well-formed lines round-tripped through sh", async () => {
+  const { adapter, requests } = createCaptureAdapter();
+
+  for (const [key, value] of ROUND_TRIP_CASES) {
+    await adapter.setEnv(key, value);
+    const command = requests.at(-1).command;
+    const envFile = join(mkdtempSync(join(tmpdir(), "opensandbox-setenv-")), ".env");
+    execFileSync("/bin/sh", ["-c", command], {
+      env: { PATH: process.env.PATH, EXECD_ENVS: envFile },
+    });
+    const want = ROUND_TRIP_CASES.find(([k]) => k === key)[2] + "\n";
+    assert.equal(readFileSync(envFile, "utf8"), want, `round-trip failed for ${key}`);
+  }
 });
 
 test("commands.setEnv rejects invalid keys before any transport call", async () => {
-  for (const key of ["", "1ABC", "MY-TOKEN", "MY TOKEN", "A=B", "A.B"]) {
+  for (const key of ["", "1ABC", "MY-TOKEN", "MY TOKEN", "A=B", "A.B", "A\n"]) {
     const { adapter, requests } = createCaptureAdapter();
     await assert.rejects(() => adapter.setEnv(key, "value"), /setEnv key must match/);
     assert.equal(requests.length, 0);
@@ -108,4 +113,13 @@ test("commands.setEnv throws with stderr when the append command fails", async (
       return true;
     },
   );
+});
+
+test("commands.setEnv treats a dropped stream without completion as failure", async () => {
+  // Stream ends after init only: no execution_complete and no error event, so
+  // the append was never confirmed and setEnv must not report success.
+  const incompleteSse = 'data: {"type":"init","text":"cmd-1","timestamp":1}\n\n';
+  const { adapter } = createCaptureAdapter(incompleteSse);
+
+  await assert.rejects(() => adapter.setEnv("MY_TOKEN", "value"), /commands\.setEnv failed/);
 });

@@ -56,7 +56,7 @@ import com.alibaba.opensandbox.sandbox.api.models.execd.RunInSessionRequest as R
 /** Quotes a string as a single POSIX shell word. */
 private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
 
-private val ENV_KEY_REGEX = Regex("^[A-Za-z_][A-Za-z0-9_]*$")
+private val ENV_KEY_REGEX = Regex("^[A-Za-z_][A-Za-z0-9_]*\\z")
 
 /** Escapes a value for the runtime env file's double-quoted form. */
 private fun escapeDoubleQuoted(value: String): String =
@@ -96,7 +96,7 @@ private fun buildSetEnvCommand(
             "'EXECD_ENVS is not set; cannot persist environment variable $key' " +
             ">&2; exit 1; fi",
         "mkdir -p \"\$(dirname \"\$EXECD_ENVS\")\"",
-        "printf '%s=%s\\n' ${shellQuote(entry)} >> \"\$EXECD_ENVS\"",
+        "printf '%s\\n' ${shellQuote(entry)} >> \"\$EXECD_ENVS\"",
     ).joinToString("\n")
 }
 
@@ -166,7 +166,10 @@ internal class CommandsAdapter(
     ) {
         val command = buildSetEnvCommand(key, value)
         val execution = run(RunCommandRequest.builder().command(command).build())
-        val failed = execution.error != null || (execution.exitCode != null && execution.exitCode != 0)
+        // A foreground command only reports exitCode 0 after a confirmed
+        // execution_complete event; a missing exit code (e.g. a dropped
+        // stream) is treated as failure because the append was never confirmed.
+        val failed = execution.error != null || execution.exitCode != 0
         if (failed) {
             val stderr = execution.logs.stderr.joinToString("") { it.text }.trim()
             val detail =

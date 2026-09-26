@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // envKeyPattern matches valid environment variable names persisted via SetEnv.
@@ -52,6 +53,9 @@ func buildSetEnvCommand(key, value string) (string, error) {
 	if strings.ContainsRune(value, '\x00') {
 		return "", fmt.Errorf("opensandbox: SetEnv value cannot contain NUL bytes")
 	}
+	if !utf8.ValidString(value) {
+		return "", fmt.Errorf("opensandbox: SetEnv value must be valid UTF-8")
+	}
 	var entry string
 	if strings.ContainsRune(value, '\'') {
 		entry = fmt.Sprintf(`%s="%s"`, key, escapeDoubleQuoted(value))
@@ -61,7 +65,7 @@ func buildSetEnvCommand(key, value string) (string, error) {
 	return strings.Join([]string{
 		fmt.Sprintf("if [ -z \"${EXECD_ENVS:-}\" ]; then printf '%%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable %s' >&2; exit 1; fi", key),
 		`mkdir -p "$(dirname "$EXECD_ENVS")"`,
-		fmt.Sprintf("printf '%%s=%%s\\n' %s >> \"$EXECD_ENVS\"", shellQuote(entry)),
+		fmt.Sprintf("printf '%%s\\n' %s >> \"$EXECD_ENVS\"", shellQuote(entry)),
 	}, "\n"), nil
 }
 
@@ -70,10 +74,11 @@ func buildSetEnvCommand(key, value string) (string, error) {
 // It appends KEY=VALUE to the sandbox env file that the runtime loads for
 // every command and session (the file named by the sandbox's EXECD_ENVS
 // variable, resolved inside the sandbox). Keys must match
-// [A-Za-z_][A-Za-z0-9_]*; values are stored verbatim with proper escaping
-// (quotes, backslashes, newlines, "="). The file is append-only: the last
-// write for a key wins. Returns an error if the sandbox fails to persist the
-// variable.
+// [A-Za-z_][A-Za-z0-9_]*. Values without a single quote are stored verbatim;
+// values containing a single quote use the env file's double-quoted form, in
+// which shell-style $NAME sequences may be expanded when the runtime loads
+// the file. The file is append-only: the last write for a key wins. Returns
+// an error if the sandbox fails to persist the variable.
 func (s *Sandbox) SetEnv(ctx context.Context, key, value string) error {
 	command, err := buildSetEnvCommand(key, value)
 	if err != nil {
@@ -84,7 +89,10 @@ func (s *Sandbox) SetEnv(ctx context.Context, key, value string) error {
 	if err != nil {
 		return fmt.Errorf("opensandbox: SetEnv %q: %w", key, err)
 	}
-	if exec.Error == nil && (exec.ExitCode == nil || *exec.ExitCode == 0) {
+	// A foreground command only reports ExitCode 0 after a confirmed
+	// execution_complete event; a missing exit code (e.g. a dropped stream)
+	// is treated as failure because the append was never confirmed.
+	if exec.Error == nil && exec.ExitCode != nil && *exec.ExitCode == 0 {
 		return nil
 	}
 

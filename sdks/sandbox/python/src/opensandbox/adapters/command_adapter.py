@@ -288,6 +288,7 @@ class CommandsAdapter(Commands):
         try:
             execution = await self.run(command)
         except Exception as e:
+            logger.error("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
         raise_for_set_env_failure(key, execution)
 

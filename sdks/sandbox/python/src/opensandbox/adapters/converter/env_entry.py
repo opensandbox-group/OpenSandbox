@@ -27,7 +27,7 @@ import re
 from opensandbox.exceptions import InvalidArgumentException, SandboxException
 from opensandbox.models.execd import Execution
 
-ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def _shell_quote(value: str) -> str:
@@ -72,16 +72,19 @@ def build_set_env_command(key: str, value: str) -> str:
                 ">&2; exit 1; fi"
             ),
             'mkdir -p "$(dirname "$EXECD_ENVS")"',
-            f"printf '%s=%s\\n' {_shell_quote(entry)} >> \"$EXECD_ENVS\"",
+            f"printf '%s\\n' {_shell_quote(entry)} >> \"$EXECD_ENVS\"",
         ]
     )
 
 
 def raise_for_set_env_failure(key: str, execution: Execution) -> None:
-    """Raise :class:`SandboxException` when the append command failed."""
-    failed = execution.error is not None or (
-        execution.exit_code is not None and execution.exit_code != 0
-    )
+    """Raise :class:`SandboxException` when the append command failed.
+
+    A foreground command only reports ``exit_code == 0`` after a confirmed
+    ``execution_complete``; a missing exit code (e.g. a dropped stream) is
+    treated as failure because the append was never confirmed.
+    """
+    failed = execution.error is not None or execution.exit_code != 0
     if not failed:
         return
     stderr_text = "".join(msg.text for msg in execution.logs.stderr).strip()

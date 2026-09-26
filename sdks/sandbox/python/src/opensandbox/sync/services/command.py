@@ -77,9 +77,11 @@ class CommandsSync(Protocol):
         Appends ``KEY=VALUE`` to the sandbox env file that the runtime loads for
         every command and session (the file pointed to by the sandbox's
         ``EXECD_ENVS`` variable, resolved inside the sandbox). Keys must match
-        ``[A-Za-z_][A-Za-z0-9_]*``; values are stored verbatim with proper
-        escaping. The file is append-only: when a key is written multiple times,
-        the last entry wins.
+        ``[A-Za-z_][A-Za-z0-9_]*``. Values without a single quote are stored
+        verbatim; values containing a single quote use the env file's
+        double-quoted form, in which shell-style ``$NAME`` sequences may be
+        expanded when the runtime loads the file. The file is append-only: when
+        a key is written multiple times, the last entry wins.
 
         Args:
             key: Environment variable name

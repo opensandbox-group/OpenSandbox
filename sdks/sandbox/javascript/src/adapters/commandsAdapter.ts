@@ -146,7 +146,7 @@ function buildSetEnvCommand(key: string, value: string): string {
   return [
     `if [ -z "\${EXECD_ENVS:-}" ]; then printf '%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable ${key}' >&2; exit 1; fi`,
     `mkdir -p "$(dirname "$EXECD_ENVS")"`,
-    `printf '%s=%s\\n' ${shellQuote(entry)} >> "$EXECD_ENVS"`,
+    `printf '%s\\n' ${shellQuote(entry)} >> "$EXECD_ENVS"`,
   ].join("\n");
 }
 
@@ -277,7 +277,7 @@ export class CommandsAdapter implements ExecdCommands {
   async setEnv(key: string, value: string): Promise<void> {
     const command = buildSetEnvCommand(key, value);
     const execution = await this.run(command);
-    if (execution.error != null || (execution.exitCode != null && execution.exitCode !== 0)) {
+    if (execution.error != null || execution.exitCode !== 0) {
       const stderr = execution.logs.stderr.map((m) => m.text).join("").trim();
       const detail = stderr.length > 0 ? stderr : (execution.error?.value?.trim() ?? "");
       throw new Error(`commands.setEnv failed for '${key}'${detail ? `: ${detail}` : ""}`);

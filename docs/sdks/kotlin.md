@@ -323,8 +323,10 @@ and session — without hand-writing shell escaping against the sandbox env file
 sandbox.commands().setEnv("MY_TOKEN", "it's a safe value");
 ```
 
-Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values are stored verbatim with proper
-escaping (quotes, backslashes, newlines, `=`). The env file is append-only: the
+Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values without a single quote are
+stored verbatim; values containing a single quote use the env file's
+double-quoted form, in which shell-style `$NAME` sequences may be expanded
+when the runtime loads the file. The env file is append-only: the
 last write for a key wins. Throws `SandboxException` if the sandbox fails to
 persist the variable.
 

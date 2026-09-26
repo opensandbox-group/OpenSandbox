@@ -119,7 +119,10 @@ internal sealed class CommandsAdapter : IExecdCommands
     {
         var command = BuildSetEnvCommand(key, value);
         var execution = await RunAsync(command, cancellationToken: cancellationToken).ConfigureAwait(false);
-        var failed = execution.Error != null || (execution.ExitCode.HasValue && execution.ExitCode.Value != 0);
+        // A foreground command only reports ExitCode 0 after a confirmed
+        // execution_complete event; a missing exit code (e.g. a dropped
+        // stream) is treated as failure because the append was never confirmed.
+        var failed = execution.Error != null || execution.ExitCode is not 0;
         if (!failed)
         {
             return;
@@ -292,7 +295,7 @@ internal sealed class CommandsAdapter : IExecdCommands
     }
 
     private static readonly System.Text.RegularExpressions.Regex EnvKeyPattern =
-        new("^[A-Za-z_][A-Za-z0-9_]*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        new("^[A-Za-z_][A-Za-z0-9_]*\\z", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>Quotes a string as a single POSIX shell word.</summary>
     private static string ShellQuote(string s) => "'" + s.Replace("'", "'\\''") + "'";
@@ -314,6 +317,14 @@ internal sealed class CommandsAdapter : IExecdCommands
     /// </summary>
     private static string BuildSetEnvCommand(string key, string value)
     {
+        if (key is null)
+        {
+            throw new InvalidArgumentException("setEnv key cannot be null");
+        }
+        if (value is null)
+        {
+            throw new InvalidArgumentException("setEnv value cannot be null");
+        }
         if (!EnvKeyPattern.IsMatch(key))
         {
             throw new InvalidArgumentException($"setEnv key must match [A-Za-z_][A-Za-z0-9_]*, got '{key}'");
@@ -329,7 +340,7 @@ internal sealed class CommandsAdapter : IExecdCommands
         return string.Join("\n",
             $"if [ -z \"${{EXECD_ENVS:-}}\" ]; then printf '%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable {key}' >&2; exit 1; fi",
             "mkdir -p \"$(dirname \"$EXECD_ENVS\")\"",
-            $"printf '%s=%s\\n' {ShellQuote(entry)} >> \"$EXECD_ENVS\"");
+            $"printf '%s\\n' {ShellQuote(entry)} >> \"$EXECD_ENVS\"");
     }
 
     private static void ValidateRunOptions(RunCommandOptions? options)

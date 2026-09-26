@@ -44,6 +44,10 @@ export interface ExecdCommands {
    *
    * @param key Environment variable name
    * @param value Environment variable value
+   * @remarks Values without a single quote are stored verbatim; values
+   * containing a single quote use the env file's double-quoted form, in which
+   * shell-style `$NAME` sequences may be expanded when the runtime loads the
+   * file.
    * @throws If arguments are invalid or the sandbox fails to persist the variable
    */
   setEnv(key: string, value: string): Promise<void>;

@@ -111,63 +111,87 @@ public class CommandsAdapterTests
         requests.Should().Be(0);
     }
 
-    private static string ExpectedSetEnvCommand(string entry, string key = "MY_TOKEN")
-    {
-        var quotedEntry = "'" + entry.Replace("'", "'\\''") + "'";
-        return string.Join("\n",
-            $"if [ -z \"${{EXECD_ENVS:-}}\" ]; then printf '%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable {key}' >&2; exit 1; fi",
-            "mkdir -p \"$(dirname \"$EXECD_ENVS\")\"",
-            $"printf '%s=%s\\n' {quotedEntry} >> \"$EXECD_ENVS\"");
-    }
+    private static string? s_capturedSetEnvBody;
 
-    private static StubHttpMessageHandler SetEnvCaptureHandler(out Func<string?> capturedBody)
+    private static StubHttpMessageHandler SetEnvCaptureHandler()
     {
-        string? captured = null;
-        capturedBody = () => captured;
+        s_capturedSetEnvBody = null;
         return new StubHttpMessageHandler(async (request, _) =>
         {
-            captured = await request.Content!.ReadAsStringAsync();
+            s_capturedSetEnvBody = await request.Content!.ReadAsStringAsync();
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StreamContent(new CommandEventStream("data: {\"type\":\"execution_complete\"}\n\n"))
+                Content = new StreamContent(new CommandEventStream(
+                    "data: {\"type\":\"execution_complete\",\"execution_time\":1,\"timestamp\":1}\n\n"))
             };
         });
     }
 
+    private static string CapturedSetEnvCommand => JsonDocument.Parse(s_capturedSetEnvBody!).RootElement
+        .GetProperty("command").GetString()!;
+
     [Fact]
     public async Task SetEnvAsync_ShouldAppendEnvEntryViaSandboxEnvFile()
     {
-        var adapter = CreateAdapter(SetEnvCaptureHandler(out var capturedBody));
+        var adapter = CreateAdapter(SetEnvCaptureHandler());
 
         await adapter.SetEnvAsync("MY_TOKEN", "value");
 
-        var body = JsonDocument.Parse(capturedBody()!).RootElement;
-        body.GetProperty("command").GetString().Should().Be(ExpectedSetEnvCommand("MY_TOKEN='value'"));
+        // Hand-written golden literal (not derived from the implementation).
+        CapturedSetEnvCommand.Should().Be(
+            "if [ -z \"${EXECD_ENVS:-}\" ]; then printf '%s\\n' " +
+            "'EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN' >&2; exit 1; fi\n" +
+            "mkdir -p \"$(dirname \"$EXECD_ENVS\")\"\n" +
+            "printf '%s\\n' 'MY_TOKEN='\\''value'\\''' >> \"$EXECD_ENVS\"");
     }
 
-    [Fact]
-    public async Task SetEnvAsync_ShouldKeepDollarBackslashAndNewlineLiteral()
+    public static TheoryData<string, string, string> SetEnvRoundTripCases => new()
     {
-        var adapter = CreateAdapter(SetEnvCaptureHandler(out var capturedBody));
+        { "MY_TOKEN", "value", "MY_TOKEN='value'" },
+        { "MY_VAR", "line1\nline2 $HOME \\path", "MY_VAR='line1\nline2 $HOME \\path'" },
+        { "KV", "a=b=c", "KV='a=b=c'" },
+        { "EMPTY", "", "EMPTY=''" },
+        { "GREETING", "it's fine \"quoted\"\ttab", "GREETING=\"it's fine \\\"quoted\\\"\\ttab\"" },
+        { "PATHY", "it's\nC:\\path", "PATHY=\"it's\\nC:\\\\path\"" },
+    };
 
-        await adapter.SetEnvAsync("MY_VAR", "line1\nline2 $HOME \\path");
-
-        var body = JsonDocument.Parse(capturedBody()!).RootElement;
-        body.GetProperty("command").GetString().Should()
-            .Be(ExpectedSetEnvCommand("MY_VAR='line1\nline2 $HOME \\path'", "MY_VAR"));
-    }
-
-    [Fact]
-    public async Task SetEnvAsync_ShouldEscapeSingleQuotesViaDoubleQuotedForm()
+    [Theory]
+    [MemberData(nameof(SetEnvRoundTripCases))]
+    public async Task SetEnvAsync_ShouldAppendWellFormedLinesRoundTrippedThroughSh(
+        string key, string value, string expectedLine)
     {
-        var adapter = CreateAdapter(SetEnvCaptureHandler(out var capturedBody));
+        var adapter = CreateAdapter(SetEnvCaptureHandler());
 
-        await adapter.SetEnvAsync("GREETING", "it's fine \"quoted\"\ttab");
+        await adapter.SetEnvAsync(key, value);
 
-        var body = JsonDocument.Parse(capturedBody()!).RootElement;
-        body.GetProperty("command").GetString().Should()
-            .Be(ExpectedSetEnvCommand("GREETING=\"it's fine \\\"quoted\\\"\\ttab\"", "GREETING"));
+        if (!File.Exists("/bin/sh"))
+        {
+            return; // POSIX round-trip test
+        }
+        var envFile = Path.Combine(Path.GetTempPath(), $"opensandbox-setenv-{Guid.NewGuid():N}.env");
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo("/bin/sh")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add(CapturedSetEnvCommand);
+            startInfo.EnvironmentVariables["EXECD_ENVS"] = envFile;
+            var process = System.Diagnostics.Process.Start(startInfo)!;
+            process.WaitForExit(10_000).Should().BeTrue();
+            process.ExitCode.Should().Be(0, string.Concat(process.StandardError.ReadToEnd(), process.StandardOutput.ReadToEnd()));
+            File.ReadAllText(envFile).Should().Be(expectedLine + "\n");
+        }
+        finally
+        {
+            File.Delete(envFile);
+        }
     }
+
+    private static string QuoteForSh(string s) => "'" + s.Replace("'", "'\\''") + "'";
 
     [Theory]
     [InlineData("")]
@@ -176,6 +200,7 @@ public class CommandsAdapterTests
     [InlineData("MY TOKEN")]
     [InlineData("A=B")]
     [InlineData("A.B")]
+    [InlineData("A\n")]
     public async Task SetEnvAsync_ShouldRejectInvalidKeysBeforeSending(string key)
     {
         var requests = 0;
@@ -188,6 +213,18 @@ public class CommandsAdapterTests
 
         await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.SetEnvAsync(key, "value"));
         requests.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldRejectNullKeyAndValue()
+    {
+        IExecdCommands commands = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            throw new InvalidOperationException("Unexpected request")));
+
+        (await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.SetEnvAsync(null!, "value")))
+            .Message.Should().Contain("key cannot be null");
+        (await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.SetEnvAsync("MY_TOKEN", null!)))
+            .Message.Should().Contain("value cannot be null");
     }
 
     [Fact]
@@ -221,6 +258,36 @@ public class CommandsAdapterTests
         var ex = await Assert.ThrowsAsync<SandboxException>(() => adapter.SetEnvAsync("MY_TOKEN", "value"));
         ex.Message.Should().Contain("commands.SetEnvAsync failed for 'MY_TOKEN'");
         ex.Message.Should().Contain("EXECD_ENVS is not set");
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldFallBackToErrorValueWhenStderrIsEmpty()
+    {
+        var sse = "data: {\"type\":\"error\",\"error\":{\"ename\":\"CommandExecError\",\"evalue\":\"7\"}}\n\n";
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new CommandEventStream(sse))
+            })));
+
+        var ex = await Assert.ThrowsAsync<SandboxException>(() => adapter.SetEnvAsync("MY_TOKEN", "value"));
+        ex.Message.Should().Contain("commands.SetEnvAsync failed for 'MY_TOKEN': 7");
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldTreatDroppedStreamWithoutCompletionAsFailure()
+    {
+        // Stream ends after init only: no execution_complete and no error
+        // event, so the append was never confirmed and must not report success.
+        var sse = "data: {\"type\":\"init\",\"text\":\"cmd-1\"}\n\n";
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new CommandEventStream(sse))
+            })));
+
+        (await Assert.ThrowsAsync<SandboxException>(() => adapter.SetEnvAsync("MY_TOKEN", "value")))
+            .Message.Should().Contain("commands.SetEnvAsync failed for 'MY_TOKEN'");
     }
 
     [Theory]

@@ -71,8 +71,11 @@ public interface IExecdCommands
     /// Appends <c>KEY=VALUE</c> to the sandbox env file that the runtime loads for
     /// every command and session (the file named by the sandbox's <c>EXECD_ENVS</c>
     /// variable, resolved inside the sandbox). Keys must match
-    /// <c>[A-Za-z_][A-Za-z0-9_]*</c>; values are stored verbatim with proper escaping.
-    /// The env file is append-only: the last write for a key wins.
+    /// <c>[A-Za-z_][A-Za-z0-9_]*</c>. Values without a single quote are stored
+    /// verbatim; values containing a single quote use the env file's double-quoted
+    /// form, in which shell-style <c>$NAME</c> sequences may be expanded when the
+    /// runtime loads the file. The env file is append-only: the last write for a
+    /// key wins.
     /// </summary>
     /// <param name="key">Environment variable name.</param>
     /// <param name="value">Environment variable value.</param>
