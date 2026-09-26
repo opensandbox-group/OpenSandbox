@@ -23,10 +23,6 @@ import pytest
 
 from opensandbox_cli.utils import DURATION, KEY_VALUE, parse_duration
 
-# ---------------------------------------------------------------------------
-# parse_duration
-# ---------------------------------------------------------------------------
-
 
 class TestParseDuration:
     @pytest.mark.parametrize(
@@ -63,11 +59,6 @@ class TestParseDuration:
         assert parse_duration("  10m  ") == timedelta(minutes=10)
 
 
-# ---------------------------------------------------------------------------
-# DurationType (Click param type)
-# ---------------------------------------------------------------------------
-
-
 class TestDurationType:
     def test_converts_string(self) -> None:
         result = DURATION.convert("5m", None, None)
@@ -81,11 +72,6 @@ class TestDurationType:
     def test_invalid_raises_bad_parameter(self) -> None:
         with pytest.raises(click.exceptions.BadParameter):
             DURATION.convert("invalid", None, None)
-
-
-# ---------------------------------------------------------------------------
-# KeyValueType (Click param type)
-# ---------------------------------------------------------------------------
 
 
 class TestKeyValueType:

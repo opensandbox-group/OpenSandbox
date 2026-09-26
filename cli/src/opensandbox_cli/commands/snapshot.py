@@ -34,8 +34,6 @@ def snapshot_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# ---- create ---------------------------------------------------------------
-
 @snapshot_group.command("create")
 @click.argument("sandbox_id")
 @click.option("--name", default=None, help="Optional snapshot name.")
@@ -47,7 +45,6 @@ def snapshot_create(
 ) -> None:
     """Create a snapshot from a sandbox."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     mgr = obj.get_manager()
     with obj.output.spinner("Creating snapshot..."):
         info = mgr.create_snapshot(sandbox_id, name=name)
@@ -61,8 +58,6 @@ def snapshot_create(
         title="Snapshot Created",
     )
 
-
-# ---- get ------------------------------------------------------------------
 
 @snapshot_group.command("get")
 @click.argument("snapshot_id")
@@ -90,8 +85,6 @@ def snapshot_get(obj, snapshot_id: str, output_format: str | None) -> None:
             d["status_message"] = status_val["message"]
     obj.output.print_dict(d, title="Snapshot Info")
 
-
-# ---- list -----------------------------------------------------------------
 
 @snapshot_group.command("list")
 @click.option("--sandbox-id", "sandbox_id", default=None, help="Filter by source sandbox ID.")
@@ -162,8 +155,6 @@ def snapshot_list(
         title="Snapshots",
     )
 
-
-# ---- delete ---------------------------------------------------------------
 
 @snapshot_group.command("delete")
 @click.argument("snapshot_id")

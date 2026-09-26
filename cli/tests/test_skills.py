@@ -20,113 +20,43 @@ import importlib.resources
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from click import Command, Group, Option
 from click.testing import CliRunner
 
-from opensandbox_cli.commands.skills import _TARGETS, skills_group
+from opensandbox_cli.commands.skills import _TARGETS, TargetConfig, skills_group
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
 from opensandbox_cli.skill_registry import list_builtin_skills
 
 
+def _rebase(path: Path, root: Path) -> Path:
+    """Rebase a target path (absolute home-based or relative) under root."""
+    relative = path.relative_to(Path.home()) if path.is_absolute() else path
+    return root / relative
+
+
 @pytest.fixture()
 def isolated_skill_targets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    patched = {
-        "claude": {
-            **_TARGETS["claude"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["claude"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".claude" / "skills",
-                },
-                "global": {
-                    **_TARGETS["claude"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".claude" / "skills",
-                },
-            },
-        },
-        "cursor": {
-            **_TARGETS["cursor"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["cursor"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".cursor" / "rules",
-                },
-                "global": {
-                    **_TARGETS["cursor"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".cursor" / "rules",
-                },
-            },
-        },
-        "codex": {
-            **_TARGETS["codex"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["codex"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".codex" / "skills",
-                },
-                "global": {
-                    **_TARGETS["codex"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".codex" / "skills",
-                },
-            },
-        },
-        "copilot": {
-            **_TARGETS["copilot"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["copilot"]["scopes"]["project"],
-                    "dest_file": tmp_path / ".github" / "copilot-instructions.md",
-                },
-                "global": {
-                    **_TARGETS["copilot"]["scopes"]["global"],
-                    "dest_file": tmp_path / "home" / ".github" / "copilot-instructions.md",
-                },
-            },
-        },
-        "windsurf": {
-            **_TARGETS["windsurf"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["windsurf"]["scopes"]["project"],
-                    "dest_file": tmp_path / ".windsurfrules",
-                },
-                "global": {
-                    **_TARGETS["windsurf"]["scopes"]["global"],
-                    "dest_file": tmp_path / "home" / ".windsurfrules",
-                },
-            },
-        },
-        "cline": {
-            **_TARGETS["cline"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["cline"]["scopes"]["project"],
-                    "dest_file": tmp_path / ".clinerules",
-                },
-                "global": {
-                    **_TARGETS["cline"]["scopes"]["global"],
-                    "dest_file": tmp_path / "home" / ".clinerules",
-                },
-            },
-        },
-        "opencode": {
-            **_TARGETS["opencode"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["opencode"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".agents" / "skills",
-                },
-                "global": {
-                    **_TARGETS["opencode"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".agents" / "skills",
-                },
-            },
-        },
-    }
-    monkeypatch.setattr("opensandbox_cli.commands.skills._TARGETS", patched)
+    """Point project scope at tmp_path and global scope at tmp_path/home."""
+    patched: dict[str, object] = {}
+    for name, cfg in _TARGETS.items():
+        scopes = {}
+        for scope, scope_cfg in cfg["scopes"].items():
+            root = tmp_path if scope == "project" else tmp_path / "home"
+            new_cfg = dict(scope_cfg)
+            if "dest_dir" in new_cfg:
+                new_cfg["dest_dir"] = _rebase(new_cfg["dest_dir"], root)
+            if "dest_file" in new_cfg:
+                new_cfg["dest_file"] = _rebase(new_cfg["dest_file"], root)
+            scopes[scope] = new_cfg
+        patched[name] = {**cfg, "scopes": scopes}
+    monkeypatch.setattr(
+        "opensandbox_cli.commands.skills._TARGETS",
+        cast(dict[str, TargetConfig], patched),
+    )
 
 
 class TestSkillsCommands:
@@ -350,29 +280,21 @@ class TestSkillsCommands:
         assert "Full Skill:" in result.output
         assert "osb file cat" in result.output
 
-    def test_show_supports_new_network_egress_skill(
+    def test_show_prints_network_and_vault_skills(
         self,
         runner: CliRunner,
         isolated_skill_targets: None,
     ) -> None:
-        result = runner.invoke(skills_group, ["show", "network-egress"])
+        network = runner.invoke(skills_group, ["show", "network-egress"])
+        assert network.exit_code == 0
+        assert "Skill: network-egress" in network.output
+        assert "Quick Start:" in network.output
+        assert "osb egress patch" in network.output
 
-        assert result.exit_code == 0
-        assert "Skill: network-egress" in result.output
-        assert "Quick Start:" in result.output
-        assert "osb egress patch" in result.output
-
-    def test_show_supports_credential_vault_skill(
-        self,
-        runner: CliRunner,
-        isolated_skill_targets: None,
-    ) -> None:
-        result = runner.invoke(skills_group, ["show", "credential-vault"])
-
-        assert result.exit_code == 0
-        assert "Skill: credential-vault" in result.output
-        assert "Credential Vault" in result.output
-        assert "osb credential-vault create" in result.output
+        vault = runner.invoke(skills_group, ["show", "credential-vault"])
+        assert vault.exit_code == 0
+        assert "Skill: credential-vault" in vault.output
+        assert "osb credential-vault create" in vault.output
 
     def test_show_surfaces_json_shapes_for_lifecycle_skill(
         self,

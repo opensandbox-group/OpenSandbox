@@ -46,8 +46,6 @@ def file_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# ---- cat (read) -----------------------------------------------------------
-
 @file_group.command("cat")
 @click.argument("sandbox_id")
 @click.argument("path")
@@ -71,8 +69,6 @@ def file_cat(
     finally:
         sandbox.close()
 
-
-# ---- write ----------------------------------------------------------------
 
 @file_group.command("write")
 @click.argument("sandbox_id")
@@ -119,8 +115,6 @@ def file_write(
         sandbox.close()
 
 
-# ---- upload ---------------------------------------------------------------
-
 @file_group.command("upload")
 @click.argument("sandbox_id")
 @click.argument("local_path", type=click.Path(exists=True))
@@ -145,8 +139,6 @@ def file_upload(
     finally:
         sandbox.close()
 
-
-# ---- download -------------------------------------------------------------
 
 @file_group.command("download")
 @click.argument("sandbox_id")
@@ -221,8 +213,6 @@ def file_download(
         sandbox.close()
 
 
-# ---- rm (delete) ----------------------------------------------------------
-
 @file_group.command("rm")
 @click.argument("sandbox_id")
 @click.argument("paths", nargs=-1, required=True)
@@ -249,8 +239,6 @@ def file_rm(
         sandbox.close()
 
 
-# ---- mv (move) ------------------------------------------------------------
-
 @file_group.command("mv")
 @click.argument("sandbox_id")
 @click.argument("source")
@@ -276,8 +264,6 @@ def file_mv(
     finally:
         sandbox.close()
 
-
-# ---- mkdir ----------------------------------------------------------------
 
 @file_group.command("mkdir")
 @click.argument("sandbox_id")
@@ -323,8 +309,6 @@ def file_mkdir(
         sandbox.close()
 
 
-# ---- rmdir ----------------------------------------------------------------
-
 @file_group.command("rmdir")
 @click.argument("sandbox_id")
 @click.argument("paths", nargs=-1, required=True)
@@ -350,8 +334,6 @@ def file_rmdir(
     finally:
         sandbox.close()
 
-
-# ---- search ---------------------------------------------------------------
 
 @file_group.command("search")
 @click.argument("sandbox_id")
@@ -388,8 +370,6 @@ def file_search(
         sandbox.close()
 
 
-# ---- info (stat) ----------------------------------------------------------
-
 @file_group.command("info")
 @click.argument("sandbox_id")
 @click.argument("paths", nargs=-1, required=True)
@@ -416,8 +396,6 @@ def file_info(
     finally:
         sandbox.close()
 
-
-# ---- chmod ----------------------------------------------------------------
 
 @file_group.command("chmod")
 @click.argument("sandbox_id")
@@ -457,8 +435,6 @@ def file_chmod(
     finally:
         sandbox.close()
 
-
-# ---- replace --------------------------------------------------------------
 
 @file_group.command("replace")
 @click.argument("sandbox_id")

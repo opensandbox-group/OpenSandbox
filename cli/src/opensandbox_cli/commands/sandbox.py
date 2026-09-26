@@ -53,9 +53,6 @@ def sandbox_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# Alias: osb sb ...
-sandbox_group.name = "sandbox"
-
 _SANDBOX_STATE_CANONICAL = {
     state.lower(): state for state in SandboxState.values()
 }
@@ -77,8 +74,6 @@ def _normalize_sandbox_states(states: tuple[str, ...]) -> list[str] | None:
         normalized.append(canonical)
     return normalized
 
-
-# ---- create ---------------------------------------------------------------
 
 @sandbox_group.command("create")
 @click.option("--image", "-i", required=False, help="Container image (e.g. python:3.11). Defaults to config value if set.")
@@ -155,6 +150,7 @@ def sandbox_create(
 ) -> None:
     """Create a new sandbox from an image, a template, or a snapshot."""
     from opensandbox.sync.sandbox import SandboxSync
+
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
 
     if template and snapshot_id:
@@ -329,8 +325,6 @@ def _template_optional_kwargs(
     return kwargs
 
 
-# ---- list -----------------------------------------------------------------
-
 @sandbox_group.command("list")
 @click.option("--state", "-s", "states", multiple=True, help="Filter by state (Pending, Running, Paused, ...). Repeatable.")
 @click.option("--metadata", "-m", "metadata_kv", multiple=True, type=KEY_VALUE, help="Metadata filter (KEY=VALUE). Repeatable.")
@@ -373,7 +367,6 @@ def sandbox_list(
 
     raw_rows = [info.model_dump(mode="json") for info in result.sandbox_infos]
 
-    # For machine-readable formats, preserve the original structure
     if obj.output.fmt in ("json", "yaml"):
         obj.output.print_dict(
             {
@@ -384,7 +377,6 @@ def sandbox_list(
         )
         return
 
-    # Flatten nested status/image objects for clean table display
     rows = []
     for d in raw_rows:
         flat = dict(d)
@@ -403,8 +395,6 @@ def sandbox_list(
     )
 
 
-# ---- get ------------------------------------------------------------------
-
 @sandbox_group.command("get")
 @click.argument("sandbox_id")
 @output_option("table", "json", "yaml")
@@ -413,17 +403,14 @@ def sandbox_list(
 def sandbox_get(obj: ClientContext, sandbox_id: str, output_format: str | None) -> None:
     """Get sandbox details."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     mgr = obj.get_manager()
     info = mgr.get_sandbox_info(sandbox_id)
     d = info.model_dump(mode="json")
 
-    # For machine-readable formats, preserve the original structure
     if obj.output.fmt in ("json", "yaml"):
         obj.output.print_dict(d, title="Sandbox Info")
         return
 
-    # Flatten nested objects for clean table display
     status_val = d.get("status")
     if isinstance(status_val, dict):
         d["status"] = status_val.get("state", str(status_val))
@@ -436,8 +423,6 @@ def sandbox_get(obj: ClientContext, sandbox_id: str, output_format: str | None) 
         d["image"] = image_val.get("image", str(image_val))
     obj.output.print_dict(d, title="Sandbox Info")
 
-
-# ---- kill -----------------------------------------------------------------
 
 @sandbox_group.command("kill")
 @click.argument("sandbox_ids", nargs=-1, required=True)
@@ -452,14 +437,11 @@ def sandbox_kill(
     mgr = obj.get_manager()
     rows: list[dict[str, str]] = []
     for sid in sandbox_ids:
-        resolved = obj.resolve_sandbox_id(sid)
-        with obj.output.spinner(f"Killing sandbox {resolved}..."):
-            mgr.kill_sandbox(resolved)
-        rows.append({"sandbox_id": resolved, "status": "terminated"})
+        with obj.output.spinner(f"Killing sandbox {sid}..."):
+            mgr.kill_sandbox(sid)
+        rows.append({"sandbox_id": sid, "status": "terminated"})
     obj.output.print_rows(rows, columns=["sandbox_id", "status"], title="Sandboxes")
 
-
-# ---- pause ----------------------------------------------------------------
 
 @sandbox_group.command("pause")
 @click.argument("sandbox_id")
@@ -469,14 +451,11 @@ def sandbox_kill(
 def sandbox_pause(obj: ClientContext, sandbox_id: str, output_format: str | None) -> None:
     """Pause a running sandbox."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     mgr = obj.get_manager()
     with obj.output.spinner("Pausing sandbox..."):
         mgr.pause_sandbox(sandbox_id)
     obj.output.success(f"Pause request accepted: {sandbox_id}")
 
-
-# ---- resume ---------------------------------------------------------------
 
 @sandbox_group.command("resume")
 @click.argument("sandbox_id")
@@ -494,9 +473,9 @@ def sandbox_resume(
 ) -> None:
     """Resume a paused sandbox."""
     from opensandbox.sync.sandbox import SandboxSync
+
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
 
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     sandbox = None
     try:
         kwargs = {
@@ -514,8 +493,6 @@ def sandbox_resume(
             sandbox.close()
 
 
-# ---- renew ----------------------------------------------------------------
-
 @sandbox_group.command("renew")
 @click.argument("sandbox_id")
 @click.option("--timeout", "-t", required=True, type=DURATION, help="New TTL duration (e.g. 30m, 2h).")
@@ -530,7 +507,6 @@ def sandbox_renew(
 ) -> None:
     """Renew sandbox expiration."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     mgr = obj.get_manager()
     with obj.output.spinner("Renewing sandbox..."):
         resp = mgr.renew_sandbox(sandbox_id, timeout)
@@ -539,8 +515,6 @@ def sandbox_renew(
         title="Sandbox Renewed",
     )
 
-
-# ---- endpoint -------------------------------------------------------------
 
 @sandbox_group.command("endpoint")
 @click.argument("sandbox_id")
@@ -560,8 +534,6 @@ def sandbox_endpoint(
     finally:
         sandbox.close()
 
-
-# ---- health ---------------------------------------------------------------
 
 @sandbox_group.command("health")
 @click.argument("sandbox_id")
@@ -589,8 +561,6 @@ def sandbox_health(
     finally:
         sandbox.close()
 
-
-# ---- metrics --------------------------------------------------------------
 
 @sandbox_group.command("metrics")
 @click.argument("sandbox_id")
@@ -693,6 +663,4 @@ def _render_stream_metric(obj: ClientContext, metric: SandboxMetrics) -> None:
         click.echo(json.dumps(metric.model_dump(mode="json"), default=str))
         return
 
-    if obj.output.fmt == "yaml":
-        obj.output.print_model(metric)
-        return
+    obj.output.print_model(metric)

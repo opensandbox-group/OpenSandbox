@@ -37,12 +37,7 @@ from rich.status import Status
 from rich.table import Table
 from rich.text import Text
 
-# ---------------------------------------------------------------------------
-# Status badge styling  (sandbox state → color + icon)
-# ---------------------------------------------------------------------------
-
 _STATUS_STYLES: dict[str, tuple[str, str]] = {
-    # state → (rich style, icon)
     "running": ("bold green", "●"),
     "ready": ("bold green", "●"),
     "healthy": ("bold green", "●"),
@@ -59,13 +54,8 @@ _STATUS_STYLES: dict[str, tuple[str, str]] = {
     "created": ("bold cyan", "✦"),
 }
 
-# Columns that contain status-like values
 _STATUS_COLUMNS = {"status", "state", "healthy"}
-
-# Columns that should be rendered in a dimmer style (long IDs, timestamps)
 _DIM_COLUMNS = {"created_at", "expires_at", "modified_at", "updated_at"}
-
-# Columns that are primary identifiers
 _ID_COLUMNS = {"id", "sandbox_id", "execution_id", "context_id"}
 
 
@@ -93,68 +83,46 @@ class OutputFormatter:
     def __init__(self, fmt: str = "table", *, color: bool = True) -> None:
         self.fmt = fmt
         self.color = color
-        self.console = Console(
-            stderr=False, no_color=not color, force_terminal=None
-        )
-        self._err_console = Console(
-            stderr=True, no_color=not color, force_terminal=None
-        )
+        self.console = Console(stderr=False, no_color=not color)
+        self._err_console = Console(stderr=True, no_color=not color)
 
-    # ------------------------------------------------------------------
-    # Status messages with icons
-    # ------------------------------------------------------------------
+    def _message(
+        self,
+        status: str,
+        msg: str,
+        *,
+        icon: str,
+        style: str,
+        plain: str,
+        stderr: bool,
+    ) -> None:
+        if self.fmt == "json":
+            self._print_json({"status": status, "message": msg})
+            return
+        if self.fmt == "yaml":
+            self._print_yaml({"status": status, "message": msg})
+            return
+        if self.color:
+            console = self._err_console if stderr else self.console
+            console.print(f"  [bold {style}]{icon} {msg}[/]")
+        else:
+            click.echo(f"{plain}: {msg}", err=stderr)
 
     def success(self, msg: str) -> None:
         """Print a success message with ✅ icon."""
-        if self.fmt == "json":
-            self._print_json({"status": "ok", "message": msg})
-            return
-        if self.fmt == "yaml":
-            self._print_yaml({"status": "ok", "message": msg})
-            return
-        if self.color:
-            self.console.print(f"  [bold green]✅ {msg}[/]")
-        else:
-            click.echo(f"OK: {msg}")
+        self._message("ok", msg, icon="✅", style="green", plain="OK", stderr=False)
 
     def info(self, msg: str) -> None:
-        """Print an info message with ℹ️  icon."""
-        if self.fmt == "json":
-            self._print_json({"status": "info", "message": msg})
-            return
-        if self.fmt == "yaml":
-            self._print_yaml({"status": "info", "message": msg})
-            return
-        if self.color:
-            self.console.print(f"  [bold blue]ℹ️  {msg}[/]")
-        else:
-            click.echo(f"INFO: {msg}")
+        """Print an info message with ℹ️ icon."""
+        self._message("info", msg, icon="ℹ️ ", style="blue", plain="INFO", stderr=False)
 
     def warning(self, msg: str) -> None:
-        """Print a warning message with ⚠️  icon."""
-        if self.fmt == "json":
-            self._print_json({"status": "warning", "message": msg})
-            return
-        if self.fmt == "yaml":
-            self._print_yaml({"status": "warning", "message": msg})
-            return
-        if self.color:
-            self._err_console.print(f"  [bold yellow]⚠️  {msg}[/]")
-        else:
-            click.echo(f"WARN: {msg}", err=True)
+        """Print a warning message with ⚠️ icon."""
+        self._message("warning", msg, icon="⚠️ ", style="yellow", plain="WARN", stderr=True)
 
     def error(self, msg: str) -> None:
         """Print an error message with ❌ icon."""
-        if self.fmt == "json":
-            self._print_json({"status": "error", "message": msg})
-            return
-        if self.fmt == "yaml":
-            self._print_yaml({"status": "error", "message": msg})
-            return
-        if self.color:
-            self._err_console.print(f"  [bold red]❌ {msg}[/]")
-        else:
-            click.echo(f"ERROR: {msg}", err=True)
+        self._message("error", msg, icon="❌", style="red", plain="ERROR", stderr=True)
 
     def error_panel(self, msg: str, title: str = "Error") -> None:
         """Print an error with a bold header and message."""
@@ -168,10 +136,6 @@ class OutputFormatter:
         else:
             click.echo(f"ERROR [{title}]: {msg}", err=True)
 
-    # ------------------------------------------------------------------
-    # Spinner for long-running operations
-    # ------------------------------------------------------------------
-
     @contextmanager
     def spinner(self, msg: str) -> Generator[Status, None, None]:
         """Context manager that shows a spinner while work is in progress."""
@@ -179,12 +143,7 @@ class OutputFormatter:
             with self._err_console.status(f"[bold cyan]⏳ {msg}[/]", spinner="dots") as status:
                 yield status
         else:
-            # No spinner in non-color or non-table mode
             yield None  # type: ignore[arg-type]
-
-    # ------------------------------------------------------------------
-    # Panel output
-    # ------------------------------------------------------------------
 
     def panel(self, content: str, *, title: str | None = None, style: str = "cyan") -> None:
         """Print content inside a styled panel."""
@@ -223,13 +182,9 @@ class OutputFormatter:
             for k, v in data.items():
                 click.echo(f"  {k}: {v}")
 
-    # ------------------------------------------------------------------
-    # Public helpers
-    # ------------------------------------------------------------------
-
     def print_model(self, model: BaseModel, title: str | None = None) -> None:
         """Print a single Pydantic model as key-value panel or JSON/YAML."""
-        data = _model_to_dict(model)
+        data = model.model_dump(mode="json")
         if self.fmt == "json":
             self._print_json(data)
         elif self.fmt == "yaml":
@@ -245,7 +200,7 @@ class OutputFormatter:
         title: str | None = None,
     ) -> None:
         """Print a list of Pydantic models as a table or JSON/YAML."""
-        rows = [_model_to_dict(m) for m in models]
+        rows = [m.model_dump(mode="json") for m in models]
         if self.fmt == "json":
             self._print_json(rows)
         elif self.fmt == "yaml":
@@ -280,10 +235,6 @@ class OutputFormatter:
     def print_text(self, text: str) -> None:
         """Print raw text (ignores format)."""
         click.echo(text)
-
-    # ------------------------------------------------------------------
-    # Internal renderers
-    # ------------------------------------------------------------------
 
     def _print_json(self, data: Any) -> None:
         if self.color:
@@ -352,12 +303,3 @@ class OutputFormatter:
                     cells.append(val)
             table.add_row(*cells)
         self.console.print(table)
-
-
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
-
-def _model_to_dict(model: BaseModel) -> dict[str, Any]:
-    return model.model_dump(mode="json")

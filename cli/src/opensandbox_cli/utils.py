@@ -25,10 +25,6 @@ import click
 
 from opensandbox_cli.client import ClientContext
 
-# ---------------------------------------------------------------------------
-# Duration parsing  (e.g. "10m", "1h30m", "90s", "2h")
-# ---------------------------------------------------------------------------
-
 _DURATION_RE = re.compile(
     r"^(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?:(?P<seconds>\d+)s)?$"
 )
@@ -44,7 +40,6 @@ def parse_duration(value: str) -> timedelta:
     if not value:
         raise click.BadParameter("Duration cannot be empty")
 
-    # Plain integer → seconds
     if value.isdigit():
         return timedelta(seconds=int(value))
 
@@ -94,11 +89,6 @@ class DurationType(click.ParamType):
 DURATION = DurationType()
 
 
-# ---------------------------------------------------------------------------
-# Key=Value parsing  (e.g. --env FOO=bar)
-# ---------------------------------------------------------------------------
-
-
 class KeyValueType(click.ParamType):
     """Click parameter type that parses ``KEY=VALUE`` strings into a tuple."""
 
@@ -118,11 +108,6 @@ class KeyValueType(click.ParamType):
 KEY_VALUE = KeyValueType()
 
 
-# ---------------------------------------------------------------------------
-# Output helpers
-# ---------------------------------------------------------------------------
-
-
 def output_option(
     *choices: str,
     default: str | None = None,
@@ -135,29 +120,10 @@ def output_option(
         "--output",
         "output_format",
         type=click.Choice(list(choices), case_sensitive=False),
-        default=None if default is None else default,
+        default=default,
         show_default=default is not None,
         help=option_help,
     )
-
-
-def select_output_format(
-    obj: ClientContext,
-    requested: str | None,
-    *,
-    allowed: tuple[str, ...],
-    fallback: str,
-) -> str:
-    """Resolve a command-scoped output format from explicit input, config, and fallback."""
-    if requested:
-        if requested not in allowed:
-            allowed_list = ", ".join(allowed)
-            raise click.ClickException(
-                f"This command does not support `-o {requested}`. Allowed values: {allowed_list}."
-            )
-        return requested
-
-    return fallback
 
 
 def prepare_output(
@@ -168,13 +134,16 @@ def prepare_output(
     fallback: str,
 ):
     """Resolve and attach the formatter for the current command."""
-    fmt = select_output_format(obj, requested, allowed=allowed, fallback=fallback)
+    if requested:
+        if requested not in allowed:
+            allowed_list = ", ".join(allowed)
+            raise click.ClickException(
+                f"This command does not support `-o {requested}`. Allowed values: {allowed_list}."
+            )
+        fmt = requested
+    else:
+        fmt = fallback
     return obj.make_output(fmt)
-
-
-# ---------------------------------------------------------------------------
-# Error handling decorator
-# ---------------------------------------------------------------------------
 
 
 def handle_errors(fn):  # type: ignore[no-untyped-def]
@@ -184,15 +153,12 @@ def handle_errors(fn):  # type: ignore[no-untyped-def]
     def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
         try:
             return fn(*args, **kwargs)
-        except click.exceptions.Exit:
-            raise
-        except click.ClickException:
+        except (click.exceptions.Exit, click.ClickException):
             raise
         except Exception as exc:
             # Import here to avoid circular imports at module level
             from opensandbox.exceptions import SandboxException
 
-            # Try to get the OutputFormatter from the Click context
             ctx = click.get_current_context(silent=True)
             obj = getattr(ctx, "obj", None) if ctx else None
             output = getattr(obj, "output", None) if obj else None

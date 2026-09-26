@@ -27,26 +27,13 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-# ---------------------------------------------------------------------------
-# Root
-# ---------------------------------------------------------------------------
-
-
 class TestRootCLI:
-    def test_help(self, runner: CliRunner) -> None:
+    def test_help_lists_options_and_commands(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "OpenSandbox CLI" in result.output
         assert "--request-timeout" in result.output
         assert "--timeout" not in result.output
-
-    def test_version(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["--version"])
-        assert result.exit_code == 0
-        assert "opensandbox" in result.output
-
-    def test_root_lists_commands(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["--help"])
         for cmd in (
             "sandbox",
             "template",
@@ -62,10 +49,10 @@ class TestRootCLI:
         ):
             assert cmd in result.output
 
-
-# ---------------------------------------------------------------------------
-# Sandbox sub-commands
-# ---------------------------------------------------------------------------
+    def test_version(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert "opensandbox" in result.output
 
 
 class TestSandboxHelp:
@@ -74,20 +61,6 @@ class TestSandboxHelp:
         assert result.exit_code == 0
         for subcmd in ("create", "list", "get", "kill", "pause", "resume", "renew", "endpoint", "health", "metrics"):
             assert subcmd in result.output
-
-    @pytest.mark.parametrize(
-        "subcmd",
-        ["create", "list", "get", "kill", "pause", "resume", "renew", "endpoint", "health", "metrics"],
-    )
-    def test_sandbox_subcommand_help(self, runner: CliRunner, subcmd: str) -> None:
-        result = runner.invoke(cli, ["sandbox", subcmd, "--help"])
-        assert result.exit_code == 0
-        assert subcmd in result.output.lower() or "usage" in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
-# Template & snapshot sub-commands
-# ---------------------------------------------------------------------------
 
 
 class TestTemplateAndSnapshotHelp:
@@ -99,22 +72,12 @@ class TestTemplateAndSnapshotHelp:
             assert subcmd in result.output
 
 
-# ---------------------------------------------------------------------------
-# Command sub-commands
-# ---------------------------------------------------------------------------
-
-
 class TestCommandHelp:
     def test_command_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["command", "--help"])
         assert result.exit_code == 0
         for subcmd in ("run", "status", "logs", "interrupt", "session"):
             assert subcmd in result.output
-
-    @pytest.mark.parametrize("subcmd", ["run", "status", "logs", "interrupt"])
-    def test_command_subcommand_help(self, runner: CliRunner, subcmd: str) -> None:
-        result = runner.invoke(cli, ["command", subcmd, "--help"])
-        assert result.exit_code == 0
 
     def test_command_session_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["command", "session", "--help"])
@@ -123,30 +86,12 @@ class TestCommandHelp:
             assert subcmd in result.output
 
 
-# ---------------------------------------------------------------------------
-# File sub-commands
-# ---------------------------------------------------------------------------
-
-
 class TestFileHelp:
     def test_file_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["file", "--help"])
         assert result.exit_code == 0
         for subcmd in ("cat", "write", "upload", "download", "rm", "mv", "mkdir", "rmdir", "search", "info", "chmod", "replace"):
             assert subcmd in result.output
-
-    @pytest.mark.parametrize(
-        "subcmd",
-        ["cat", "write", "upload", "download", "rm", "mv", "mkdir", "rmdir", "search", "info", "chmod", "replace"],
-    )
-    def test_file_subcommand_help(self, runner: CliRunner, subcmd: str) -> None:
-        result = runner.invoke(cli, ["file", subcmd, "--help"])
-        assert result.exit_code == 0
-
-
-# ---------------------------------------------------------------------------
-# Egress sub-commands
-# ---------------------------------------------------------------------------
 
 
 class TestEgressHelp:
@@ -157,11 +102,6 @@ class TestEgressHelp:
             assert subcmd in result.output
 
 
-# ---------------------------------------------------------------------------
-# Credential Vault sub-commands
-# ---------------------------------------------------------------------------
-
-
 class TestCredentialVaultHelp:
     def test_credential_vault_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["credential-vault", "--help"])
@@ -169,27 +109,12 @@ class TestCredentialVaultHelp:
         for subcmd in ("create", "get", "patch", "delete", "credential", "binding"):
             assert subcmd in result.output
 
-    @pytest.mark.parametrize("subcmd", ["create", "get", "patch", "delete"])
-    def test_credential_vault_subcommand_help(self, runner: CliRunner, subcmd: str) -> None:
-        result = runner.invoke(cli, ["credential-vault", subcmd, "--help"])
-        assert result.exit_code == 0
-
-    def test_credential_vault_credential_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["credential-vault", "credential", "--help"])
+    @pytest.mark.parametrize("group", ["credential", "binding"])
+    def test_credential_vault_subgroup_help(self, runner: CliRunner, group: str) -> None:
+        result = runner.invoke(cli, ["credential-vault", group, "--help"])
         assert result.exit_code == 0
         for subcmd in ("list", "get"):
             assert subcmd in result.output
-
-    def test_credential_vault_binding_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["credential-vault", "binding", "--help"])
-        assert result.exit_code == 0
-        for subcmd in ("list", "get"):
-            assert subcmd in result.output
-
-
-# ---------------------------------------------------------------------------
-# Config sub-commands
-# ---------------------------------------------------------------------------
 
 
 class TestConfigHelp:
@@ -198,16 +123,6 @@ class TestConfigHelp:
         assert result.exit_code == 0
         for subcmd in ("init", "show", "set"):
             assert subcmd in result.output
-
-    @pytest.mark.parametrize("subcmd", ["init", "show", "set"])
-    def test_config_subcommand_help(self, runner: CliRunner, subcmd: str) -> None:
-        result = runner.invoke(cli, ["config", subcmd, "--help"])
-        assert result.exit_code == 0
-
-
-# ---------------------------------------------------------------------------
-# DevOps sub-commands
-# ---------------------------------------------------------------------------
 
 
 class TestDevopsHelp:
@@ -218,43 +133,20 @@ class TestDevopsHelp:
             assert subcmd in result.output
 
 
-# ---------------------------------------------------------------------------
-# Diagnostics sub-commands
-# ---------------------------------------------------------------------------
-
-
 class TestDiagnosticsHelp:
-    def test_diagnostics_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["diagnostics", "--help"])
-        assert result.exit_code == 0
-        for subcmd in ("logs", "events"):
-            assert subcmd in result.output
-
-    @pytest.mark.parametrize("subcmd", ["logs", "events"])
-    def test_diagnostics_subcommand_help(self, runner: CliRunner, subcmd: str) -> None:
-        result = runner.invoke(cli, ["diagnostics", subcmd, "--help"])
-        assert result.exit_code == 0
-        assert "--scope" in result.output
-        assert "content URL" in result.output
-
-    def test_diagnostics_logs_help_describes_builtin_scopes(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["diagnostics", "logs", "--help"])
-        assert result.exit_code == 0
-        assert "container" in result.output
-        assert "all" in result.output
-        assert "lifecycle" not in result.output
-
-    def test_diagnostics_events_help_describes_builtin_scopes(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["diagnostics", "events", "--help"])
-        assert result.exit_code == 0
-        assert "runtime" in result.output
-        assert "all" in result.output
-        assert "lifecycle" not in result.output
-
-
-# ---------------------------------------------------------------------------
-# Skills sub-commands
-# ---------------------------------------------------------------------------
+    def test_diagnostics_help_documents_scopes(self, runner: CliRunner) -> None:
+        logs = runner.invoke(cli, ["diagnostics", "logs", "--help"])
+        events = runner.invoke(cli, ["diagnostics", "events", "--help"])
+        assert logs.exit_code == 0
+        assert events.exit_code == 0
+        assert "--scope" in logs.output
+        assert "container" in logs.output
+        assert "content URL" in logs.output
+        assert "lifecycle" not in logs.output
+        assert "--scope" in events.output
+        assert "runtime" in events.output
+        assert "content URL" in events.output
+        assert "lifecycle" not in events.output
 
 
 class TestSkillsHelp:

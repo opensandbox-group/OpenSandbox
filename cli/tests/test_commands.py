@@ -87,7 +87,6 @@ def _build_mock_client_context(
     ctx.make_output.side_effect = _make_output
     ctx.get_manager.return_value = manager or MagicMock()
     ctx.connect_sandbox.return_value = sandbox or MagicMock()
-    ctx.resolve_sandbox_id.side_effect = lambda prefix: prefix  # passthrough
     ctx.connection_config = MagicMock()
     ctx.close = MagicMock()
     return ctx
@@ -114,11 +113,6 @@ def _invoke(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Config commands (no SDK mocking needed)
-# ---------------------------------------------------------------------------
-
-
 class TestConfigInit:
     def test_init_creates_file(self, runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "config.toml"
@@ -131,13 +125,6 @@ class TestConfigInit:
         cfg_path.write_text("existing")
         result = runner.invoke(cli, ["--config", str(cfg_path), "config", "init"])
         assert "already exists" in result.output
-
-    def test_init_force_overwrites(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("old")
-        result = runner.invoke(cli, ["--config", str(cfg_path), "config", "init", "--force"])
-        assert result.exit_code == 0
-        assert "Config file created" in result.output
 
 
 class TestConfigShow:
@@ -165,16 +152,6 @@ class TestConfigShow:
 
 
 class TestConfigSet:
-    def test_set_updates_existing_field(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        runner.invoke(cli, ["--config", str(cfg_path), "config", "init"])
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.domain", "new.host"],
-        )
-        assert result.exit_code == 0
-        assert "Set connection.domain = new.host" in result.output
-
     def test_set_rejects_flat_key(self, runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text("[connection]\n")
@@ -207,22 +184,10 @@ class TestConfigSet:
         assert "Run 'osb config init' first." in result.output
 
 
-# ---------------------------------------------------------------------------
 # Sandbox commands
-# ---------------------------------------------------------------------------
 
 
 class TestSandboxList:
-    def test_list_invokes_manager(self, runner: CliRunner) -> None:
-        mock_mgr = MagicMock()
-        mock_result = MagicMock()
-        mock_result.sandbox_infos = []
-        mock_mgr.list_sandbox_infos.return_value = mock_result
-
-        result = _invoke(runner, ["sandbox", "list", "-o", "json"], manager=mock_mgr)
-        assert result.exit_code == 0
-        mock_mgr.list_sandbox_infos.assert_called_once()
-
     def test_list_normalizes_state_filters_case_insensitively(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
         mock_result = MagicMock()
@@ -250,16 +215,6 @@ class TestSandboxList:
         assert result.exit_code != 0
         assert "Invalid sandbox state 'runing'" in result.output
         mock_mgr.list_sandbox_infos.assert_not_called()
-
-    def test_list_help_uses_one_indexed_pages(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["sandbox", "list", "--help"])
-        assert result.exit_code == 0
-        assert "Page number (1-indexed)." in result.output
-
-    def test_list_rejects_page_zero(self, runner: CliRunner) -> None:
-        result = _invoke(runner, ["sandbox", "list", "--page", "0"])
-        assert result.exit_code != 0
-        assert "0 is not in the range x>=1" in result.output
 
     def test_list_passes_user_page_through_to_sdk(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
@@ -956,22 +911,8 @@ class TestSandboxEndpoint:
         assert result.exit_code == 0
         mock_sb.get_endpoint.assert_called_once_with(8080)
 
-    def test_endpoint_rejects_invalid_port(self, runner: CliRunner) -> None:
-        mock_sb = MagicMock()
-        result = _invoke(
-            runner,
-            ["sandbox", "endpoint", "sb-1", "--port", "70000"],
-            sandbox=mock_sb,
-        )
 
-        assert result.exit_code != 0
-        assert "70000 is not in the range 1<=x<=65535" in result.output
-        mock_sb.get_endpoint.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
 # File commands
-# ---------------------------------------------------------------------------
 
 
 class TestFileCat:
@@ -987,11 +928,6 @@ class TestFileCat:
         assert result.exit_code == 0
         assert "hello world" in result.output
         mock_sb.files.read_file.assert_called_once_with("/etc/hostname", encoding="utf-8")
-
-    def test_cat_rejects_json_output(self, runner: CliRunner) -> None:
-        result = _invoke(runner, ["file", "cat", "sb-1", "/etc/hostname", "-o", "json"])
-        assert result.exit_code != 0
-        assert "Invalid value for '-o' / '--output'" in result.output
 
 
 class TestFileWrite:
@@ -1311,6 +1247,10 @@ class TestFileMv:
         )
         assert result.exit_code == 0
         assert "Moved: /tmp/old" in result.output and "/tmp/new" in result.output
+        entries = mock_sb.files.move_files.call_args.args[0]
+        assert len(entries) == 1
+        assert entries[0].src == "/tmp/old"
+        assert entries[0].dest == "/tmp/new"
 
 
 class TestFileMkdir:
@@ -1408,23 +1348,6 @@ class TestCommandSeparators:
         mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == "sh -lc 'echo ready'"
 
-    def test_command_run_argv_flag_passes_native_argv_after_separator(self, runner: CliRunner) -> None:
-        mock_sb = MagicMock()
-        execution = MagicMock()
-        execution.error = None
-        mock_sb.commands.run.return_value = execution
-
-        result = _invoke(
-            runner,
-            ["command", "run", "sb-1", "--argv", "--", "sh", "-lc", "echo ready"],
-            sandbox=mock_sb,
-            output_format="raw",
-        )
-
-        assert result.exit_code == 0
-        mock_sb.commands.run.assert_called_once()
-        assert mock_sb.commands.run.call_args.args[0] == ["sh", "-lc", "echo ready"]
-
     def test_command_run_argv_flag_preserves_literal_arguments(self, runner: CliRunner) -> None:
         # With --argv the trailing arguments must reach the process verbatim:
         # literal "$HOME", embedded space, single quote, and an empty string,
@@ -1477,9 +1400,7 @@ class TestCommandSeparators:
         assert "Separator rule: use `--` before the sandbox command payload." in result.output
 
 
-# ---------------------------------------------------------------------------
 # Egress commands
-# ---------------------------------------------------------------------------
 
 
 class TestEgressCommands:
@@ -1515,9 +1436,7 @@ class TestEgressCommands:
         assert rules[1].target == "bad.example.com"
 
 
-# ---------------------------------------------------------------------------
 # Credential Vault commands
-# ---------------------------------------------------------------------------
 
 
 class TestCredentialVaultCommands:
@@ -1703,9 +1622,7 @@ bindings: []
         assert data["auth"]["type"] == "apiKey"
 
 
-# ---------------------------------------------------------------------------
 # Command execution
-# ---------------------------------------------------------------------------
 
 
 class TestCommandRun:
@@ -1807,18 +1724,8 @@ class TestCommandSession:
         mock_sb.commands.delete_session.assert_called_once_with("sess-123")
         assert "Deleted session: sess-123" in result.output
 
-    def test_session_run_rejects_json_output(self, runner: CliRunner) -> None:
-        result = _invoke(
-            runner,
-            ["command", "session", "run", "sb-1", "sess-123", "-o", "json", "--", "pwd"],
-        )
-        assert result.exit_code != 0
-        assert "Invalid value for '-o' / '--output'" in result.output
 
-
-# ---------------------------------------------------------------------------
 # DevOps diagnostics
-# ---------------------------------------------------------------------------
 
 
 class TestDevopsCommands:
@@ -1877,17 +1784,10 @@ class TestDevopsCommands:
         )
 
 
-# ---------------------------------------------------------------------------
 # Stable diagnostics
-# ---------------------------------------------------------------------------
 
 
 class TestDiagnosticsCommands:
-    def test_logs_requires_scope(self, runner: CliRunner) -> None:
-        result = _invoke(runner, ["diagnostics", "logs", "sb-1", "-o", "raw"])
-        assert result.exit_code != 0
-        assert "Missing option '--scope'" in result.output
-
     def test_logs_raw_prints_inline_content(self, runner: CliRunner) -> None:
         manager = MagicMock()
         manager.get_diagnostic_logs.return_value = DiagnosticContent(

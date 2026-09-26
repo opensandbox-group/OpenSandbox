@@ -23,20 +23,11 @@ from pydantic import BaseModel
 
 from opensandbox_cli.output import OutputFormatter
 
-# ---------------------------------------------------------------------------
-# Test models
-# ---------------------------------------------------------------------------
-
 
 class FakeItem(BaseModel):
     id: str
     name: str
     score: int
-
-
-# ---------------------------------------------------------------------------
-# JSON output
-# ---------------------------------------------------------------------------
 
 
 class TestJsonOutput:
@@ -78,11 +69,6 @@ class TestJsonOutput:
         assert data == {"status": "ok", "message": "done"}
 
 
-# ---------------------------------------------------------------------------
-# YAML output
-# ---------------------------------------------------------------------------
-
-
 class TestYamlOutput:
     def test_print_dict(self, capsys: pytest.CaptureFixture[str]) -> None:
         fmt = OutputFormatter("yaml", color=False)
@@ -98,11 +84,6 @@ class TestYamlOutput:
         assert "id: x" in captured.out
         assert "name: y" in captured.out
         assert "score: 5" in captured.out
-
-
-# ---------------------------------------------------------------------------
-# Table output
-# ---------------------------------------------------------------------------
 
 
 class TestTableOutput:

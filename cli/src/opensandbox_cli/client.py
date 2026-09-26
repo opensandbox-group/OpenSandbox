@@ -90,15 +90,10 @@ class ClientContext:
             self._manager = SandboxManagerSync.create(self.connection_config)
         return self._manager
 
-    def resolve_sandbox_id(self, sandbox_id: str) -> str:
-        """Return the sandbox ID exactly as provided by the user."""
-        return sandbox_id
-
     def connect_sandbox(
         self, sandbox_id: str, *, skip_health_check: bool = True
     ) -> SandboxSync:
         """Connect to an existing sandbox by ID."""
-        sandbox_id = self.resolve_sandbox_id(sandbox_id)
         return SandboxSync.connect(
             sandbox_id,
             connection_config=self.connection_config,

@@ -41,8 +41,6 @@ def template_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# ---- create ---------------------------------------------------------------
-
 @template_group.command("create")
 @click.option("--image", "-i", required=True, help="Source OCI image reference the golden image is built from.")
 @click.option(
@@ -137,8 +135,6 @@ def template_create(
     )
 
 
-# ---- get ------------------------------------------------------------------
-
 @template_group.command("get")
 @click.argument("template_id")
 @output_option("table", "json", "yaml")
@@ -171,8 +167,6 @@ def template_get(obj, template_id: str, output_format: str | None) -> None:
         d["readiness"] = " ".join(parts) if parts else None
     obj.output.print_dict(d, title="Template Info")
 
-
-# ---- list -----------------------------------------------------------------
 
 @template_group.command("list")
 @click.option("--metadata", "-m", "metadata_kv", multiple=True, type=KEY_VALUE, help="Metadata filter (KEY=VALUE). Repeatable.")
@@ -237,8 +231,6 @@ def template_list(
         title="Templates",
     )
 
-
-# ---- delete ---------------------------------------------------------------
 
 @template_group.command("delete")
 @click.argument("template_id")

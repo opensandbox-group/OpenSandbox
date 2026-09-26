@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -34,13 +35,11 @@ def config_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# ---- init -----------------------------------------------------------------
-
 @config_group.command("init")
 @click.option("--force", is_flag=True, default=False, help="Overwrite existing config file.")
 @output_option("table", "json", "yaml")
-@handle_errors
 @click.pass_obj
+@handle_errors
 def config_init(obj: ClientContext, force: bool, output_format: str | None) -> None:
     """Create a default configuration file."""
     output = prepare_output(
@@ -53,8 +52,6 @@ def config_init(obj: ClientContext, force: bool, output_format: str | None) -> N
     except FileExistsError as exc:
         output.warning(str(exc))
 
-
-# ---- show -----------------------------------------------------------------
 
 _SENSITIVE_CONFIG_KEYS = {
     "api_key",
@@ -79,6 +76,7 @@ def _sanitize_config_for_display(data: Mapping[str, Any]) -> dict[str, Any]:
             continue
         sanitized[key] = value
     return sanitized
+
 
 @config_group.command("show")
 @output_option("table", "json", "yaml")
@@ -105,14 +103,12 @@ def config_show(obj: ClientContext, output_format: str | None) -> None:
     )
 
 
-# ---- set ------------------------------------------------------------------
-
 @config_group.command("set")
 @click.argument("key")
 @click.argument("value")
 @output_option("table", "json", "yaml")
-@handle_errors
 @click.pass_obj
+@handle_errors
 def config_set(
     obj: ClientContext,
     key: str,
@@ -127,16 +123,10 @@ def config_set(
 
     content = path.read_text()
 
-    # TODO: Replace this regex-based TOML editing with a parser-backed update
-    # path so formatting/comments survive reliably as config complexity grows.
-    # Simple key replacement in TOML
-    # Supports dotted keys like connection.domain
+    # TODO: Replace this regex-based TOML editing with a parser-backed update path.
     parts = key.split(".", 1)
     if len(parts) == 2:
         section, field = parts
-        # Try to find and update existing value
-        import re
-
         section_pattern = rf"(\[{re.escape(section)}\].*?)(?=\n\[|\Z)"
         section_match = re.search(section_pattern, content, re.DOTALL)
 
@@ -167,11 +157,9 @@ def config_set(
                 new_section = section_text[:field_match.start()] + new_line + section_text[field_match.end():]
                 content = content[:section_match.start()] + new_section + content[section_match.end():]
             else:
-                # Add field to section
                 insert_pos = section_match.end()
                 content = content[:insert_pos] + f'\n{field} = {toml_val}' + content[insert_pos:]
         else:
-            # Add new section
             content += f'\n[{section}]\n{field} = {toml_val}\n'
     else:
         raise click.ClickException(

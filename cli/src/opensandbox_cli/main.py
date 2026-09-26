@@ -36,10 +36,6 @@ from opensandbox_cli.commands.snapshot import snapshot_group
 from opensandbox_cli.commands.template import template_group
 from opensandbox_cli.config import resolve_config
 
-# ---------------------------------------------------------------------------
-# Banner
-# ---------------------------------------------------------------------------
-
 BANNER = r"""[bold cyan]
    ____                   _____                 _ _
   / __ \                 / ____|               | | |
@@ -132,7 +128,6 @@ def cli(
     ctx.call_on_close(lambda: ctx.obj.close())
 
 
-# Register sub-command groups
 cli.add_command(sandbox_group)
 cli.add_command(template_group)
 cli.add_command(snapshot_group)

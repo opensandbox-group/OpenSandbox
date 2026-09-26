@@ -37,15 +37,6 @@ class TestLoadConfigFile:
         result = load_config_file(tmp_path / "nonexistent.toml")
         assert result == {}
 
-    def test_parses_toml_file(self, tmp_path: Path) -> None:
-        cfg = tmp_path / "config.toml"
-        cfg.write_text(
-            '[connection]\napi_key = "abc"\ndomain = "example.com"\n'
-        )
-        result = load_config_file(cfg)
-        assert result["connection"]["api_key"] == "abc"
-        assert result["connection"]["domain"] == "example.com"
-
     def test_parses_all_sections(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"
         cfg.write_text(

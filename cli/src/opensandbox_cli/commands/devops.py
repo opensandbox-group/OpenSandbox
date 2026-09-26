@@ -24,7 +24,6 @@ from opensandbox_cli.utils import handle_errors, output_option, prepare_output
 
 def _fetch_plain_text(obj: ClientContext, sandbox_id: str, endpoint: str, params: dict | None = None) -> str:
     """Fetch a diagnostics endpoint and return the plain-text body."""
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     client = obj.get_devops_client()
     resp = client.get(f"sandboxes/{sandbox_id}/diagnostics/{endpoint}", params=params)
     if resp.status_code == 404:
@@ -40,8 +39,6 @@ def devops_group(ctx: click.Context) -> None:
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
-
-# ---- logs ----------------------------------------------------------------
 
 @devops_group.command("logs")
 @click.argument("sandbox_id")
@@ -67,8 +64,6 @@ def devops_logs(
     click.echo(text)
 
 
-# ---- inspect -------------------------------------------------------------
-
 @devops_group.command("inspect")
 @click.argument("sandbox_id")
 @output_option("raw", help_text="Output format: raw.")
@@ -82,8 +77,6 @@ def devops_inspect(
     text = _fetch_plain_text(obj, sandbox_id, "inspect")
     click.echo(text)
 
-
-# ---- events --------------------------------------------------------------
 
 @devops_group.command("events")
 @click.argument("sandbox_id")
@@ -101,8 +94,6 @@ def devops_events(
     text = _fetch_plain_text(obj, sandbox_id, "events", params=params)
     click.echo(text)
 
-
-# ---- summary -------------------------------------------------------------
 
 @devops_group.command("summary")
 @click.argument("sandbox_id")
