@@ -26,6 +26,7 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Success
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
@@ -51,6 +52,53 @@ import okhttp3.Response
 import org.slf4j.LoggerFactory
 import com.alibaba.opensandbox.sandbox.api.models.execd.CreateSessionRequest as CreateSessionRequestApi
 import com.alibaba.opensandbox.sandbox.api.models.execd.RunInSessionRequest as RunInSessionRequestApi
+
+/** Quotes a string as a single POSIX shell word. */
+private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+
+private val ENV_KEY_REGEX = Regex("^[A-Za-z_][A-Za-z0-9_]*$")
+
+/** Escapes a value for the runtime env file's double-quoted form. */
+private fun escapeDoubleQuoted(value: String): String =
+    value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+
+/**
+ * Builds the sandbox-side snippet that appends KEY=VALUE to the env file named
+ * by the sandbox's EXECD_ENVS variable. Values without a single quote use the
+ * runtime env file's lossless single-quoted form; otherwise the double-quoted
+ * form is used (shell-style `$NAME` sequences in such values may be expanded
+ * when the runtime loads the file).
+ */
+private fun buildSetEnvCommand(
+    key: String,
+    value: String,
+): String {
+    if (!ENV_KEY_REGEX.matches(key)) {
+        throw InvalidArgumentException("setEnv key must match [A-Za-z_][A-Za-z0-9_]*, got '$key'")
+    }
+    if (value.contains('\u0000')) {
+        throw InvalidArgumentException("setEnv value cannot contain NUL bytes")
+    }
+    val entry =
+        if (value.contains('\'')) {
+            "$key=\"${escapeDoubleQuoted(value)}\""
+        } else {
+            "$key='$value'"
+        }
+    return listOf(
+        "if [ -z \"\${EXECD_ENVS:-}\" ]; then " +
+            "printf '%s\\n' " +
+            "'EXECD_ENVS is not set; cannot persist environment variable $key' " +
+            ">&2; exit 1; fi",
+        "mkdir -p \"\$(dirname \"\$EXECD_ENVS\")\"",
+        "printf '%s=%s\\n' ${shellQuote(entry)} >> \"\$EXECD_ENVS\"",
+    ).joinToString("\n")
+}
 
 /**
  * Implementation of [Commands] that adapts OpenAPI-generated APIs and handles
@@ -109,6 +157,22 @@ internal class CommandsAdapter(
         } catch (e: Exception) {
             logger.error("Failed to run command (length: {})", request.command.length, e)
             throw e.toSandboxException()
+        }
+    }
+
+    override fun setEnv(
+        key: String,
+        value: String,
+    ) {
+        val command = buildSetEnvCommand(key, value)
+        val execution = run(RunCommandRequest.builder().command(command).build())
+        val failed = execution.error != null || (execution.exitCode != null && execution.exitCode != 0)
+        if (failed) {
+            val stderr = execution.logs.stderr.joinToString("") { it.text }.trim()
+            val detail =
+                stderr.ifEmpty { execution.error?.value?.trim().orEmpty() }
+            val message = "commands.setEnv failed for '$key'" + if (detail.isNotEmpty()) ": $detail" else ""
+            throw SandboxInternalException(message)
         }
     }
 

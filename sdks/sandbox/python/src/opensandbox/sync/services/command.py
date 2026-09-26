@@ -70,6 +70,27 @@ class CommandsSync(Protocol):
         """
         ...
 
+    def set_env(self, key: str, value: str) -> None:
+        """
+        Persist an environment variable for future commands and sessions.
+
+        Appends ``KEY=VALUE`` to the sandbox env file that the runtime loads for
+        every command and session (the file pointed to by the sandbox's
+        ``EXECD_ENVS`` variable, resolved inside the sandbox). Keys must match
+        ``[A-Za-z_][A-Za-z0-9_]*``; values are stored verbatim with proper
+        escaping. The file is append-only: when a key is written multiple times,
+        the last entry wins.
+
+        Args:
+            key: Environment variable name
+            value: Environment variable value
+
+        Raises:
+            InvalidArgumentException: if key or value is invalid
+            SandboxException: if the sandbox fails to persist the variable
+        """
+        ...
+
     def interrupt(self, execution_id: str) -> None:
         """
         Interrupt and terminate a running command execution.

@@ -109,6 +109,47 @@ function assertNonBlank(value: string, field: string): void {
   }
 }
 
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Quotes a string as a single POSIX shell word. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/** Escapes a value for the runtime env file's double-quoted form. */
+function escapeDoubleQuoted(value: string): string {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("\t", "\\t");
+}
+
+/**
+ * Builds the sandbox-side snippet that appends KEY=VALUE to the env file named
+ * by the sandbox's EXECD_ENVS variable. Values without a single quote use the
+ * runtime env file's lossless single-quoted form; otherwise the double-quoted
+ * form is used (shell-style `$NAME` sequences in such values may be expanded
+ * when the runtime loads the file).
+ */
+function buildSetEnvCommand(key: string, value: string): string {
+  if (!ENV_KEY_PATTERN.test(key)) {
+    throw new Error(`setEnv key must match ${ENV_KEY_PATTERN.source}, got '${key}'`);
+  }
+  if (value.includes("\0")) {
+    throw new Error("setEnv value cannot contain NUL bytes");
+  }
+  const entry = value.includes("'")
+    ? `${key}="${escapeDoubleQuoted(value)}"`
+    : `${key}='${value}'`;
+  return [
+    `if [ -z "\${EXECD_ENVS:-}" ]; then printf '%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable ${key}' >&2; exit 1; fi`,
+    `mkdir -p "$(dirname "$EXECD_ENVS")"`,
+    `printf '%s=%s\\n' ${shellQuote(entry)} >> "$EXECD_ENVS"`,
+  ].join("\n");
+}
+
 function parseOptionalDate(value: unknown, field: string): Date | undefined {
   if (value == null) return undefined;
   if (value instanceof Date) return value;
@@ -231,6 +272,16 @@ export class CommandsAdapter implements ExecdCommands {
     }
 
     return execution;
+  }
+
+  async setEnv(key: string, value: string): Promise<void> {
+    const command = buildSetEnvCommand(key, value);
+    const execution = await this.run(command);
+    if (execution.error != null || (execution.exitCode != null && execution.exitCode !== 0)) {
+      const stderr = execution.logs.stderr.map((m) => m.text).join("").trim();
+      const detail = stderr.length > 0 ? stderr : (execution.error?.value?.trim() ?? "");
+      throw new Error(`commands.setEnv failed for '${key}'${detail ? `: ${detail}` : ""}`);
+    }
   }
 
   async interrupt(sessionId: string): Promise<void> {

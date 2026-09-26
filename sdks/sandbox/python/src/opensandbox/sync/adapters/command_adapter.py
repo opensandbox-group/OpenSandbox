@@ -23,6 +23,10 @@ from datetime import timedelta
 
 import httpx
 
+from opensandbox.adapters.converter.env_entry import (
+    build_set_env_command,
+    raise_for_set_env_failure,
+)
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
@@ -241,6 +245,16 @@ class CommandsAdapterSync(CommandsSync):
         except Exception as e:
             logger.error("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def set_env(self, key: str, value: str) -> None:
+        """Persist an environment variable for future commands and sessions."""
+        command = build_set_env_command(key, value)
+        try:
+            execution = self.run(command)
+        except Exception as e:
+            logger.error("Failed to run command", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+        raise_for_set_env_failure(key, execution)
 
     def interrupt(self, execution_id: str) -> None:
         """

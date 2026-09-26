@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
@@ -551,5 +552,87 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
     fun `deleteSession should reject blank session id`() {
         val ex = assertThrows(InvalidArgumentException::class.java) { commandsAdapter.deleteSession(" ") }
         assertEquals("session_id cannot be empty", ex.message)
+    }
+
+    private fun expectedSetEnvCommand(
+        entry: String,
+        key: String = "MY_TOKEN",
+    ): String {
+        val quotedEntry = "'" + entry.replace("'", "'\\''") + "'"
+        return listOf(
+            "if [ -z \"\${EXECD_ENVS:-}\" ]; then printf '%s\\n' " +
+                "'EXECD_ENVS is not set; cannot persist environment variable $key' >&2; exit 1; fi",
+            "mkdir -p \"\$(dirname \"\$EXECD_ENVS\")\"",
+            "printf '%s=%s\\n' $quotedEntry >> \"\$EXECD_ENVS\"",
+        ).joinToString("\n")
+    }
+
+    @Test
+    fun `setEnv should append the env entry via the sandbox env file`() {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1}""" + "\n"),
+        )
+
+        commandsAdapter.setEnv("MY_TOKEN", "value")
+
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(expectedSetEnvCommand("MY_TOKEN='value'"), body["command"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `setEnv should keep dollar backslash and newline literal via single-quoted form`() {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1}""" + "\n"),
+        )
+
+        commandsAdapter.setEnv("MY_VAR", "line1\nline2 $" + "HOME \\path")
+
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(
+            expectedSetEnvCommand("MY_VAR='line1\nline2 $" + "HOME \\path'", key = "MY_VAR"),
+            body["command"]?.jsonPrimitive?.content,
+        )
+    }
+
+    @Test
+    fun `setEnv should escape single quotes via double-quoted form`() {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1}""" + "\n"),
+        )
+
+        commandsAdapter.setEnv("GREETING", "it's fine \"quoted\"\ttab")
+
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(
+            expectedSetEnvCommand("GREETING=\"it's fine \\\"quoted\\\"\\ttab\"", key = "GREETING"),
+            body["command"]?.jsonPrimitive?.content,
+        )
+    }
+
+    @Test
+    fun `setEnv should reject invalid keys before any transport call`() {
+        for (key in listOf("", "1ABC", "MY-TOKEN", "MY TOKEN", "A=B", "A.B")) {
+            val ex = assertThrows(InvalidArgumentException::class.java) { commandsAdapter.setEnv(key, "value") }
+            assertTrue(ex.message!!.contains("setEnv key must match"))
+        }
+        assertEquals(0, mockWebServer.requestCount)
+    }
+
+    @Test
+    fun `setEnv should throw with stderr when the append command fails`() {
+        val initEvent = """data: {"type":"init","text":"cmd-1","timestamp":1672531200000}"""
+        val stderrEvent =
+            """data: {"type":"stderr","text":"EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN",""" +
+                """"timestamp":1672531200001}"""
+        val errorEvent =
+            """data: {"type":"error","error":{"ename":"CommandExecError","evalue":"1",""" +
+                """"traceback":["exit status 1"]},"timestamp":1672531200002}"""
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("$initEvent\n\n$stderrEvent\n\n$errorEvent\n\n"),
+        )
+
+        val ex = assertThrows(SandboxInternalException::class.java) { commandsAdapter.setEnv("MY_TOKEN", "value") }
+        assertTrue(ex.message!!.contains("commands.setEnv failed for 'MY_TOKEN'"))
+        assertTrue(ex.message!!.contains("EXECD_ENVS is not set"))
     }
 }

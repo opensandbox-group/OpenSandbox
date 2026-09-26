@@ -33,6 +33,22 @@ export interface ExecdCommands {
   run(command: string | string[], opts?: RunCommandOpts, handlers?: ExecutionHandlers, signal?: AbortSignal): Promise<CommandExecution>;
 
   /**
+   * Persist an environment variable for future commands and sessions.
+   *
+   * Appends `KEY=VALUE` to the sandbox env file that the runtime loads for every
+   * command and session (the file pointed to by the sandbox's `EXECD_ENVS`
+   * variable, resolved inside the sandbox). Keys must match
+   * `[A-Za-z_][A-Za-z0-9_]*`; values are stored verbatim with proper escaping.
+   * The file is append-only: when a key is written multiple times, the last
+   * entry wins.
+   *
+   * @param key Environment variable name
+   * @param value Environment variable value
+   * @throws If arguments are invalid or the sandbox fails to persist the variable
+   */
+  setEnv(key: string, value: string): Promise<void>;
+
+  /**
    * Interrupt the current execution in the given context/session.
    *
    * Note: Execd spec uses `DELETE /command?id=<sessionId>`.

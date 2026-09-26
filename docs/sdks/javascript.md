@@ -270,6 +270,19 @@ try {
 }
 ```
 
+#### Persistent environment variables
+
+Set environment variables that the runtime injects into every subsequent command
+and session — without hand-writing shell escaping against the sandbox env file.
+
+```ts
+await sandbox.commands.setEnv("MY_TOKEN", "it's a safe value");
+```
+
+Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values are stored verbatim with proper
+escaping (quotes, backslashes, newlines, `=`). The env file is append-only: the
+last write for a key wins. Throws if the sandbox fails to persist the variable.
+
 For filesystem/process isolation within a sandbox, see
 [Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
 
