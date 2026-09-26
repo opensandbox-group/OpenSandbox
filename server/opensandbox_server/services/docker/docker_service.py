@@ -1142,7 +1142,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
     def pause_sandbox(self, sandbox_id: str) -> None:
         container = self._get_container_by_sandbox_id(sandbox_id)
         state = container.attrs.get("State", {})
-        if not state.get("Running", False):
+        if not state.get("Running", False) or state.get("Paused", False):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={

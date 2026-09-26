@@ -37,7 +37,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `GET /snapshots` - List snapshots with optional source sandbox, exact name, and state filtering plus pagination
 - `GET /snapshots/{snapshotId}` - Get snapshot state and metadata
 - `DELETE /snapshots/{snapshotId}` - Delete a snapshot
-- `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous)
+- `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous); returns `409 Conflict` if it is already paused
 - `POST /sandboxes/{sandboxId}/resume` - Resume a paused sandbox
 - `POST /sandboxes/{sandboxId}/renew-expiration` - Renew sandbox expiration (TTL)
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
