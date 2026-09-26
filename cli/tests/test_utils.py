@@ -16,12 +16,21 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+from pathlib import Path
 
 import click
 import pytest
+from pydantic import BaseModel, ValidationError, model_validator
 
-from opensandbox_cli.utils import DURATION, KEY_VALUE, parse_duration
+from opensandbox_cli.utils import (
+    DURATION,
+    KEY_VALUE,
+    load_json_object,
+    parse_duration,
+    validation_message,
+)
 
 
 class TestParseDuration:
@@ -92,3 +101,61 @@ class TestKeyValueType:
         t = ("key", "val")
         result = KEY_VALUE.convert(t, None, None)  # type: ignore[arg-type]
         assert result is t
+
+
+class _UniqueNames(BaseModel):
+    names: list[str] = []
+
+    @model_validator(mode="after")
+    def _names_unique(self) -> _UniqueNames:
+        if len(self.names) != len(set(self.names)):
+            raise ValueError("names must be unique")
+        return self
+
+
+class TestLoadJsonObject:
+    def test_loads_object(self, tmp_path: Path) -> None:
+        path = tmp_path / "req.json"
+        path.write_text(json.dumps({"image": "python:3.12"}))
+        assert load_json_object(str(path)) == {"image": "python:3.12"}
+
+    def test_invalid_json_names_the_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "req.json"
+        path.write_text("{not json")
+        with pytest.raises(click.ClickException, match="Invalid JSON in request file"):
+            load_json_object(str(path))
+
+    def test_non_object_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "req.json"
+        path.write_text(json.dumps([1, 2]))
+        with pytest.raises(click.ClickException, match="must contain a JSON object"):
+            load_json_object(str(path))
+
+    def test_unreadable_file_names_the_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "req.json"
+        path.write_bytes(b'{"image": "\xff\xfe"}')
+        with pytest.raises(click.ClickException, match="Cannot read request file"):
+            load_json_object(str(path))
+
+    def test_missing_file_names_the_file(self, tmp_path: Path) -> None:
+        with pytest.raises(click.ClickException, match="Cannot read request file"):
+            load_json_object(str(tmp_path / "missing.json"))
+
+
+class TestValidationMessage:
+    def test_joins_field_errors(self) -> None:
+        class _Model(BaseModel):
+            image: str
+
+        with pytest.raises(ValidationError) as exc_info:
+            _Model()
+        message = validation_message(exc_info.value)
+        assert "image" in message
+        assert ": " in message
+
+    def test_model_level_error_has_no_dangling_prefix(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            _UniqueNames(names=["a", "a"])
+        message = validation_message(exc_info.value)
+        assert "names must be unique" in message
+        assert message.index("Value error") == 0

@@ -831,6 +831,91 @@ class TestSandboxCreate:
         assert result.exit_code != 0
         assert "Invalid JSON in request file" in result.output
 
+    def test_create_from_file_applies_default_timeout(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-file"
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"image": "python:3.12"}))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        mock_ctx.resolved_config["default_timeout"] = "15m"
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert mock_create.call_args.kwargs["timeout"].total_seconds() == 900
+
+    def test_create_from_file_template_without_timeout_mentions_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"templateId": "tpl_abc"}))
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert f"'timeout' is required in request file '{request_path}'" in result.output
+        assert "--timeout is required" not in result.output
+
+    def test_create_from_file_template_rejects_manual_cleanup(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({"templateId": "tpl_abc", "timeout": None}))
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert "'timeout': null (manual cleanup) is not supported in template mode." in result.output
+
+    def test_create_from_file_allows_secure_access_false_with_template(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.id = "sb-tpl"
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({
+            "templateId": "tpl_abc",
+            "timeout": 600,
+            "secureAccess": False,
+        }))
+
+        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
+        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+             patch("opensandbox.sync.sandbox.SandboxSync.create_from_template", return_value=mock_sb) as mock_create:
+            mock_resolve.return_value = mock_ctx.resolved_config
+            result = runner.invoke(
+                cli,
+                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        mock_create.assert_called_once()
+        assert mock_create.call_args.args[0] == "tpl_abc"
+
+    def test_create_from_file_rejects_secure_access_true_with_template(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "sandbox-request.json"
+        request_path.write_text(json.dumps({
+            "templateId": "tpl_abc",
+            "timeout": 600,
+            "secureAccess": True,
+        }))
+
+        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
+        assert result.exit_code != 0
+        assert "cannot combine 'templateId' with 'secureAccess'" in result.output
+
 
 def _make_template_info(phase: str = "Pending") -> TemplateInfo:
     return TemplateInfo(
@@ -963,6 +1048,24 @@ class TestTemplateCommands:
         assert result.exit_code != 0
         assert "Invalid request file" in result.output
         assert "publish" in result.output
+
+    def test_create_from_file_rejects_unknown_fields(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        request_path = tmp_path / "template-request.json"
+        request_path.write_text(json.dumps({
+            "image": "python:3.12",
+            "publish": "s3://bucket/publish",
+            "resourceLimit": {"cpu": "1"},
+        }))
+
+        result = _invoke(
+            runner,
+            ["template", "create", "-f", str(request_path)],
+            manager=MagicMock(),
+        )
+        assert result.exit_code != 0
+        assert "unsupported fields: resourceLimit" in result.output
 
     def test_get_list_delete_use_manager(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()

@@ -218,6 +218,11 @@ def sandbox_create(
         snapshot_id = file_req["snapshot_id"]
         timeout = file_req["timeout"]
         timeout_is_set = file_req["timeout_is_set"]
+        if not timeout_is_set:
+            default_timeout = obj.resolved_config.get("default_timeout")
+            if default_timeout:
+                timeout = parse_nullable_duration(default_timeout)
+                timeout_is_set = True
         env = file_req["env"]
         metadata = file_req["metadata"]
         extensions = file_req["extensions"]
@@ -325,6 +330,11 @@ def sandbox_create(
         lifecycle = None
 
     if template and not timeout_is_set:
+        if request_file is not None:
+            raise click.ClickException(
+                f"'timeout' is required in request file '{request_file}' "
+                "when 'templateId' is set (in seconds)."
+            )
         raise click.ClickException(
             "--timeout is required when creating a sandbox from a template (e.g. --timeout 30m)."
         )
@@ -332,6 +342,10 @@ def sandbox_create(
     with obj.output.spinner("Creating sandbox..."):
         if template:
             if timeout is None:
+                if request_file is not None:
+                    raise click.ClickException(
+                        "'timeout': null (manual cleanup) is not supported in template mode."
+                    )
                 raise click.ClickException(
                     "--timeout none (manual cleanup) is not supported in template mode."
                 )
@@ -599,10 +613,17 @@ def _parse_sandbox_request_file(path: str) -> dict[str, Any]:
             )
 
     if req["template"] is not None:
+        def _is_set(name: str) -> bool:
+            # Mirror the server: explicit `secureAccess: false` is the documented
+            # default and stays allowed alongside templateId.
+            if name == "secureAccess":
+                return data.get(name) is True
+            return data.get(name) is not None
+
         fixed_fields = [
             f"'{name}'"
             for name in _TEMPLATE_MODE_FORBIDDEN_FILE_FIELDS
-            if data.get(name) is not None
+            if _is_set(name)
         ]
         if fixed_fields:
             raise click.ClickException(

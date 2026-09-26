@@ -155,6 +155,17 @@ def template_create(
                 f"--file cannot be combined with: {', '.join(file_conflicts)}."
             )
         data = load_json_object(request_file)
+        known_fields = set(CreateTemplateRequest.model_fields) | {
+            field.alias
+            for field in CreateTemplateRequest.model_fields.values()
+            if field.alias
+        }
+        unknown = sorted(set(data) - known_fields)
+        if unknown:
+            raise click.ClickException(
+                f"Request file '{request_file}' has unsupported fields: "
+                f"{', '.join(unknown)}."
+            )
         try:
             request = CreateTemplateRequest.model_validate(data)
         except ValidationError as exc:

@@ -112,13 +112,17 @@ KEY_VALUE = KeyValueType()
 
 def load_json_object(path: str) -> dict:
     """Load a JSON object from a file, with CLI-friendly errors."""
-    with open(path, encoding="utf-8") as f:
-        try:
+    try:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        except json.JSONDecodeError as exc:
-            raise click.ClickException(
-                f"Invalid JSON in request file '{path}': {exc}"
-            ) from exc
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"Invalid JSON in request file '{path}': {exc}"
+        ) from exc
+    except (OSError, UnicodeError) as exc:
+        raise click.ClickException(
+            f"Cannot read request file '{path}': {exc}"
+        ) from exc
     if not isinstance(data, dict):
         raise click.ClickException(
             f"Request file '{path}' must contain a JSON object."
@@ -128,10 +132,11 @@ def load_json_object(path: str) -> dict:
 
 def validation_message(exc: ValidationError) -> str:
     """Format a pydantic ``ValidationError`` as a compact one-line message."""
-    return "; ".join(
-        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-        for error in exc.errors()
-    )
+    parts = []
+    for error in exc.errors():
+        loc = ".".join(str(part) for part in error["loc"])
+        parts.append(f"{loc}: {error['msg']}" if loc else error["msg"])
+    return "; ".join(parts)
 
 
 def output_option(
