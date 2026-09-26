@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 import httpx  # type: ignore[reportMissingImports]
 
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -134,6 +135,7 @@ class SandboxesAdapter(Sandboxes):
             prefix="",  # No prefix, just the token
             auth_header_name="OPEN-SANDBOX-API-KEY",  # Custom header name
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         # Inject httpx client (adapter-owned)
@@ -142,6 +144,10 @@ class SandboxesAdapter(Sandboxes):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_async_redirect_client_options(
+                self.connection_config,
+                self.connection_config.get_base_url(),
+            ),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 

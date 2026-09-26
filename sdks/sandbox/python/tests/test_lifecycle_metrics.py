@@ -16,14 +16,16 @@
 
 import asyncio
 from datetime import timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from opensandbox.config import ConnectionConfig
+from opensandbox.config import ConnectionConfig, ConnectionConfigSync
 from opensandbox.internal.lifecycle_metrics import (
     _build_payload,
+    _post_async,
+    _post_sync,
     report_sandbox_create_metric,
 )
 
@@ -42,6 +44,95 @@ def test_build_payload_omits_optional_fields():
     assert "image" not in payload
     assert "sdkLanguage" not in payload
     assert "sdkVersion" not in payload
+
+
+def test_sync_metrics_client_honors_redirect_config_and_security_hook():
+    user_hook = MagicMock()
+    config = ConnectionConfigSync(
+        domain="sandbox.local:8080",
+        protocol="http",
+        follow_redirects=True,
+        event_hooks={"request": [user_hook]},
+    )
+    client = MagicMock()
+    context_manager = MagicMock()
+    context_manager.__enter__.return_value = client
+
+    with patch(
+        "opensandbox.internal.lifecycle_metrics.httpx.Client",
+        return_value=context_manager,
+    ) as client_cls:
+        _post_sync(config, {"eventType": "sandbox.create"})
+
+    options = client_cls.call_args.kwargs
+    assert options["follow_redirects"] is True
+    assert "transport" not in options
+    assert len(options["event_hooks"]["request"]) == 1
+
+    redirected_request = httpx.Request(
+        "POST",
+        "http://redirect.local/metrics/events",
+        headers={
+            "OPEN-SANDBOX-API-KEY": "api-secret",
+            "OPENSANDBOX-EGRESS-AUTH": "egress-secret",
+            "OpenSandbox-Secure-Access": "access-secret",
+            "X-Custom-Header": "preserved",
+        },
+    )
+    options["event_hooks"]["request"][0](redirected_request)
+
+    assert user_hook.call_count == 0
+    assert "OPEN-SANDBOX-API-KEY" not in redirected_request.headers
+    assert "OPENSANDBOX-EGRESS-AUTH" not in redirected_request.headers
+    assert "OpenSandbox-Secure-Access" not in redirected_request.headers
+    assert redirected_request.headers["X-Custom-Header"] == "preserved"
+    client.post.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_metrics_client_honors_redirect_config_and_security_hook():
+    user_hook = AsyncMock()
+    config = ConnectionConfig(
+        domain="sandbox.local:8080",
+        protocol="http",
+        follow_redirects=True,
+        event_hooks={"request": [user_hook]},
+    )
+    client = MagicMock()
+    client.post = AsyncMock()
+    context_manager = MagicMock()
+    context_manager.__aenter__ = AsyncMock(return_value=client)
+    context_manager.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "opensandbox.internal.lifecycle_metrics.httpx.AsyncClient",
+        return_value=context_manager,
+    ) as client_cls:
+        await _post_async(config, {"eventType": "sandbox.create"})
+
+    options = client_cls.call_args.kwargs
+    assert options["follow_redirects"] is True
+    assert "transport" not in options
+    assert len(options["event_hooks"]["request"]) == 1
+
+    redirected_request = httpx.Request(
+        "POST",
+        "http://redirect.local/metrics/events",
+        headers={
+            "OPEN-SANDBOX-API-KEY": "api-secret",
+            "OPENSANDBOX-EGRESS-AUTH": "egress-secret",
+            "OpenSandbox-Secure-Access": "access-secret",
+            "X-Custom-Header": "preserved",
+        },
+    )
+    await options["event_hooks"]["request"][0](redirected_request)
+
+    assert user_hook.await_count == 0
+    assert "OPEN-SANDBOX-API-KEY" not in redirected_request.headers
+    assert "OPENSANDBOX-EGRESS-AUTH" not in redirected_request.headers
+    assert "OpenSandbox-Secure-Access" not in redirected_request.headers
+    assert redirected_request.headers["X-Custom-Header"] == "preserved"
+    client.post.assert_awaited_once()
 
 
 @pytest.mark.asyncio

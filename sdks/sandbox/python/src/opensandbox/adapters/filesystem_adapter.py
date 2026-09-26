@@ -30,6 +30,7 @@ from typing import TypedDict
 
 import httpx
 
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -115,11 +116,13 @@ class FilesystemAdapter(Filesystem):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
 
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._client.set_async_httpx_client(self._httpx_client)
 
@@ -319,7 +322,11 @@ class FilesystemAdapter(Filesystem):
 
             multipart_parts.append(("file", (entry.path, content, content_type)))
 
-        return await client.post(url, files=multipart_parts)
+        return await client.post(
+            url,
+            files=multipart_parts,
+            follow_redirects=False,
+        )
 
     async def _write_files_chunked(
         self,
@@ -404,6 +411,7 @@ class FilesystemAdapter(Filesystem):
             url,
             content=_body(),
             headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            follow_redirects=False,
         )
 
     async def write_file(
