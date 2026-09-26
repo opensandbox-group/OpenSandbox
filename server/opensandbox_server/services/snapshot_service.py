@@ -53,6 +53,7 @@ from opensandbox_server.services.snapshot_runtime import (
     SnapshotRuntimePreflightError,
     SnapshotRuntimeStatus,
     SnapshotRuntimeUnsupportedError,
+    is_snapshot_source_state_supported,
 )
 from opensandbox_server.services.snapshot_runtime_factory import create_snapshot_runtime
 from opensandbox_server.services.snapshot_models import (
@@ -135,7 +136,12 @@ class PersistedSnapshotService(SnapshotService):
 
     def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest) -> Snapshot:
         sandbox = self._sandbox_service.get_sandbox(sandbox_id)
-        self._ensure_source_sandbox_running(sandbox)
+        namespace = self._get_tenant_namespace()
+        self._ensure_source_sandbox_state(
+            sandbox_id,
+            sandbox,
+            namespace=namespace,
+        )
 
         if not self._snapshot_runtime.supports_create_snapshot():
             raise HTTPException(
@@ -146,7 +152,6 @@ class PersistedSnapshotService(SnapshotService):
                 },
             )
 
-        namespace = self._get_tenant_namespace()
         try:
             self._snapshot_runtime.preflight_create_snapshot(
                 sandbox_id,
@@ -684,10 +689,20 @@ class PersistedSnapshotService(SnapshotService):
             )
             return False
 
-    @staticmethod
-    def _ensure_source_sandbox_running(sandbox) -> None:
-        state = PersistedSnapshotService._sandbox_state(sandbox)
-        if state == "Running":
+    def _ensure_source_sandbox_state(
+        self,
+        sandbox_id: str,
+        sandbox,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        state = self._sandbox_state(sandbox)
+        if state is not None and is_snapshot_source_state_supported(
+            self._snapshot_runtime,
+            sandbox_id,
+            state,
+            namespace=namespace,
+        ):
             return
 
         raise HTTPException(
