@@ -16,26 +16,11 @@ package controller
 
 import (
 	"context"
-	"errors"
-	"net/url"
-	"os"
-	"strings"
-	"time"
 
-	"github.com/go-logr/logr"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-)
-
-const (
-	controllerServiceName          = "opensandbox-controller"
-	otelMetricsEndpointEnvironment = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-	otelEndpointEnvironment        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 )
 
 type capacityMetricsRunner struct {
@@ -51,101 +36,19 @@ func (r *capacityMetricsRunner) NeedLeaderElection() bool {
 	return true
 }
 
+// Start registers the capacity gauges on the global meter provider and
+// unregisters them when the manager stops. With no OTLP endpoint configured
+// the no-op provider keeps them inert.
 func (r *capacityMetricsRunner) Start(ctx context.Context) error {
-	endpointEnvironment, endpoint, enabled := capacityMetricsEndpoint()
-	if !enabled {
-		return nil
-	}
-	logger := logf.FromContext(ctx).WithName("capacity-metrics")
-	safeEndpoint := sanitizeOTLPEndpoint(endpoint)
-	if err := validateOTLPEndpoint(endpoint); err != nil {
-		logCapacityMetricsDisabled(logger, err, "configuration", endpointEnvironment, safeEndpoint)
-		return nil
-	}
-	exporter, err := otlpmetrichttp.New(ctx)
+	registration, err := registerCapacityMetrics(otel.GetMeterProvider().Meter(capacityMeterName), r.reader, r.allocations)
 	if err != nil {
-		logCapacityMetricsDisabled(logger, err, "exporter", endpointEnvironment, safeEndpoint)
+		logf.FromContext(ctx).Error(err, "Capacity metrics disabled after registration failure")
+		<-ctx.Done()
 		return nil
 	}
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewSchemaless(semconv.ServiceName(controllerServiceName)),
-	)
-	if err != nil {
-		logCapacityMetricsDisabled(logger, err, "resource", endpointEnvironment, safeEndpoint)
-		shutdownMetricExporter(logger, exporter)
-		return nil
-	}
-	provider := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
-	)
-	registration, err := registerCapacityMetrics(provider.Meter(capacityMeterName), r.reader, r.allocations)
-	if err != nil {
-		logCapacityMetricsDisabled(logger, err, "registration", endpointEnvironment, safeEndpoint)
-		shutdownMetricProvider(logger, provider)
-		return nil
-	}
-	logger.Info("Capacity metrics enabled", "endpointEnvironment", endpointEnvironment, "endpoint", safeEndpoint)
-
 	<-ctx.Done()
 	if err := registration.Unregister(); err != nil {
-		logger.Error(err, "Unable to unregister capacity metrics")
-	}
-	shutdownMetricProvider(logger, provider)
-	return nil
-}
-
-func capacityMetricsEndpoint() (environment, endpoint string, enabled bool) {
-	if endpoint := strings.TrimSpace(os.Getenv(otelMetricsEndpointEnvironment)); endpoint != "" {
-		return otelMetricsEndpointEnvironment, endpoint, true
-	}
-	if endpoint := strings.TrimSpace(os.Getenv(otelEndpointEnvironment)); endpoint != "" {
-		return otelEndpointEnvironment, endpoint, true
-	}
-	return "", "", false
-}
-
-func validateOTLPEndpoint(endpoint string) error {
-	parsed, err := url.ParseRequestURI(strings.TrimSpace(endpoint))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return errors.New("endpoint must be an absolute HTTP(S) URL")
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return errors.New("endpoint scheme must be http or https")
+		logf.FromContext(ctx).Error(err, "Unable to unregister capacity metrics")
 	}
 	return nil
-}
-
-func sanitizeOTLPEndpoint(endpoint string) string {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "<invalid>"
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.ForceQuery = false
-	parsed.Fragment = ""
-	return parsed.String()
-}
-
-func logCapacityMetricsDisabled(logger logr.Logger, err error, stage, endpointEnvironment, endpoint string) {
-	logger.Error(err, "Capacity metrics disabled after OTLP setup failure",
-		"stage", stage, "endpointEnvironment", endpointEnvironment, "endpoint", endpoint)
-}
-
-func shutdownMetricExporter(logger logr.Logger, exporter *otlpmetrichttp.Exporter) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := exporter.Shutdown(ctx); err != nil {
-		logger.Error(err, "Unable to shut down OTLP metrics exporter")
-	}
-}
-
-func shutdownMetricProvider(logger logr.Logger, provider *sdkmetric.MeterProvider) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := provider.Shutdown(ctx); err != nil {
-		logger.Error(err, "Unable to shut down OTLP metrics provider")
-	}
 }

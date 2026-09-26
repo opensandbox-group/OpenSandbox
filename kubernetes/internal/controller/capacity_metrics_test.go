@@ -16,11 +16,8 @@ package controller
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"testing"
 
-	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -29,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
@@ -172,80 +168,6 @@ func TestCapacityMetricsUseSchedulerEquivalentPodRequests(t *testing.T) {
 
 func TestCapacityMetricsRunnerRequiresLeaderElection(t *testing.T) {
 	require.True(t, (&capacityMetricsRunner{}).NeedLeaderElection())
-}
-
-func TestCapacityMetricsEndpointPrecedence(t *testing.T) {
-	t.Setenv(otelMetricsEndpointEnvironment, " https://metrics.example:4318/v1/metrics ")
-	t.Setenv(otelEndpointEnvironment, "https://fallback.example:4318")
-
-	environment, endpoint, enabled := capacityMetricsEndpoint()
-	require.True(t, enabled)
-	require.Equal(t, otelMetricsEndpointEnvironment, environment)
-	require.Equal(t, "https://metrics.example:4318/v1/metrics", endpoint)
-
-	t.Setenv(otelMetricsEndpointEnvironment, "")
-	environment, endpoint, enabled = capacityMetricsEndpoint()
-	require.True(t, enabled)
-	require.Equal(t, otelEndpointEnvironment, environment)
-	require.Equal(t, "https://fallback.example:4318", endpoint)
-
-	t.Setenv(otelEndpointEnvironment, "")
-	_, _, enabled = capacityMetricsEndpoint()
-	require.False(t, enabled)
-}
-
-func TestSanitizeOTLPEndpoint(t *testing.T) {
-	require.NoError(t, validateOTLPEndpoint("https://collector.example:4318/v1/metrics"))
-	require.Error(t, validateOTLPEndpoint("://not-a-url?token=secret"))
-	require.Error(t, validateOTLPEndpoint("grpc://collector.example:4317"))
-	require.Equal(t,
-		"https://collector.example:4318/v1/metrics",
-		sanitizeOTLPEndpoint("https://user:secret@collector.example:4318/v1/metrics?api_key=secret#fragment"),
-	)
-	require.Equal(t, "<invalid>", sanitizeOTLPEndpoint("://not-a-url?token=secret"))
-}
-
-func TestLogCapacityMetricsDisabledIncludesSafeContext(t *testing.T) {
-	var entries []string
-	logger := funcr.New(func(prefix, args string) {
-		entries = append(entries, prefix+args)
-	}, funcr.Options{})
-
-	logCapacityMetricsDisabled(
-		logger,
-		errors.New("setup failed"),
-		"registration",
-		otelMetricsEndpointEnvironment,
-		sanitizeOTLPEndpoint("https://user:secret@collector.example:4318/v1/metrics?api_key=secret"),
-	)
-
-	output := strings.Join(entries, "\n")
-	require.Contains(t, output, "Capacity metrics disabled after OTLP setup failure")
-	require.Contains(t, output, "registration")
-	require.Contains(t, output, otelMetricsEndpointEnvironment)
-	require.Contains(t, output, "https://collector.example:4318/v1/metrics")
-	require.NotContains(t, output, "user")
-	require.NotContains(t, output, "secret")
-}
-
-func TestCapacityMetricsRunnerSurfacesInvalidEndpointWithoutFailingManager(t *testing.T) {
-	t.Setenv(otelMetricsEndpointEnvironment, "://not-a-url?token=secret")
-	t.Setenv(otelEndpointEnvironment, "")
-	var entries []string
-	logger := funcr.New(func(prefix, args string) {
-		entries = append(entries, prefix+args)
-	}, funcr.Options{})
-
-	err := (&capacityMetricsRunner{}).Start(logf.IntoContext(context.Background(), logger))
-	require.NoError(t, err)
-
-	output := strings.Join(entries, "\n")
-	require.Contains(t, output, "Capacity metrics disabled after OTLP setup failure")
-	require.Contains(t, output, "configuration")
-	require.Contains(t, output, otelMetricsEndpointEnvironment)
-	require.Contains(t, output, "<invalid>")
-	require.NotContains(t, output, "token")
-	require.NotContains(t, output, "secret")
 }
 
 func poolPod(name, pool string, ready bool, cpu, memory string) *corev1.Pod {

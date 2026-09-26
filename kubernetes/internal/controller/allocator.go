@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -302,7 +303,10 @@ func (syncer *annoAllocationSyncer) SetAllocation(ctx context.Context, sandbox *
 	obj := &sandboxv1alpha1.BatchSandbox{}
 	obj.Name = sandbox.Name
 	obj.Namespace = sandbox.Namespace
-	return syncer.client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
+	persistStart := time.Now()
+	patchErr := syncer.client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
+	recordAllocatorPersistAllocStateDuration(ctx, sandbox, time.Since(persistStart), patchErr)
+	return patchErr
 }
 
 func (syncer *annoAllocationSyncer) GetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*sandboxAllocation, error) {
