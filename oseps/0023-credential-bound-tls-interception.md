@@ -3,7 +3,7 @@ title: Credential-Bound TLS Interception
 authors:
   - "@hpliStartAgain"
 creation-date: 2026-09-04
-last-updated: 2026-09-09
+last-updated: 2026-09-26
 status: implementing
 ---
 
@@ -851,10 +851,31 @@ that permits a new candidate. When a candidate allocated by `Apply` has an
 indeterminate prepare/abort or commit outcome, the call returns that exact
 attempt identity with `ErrIndeterminate`; that identity is not proof of
 activation, and the caller must compare it exactly with a later reconciliation
-result before publishing. This preserves attempt identity at the coordinator
-boundary only; ProcessSession-backed public mutation and atomic public-store
-finalization, along with connection fencing, remain unwired. Durable recovery
-intent after a complete sidecar replacement remains integration work.
+result before publishing. Attempt identity is now also retained by the private
+ProcessSession API, but public mutation and atomic public-store finalization,
+along with connection fencing, remain unwired. Durable recovery intent after a
+complete sidecar replacement remains integration work.
+
+ProcessSession now also exposes an internal post-bootstrap `Update` primitive
+and exact-attempt `ReconcileUpdate`. A future caller must keep its Vault
+candidate unpublished while holding the shared mutation barrier. A successful
+`Update` confirms its exact identity and permits finalization. After an
+indeterminate update, the session retains the exact attempt and the exact
+previous confirmed identity. `ReconcileUpdate` accepts only that outstanding
+attempt: it permits finalization only when it confirms that attempt active, and
+permits discarding only when it confirms the frozen previous identity remains
+active. Other attempts are rejected without transport activity; reconciliation
+errors retain the attempt, and a concurrent update remains blocked without
+transport activity.
+
+`ErrClosed` and `ErrTransportUnavailable`, including a local parent-path fence
+failure after the receiver committed, are terminal session failures rather
+than reconcilable mutation outcomes. They return no attempt identity and never
+authorize candidate finalization. The future owner must stop the exact child,
+close the session, discard the unpublished candidate, and start a fresh session
+from the prior public state. This primitive does not connect public mutation
+handlers, finalize the Vault store, or install connection fences; selective
+TLS decisions remain disabled.
 
 The Go Vault store can now prepare unpublished create, patch, and delete
 candidates. A candidate freezes its rendered `ActiveSnapshot` before commit,

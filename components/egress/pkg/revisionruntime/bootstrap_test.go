@@ -241,6 +241,10 @@ type bootstrapReceiver struct {
 	rejectPrepareResponse bool
 	rejectCommitResponse  bool
 	rejectAbortResponse   bool
+	prepareSeen           chan struct{}
+	releasePrepare        chan struct{}
+	commitSeen            chan struct{}
+	releaseCommit         chan struct{}
 	aborted               *revision.Identity
 	aborts                int
 }
@@ -308,7 +312,17 @@ func (r *bootstrapReceiver) ServeHTTP(w http.ResponseWriter, request *http.Reque
 		r.pending = &value.Revision
 		r.data = append([]byte(nil), value.Payload...)
 		r.prepares++
+		prepareSeen := r.prepareSeen
+		r.prepareSeen = nil
+		releasePrepare := r.releasePrepare
+		r.releasePrepare = nil
 		r.mu.Unlock()
+		if prepareSeen != nil {
+			close(prepareSeen)
+		}
+		if releasePrepare != nil {
+			<-releasePrepare
+		}
 		if r.rejectPrepareResponse {
 			http.Error(w, "unavailable", http.StatusInternalServerError)
 			return
@@ -323,15 +337,27 @@ func (r *bootstrapReceiver) ServeHTTP(w http.ResponseWriter, request *http.Reque
 			return
 		}
 		r.mu.Lock()
-		defer r.mu.Unlock()
 		if r.pending == nil || *r.pending != value.Revision {
+			r.mu.Unlock()
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
 		r.active = r.pending
 		r.pending = nil
 		r.commits++
-		if r.rejectCommitResponse {
+		rejectResponse := r.rejectCommitResponse
+		commitSeen := r.commitSeen
+		r.commitSeen = nil
+		releaseCommit := r.releaseCommit
+		r.releaseCommit = nil
+		r.mu.Unlock()
+		if commitSeen != nil {
+			close(commitSeen)
+		}
+		if releaseCommit != nil {
+			<-releaseCommit
+		}
+		if rejectResponse {
 			http.Error(w, "unavailable", http.StatusInternalServerError)
 			return
 		}

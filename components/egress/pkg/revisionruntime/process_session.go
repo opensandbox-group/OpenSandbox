@@ -54,21 +54,23 @@ type ProcessSessionConfig struct {
 // one transport and coordinator. It is not connected to a running egress
 // profile; the future launcher owner must stop the child before Close.
 type ProcessSession struct {
-	mu            sync.Mutex
-	bootstrapMu   sync.Mutex
-	bootstrap     bootstrapState
-	parentPath    string
-	parentRoot    *os.Root
-	parentInfo    os.FileInfo
-	targetUID     int
-	targetGID     int
-	directoryName string
-	directoryInfo os.FileInfo
-	launch        mitmproxy.RevisionIPCConfig
-	transport     *revision.UnixTransport
-	coordinator   *revision.Coordinator
-	closed        bool
-	cleaned       bool
+	mu             sync.Mutex
+	bootstrapMu    sync.Mutex
+	bootstrap      bootstrapState
+	pendingUpdate  *revision.Identity // guarded by bootstrapMu
+	previousUpdate *revision.Identity // guarded by bootstrapMu
+	parentPath     string
+	parentRoot     *os.Root
+	parentInfo     os.FileInfo
+	targetUID      int
+	targetGID      int
+	directoryName  string
+	directoryInfo  os.FileInfo
+	launch         mitmproxy.RevisionIPCConfig
+	transport      *revision.UnixTransport
+	coordinator    *revision.Coordinator
+	closed         bool
+	cleaned        bool
 }
 
 func (*ProcessSession) String() string { return "revisionruntime.ProcessSession" }
