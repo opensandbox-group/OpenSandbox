@@ -171,7 +171,7 @@ curl --fail http://127.0.0.1:8080/health
 | `server.service.type` | Service type for the server | Defaults to `ClusterIP`. Use `NodePort` or `LoadBalancer` for access from outside the cluster; pin the port with `server.service.nodePort`. |
 | `namespaceOverride` | Namespace used by chart resources | Defaults to `opensandbox-system`. |
 
-The server container and its Service use port `80`. Keep `[server].port = 80` when replacing `configToml` unless the chart templates are also updated to use a different port. The Service is `ClusterIP` by default; set `server.service.type` to reach the server from outside the cluster.
+The server container uses port `8080`. Keep `[server].port = 8080` when replacing `configToml` unless the chart templates are also updated to use a different port. The Service uses port 80, and Service is `ClusterIP` by default; set `server.service.type` to reach the server from outside the cluster.
 
 ### Configure egress sidecar resources
 
