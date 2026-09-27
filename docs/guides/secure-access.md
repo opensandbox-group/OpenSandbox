@@ -17,10 +17,12 @@ Its counterparts:
 
 ## Requirements
 
-- Kubernetes runtime (Docker rejects `secureAccess: true` with `400`).
-- `[ingress] mode = "gateway"`.
-- Signed URLs additionally require `[ingress.secure_access]` with at least
-  one signing key.
+- **Kubernetes** runtime with `[ingress] mode = "gateway"`: the gateway enforces
+  the token, and signed URLs additionally require `[ingress.secure_access]`
+  with at least one signing key.
+- **Docker** runtime: no gateway is involved — `execd` itself enforces a
+  per-sandbox token (see [Docker runtime](#docker-runtime) below). Signed URLs
+  (`expires`) are not available on Docker.
 
 ## How It Works
 
@@ -42,6 +44,29 @@ fixed order:
 
 Requests that pass either check are forwarded upstream with the header or
 signed prefix stripped, so the workload never sees the credential.
+
+## Docker Runtime
+
+A Docker sandbox has no ingress gateway in front of it; every port is reached
+through the host-published `execd` port (`/proxy/<port>`) or the published
+`8080`. `secureAccess: true` therefore makes **`execd` the enforcer**:
+
+- the server mints a per-sandbox token at create (the same random token the
+  Kubernetes runtime mints), stores it on the container like the egress token,
+  and starts `execd` with it as `EXECD_ACCESS_TOKEN`;
+- `execd` rejects every request without a matching `X-EXECD-ACCESS-TOKEN`
+  header with `401` — `/ping` and `/ready` stay open so readiness probes work;
+- `GetEndpoint` returns **both** headers, `X-EXECD-ACCESS-TOKEN` (what `execd`
+  checks on the direct path) and `OpenSandbox-Secure-Access` (what the server
+  proxy checks on the caller and strips before forwarding). SDKs send whatever
+  the endpoint response carries, so application code does not change between
+  runtimes.
+
+Without `secureAccess`, a Docker sandbox's `execd` stays open to anyone who
+reaches its published port (the host, its other containers) — the pre-existing
+behaviour. Anything that reaches `execd` runs commands as root in the sandbox,
+so a box shared by several people, or running untrusted code, should create
+its sandboxes with `secureAccess: true`.
 
 ## Static Header Token
 
@@ -162,7 +187,7 @@ curl -s "http://localhost:8080/v1/sandboxes/${SANDBOX_ID}/endpoints/8080?expires
 
 | Code | Cause |
 |------|-------|
-| `400` | `secureAccess: true` on Docker; malformed `expires` or routing token; invalid `expires_b36` / `port` / `signature`. |
+| `400` | `expires` on Docker (no signed routes there); malformed `expires` or routing token; invalid `expires_b36` / `port` / `signature`. |
 | `401` | Header mismatch; signed URL expired; bad signature; unknown key ID; secure access required but no credential presented. |
 
 Omitting `expires` on `GetEndpoint` is not a `400` — it returns the unsigned

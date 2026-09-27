@@ -415,3 +415,52 @@ def test_extract_bridge_ip_falls_back_when_named_network_ip_missing(mock_docker_
 
     ip = service._extract_bridge_ip(mock_container)
     assert ip == "172.17.0.9"
+
+
+def test_get_endpoint_secure_access_carries_both_headers(mock_docker_service):
+    """A secured Docker sandbox's endpoints carry the token execd checks on the direct path and the
+    one the server proxy checks on the caller — on every port, host-mapped and internal alike."""
+    service, mock_client = mock_docker_service
+    service.app_config.docker.network_mode = "bridge"
+    service.network_mode = "bridge"
+
+    labels = {
+        "opensandbox.io/embedding-proxy-port": "50002",
+        "opensandbox.io/http-port": "50001",
+        "opensandbox.io/secure-access-token": "s3cret",
+    }
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": labels},
+        "NetworkSettings": {"IPAddress": "172.17.0.5"},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+    with patch("opensandbox_server.services.sandbox_service.SandboxService._resolve_bind_ip", return_value="192.168.1.100"):
+        via_execd = service.get_endpoint("sbx-123", 3000, resolve_internal=False)
+        http = service.get_endpoint("sbx-123", 8080, resolve_internal=False)
+    internal = service.get_endpoint("sbx-123", 3000, resolve_internal=True)
+
+    for ep in (via_execd, http, internal):
+        assert ep.headers["X-EXECD-ACCESS-TOKEN"] == "s3cret"
+        assert ep.headers["OpenSandbox-Secure-Access"] == "s3cret"
+    assert via_execd.endpoint == "192.168.1.100:50002/proxy/3000"
+    assert internal.endpoint == "172.17.0.5:3000"
+
+
+def test_get_endpoint_without_secure_access_carries_no_token(mock_docker_service):
+    service, mock_client = mock_docker_service
+    service.app_config.docker.network_mode = "bridge"
+    service.network_mode = "bridge"
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": {"opensandbox.io/embedding-proxy-port": "50002", "opensandbox.io/http-port": "50001"}},
+        "NetworkSettings": {"IPAddress": "172.17.0.5"},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+    with patch("opensandbox_server.services.sandbox_service.SandboxService._resolve_bind_ip", return_value="192.168.1.100"):
+        ep = service.get_endpoint("sbx-123", 3000, resolve_internal=False)
+    assert "X-EXECD-ACCESS-TOKEN" not in (ep.headers or {})
+    assert "OpenSandbox-Secure-Access" not in (ep.headers or {})

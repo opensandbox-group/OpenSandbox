@@ -545,7 +545,8 @@ class CreateSandboxRequest(BaseModel):
         alias="secureAccess",
         description=(
             "Opts the sandbox into secured access for endpoint access. "
-            "Currently supported only for Kubernetes sandboxes exposed through ingress gateway mode. "
+            "Kubernetes: enforced by the ingress gateway (ingress.mode = 'gateway'; signed routes too). "
+            "Docker: enforced by execd itself (a per-sandbox X-EXECD-ACCESS-TOKEN; no signed routes). "
             "When enabled, the server provisions access credentials and returns required endpoint headers."
         ),
     )
