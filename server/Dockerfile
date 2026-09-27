@@ -54,6 +54,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     SANDBOX_CONFIG_PATH=/etc/opensandbox/config.toml
 
 WORKDIR /app
+ENV HOME=/root
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/opensandbox_server /app/opensandbox_server
@@ -63,6 +64,10 @@ COPY --from=builder /app/opensandbox_server/examples/example.batchsandbox-templa
 COPY --from=builder /app/opensandbox_server/examples/e2e.batchsandbox-template.yaml /etc/opensandbox/e2e.batchsandbox-template.yaml
 
 EXPOSE 8080
+
+RUN mkdir -p /root && \
+    chgrp -R 0 /root && \
+    chmod -R g=u /root
 
 ENTRYPOINT ["opensandbox-server"]
 CMD ["--config", "/etc/opensandbox/config.toml"]

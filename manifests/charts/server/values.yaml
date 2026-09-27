@@ -108,7 +108,7 @@ server:
 configToml: |
   [server]
   host = "0.0.0.0"
-  port = 80
+  port = 8080
   api_key = ""
 
   [log]
@@ -125,7 +125,7 @@ configToml: |
   informer_watch_timeout_seconds = 60
   workload_provider = "batchsandbox"
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
-  
+
   [egress]
   image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.1.0"
   mode = "dns+nft"
