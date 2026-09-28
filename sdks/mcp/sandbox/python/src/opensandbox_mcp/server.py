@@ -67,8 +67,8 @@ class ServerState:
 def _discard_connecting(
     state: ServerState, sandbox_id: str, task: asyncio.Task[Sandbox]
 ) -> None:
-    # Pop only if this task is still the mapped entry so a late callback
-    # from a stale connect can never evict a newer in-flight connect.
+    # Only pop if this task is still the mapped entry (a stale callback
+    # must not evict a newer connect).
     if state.connecting.get(sandbox_id) is task:
         state.connecting.pop(sandbox_id)
 
@@ -129,12 +129,9 @@ def register_tools(
         *,
         connect_if_missing: bool,
     ) -> Sandbox:
-        # The lock is only held for registry lookup + in-flight dedup book
-        # keeping. The connect itself runs outside the lock, so a slow or
-        # unreachable sandbox cannot stall unrelated tool calls (other ids'
-        # connects, kill/remove, registry reads) for the whole connect
-        # budget. Concurrent connects for the *same* id still coalesce onto
-        # one in-flight task, preserving the no-duplicate-connect guarantee.
+        # Lock held only for lookup + in-flight dedup; the connect itself
+        # runs outside the lock so a slow connect can't stall unrelated
+        # tool calls. Same-id connects still coalesce onto one task.
         async with state.lock:
             sandbox = state.sandboxes.get(sandbox_id)
             if sandbox is not None:

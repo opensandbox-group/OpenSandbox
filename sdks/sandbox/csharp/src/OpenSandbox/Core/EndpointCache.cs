@@ -132,12 +132,9 @@ internal sealed class EndpointCache
         var lazy = _inflight.GetOrAdd(key, _ => new Lazy<Task<Endpoint>>(() => FetchAndCache(key, fetcher, genBefore)));
 
         var fetchTask = lazy.Value;
-        // Drop the shared entry once the fetch settles — even when every
-        // waiter has already left (e.g. cancelled) — so a later caller never
-        // gets a cached fault (stale retry-less failure) or a completed
-        // entry that bypasses the TTL. The value-matched removal only
-        // deletes this lazy: a newer entry installed by Invalidate() (or a
-        // fresh fetch after expiry) is never evicted.
+        // Drop the entry when the fetch settles, even with no waiters left
+        // (no cached faults, no TTL bypass); value-matched so a newer entry
+        // from Invalidate() is never evicted.
         _ = fetchTask.ContinueWith(
             _ => ((ICollection<KeyValuePair<EndpointCacheKey, Lazy<Task<Endpoint>>>>)_inflight)
                 .Remove(new KeyValuePair<EndpointCacheKey, Lazy<Task<Endpoint>>>(key, lazy)),

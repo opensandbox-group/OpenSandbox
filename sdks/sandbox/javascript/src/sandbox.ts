@@ -237,13 +237,9 @@ export interface SandboxConnectOptions {
   connectionConfig?: ConnectionConfig | ConnectionConfigOptions;
   /**
    * Declare that the SDK owns (and may close) the connection config's
-   * transport on cleanup paths.
-   *
-   * By default the SDK closes a transport only when it initialized it during
-   * this connect (i.e. `connectionConfig` arrived uninitialized). Set this
-   * to `true` when handing over a config whose transport was allocated for
-   * this instance by internal helpers (e.g. `sandbox.resume()`), or to
-   * explicitly transfer ownership of a caller-initialized config.
+   * transport on cleanup paths. Set when the config's transport was
+   * allocated for this connect (e.g. `sandbox.resume()`), or to transfer
+   * ownership of a caller-initialized config.
    */
   ownsTransport?: boolean;
   /**
@@ -892,10 +888,8 @@ export class Sandbox {
         ? opts.connectionConfig
         : new ConnectionConfig(opts.connectionConfig);
     const connectionConfig = baseConnectionConfig.withTransportIfMissing();
-    // Ownership cannot always be derived by reference equality: a config
-    // produced by `withFreshTransport()` arrives already initialized, so it
-    // is `===` to the base even though the caller allocated it *for* this
-    // connect (instance resume()). An explicit `ownsTransport` option wins.
+    // Reference equality can't tell a resume-allocated config from a
+    // caller-initialized one; an explicit option wins.
     const ownsTransport =
       opts.ownsTransport === true || connectionConfig !== baseConnectionConfig;
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
@@ -1026,10 +1020,8 @@ export class Sandbox {
     const resumeConfig = this.connectionConfig.withFreshTransport();
     return await Sandbox.connect({
       sandboxId: this.id,
-      // The fresh transport is allocated here *for* the resumed instance:
-      // declare ownership so close() releases it and failed resumes don't
-      // leak the dispatcher (reference equality inside connect would mark
-      // this config caller-owned because it arrives already initialized).
+      // Allocated here for the resumed instance; without ownsTransport the
+      // dispatcher would leak (connect marks initialized configs caller-owned).
       connectionConfig: resumeConfig,
       ownsTransport: true,
       adapterFactory: Sandbox._priv.get(this)!.adapterFactory,
@@ -1079,13 +1071,9 @@ export class Sandbox {
   /**
    * Release any client-side resources (e.g. Node.js HTTP agents) owned by this Sandbox instance.
    *
-   * Transport ownership: the SDK closes the transport only when it allocated
-   * it for this instance (default connect/create paths, `resume()`, or an
-   * explicit `ownsTransport: true`). When you pass an already-initialized
-   * `ConnectionConfig` (e.g. one produced by
-   * `connectionConfig.withTransportIfMissing()`), that config stays
-   * caller-owned: `close()` is a no-op for its transport and you must call
-   * `connectionConfig.closeTransport()` yourself when finished with it.
+   * The transport is closed only when the SDK allocated it for this
+   * instance; caller-initialized `ConnectionConfig`s stay caller-owned —
+   * call `connectionConfig.closeTransport()` yourself when done.
    */
   async close(): Promise<void> {
     // Shared (caller-initialized) transports are closed by their owner.

@@ -462,21 +462,14 @@ export class ConnectionConfig {
 
   /**
    * True when this instance allocated (and may close) its transport.
-   *
-   * Configs produced by `withTransportIfMissing()`/`withFreshTransport()`
-   * own theirs; a config still holding a caller-initialized transport does
-   * not. The SDK closes transports it owns on cleanup paths and never
-   * touches caller-owned ones.
    */
   get ownsTransport(): boolean {
     return this._ownsTransport;
   }
 
   /**
-   * Close the Node.js agent owned by this configuration.
-   *
-   * Only configs that allocated their transport actually close it; calling
-   * this on a caller-owned config is a no-op.
+   * Close the Node.js agent owned by this configuration (no-op for
+   * caller-owned configs).
    */
   async closeTransport(): Promise<void> {
     if (!this._ownsTransport) return;

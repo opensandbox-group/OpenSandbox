@@ -67,8 +67,7 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
   const { sandboxes, calls } = createSandboxesStub();
   const originalClose = ConnectionConfig.prototype.closeTransport;
   let closeCalls = 0;
-  // The manager initializes its own transport from an uninitialized config,
-  // so the clone it holds is what gets closed.
+  // The manager owns the transport it initialized from an uninitialized config.
   ConnectionConfig.prototype.closeTransport = async function () {
     closeCalls += 1;
   };
@@ -155,8 +154,7 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
 
 test("SandboxManager.close leaves caller-initialized transports open", async () => {
   const { sandboxes } = createSandboxesStub();
-  // A caller-initialized config is shared property: manager.close() must
-  // not tear down its transport (it may back other SDK resources).
+  // Caller-initialized configs may back other SDK resources.
   const connectionConfig = new ConnectionConfig({
     domain: "http://127.0.0.1:8080",
   }).withTransportIfMissing();

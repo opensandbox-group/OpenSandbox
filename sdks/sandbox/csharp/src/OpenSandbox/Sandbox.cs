@@ -438,11 +438,9 @@ public sealed class Sandbox : IAsyncDisposable
             if (!skipHealthCheck)
             {
                 logger.LogDebug("Waiting for sandbox readiness: {SandboxId}", sandboxId);
-                // Reuse the endpoint-resolution budget so the ready timeout
-                // covers the whole create flow (endpoint publication + health
-                // check) exactly once, mirroring ConnectAsync — not
-                // WaitUntilReadyAsync, which would start a second fresh
-                // budget and allow ~2x the configured ready timeout.
+                // Reuse the endpoint budget so the ready timeout covers
+                // publication + health check once, mirroring ConnectAsync
+                // (WaitUntilReadyAsync would stack a second fresh budget).
                 await sandbox.CheckReadinessAsync(budget, interval, healthCheck).ConfigureAwait(false);
             }
 

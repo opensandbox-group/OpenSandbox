@@ -210,7 +210,6 @@ async def test_create_failure_releases_service_clients(monkeypatch) -> None:
     with pytest.raises(SandboxReadyTimeoutException):
         await CodeInterpreter.create(sandbox=sbx)  # type: ignore[arg-type]
 
-    # The health check failed after the service was built; its HTTP
-    # clients must be released instead of leaking connection pools.
+    # Failed creation must still release the service's clients.
     assert created and created[0]._httpx_client.is_closed
     assert created[0]._sse_client.is_closed

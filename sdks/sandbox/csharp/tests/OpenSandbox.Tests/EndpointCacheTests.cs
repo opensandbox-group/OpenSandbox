@@ -128,10 +128,9 @@ public class EndpointCacheTests
     [Fact]
     public async Task GetOrFetchAsync_RemovesEntry_WhenAllWaitersCancelBeforeFault()
     {
-        // Regression: when the last waiter cancelled, the old finally-based
-        // removal left the shared entry in place. If the fetch then faulted,
-        // the next caller was served the cached fault instantly instead of
-        // retrying with a fresh fetch.
+        // Regression: the old finally-based removal left the entry behind
+        // when all waiters cancelled; a later caller then got the cached
+        // fault instead of a fresh fetch.
         var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
         var key = new EndpointCacheKey("sb-1", 8080, false);
         var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -162,9 +161,8 @@ public class EndpointCacheTests
     [Fact]
     public async Task GetOrFetchAsync_RemovesSettledEntry_EvenWithoutWaiters()
     {
-        // Regression: a completed entry used to linger in the inflight map
-        // when its only waiter cancelled, so a later caller after TTL expiry
-        // was served the stale endpoint instead of triggering a fresh fetch.
+        // Regression: a settled entry used to linger when its only waiter
+        // cancelled, so a post-TTL caller was served the stale endpoint.
         var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
         var key = new EndpointCacheKey("sb-1", 8080, false);
         var fetchCount = 0;
@@ -195,9 +193,8 @@ public class EndpointCacheTests
     [Fact]
     public async Task GetOrFetchAsync_StaleSettledRemoval_DoesNotEvictNewerFetch()
     {
-        // Invalidate() during a fetch installs a new generation; when the
-        // stale fetch settles it must only remove its own entry, not the
-        // newer fetch's — otherwise a duplicate-fetch window opens.
+        // Invalidate() during a fetch installs a new generation; the stale
+        // removal must only delete its own entry.
         var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
         var key = new EndpointCacheKey("sb-1", 8080, false);
         var firstRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -218,8 +215,8 @@ public class EndpointCacheTests
         firstRelease.TrySetResult(true);
         await stale;
 
-        // Served from the cache entry the fresh fetch installed; a third
-        // fetch here would mean the stale removal evicted the fresh entry.
+        // Served from the fresh fetch's cache entry; a third fetch here
+        // would mean the stale removal evicted it.
         var third = await cache.GetOrFetchAsync(key, Fetcher);
         Assert.Equal(2, fetchCount);
         Assert.Equal("fresh", third.EndpointAddress);

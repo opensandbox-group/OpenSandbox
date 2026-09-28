@@ -138,13 +138,9 @@ class ConnectionConfigSync(BaseModel):
         """
         Build a fresh transport stack owned by the caller.
 
-        Mirrors the default stack built by `with_transport_if_missing`:
-        a deadline-aware `HTTPTransport` wrapped by the configured
-        `retry_policy` when the policy wraps transports. Callers that
-        hand the returned transport to an httpx client they close
-        themselves (e.g. adapter clients with their own cleanup
-        lifecycle) can do so safely: the shared `transport` on this
-        config is never touched.
+        Same stack as `with_transport_if_missing` builds by default; the
+        shared `transport` on this config is never touched. Callers that
+        close what they build (e.g. adapter clients) can do so safely.
         """
         ssl_context = httpx.create_ssl_context()
         inner = httpx.HTTPTransport(

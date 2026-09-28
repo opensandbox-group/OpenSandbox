@@ -97,10 +97,8 @@ test("Sandbox.connect abort fails the caller without poisoning the shared fetch"
 
   await assert.rejects(connecting, assertAbortError);
   assert.equal(calls.length, 1);
-  // The deduped endpoint fetch does not carry the caller's signal (only the
-  // SDK's request-timeout signal): aborting this caller fails only that
-  // waiter and must not abort the shared request other coalesced callers
-  // (e.g. signal-less getEndpoint) still wait on.
+  // The deduped fetch carries no caller signal (only the SDK's timeout
+  // signal): an abort fails only this waiter, not the shared request.
   assert.notEqual(calls[0].signal, controller.signal);
   assert.equal(calls[0].signal.aborted, false);
   await connectionConfig.closeTransport();

@@ -20,12 +20,8 @@ so every ``CodeInterpreter.create()`` leaked sockets for the process lifetime.
 ``SupportedLanguageSync`` was also missing ``JAVASCRIPT`` despite claiming
 value parity with ``SupportedLanguage``.
 
-Follow-up finding: the adapter clients originally wrapped the *shared*
-``connection_config.transport``; httpx closes a client's transport on
-close(), so ``aclose()`` tore down the sandbox's own connection pool and
-broke the documented ``interpreter.aclose() -> sandbox.kill()`` sequence.
-The adapter clients now run on adapter-owned transports
-(``ConnectionConfig.new_owned_transport()``).
+Follow-up: adapter clients must never close the shared
+``connection_config.transport`` (that broke ``aclose() -> sandbox.kill()``).
 """
 
 from __future__ import annotations
@@ -98,9 +94,8 @@ async def test_async_adapter_aclose_closes_owned_clients() -> None:
 
 @pytest.mark.asyncio
 async def test_async_adapter_aclose_keeps_shared_transport_open() -> None:
-    # Production shape: the sandbox built the config's shared transport via
-    # with_transport_if_missing(); the adapter must not tear it down. A
-    # closed pool raises RuntimeError; ConnectError proves it is still open.
+    # Production shape: transport built by with_transport_if_missing().
+    # A closed pool raises RuntimeError; ConnectError proves it's still open.
     config = ConnectionConfig(protocol="http").with_transport_if_missing()
     shared = config.transport
     adapter = CodesAdapter(ENDPOINT, config)
@@ -135,9 +130,7 @@ def test_sync_adapter_close_closes_owned_clients() -> None:
 
 
 def test_sync_adapter_close_keeps_shared_transport_open() -> None:
-    # Production shape: the sandbox built the config's shared transport via
-    # with_transport_if_missing(); the adapter must not tear it down. A
-    # closed pool raises RuntimeError; ConnectError proves it is still open.
+    # Sync twin of test_async_adapter_aclose_keeps_shared_transport_open.
     config = ConnectionConfigSync(protocol="http").with_transport_if_missing()
     shared = config.transport
     adapter = CodesAdapterSync(ENDPOINT, config)

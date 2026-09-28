@@ -162,8 +162,7 @@ public class CodeInterpreterHealthCheckTests
                 calls++;
                 if (calls <= executionErrorOnFirstAttempts)
                 {
-                    // Mirrors CommandsAdapter's inference: a failed foreground
-                    // run reports the numeric error value as its exit code.
+                    // Mirrors CommandsAdapter's inference: numeric error value.
                     return new Execution
                     {
                         Error = new ExecutionError
@@ -177,8 +176,7 @@ public class CodeInterpreterHealthCheckTests
                     };
                 }
 
-                // Foreground runs end with ExitCode 0 on success; the strict
-                // health check treats an indeterminate null exit as unhealthy.
+                // Foreground success is a confirmed ExitCode 0.
                 return new Execution { ExitCode = 0 };
             });
         return commands;
@@ -200,8 +198,7 @@ public class CodeInterpreterHealthCheckTests
     [Fact]
     public async Task IsHealthyAsync_TreatsNonZeroExitWithoutErrorAsUnhealthy()
     {
-        // Only reachable via custom IExecdCommands stacks: the built-in
-        // CommandsAdapter never reports a non-zero exit without an error.
+        // Only reachable via custom IExecdCommands stacks.
         var commands = new Mock<IExecdCommands>();
         commands
             .Setup(x => x.RunAsync(
@@ -219,8 +216,7 @@ public class CodeInterpreterHealthCheckTests
     [Fact]
     public async Task IsHealthyAsync_TreatsIndeterminateResultAsUnhealthy()
     {
-        // Neither Complete nor Error observed (e.g. a stream dropped
-        // mid-command): not proof that the runtime is serving.
+        // Neither Complete nor Error: not proof the runtime is serving.
         var commands = new Mock<IExecdCommands>();
         commands
             .Setup(x => x.RunAsync(

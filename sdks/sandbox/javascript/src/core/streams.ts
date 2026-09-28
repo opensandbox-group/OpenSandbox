@@ -13,11 +13,8 @@
 // limitations under the License.
 
 /**
- * Iterate a response body stream chunk by chunk.
- *
- * Shared by the filesystem adapters' `downloadStream`: the reader lock is
- * always released — cancel + releaseLock on early consumer exit or error
- * (#1528/#1532), plain releaseLock after a full read.
+ * Iterate a response body stream, releasing the reader lock on early
+ * consumer exit or error (#1528/#1532).
  */
 export async function* iterateBodyStream(
   body: ReadableStream<Uint8Array>,

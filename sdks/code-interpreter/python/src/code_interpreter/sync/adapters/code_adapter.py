@@ -105,14 +105,8 @@ class CodesAdapterSync(CodesSync):
             **(self.execd_endpoint.headers or {}),
         }
 
-        # Transport ownership: httpx clients always close their transport on
-        # close(), so the clients must never sit on a transport the adapter
-        # does not own. A user-supplied transport is wrapped (it stays the
-        # transport for all SDK clients) but close() then leaves the clients
-        # open — closing them would tear down the caller's transport. Without
-        # one, the adapter builds its own stack via new_owned_transport() and
-        # releases it in close(); the sandbox's shared transport is untouched
-        # either way (its pool is released by sandbox.close()).
+        # Adapter clients must own their transports: close() closes them,
+        # and the shared/user connection_config transport must survive that.
         self._owns_clients = self.connection_config.owns_transport
         main_transport: httpx.BaseTransport | None
         if self._owns_clients:
@@ -158,13 +152,10 @@ class CodesAdapterSync(CodesSync):
     def close(self) -> None:
         """Release the adapter-owned HTTP clients.
 
-        The generated API client reuses the injected ``httpx.Client``, so
-        closing the main client and the SSE client is sufficient. The shared
-        ``connection_config.transport`` (used by the sandbox's own adapters)
-        is never closed: adapter clients run on adapter-owned transports, and
-        clients wrapping a user-supplied transport are left open because
-        httpx would close the caller's transport with them. The underlying
-        sandbox stays fully usable after ``close()``.
+        Never closes the shared ``connection_config.transport``; the sandbox
+        stays usable after ``close()``. Clients wrapping a user-supplied
+        transport are left open (httpx would close the caller's transport
+        with them).
         """
         if not self._owns_clients:
             return

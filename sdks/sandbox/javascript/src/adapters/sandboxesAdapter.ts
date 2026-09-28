@@ -444,12 +444,8 @@ export class SandboxesAdapter implements Sandboxes {
     if (!this.endpointCache) {
       return this.fetchSandboxEndpoint(sandboxId, port, useServerProxy, signal);
     }
-    // Dedupe on a signal-less fetch: the shared inflight promise must not
-    // capture any single caller's signal, or aborting that caller would
-    // fail every coalesced waiter (including signal-less ones like
-    // Sandbox.getEndpoint()). Waiters with a signal race the shared
-    // promise locally, so an abort fails only that waiter; the shared
-    // fetch itself stays bounded by requestTimeoutSeconds.
+    // Signal-less dedup fetch: no single caller's signal may abort the
+    // shared request; signal callers race it locally instead.
     const shared = this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
       this.fetchSandboxEndpoint(sandboxId, port, useServerProxy)
     );

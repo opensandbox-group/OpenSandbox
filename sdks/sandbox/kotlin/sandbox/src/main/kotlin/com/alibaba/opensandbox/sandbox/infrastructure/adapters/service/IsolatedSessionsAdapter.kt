@@ -634,9 +634,8 @@ internal class IsolatedSessionsAdapter(
         }
     }
 
-    // Delegates to the shared execd helpers so commands, isolated-session,
-    // and code-interpreter paths parse SSE lines and infer exit codes
-    // identically (no per-adapter drift in whitespace/payload handling).
+    // Delegates to the shared helpers so all execd consumers parse SSE lines
+    // and infer exit codes identically.
     private fun decodeEventLine(line: String): EventNode? =
         ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
             logger.error("Failed to parse SSE line: {}", failingLine, error)

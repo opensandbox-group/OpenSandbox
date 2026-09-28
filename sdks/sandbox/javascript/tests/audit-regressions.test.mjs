@@ -105,9 +105,8 @@ test("instance resume gives the resumed sandbox its own transport", async () => 
   // Regression: both instances used to share one undici agent, so closing the
   // original killed the resumed sandbox's connections.
   assert.notEqual(resumed.connectionConfig, original.connectionConfig);
-  // Regression: the resumed instance used to *leak* its fresh transport —
-  // connect's reference-equality check marked the pre-initialized config
-  // caller-owned, so close() never released the dedicated undici agent.
+  // Regression: resume() used to leak its fresh transport (connect marked
+  // the initialized config caller-owned).
   assert.equal(resumed.connectionConfig.ownsTransport, true);
 
   let resumedCloseCalls = 0;
@@ -137,8 +136,8 @@ test("failed instance resume does not close the original sandbox transport", asy
     await realClose();
   };
 
-  // The fresh transport is allocated for the resumed instance; detect its
-  // release via the prototype (the instance does not exist yet).
+  // Detect the fresh transport's release via the prototype (the resumed
+  // instance isn't reachable here).
   const protoClose = ConnectionConfig.prototype.closeTransport;
   let freshCloseCalls = 0;
   ConnectionConfig.prototype.closeTransport = async function () {

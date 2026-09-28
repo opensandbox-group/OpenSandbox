@@ -168,10 +168,8 @@ async def test_slow_connect_does_not_block_unrelated_registry_ops(
 ) -> None:
     """A hanging connect for one sandbox id must not stall other ids' tool calls.
 
-    The registry lock is only held for lookup/dedup book keeping; the connect
-    itself runs outside it (coalesced per id via an in-flight task), so a
-    slow or unreachable sandbox cannot serialize every registry-touching
-    operation for the whole connect budget.
+    The connect runs outside the registry lock, coalesced per id via an
+    in-flight task.
     """
     fake, state = server
     release = asyncio.Event()

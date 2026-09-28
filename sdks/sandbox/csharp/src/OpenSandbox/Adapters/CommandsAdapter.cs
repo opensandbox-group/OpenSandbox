@@ -59,9 +59,8 @@ internal sealed class CommandsAdapter : IExecdCommands
         RunCommandOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        // Guarded here (the shared entry point) so both RunStreamAsync and
-        // RunAsync reject blank commands before any request is built, with
-        // the same whitespace-only contract as RunInSessionAsync.
+        // Shared entry point: covers RunAsync too, with the same whitespace
+        // contract as RunInSessionAsync.
         if (string.IsNullOrWhiteSpace(command))
         {
             throw new InvalidArgumentException("command cannot be empty");
@@ -114,8 +113,6 @@ internal sealed class CommandsAdapter : IExecdCommands
         ExecutionHandlers? handlers = null,
         CancellationToken cancellationToken = default)
     {
-        // Blank-command and option validation happen in RunStreamAsync, the
-        // shared entry point, before any request is built.
         var stream = RunStreamAsync(command, options, cancellationToken);
         _logger.LogDebug("Running command (commandLength={CommandLength})", command.Length);
         return await ConsumeExecutionAsync(

@@ -316,8 +316,7 @@ class CodeInterpreterSync:
                 if not skip_health_check:
                     interpreter.check_ready(ready_timeout, health_check_polling_interval)
             except Exception:
-                # Release the service's HTTP clients so a failed creation
-                # (e.g. ready timeout) does not leak connection pools.
+                # Don't leak the service's clients on a failed creation.
                 with contextlib.suppress(Exception):
                     interpreter.close()
                 raise

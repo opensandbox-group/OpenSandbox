@@ -54,8 +54,7 @@ class ExecdEventSupportTest {
 
     @Test
     fun `preserves interior whitespace after the data prefix`() {
-        // Only one leading space belongs to SSE framing; the rest is payload
-        // (multi-space separators must not be trimmed away by the parser).
+        // Only one leading space is SSE framing; the payload keeps its whitespace.
         val node = decode("""data:  {"type":"stdout","timestamp":3,"text":"  spaced  "}""")
         assertNotNull(node)
         assertEquals("  spaced  ", node!!.text)
@@ -89,8 +88,7 @@ class ExecdEventSupportTest {
 
     @Test
     fun `decodes payload lines the same way regardless of line endings`() {
-        // The adapters feed reader.lineSequence() output, so CRLF is already
-        // stripped by the reader; a bare payload line decodes identically.
+        // Adapters feed reader.lineSequence() output: CRLF is already stripped.
         val node = decode("""{"type":"complete","timestamp":4}""")
         assertNotNull(node)
         assertEquals("complete", node!!.type)

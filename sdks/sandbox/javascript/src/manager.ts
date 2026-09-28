@@ -90,9 +90,7 @@ export class SandboxManager {
       ? opts.connectionConfig
       : new ConnectionConfig(opts.connectionConfig);
     const connectionConfig = baseConnectionConfig.withTransportIfMissing();
-    // Only close transports this manager allocated: a caller-initialized
-    // config (e.g. shared between a manager and Sandbox instances) is
-    // closed by its owner, mirroring Sandbox.connect()/close().
+    // Caller-initialized transports are closed by their owner (mirrors Sandbox).
     const ownsTransport = connectionConfig !== baseConnectionConfig;
     const lifecycleBaseUrl = connectionConfig.getBaseUrl();
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
@@ -201,10 +199,8 @@ export class SandboxManager {
   /**
    * Release the HTTP agent resources allocated for this manager instance.
    *
-   * The transport is closed only when this manager allocated it
-   * (`connectionConfig` arrived uninitialized). A caller-initialized config
-   * stays caller-owned: close it yourself via
-   * `connectionConfig.closeTransport()` when finished with it.
+   * Caller-initialized configs stay caller-owned — close them yourself via
+   * `connectionConfig.closeTransport()`.
    */
   async close(): Promise<void> {
     // Shared (caller-initialized) transports are closed by their owner.

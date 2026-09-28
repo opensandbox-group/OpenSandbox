@@ -88,8 +88,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
 
     /// <summary>
     /// Like <see cref="Internal.HttpClientWrapper"/>, raises a typed
-    /// <see cref="SandboxApiException"/> on an empty or malformed body
-    /// instead of an NRE or a raw <see cref="JsonException"/>.
+    /// <see cref="SandboxApiException"/> on an empty or malformed body.
     /// </summary>
     private static T DeserializeBody<T>(string body, string operation) where T : class
     {

@@ -163,9 +163,7 @@ public class EndpointReadinessTests
     [Fact]
     public async Task CreateSharesOneBudgetAcrossEndpointsAndHealth()
     {
-        // Mirrors ConnectSharesOneBudgetAcrossEndpointsAndHealth for the
-        // create flow: a slow endpoint publication must consume the same
-        // ready timeout as the health check, not run on two stacked budgets.
+        // Same one-budget contract as the connect test, for the create flow.
         var lifecycle = new Mock<ISandboxes>();
         lifecycle.Setup(s => s.CreateSandboxAsync(It.IsAny<CreateSandboxRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new CreateSandboxResponse
