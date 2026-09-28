@@ -157,7 +157,7 @@ class SandboxPoolSync:
         self._current_max_idle = max_idle
         self._lifecycle_state = PoolLifecycleState.NOT_STARTED
         self._lifecycle_lock = threading.RLock()
-        self._stop_lock = threading.Lock()
+        self._stop_lock = threading.RLock()
         self._reconcile_lock = threading.Lock()
         self._in_flight = 0
         self._in_flight_condition = threading.Condition()
@@ -183,7 +183,11 @@ class SandboxPoolSync:
         self._warming_lock = threading.Lock()
 
     def start(self) -> None:
-        with self._lifecycle_lock:
+        # Hold _stop_lock across installation so a concurrent _stop_reconcile
+        # cannot capture a half-installed run (or tear down resources this run
+        # is about to install). The RLock lets this same thread re-enter the
+        # lock from the failure path below.
+        with self._stop_lock, self._lifecycle_lock:
             if self._lifecycle_state in (
                 PoolLifecycleState.RUNNING,
                 PoolLifecycleState.STARTING,
@@ -191,6 +195,9 @@ class SandboxPoolSync:
                 return
             self._lifecycle_state = PoolLifecycleState.STARTING
             try:
+                # Reap resources a superseded shutdown() may have left behind
+                # (run_generation=None tears down unconditionally).
+                self._stop_reconcile(wait_for_warmup=False, run_generation=None)
                 self._ensure_pool_namespace_active()
                 self._warn_if_primary_lock_ttl_may_expire_during_warmup()
                 self._open_pool_transport()
@@ -244,7 +251,9 @@ class SandboxPoolSync:
                 )
                 self._heartbeat_thread.start()
             except Exception:
-                self._stop_reconcile(wait_for_warmup=True)
+                self._stop_reconcile(
+                    wait_for_warmup=True, run_generation=self._run_generation
+                )
                 self._close_provider()
                 self._lifecycle_state = PoolLifecycleState.STOPPED
                 raise
@@ -596,16 +605,16 @@ class SandboxPoolSync:
             ):
                 self._lifecycle_state = PoolLifecycleState.STOPPED
                 return
+            run_generation = self._run_generation
             if not graceful:
                 self._accept_warmup_commits = False
-                self._lifecycle_state = PoolLifecycleState.DRAINING
-            else:
-                self._lifecycle_state = PoolLifecycleState.DRAINING
+            self._lifecycle_state = PoolLifecycleState.DRAINING
         if not graceful:
-            self._stop_reconcile(wait_for_warmup=False)
+            self._stop_reconcile(wait_for_warmup=False, run_generation=run_generation)
             with self._lifecycle_lock:
-                self._lifecycle_state = PoolLifecycleState.STOPPED
-                self._close_provider()
+                if self._run_generation == run_generation:
+                    self._lifecycle_state = PoolLifecycleState.STOPPED
+                    self._close_provider()
             return
         drained = self._await_in_flight_drain(self._config.drain_timeout)
         if not drained:
@@ -613,11 +622,13 @@ class SandboxPoolSync:
                 f"Pool graceful shutdown timed out waiting in-flight operations: pool_name={self._config.pool_name} in_flight={self._in_flight} timeout_ms={int(self._config.drain_timeout.total_seconds() * 1000)}"
             )
         with self._lifecycle_lock:
-            self._accept_warmup_commits = False
-        self._stop_reconcile(wait_for_warmup=False)
+            if self._run_generation == run_generation:
+                self._accept_warmup_commits = False
+        self._stop_reconcile(wait_for_warmup=False, run_generation=run_generation)
         with self._lifecycle_lock:
-            self._lifecycle_state = PoolLifecycleState.STOPPED
-            self._close_provider()
+            if self._run_generation == run_generation:
+                self._lifecycle_state = PoolLifecycleState.STOPPED
+                self._close_provider()
 
     def _run_scheduler(self, stop_event: threading.Event) -> None:
         initial_delay = 0 if self._config.max_idle > 0 else _RECONCILE_INTERVAL_SECONDS
@@ -686,7 +697,8 @@ class SandboxPoolSync:
             )
             try:
                 future = asyncio.run_coroutine_threadsafe(coroutine, loop)
-                self._warmup_futures.add(future)
+                with self._warming_lock:
+                    self._warmup_futures.add(future)
                 future.add_done_callback(
                     lambda done, current=token: self._warmup_done(done, current)
                 )
@@ -913,8 +925,8 @@ class SandboxPoolSync:
         loop.run_forever()
 
     def _warmup_done(self, future: Future[None], token: int) -> None:
-        self._warmup_futures.discard(future)
         with self._warming_lock:
+            self._warmup_futures.discard(future)
             started = token in self._started_warmup_tokens
         if not started:
             error: BaseException | None = (
@@ -981,7 +993,8 @@ class SandboxPoolSync:
                 return
             self._primary_owned = False
             self._leader_epoch += 1
-            futures = tuple(self._warmup_futures)
+            with self._warming_lock:
+                futures = tuple(self._warmup_futures)
         for future in futures:
             future.cancel()
 
@@ -1289,11 +1302,15 @@ class SandboxPoolSync:
         with self._lifecycle_lock:
             if self._lifecycle_state == PoolLifecycleState.STOPPED:
                 return
+            run_generation = self._run_generation
             self._accept_warmup_commits = False
             self._lifecycle_state = PoolLifecycleState.STOPPED
-        self._stop_reconcile(wait_for_warmup=False, join_scheduler=False)
+        self._stop_reconcile(
+            wait_for_warmup=False, join_scheduler=False, run_generation=run_generation
+        )
         with self._lifecycle_lock:
-            self._close_provider()
+            if self._run_generation == run_generation:
+                self._close_provider()
 
     def _build_sandbox_from_creator(
         self,
@@ -1481,14 +1498,21 @@ class SandboxPoolSync:
         *,
         wait_for_warmup: bool,
         join_scheduler: bool = True,
+        run_generation: int | None = None,
     ) -> None:
         # Serialize teardown so concurrent stop paths (shutdown() racing
         # shutdown(), or start()'s failure path racing shutdown()) cannot
-        # capture-and-close the same warmup loop or executors twice.
-        # Everything inside the lock is bounded (join/future timeouts), and
-        # never acquires _lifecycle_lock, so a failed start() holding
-        # _lifecycle_lock cannot deadlock against this lock.
+        # capture-and-close the same warmup loop or executors twice, and so
+        # start() (which holds _stop_lock while installing) can never have a
+        # run torn down half-installed. Every wait inside the lock is bounded
+        # by a timeout: warmup commit-stage workers may be blocked on
+        # _lifecycle_lock while a failing start() holds it, so an unbounded
+        # executor wait here would deadlock the failing start for good.
+        # run_generation=None tears down unconditionally (start()'s pre-clean);
+        # an int skips teardown when a newer run already owns the resources.
         with self._stop_lock:
+            if run_generation is not None and self._run_generation != run_generation:
+                return
             self._stop_event.set()
             thread = self._scheduler_thread
             if (
@@ -1503,7 +1527,8 @@ class SandboxPoolSync:
             if heartbeat is not None and heartbeat is not threading.current_thread():
                 heartbeat.join(timeout=5)
             self._heartbeat_thread = None
-            warmup_futures = tuple(self._warmup_futures)
+            with self._warming_lock:
+                warmup_futures = tuple(self._warmup_futures)
             if not wait_for_warmup:
                 for future in warmup_futures:
                     future.cancel()
@@ -1538,27 +1563,23 @@ class SandboxPoolSync:
             self._create_executor = None
             if create_executor is not None:
                 create_executor.shutdown(wait=False, cancel_futures=True)
-                if wait_for_warmup:
-                    create_executor.shutdown(wait=True)
-                else:
-                    self._await_executor_threads(
-                        create_executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
-                    )
+                self._await_executor_threads(
+                    create_executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
+                )
             executor = self._warmup_executor
             self._warmup_executor = None
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
-                if wait_for_warmup:
-                    executor.shutdown(wait=True)
-                else:
-                    self._await_executor_threads(
-                        executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
-                    )
-        # Idempotent bookkeeping kept outside _stop_lock: _mark_primary_lost
-        # takes _lifecycle_lock, which must never be awaited while holding
-        # _stop_lock (lock-order inversion with start()'s failure path).
-        self._release_primary_lock_best_effort()
-        self._mark_primary_lost()
+                self._await_executor_threads(
+                    executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
+                )
+            # Idempotent bookkeeping. Kept inside _stop_lock: start() holds
+            # _stop_lock and _lifecycle_lock together, so a thread inside this
+            # section can always take _lifecycle_lock without inverting the
+            # order, and start()'s failure path re-enters this lock on the
+            # same thread.
+            self._release_primary_lock_best_effort()
+            self._mark_primary_lost()
 
     def _await_executor_threads(
         self, executor: ThreadPoolExecutor, timeout_seconds: float

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -982,6 +983,102 @@ def test_concurrent_shutdown_closes_warmup_loop_once() -> None:
         assert len(close_threads) == 1
     finally:
         pool.shutdown(False)
+
+
+def test_stop_reconcile_bounded_when_warmup_stage_blocks_on_lifecycle_lock() -> None:
+    """Regression: start()'s failure path calls _stop_reconcile() while holding
+    _lifecycle_lock. A warmup commit-stage worker blocked on that lock must not
+    deadlock an unbounded executor wait in teardown — every wait must be
+    bounded so the failing start() can release the lock again.
+    """
+    pool = _create_pool(max_idle=0)
+    pool.start()
+    worker_entered = threading.Event()
+    worker_released = threading.Event()
+    lock_held = threading.Event()
+    teardown_done = threading.Event()
+
+    def blocked_commit_stage() -> None:
+        worker_entered.set()
+        # Mimics the commit stage: _can_commit_locally takes _lifecycle_lock,
+        # which the failing-start thread below already holds, so this blocks.
+        pool._can_commit_locally(0, 0)
+        worker_released.set()
+
+    def failing_start_failure_path() -> None:
+        # Mirrors start()'s failure path: teardown runs while _lifecycle_lock
+        # is held by this same thread.
+        with pool._lifecycle_lock:
+            lock_held.set()
+            assert worker_entered.wait(timeout=10)
+            pool._stop_reconcile(wait_for_warmup=True)
+        teardown_done.set()
+
+    # Daemon so a deadlocked teardown (the regression under test) cannot hang
+    # the interpreter after this test has already failed.
+    teardown_thread = threading.Thread(target=failing_start_failure_path, daemon=True)
+    teardown_thread.start()
+    assert lock_held.wait(timeout=10)
+    assert pool._warmup_executor is not None
+    pool._warmup_executor.submit(blocked_commit_stage)
+    assert worker_entered.wait(timeout=10)
+    teardown_thread.join(timeout=40)
+    assert not teardown_thread.is_alive(), "teardown deadlocked on lifecycle lock"
+    assert teardown_done.is_set()
+    assert worker_released.wait(timeout=5)
+
+
+def test_concurrent_start_shutdown_interleaved_closes_every_loop_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: teardown must be mutually exclusive with start()'s resource
+    installation. Interleaved start()/shutdown() from multiple threads must
+    never capture a half-installed run and must close every created warmup
+    loop exactly once.
+    """
+    created: list[asyncio.AbstractEventLoop] = []
+    closed: set[int] = set()
+    original_new_event_loop = sync_pool_module.asyncio.new_event_loop
+
+    def tracking_new_event_loop() -> asyncio.AbstractEventLoop:
+        loop = original_new_event_loop()
+        created.append(loop)
+        original_close = loop.close
+
+        def tracking_close() -> None:
+            closed.add(id(loop))
+            original_close()
+
+        loop.close = tracking_close  # type: ignore[method-assign]
+        return loop
+
+    monkeypatch.setattr(
+        sync_pool_module.asyncio, "new_event_loop", tracking_new_event_loop
+    )
+    pool = _create_pool(max_idle=0)
+    errors: list[Exception] = []
+
+    def worker(worker_index: int) -> None:
+        for round_index in range(10):
+            try:
+                pool.start()
+                pool.shutdown(graceful=(round_index + worker_index) % 2 == 0)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                return
+
+    threads = [
+        threading.Thread(target=worker, args=(index,)) for index in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(closed) == len(created)
+    assert pool._warmup_loop is None
+    assert pool.snapshot().lifecycle_state == PoolLifecycleState.STOPPED
 
 
 def test_acquire_retry_next_idle_empty_raises_pool_empty() -> None:
