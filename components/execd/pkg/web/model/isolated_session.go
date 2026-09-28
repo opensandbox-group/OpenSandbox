@@ -82,63 +82,14 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 	if err := v.Struct(r); err != nil {
 		return err
 	}
-	if r.Workspace == nil && len(r.Overlays) == 0 {
-		return fmt.Errorf("workspace or overlays is required")
+	if err := r.validateMounts(); err != nil {
+		return err
 	}
-	// The effective mount list (legacy workspace prepended) must carry
-	// absolute, unique paths: CreateIsolatedSession runs host-side
-	// MkdirAll on each path before bwrap validates, so a relative or
-	// duplicated path must fail here with 400 instead of creating stray
-	// host directories and surfacing as a 500.
-	seenPaths := make(map[string]struct{}, len(r.Overlays)+1)
-	for _, ov := range r.EffectiveOverlays() {
-		if !strings.HasPrefix(ov.Path, "/") {
-			return fmt.Errorf("overlays: path %q must be an absolute path", ov.Path)
-		}
-		cleaned := filepath.Clean(ov.Path)
-		if _, dup := seenPaths[cleaned]; dup {
-			return fmt.Errorf("overlays: duplicate path %q", ov.Path)
-		}
-		seenPaths[cleaned] = struct{}{}
+	if err := validateEnum("env_passthrough mode", r.EnvPassthrough.Mode, "deny", "allow"); err != nil {
+		return err
 	}
-	if r.Workspace != nil && r.Workspace.Mode != "" {
-		switch r.Workspace.Mode {
-		case WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO:
-		default:
-			return fmt.Errorf("invalid workspace mode %q: must be %s, %s, or %s",
-				r.Workspace.Mode, WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO)
-		}
-	}
-	for i, ov := range r.Overlays {
-		if ov.Mode != "" {
-			switch ov.Mode {
-			case WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO:
-			default:
-				return fmt.Errorf("invalid overlays[%d] mode %q: must be %s, %s, or %s",
-					i, ov.Mode, WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO)
-			}
-		}
-		if ov.Persist != nil &&
-			ov.Mode != WorkspaceModeOverlay && ov.Mode != "" {
-			return fmt.Errorf("overlays[%d]: persist applies only to mode %q",
-				i, WorkspaceModeOverlay)
-		}
-	}
-	if r.EnvPassthrough.Mode != "" {
-		switch r.EnvPassthrough.Mode {
-		case "deny", "allow":
-		default:
-			return fmt.Errorf("invalid env_passthrough mode %q: must be \"deny\" or \"allow\"",
-				r.EnvPassthrough.Mode)
-		}
-	}
-	if r.UidMode != "" {
-		switch r.UidMode {
-		case "setpriv", "userns":
-		default:
-			return fmt.Errorf("invalid uid_mode %q: must be \"setpriv\" or \"userns\"",
-				r.UidMode)
-		}
+	if err := validateEnum("uid_mode", r.UidMode, "setpriv", "userns"); err != nil {
+		return err
 	}
 	for i, b := range r.Binds {
 		if b.Source == "" {
@@ -150,6 +101,65 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 		if b.Dest != "" && !strings.HasPrefix(b.Dest, "/") {
 			return fmt.Errorf("binds[%d].dest %q must be an absolute path", i, b.Dest)
 		}
+	}
+	return nil
+}
+
+// validateEnum rejects a non-empty value outside the given set.
+func validateEnum(field, value string, allowed ...string) error {
+	if value == "" {
+		return nil
+	}
+	for _, a := range allowed {
+		if value == a {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid %s %q: must be one of %s", field, value, strings.Join(allowed, ", "))
+}
+
+// validateMounts checks the workspace/overlays combination: at least one
+// mount, valid modes, overlay-only persist, and absolute unique paths over
+// the effective (workspace-prepended) list.
+func (r *CreateIsolatedSessionRequest) validateMounts() error {
+	if r.Workspace == nil && len(r.Overlays) == 0 {
+		return fmt.Errorf("workspace or overlays is required")
+	}
+	if r.Workspace != nil {
+		if err := validateEnum("workspace mode", r.Workspace.Mode,
+			WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO); err != nil {
+			return err
+		}
+	}
+	for i, ov := range r.Overlays {
+		if err := validateEnum(fmt.Sprintf("overlays[%d] mode", i), ov.Mode,
+			WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO); err != nil {
+			return err
+		}
+		if ov.Persist != nil &&
+			ov.Mode != WorkspaceModeOverlay && ov.Mode != "" {
+			return fmt.Errorf("overlays[%d]: persist applies only to mode %q",
+				i, WorkspaceModeOverlay)
+		}
+	}
+	return r.validateMountPaths()
+}
+
+// validateMountPaths requires absolute, unique paths across the effective
+// mount list: CreateIsolatedSession runs host-side MkdirAll on each path
+// before bwrap validates, so a relative or duplicated path must fail here
+// with 400 instead of creating stray host directories and surfacing as 500.
+func (r *CreateIsolatedSessionRequest) validateMountPaths() error {
+	seenPaths := make(map[string]struct{}, len(r.Overlays)+1)
+	for _, ov := range r.EffectiveOverlays() {
+		if !strings.HasPrefix(ov.Path, "/") {
+			return fmt.Errorf("overlays: path %q must be an absolute path", ov.Path)
+		}
+		cleaned := filepath.Clean(ov.Path)
+		if _, dup := seenPaths[cleaned]; dup {
+			return fmt.Errorf("overlays: duplicate path %q", ov.Path)
+		}
+		seenPaths[cleaned] = struct{}{}
 	}
 	return nil
 }

@@ -191,7 +191,7 @@ public class IsolatedSessionsAdapterAttachTests
 
         var body = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(handler.Requests[0].Body!);
         body!.Should().NotContainKey("overlays");
-        body["workspace"].GetProperty("path").GetString().Should().Be("/workspace");
+        body!["workspace"].GetProperty("path").GetString().Should().Be("/workspace");
     }
 
     [Fact]
