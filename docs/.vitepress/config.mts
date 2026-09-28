@@ -232,7 +232,10 @@ export default defineConfig({
       "/api/": [
         {
           text: "API Reference",
-          items: [{ text: "OpenAPI Specs", link: "/api/" }],
+          items: [
+            { text: "OpenAPI Specs", link: "/api/" },
+            { text: "Implementation Compatibility", link: "/api/implementation-compatibility" },
+          ],
         },
       ],
 

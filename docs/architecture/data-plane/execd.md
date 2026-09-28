@@ -1,15 +1,17 @@
 ---
 title: Execd
-description: The daemon inside every OpenSandbox sandbox — one entry point for commands, code execution, terminals, files, and metrics, with layered isolation built in.
+description: The reference daemon for OpenSandbox's in-sandbox execution API — commands, code execution, terminals, files, and metrics, with layered isolation built in.
 ---
 
 # Execd
 
-Execd is the daemon that runs inside every OpenSandbox sandbox. It is the only process clients ever talk to: SDKs, the `osb` CLI, MCP agents, and the lifecycle server all reach your sandbox through its API. You rarely see it — but everything you do with a sandbox, you do through it.
+Execd is the reference daemon for OpenSandbox's in-sandbox execution API. Sandbox SDK command and file operations use this API; sandbox creation and lifecycle management use the separate lifecycle server. Clients can also access workload-specific services through resolved sandbox endpoints, using those services' own protocols and clients.
+
+For example, the [AIO Sandbox example](/examples/aio-sandbox) resolves port `8080` and uses `AioSandboxClient` for the image's shell, file, and browser API. Those requests are not execd command or file operations, even when an execd reverse proxy carries the traffic. See [Implementation compatibility](/api/implementation-compatibility) for the published contracts, current SDK endpoint assumptions, and backend-dependent features.
 
 ![execd overview](../../public/images/execd-overview.svg)
 
-When the platform creates a sandbox it injects execd next to your entrypoint — as a staged binary in Docker, an init container in Kubernetes, or a baked-in part of a Fast Sandbox template image. Execd serves one HTTP API (default port `44772`), authenticated with a shared access token the platform manages for you. The full contract is public: [execd API spec](/api/).
+The reference platform provisions execd next to your entrypoint — as a staged binary in Docker, an init container in Kubernetes, or a baked-in part of a Fast Sandbox template image. Execd serves an HTTP API (default port `44772`); when access-token protection is enabled, clients forward the token supplied by endpoint resolution. The published [execd API spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml) describes the execution contract; some reference-implementation extensions, including PTY routes, are not yet covered by it.
 
 Execd also fronts a small reverse proxy (`/proxy/{port}`), so one exposed host port can reach every port inside the sandbox — see [Single-Host Network (Docker)](/architecture/network/single-host-network).
 

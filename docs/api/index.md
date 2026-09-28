@@ -9,6 +9,10 @@ This section contains the OpenAPI specification documents for the OpenSandbox pr
 
 ## Specification Files
 
+Implementing an alternative backend or integrating a workload's own API? Read
+[Implementation compatibility](/api/implementation-compatibility) for the boundary
+between these contracts, the reference daemons, and current SDK expectations.
+
 ### 1. sandbox-lifecycle.yml
 
 [OpenAPI source](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml)
