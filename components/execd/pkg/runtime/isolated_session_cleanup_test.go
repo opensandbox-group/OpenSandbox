@@ -125,7 +125,7 @@ func TestFailedStartupTimeoutRetainsPrivateCleanupOwnership(t *testing.T) {
 				t.Fatalf("failed-start session leaked into List: %+v", sessions)
 			}
 
-			upperParent := filepath.Dir(session.upperDir)
+			upperParent := filepath.Dir(session.overlays[0].upperDir)
 			if _, err := os.Stat(upperParent); err != nil {
 				t.Fatalf("pending startup lost its upper: %v", err)
 			}
@@ -172,8 +172,13 @@ func TestDeleteTimeoutRetainsSessionAndUpperForRetry(t *testing.T) {
 		processWaited: processWaited,
 		doneCh:        doneCh,
 		upperID:       upperID,
-		upperDir:      upperDir,
-		workDir:       workDir,
+		overlays: []sessionOverlay{{
+			path:     "delete-timeout-ws",
+			mode:     isolation.WorkspaceOverlay,
+			persist:  true,
+			upperDir: upperDir,
+			workDir:  workDir,
+		}},
 	}
 	runner.ctrl.isolatedSessionMap.Store(session.id, session)
 
@@ -229,8 +234,13 @@ func TestDeleteNamespaceCleanupFailureRetainsSessionAndUpperForRetry(
 		processWaited: make(chan struct{}),
 		doneCh:        make(chan struct{}),
 		upperID:       upperID,
-		upperDir:      upperDir,
-		workDir:       workDir,
+		overlays: []sessionOverlay{{
+			path:     "delete-namespace-retry-ws",
+			mode:     isolation.WorkspaceOverlay,
+			persist:  true,
+			upperDir: upperDir,
+			workDir:  workDir,
+		}},
 		namespacePins: pins,
 	}
 	runner.ctrl.isolatedSessionMap.Store(session.id, session)
@@ -285,9 +295,14 @@ func TestFilesystemOperationLeaseRetainsUpperUntilIdleGCRetry(t *testing.T) {
 		processWaited: make(chan struct{}),
 		doneCh:        make(chan struct{}),
 		upperID:       upperID,
-		upperDir:      canonicalUpperDir,
-		workDir:       workDir,
-		lastRunAt:     time.Now(),
+		overlays: []sessionOverlay{{
+			path:     workspacePath,
+			mode:     isolation.WorkspaceOverlay,
+			persist:  true,
+			upperDir: canonicalUpperDir,
+			workDir:  workDir,
+		}},
+		lastRunAt: time.Now(),
 	}
 	runner.ctrl.isolatedSessionMap.Store(session.id, session)
 
@@ -399,9 +414,14 @@ func TestOpenFileRequestLeaseRetainsUpperUntilRelease(t *testing.T) {
 		processWaited: make(chan struct{}),
 		doneCh:        make(chan struct{}),
 		upperID:       upperID,
-		upperDir:      canonicalUpperDir,
-		workDir:       workDir,
-		lastRunAt:     time.Now(),
+		overlays: []sessionOverlay{{
+			path:     workspacePath,
+			mode:     isolation.WorkspaceOverlay,
+			persist:  true,
+			upperDir: canonicalUpperDir,
+			workDir:  workDir,
+		}},
+		lastRunAt: time.Now(),
 	}
 	runner.ctrl.isolatedSessionMap.Store(session.id, session)
 

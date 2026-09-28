@@ -30,6 +30,18 @@ type IsolatedWorkspaceSpec struct {
 	Mode string `json:"mode,omitempty"` // "rw" | "overlay" | "ro"
 }
 
+// IsolatedOverlaySpec describes one overlay mount inside the isolated
+// namespace. Overlay mode mounts a copy-on-write view: with Persist=true
+// (default) writes land in a host upper directory tracked by execd; with
+// Persist=false the upper is an ephemeral tmpfs whose writes are discarded
+// when the session ends. rw and ro bind the host path directly and ignore
+// Persist.
+type IsolatedOverlaySpec struct {
+	Path    string `json:"path"`
+	Mode    string `json:"mode,omitempty"`    // "rw" | "overlay" | "ro"
+	Persist *bool  `json:"persist,omitempty"` // overlay mode only; nil = true
+}
+
 // EnvPassthroughSpec controls environment variable passthrough.
 type EnvPassthroughSpec struct {
 	Mode string   `json:"mode,omitempty"` // "allow" | "deny"
@@ -43,18 +55,22 @@ type BindMount struct {
 	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
-// CreateIsolatedSessionRequest is the request body for creating an isolated session.
+// CreateIsolatedSessionRequest is the request body for creating an isolated
+// session. Workspace is the legacy single-workspace sugar: at least one of
+// Workspace or Overlays must be set, and when both are present Workspace is
+// prepended to Overlays.
 type CreateIsolatedSessionRequest struct {
-	Workspace          IsolatedWorkspaceSpec `json:"workspace"`
-	Profile            string                `json:"profile,omitempty"`
-	ExtraWritable      []string              `json:"extra_writable,omitempty"`
-	Binds              []BindMount           `json:"binds,omitempty"`
-	ShareNet           *bool                 `json:"share_net,omitempty"`
-	EnvPassthrough     *EnvPassthroughSpec   `json:"env_passthrough,omitempty"`
-	Uid                *uint32               `json:"uid,omitempty"`
-	Gid                *uint32               `json:"gid,omitempty"`
-	UidMode            string                `json:"uid_mode,omitempty"` // "setpriv" | "userns"
-	IdleTimeoutSeconds int                   `json:"idle_timeout_seconds,omitempty"`
+	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	Overlays           []IsolatedOverlaySpec  `json:"overlays,omitempty"`
+	Profile            string                 `json:"profile,omitempty"`
+	ExtraWritable      []string               `json:"extra_writable,omitempty"`
+	Binds              []BindMount            `json:"binds,omitempty"`
+	ShareNet           *bool                  `json:"share_net,omitempty"`
+	EnvPassthrough     *EnvPassthroughSpec    `json:"env_passthrough,omitempty"`
+	Uid                *uint32                `json:"uid,omitempty"`
+	Gid                *uint32                `json:"gid,omitempty"`
+	UidMode            string                 `json:"uid_mode,omitempty"` // "setpriv" | "userns"
+	IdleTimeoutSeconds int                    `json:"idle_timeout_seconds,omitempty"`
 }
 
 // IsolatedSessionInfo is the response from creating an isolated session.
@@ -76,6 +92,7 @@ type IsolatedSessionInfo struct {
 	// Creation-parameter echoes (populated on attach when the server supports it).
 	Profile            string                 `json:"profile,omitempty"`
 	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	Overlays           []IsolatedOverlaySpec  `json:"overlays,omitempty"`
 	ExtraWritable      []string               `json:"extra_writable,omitempty"`
 	Binds              []BindMount            `json:"binds,omitempty"`
 	ShareNet           *bool                  `json:"share_net,omitempty"`
@@ -105,6 +122,7 @@ type IsolatedSessionState struct {
 	// Creation-parameter echoes (optional; omitted by older execd builds).
 	Profile            string                 `json:"profile,omitempty"`
 	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	Overlays           []IsolatedOverlaySpec  `json:"overlays,omitempty"`
 	ExtraWritable      []string               `json:"extra_writable,omitempty"`
 	Binds              []BindMount            `json:"binds,omitempty"`
 	ShareNet           *bool                  `json:"share_net,omitempty"`

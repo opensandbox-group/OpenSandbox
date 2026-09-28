@@ -30,6 +30,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities;
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedOverlaySpec;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec;
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationSession;
@@ -101,6 +102,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         null,
@@ -126,6 +128,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         null,
@@ -152,6 +155,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         null,
@@ -178,6 +182,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         null,
@@ -206,6 +211,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         null,
@@ -234,6 +240,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/workspace", "rw"),
+                                        null,
                                         "strict",
                                         null,
                                         null,
@@ -248,6 +255,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/workspace", "rw"),
+                                        null,
                                         "strict",
                                         null,
                                         null,
@@ -284,6 +292,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 .create(
                         new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec(path, mode),
+                                null,
                                 "balanced",
                                 null,
                                 null,
@@ -885,6 +894,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .withSession(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         null,
@@ -915,6 +925,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .withSession(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         null,
@@ -960,6 +971,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         List.of(new BindMount(srcDir, dest, null)),
@@ -1005,6 +1017,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                                 .create(
                                         new CreateIsolatedSessionRequest(
                                                 new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                                null,
                                                 "balanced",
                                                 null,
                                                 // /etc is not in the writable allowlist.
@@ -1044,6 +1057,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         .create(
                                 new CreateIsolatedSessionRequest(
                                         new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        null,
                                         "balanced",
                                         null,
                                         List.of(new BindMount(srcDir, dest, true)),
@@ -1074,6 +1088,283 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         } finally {
             session.delete();
             sandbox.commands().run("rm -rf " + srcDir);
+        }
+    }
+
+    // ── Multiple overlay mounts (overlays request field) ────────────────
+
+    private IsolationSession createOverlaysSession(List<IsolatedOverlaySpec> overlays) {
+        return sandbox.isolation()
+                .create(
+                        new CreateIsolatedSessionRequest(
+                                null,
+                                overlays,
+                                "balanced",
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null));
+    }
+
+    @Test
+    @Order(40)
+    void testMultiOverlayIndependentMounts() {
+        long ts = System.currentTimeMillis();
+        String dirA = "/tmp/mo_a_" + ts;
+        String dirB = "/tmp/mo_b_" + ts;
+        sandbox.commands()
+                .run(
+                        "mkdir -p "
+                                + dirA
+                                + " "
+                                + dirB
+                                + " && echo a-lower > "
+                                + dirA
+                                + "/lower.txt && echo b-lower > "
+                                + dirB
+                                + "/lower.txt");
+        IsolationSession session =
+                createOverlaysSession(
+                        List.of(
+                                new IsolatedOverlaySpec(dirA, "overlay", null),
+                                new IsolatedOverlaySpec(dirB, "overlay", null)));
+        try {
+            // Writes land in each mount's own copy-on-write layer.
+            session.run(
+                    new IsolatedRunRequest(
+                            "echo a-upper > " + dirA + "/upper.txt"
+                                    + " && echo b-upper > " + dirB + "/upper.txt",
+                            null,
+                            null));
+            Execution exec =
+                    session.run(
+                            new IsolatedRunRequest(
+                                    "cat " + dirA + "/upper.txt && cat " + dirB + "/upper.txt",
+                                    null,
+                                    null));
+            String text = stdoutText(exec);
+            assertTrue(
+                    text.contains("a-upper") && text.contains("b-upper"),
+                    "expected both overlay writes visible in-session, got: " + text);
+
+            // The files API routes each path to its own overlay view.
+            assertEquals("a-upper", session.getFiles().readFile(dirA + "/upper.txt").trim());
+            assertEquals("b-upper", session.getFiles().readFile(dirB + "/upper.txt").trim());
+
+            // Copy-on-write: host lower files are untouched and upper files
+            // never surface on the host.
+            Execution hostCheck =
+                    sandbox.commands()
+                            .run(
+                                    "cat "
+                                            + dirA
+                                            + "/lower.txt && cat "
+                                            + dirB
+                                            + "/lower.txt && (cat "
+                                            + dirA
+                                            + "/upper.txt 2>&1 || echo NOT_FOUND)");
+            String hostText = stdoutText(hostCheck);
+            assertTrue(
+                    hostText.contains("a-lower") && hostText.contains("b-lower"),
+                    "host lower files must be untouched, got: " + hostText);
+            assertTrue(
+                    hostText.contains("NOT_FOUND") || hostText.contains("No such file"),
+                    "overlay upper files must not be visible on host, got: " + hostText);
+
+            // The session state echoes the effective overlay list.
+            var state = session.get();
+            assertNotNull(state.getOverlays());
+            assertEquals(2, state.getOverlays().size());
+            assertEquals(dirA, state.getOverlays().get(0).getPath());
+            assertEquals("overlay", state.getOverlays().get(0).getMode());
+            assertEquals(dirB, state.getOverlays().get(1).getPath());
+        } finally {
+            session.delete();
+            sandbox.commands().run("rm -rf " + dirA + " " + dirB);
+        }
+    }
+
+    @Test
+    @Order(41)
+    void testRootOverlayWithWorkspaceShadowing() {
+        long ts = System.currentTimeMillis();
+        String wsMarker = "/workspace/mo_ws_" + ts + ".txt";
+        String rootMarker = "/etc/mo_root_" + ts + ".txt";
+        sandbox.commands().run("mkdir -p /workspace && echo host-ws > " + wsMarker);
+        IsolationSession session =
+                createOverlaysSession(
+                        List.of(
+                                new IsolatedOverlaySpec("/", "overlay", null),
+                                new IsolatedOverlaySpec("/workspace", "overlay", null)));
+        try {
+            // The nested /workspace overlay shadows the root overlay inside
+            // its own subtree; writes to /etc go through the root overlay.
+            session.run(
+                    new IsolatedRunRequest(
+                            "echo in-session > " + wsMarker
+                                    + " && echo in-session-root > " + rootMarker,
+                            null,
+                            null));
+            Execution exec = session.run(new IsolatedRunRequest("cat " + wsMarker, null, null));
+            assertTrue(
+                    stdoutText(exec).contains("in-session"),
+                    "nested workspace overlay must shadow the root overlay");
+
+            // Host /workspace is untouched (COW) and the /etc write never
+            // reaches the host.
+            Execution hostCheck =
+                    sandbox.commands()
+                            .run(
+                                    "cat "
+                                            + wsMarker
+                                            + " && (cat "
+                                            + rootMarker
+                                            + " 2>&1 || echo NOT_FOUND)");
+            String hostText = stdoutText(hostCheck);
+            assertTrue(
+                    hostText.contains("host-ws"),
+                    "host workspace file must be untouched, got: " + hostText);
+            assertTrue(
+                    hostText.contains("NOT_FOUND") || hostText.contains("No such file"),
+                    "root-overlay write must not be visible on host, got: " + hostText);
+
+            // The files API routes by longest prefix: /workspace to its own
+            // overlay, /etc to the root overlay.
+            assertTrue(session.getFiles().readFile(wsMarker).contains("in-session"));
+            assertTrue(session.getFiles().readFile(rootMarker).contains("in-session-root"));
+        } finally {
+            session.delete();
+            sandbox.commands().run("rm -f " + wsMarker + " " + rootMarker);
+        }
+    }
+
+    @Test
+    @Order(42)
+    void testWorkspaceSugarPrependedToOverlays() {
+        long ts = System.currentTimeMillis();
+        String dirA = "/tmp/mo_sugar_a_" + ts;
+        String dirB = "/tmp/mo_sugar_b_" + ts;
+        sandbox.commands().run("mkdir -p " + dirA + " " + dirB);
+        IsolationSession session =
+                sandbox.isolation()
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec(dirA, "rw"),
+                                        List.of(new IsolatedOverlaySpec(dirB, "overlay", null)),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
+        try {
+            session.run(
+                    new IsolatedRunRequest(
+                            "echo rw-write > " + dirA + "/f.txt"
+                                    + " && echo ov-write > " + dirB + "/f.txt",
+                            null,
+                            null));
+
+            // The rw (legacy workspace) mount writes straight through to the
+            // host; the overlay mount's writes stay in its upper.
+            Execution hostCheck =
+                    sandbox.commands()
+                            .run(
+                                    "cat "
+                                            + dirA
+                                            + "/f.txt && (cat "
+                                            + dirB
+                                            + "/f.txt 2>&1 || echo NOT_FOUND)");
+            String hostText = stdoutText(hostCheck);
+            assertTrue(
+                    hostText.contains("rw-write"),
+                    "rw workspace writes must be visible on host, got: " + hostText);
+            assertTrue(
+                    hostText.contains("NOT_FOUND") || hostText.contains("No such file"),
+                    "overlay mount writes must not be visible on host, got: " + hostText);
+
+            assertEquals("rw-write", session.getFiles().readFile(dirA + "/f.txt").trim());
+            assertEquals("ov-write", session.getFiles().readFile(dirB + "/f.txt").trim());
+
+            // workspace is echoed as the first of the two effective overlays.
+            var state = session.get();
+            assertEquals(2, state.getOverlays().size());
+            assertEquals(dirA, state.getOverlays().get(0).getPath());
+            assertEquals("rw", state.getOverlays().get(0).getMode());
+            assertEquals(dirB, state.getOverlays().get(1).getPath());
+        } finally {
+            session.delete();
+            sandbox.commands().run("rm -rf " + dirA + " " + dirB);
+        }
+    }
+
+    @Test
+    @Order(43)
+    void testOverlayPersistEcho() {
+        long ts = System.currentTimeMillis();
+        String dirA = "/tmp/mo_persist_" + ts;
+        String dirB = "/tmp/mo_ephemeral_" + ts;
+        sandbox.commands().run("mkdir -p " + dirA + " " + dirB);
+        IsolationSession session =
+                createOverlaysSession(
+                        List.of(
+                                new IsolatedOverlaySpec(dirA, "overlay", true),
+                                new IsolatedOverlaySpec(dirB, "overlay", false)));
+        try {
+            // Both mounts work in-session regardless of persist.
+            session.run(
+                    new IsolatedRunRequest(
+                            "echo p > " + dirA + "/f.txt && echo e > " + dirB + "/f.txt",
+                            null,
+                            null));
+            assertEquals("p", session.getFiles().readFile(dirA + "/f.txt").trim());
+            assertEquals("e", session.getFiles().readFile(dirB + "/f.txt").trim());
+
+            var state = session.get();
+            assertEquals(2, state.getOverlays().size());
+            assertEquals(Boolean.TRUE, state.getOverlays().get(0).getPersist());
+            assertEquals(Boolean.FALSE, state.getOverlays().get(1).getPersist());
+        } finally {
+            session.delete();
+            sandbox.commands().run("rm -rf " + dirA + " " + dirB);
+        }
+    }
+
+    @Test
+    @Order(44)
+    void testOverlayPersistOnRwRejected() {
+        // persist applies only to overlay mode; the API must reject it 400.
+        assertThrows(
+                SandboxException.class,
+                () ->
+                        createOverlaysSession(
+                                List.of(new IsolatedOverlaySpec("/tmp", "rw", true))));
+    }
+
+    @Test
+    @Order(45)
+    void testEphemeralPrimaryBackgroundRunRejected() {
+        long ts = System.currentTimeMillis();
+        String dir = "/tmp/mo_bg_" + ts;
+        sandbox.commands().run("mkdir -p " + dir);
+        IsolationSession session =
+                createOverlaysSession(
+                        List.of(new IsolatedOverlaySpec(dir, "overlay", false)));
+        try {
+            // An ephemeral primary overlay has no host-visible writable
+            // location for background-run logs.
+            assertThrows(
+                    SandboxException.class, () -> session.runBackground("echo bg", null));
+        } finally {
+            session.delete();
+            sandbox.commands().run("rm -rf " + dir);
         }
     }
 }

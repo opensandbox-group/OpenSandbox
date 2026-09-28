@@ -1132,6 +1132,29 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/CreateIsolatedSessionRequest"
+            examples:
+              workspace:
+                summary: Single workspace (legacy field)
+                value:
+                  workspace:
+                    path: /workspace
+                    mode: overlay
+              overlays:
+                summary: Root overlay plus separate workspace overlay
+                value:
+                  overlays:
+                    - path: /
+                      mode: overlay
+                    - path: /workspace
+                      mode: overlay
+                      persist: true
+              ephemeral_overlay:
+                summary: Workspace with a discarded ephemeral upper
+                value:
+                  overlays:
+                    - path: /workspace
+                      mode: overlay
+                      persist: false
       responses:
         "201":
           description: Session created
@@ -2233,14 +2256,29 @@ components:
 
     CreateIsolatedSessionRequest:
       type: object
-      required:
-        - workspace
+      description: >-
+        Creates an isolated session with one or more overlay mounts. The
+        legacy `workspace` field is kept as sugar for a single-element
+        `overlays` list: at least one of `workspace` or `overlays` must be
+        provided, and when both are present `workspace` is prepended to
+        `overlays`.
       properties:
         profile:
           type: string
           enum: ["strict", "balanced"]
         workspace:
           $ref: "#/components/schemas/IsolatedWorkspaceSpec"
+        overlays:
+          type: array
+          description: >-
+            Independent overlay mounts inside one namespace. Each entry gets
+            its own copy-on-write upper (or a direct/ro bind for rw/ro
+            modes). bubblewrap applies mounts shallow-first, so a nested
+            overlay (for example `/workspace` on top of a `/` root overlay)
+            shadows its ancestors within its own subtree. Paths must be
+            absolute and unique across entries.
+          items:
+            $ref: "#/components/schemas/IsolatedOverlaySpec"
         extra_writable:
           type: array
           items:
@@ -2286,6 +2324,39 @@ components:
         mode:
           type: string
           enum: ["rw", "overlay", "ro"]
+
+    IsolatedOverlaySpec:
+      type: object
+      description: >-
+        One overlay mount inside the isolated namespace. `mode=overlay`
+        mounts a copy-on-write view: with `persist=true` (default) writes
+        land in a host upper directory tracked and usage-accounted by execd
+        (the substrate for the diff/commit endpoints); with
+        `persist=false` the upper is an ephemeral tmpfs whose writes are
+        discarded when the session ends. `rw` and `ro` bind the host path
+        directly and ignore `persist`.
+      required:
+        - path
+      properties:
+        path:
+          type: string
+          description: Mount destination inside the namespace (absolute).
+          example: /workspace
+        mode:
+          type: string
+          enum: ["rw", "overlay", "ro"]
+          description: Mount mode. Defaults to `overlay`.
+        persist:
+          type: boolean
+          default: true
+          description: >-
+            Overlay mode only. When true (default) the copy-on-write upper
+            is a host directory allocated per session; when false it is an
+            ephemeral tmpfs whose writes are discarded when the session
+            ends. Must be omitted for `rw` and `ro` modes. Overlay mounts
+            with `persist=false` cannot host background-run logs, so
+            background runs are rejected unless the first overlay is `rw`
+            or `overlay` with `persist=true`.
 
     BindMount:
       type: object
@@ -2365,10 +2436,11 @@ components:
             level signals (for example the SIGINT sent when a foreground run
             times out or is cancelled) also reach them; execd cannot signal
             individual in-namespace processes.
-            Background runs require a writable log location, so sessions with
-            a read-only (`ro`) workspace reject them with 400: there is no
-            host-visible writable location for the run's log and exit-code
-            files. rw and overlay workspaces are supported.
+            Background runs require a writable log location under the first
+            overlay, so sessions whose first overlay is read-only (`ro`) or
+            an ephemeral overlay (`persist: false`) reject them with 400.
+            rw overlays and persistent (`persist: true`) overlays are
+            supported.
           example: false
 
     IsolatedBackgroundRunResponse:
@@ -2438,13 +2510,16 @@ components:
       description: >-
         State of an isolated session. Runtime status fields (status,
         created_at, last_run_at, idle_remaining_seconds) are always present.
-        Creation-parameter fields (profile, workspace, binds, share_net,
-        env_passthrough, uid, gid, uid_mode, extra_writable,
+        Creation-parameter fields (profile, workspace, overlays, binds,
+        share_net, env_passthrough, uid, gid, uid_mode, extra_writable,
         idle_timeout_seconds) echo the parameters used to create the session
         and let a stateless client rebuild a session handle from just a
         session ID (e.g. after a client restart or in serverless workers).
-        Older execd builds may omit the creation-parameter fields; clients
-        must tolerate them being absent.
+        `overlays` lists the effective mounts; for sessions created via the
+        legacy `workspace` field it repeats that workspace as a single
+        element, and `workspace` itself is only echoed for such
+        single-overlay sessions. Older execd builds may omit the
+        creation-parameter fields; clients must tolerate them being absent.
       properties:
         status:
           type: string
@@ -2464,6 +2539,11 @@ components:
           description: Profile the session was created with.
         workspace:
           $ref: "#/components/schemas/IsolatedWorkspaceSpec"
+        overlays:
+          type: array
+          description: Effective overlay mounts of the session.
+          items:
+            $ref: "#/components/schemas/IsolatedOverlaySpec"
         extra_writable:
           type: array
           items:

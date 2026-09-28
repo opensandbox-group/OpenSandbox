@@ -17,6 +17,19 @@ export interface IsolatedWorkspaceSpec {
   mode?: "rw" | "overlay" | "ro";
 }
 
+export interface IsolatedOverlaySpec {
+  /** Mount destination inside the namespace (absolute). */
+  path: string;
+  /** Mount mode. Defaults to "overlay". */
+  mode?: "rw" | "overlay" | "ro";
+  /**
+   * Overlay mode only. When true (default) the copy-on-write upper is a host
+   * directory allocated per session; when false it is an ephemeral tmpfs
+   * whose writes are discarded when the session ends.
+   */
+  persist?: boolean;
+}
+
 export interface EnvPassthroughSpec {
   mode?: "allow" | "deny";
   keys?: string[];
@@ -29,7 +42,13 @@ export interface BindMount {
 }
 
 export interface CreateIsolatedSessionRequest {
-  workspace: IsolatedWorkspaceSpec;
+  /**
+   * Legacy single-workspace sugar. When both `workspace` and `overlays` are
+   * provided, `workspace` is prepended to `overlays`; at least one is required.
+   */
+  workspace?: IsolatedWorkspaceSpec;
+  /** Independent overlay mounts inside one namespace. */
+  overlays?: IsolatedOverlaySpec[];
   profile?: "strict" | "balanced";
   extra_writable?: string[];
   binds?: BindMount[];
@@ -47,6 +66,7 @@ export interface IsolatedSessionInfo {
   // Creation-parameter fields echoed by execd (may be absent on older builds).
   profile?: "strict" | "balanced";
   workspace?: IsolatedWorkspaceSpec;
+  overlays?: IsolatedOverlaySpec[];
   extra_writable?: string[];
   binds?: BindMount[];
   share_net?: boolean;
@@ -68,6 +88,7 @@ export interface IsolatedSessionState {
   // (e.g. serverless workers) that only persist a session ID.
   profile?: "strict" | "balanced";
   workspace?: IsolatedWorkspaceSpec;
+  overlays?: IsolatedOverlaySpec[];
   extra_writable?: string[];
   binds?: BindMount[];
   share_net?: boolean;

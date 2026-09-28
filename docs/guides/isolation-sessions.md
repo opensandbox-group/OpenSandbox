@@ -317,6 +317,41 @@ occupant's session data from leaking to the next.
 
 ---
 
+## Multiple Overlay Mounts
+
+A session can carry **several independent overlay mounts** via the `overlays`
+request field (the single `workspace` remains supported as sugar for a
+one-element list; when both are present, `workspace` is prepended):
+
+```json
+{
+  "overlays": [
+    { "path": "/", "mode": "overlay" },
+    { "path": "/workspace", "mode": "overlay", "persist": true },
+    { "path": "/data/scratch", "mode": "overlay", "persist": false }
+  ]
+}
+```
+
+- Each entry has its own mount semantics, so workspace files, system-level
+  changes (`apt install` → `/usr`, config → `/etc`), and additional project
+  directories get **independent copy-on-write uppers**.
+- Mounts are applied shallow-first; a nested overlay (e.g. `/workspace` on
+  top of a `/` root overlay) shadows its ancestors within its own subtree.
+  Paths must be absolute and unique.
+- `persist` (overlay mode only, default `true`): `true` allocates a host
+  upper directory under `upper_root`; `false` uses an ephemeral tmpfs upper
+  whose writes are discarded when the session ends. `rw`/`ro` entries must
+  not set `persist`.
+- The files API routes each request to the overlay whose mount path is the
+  longest prefix of the requested path; relative paths resolve against the
+  first overlay.
+- Background runs use the **first** overlay for their log location: it must
+  be `rw`, or `overlay` with `persist: true`; otherwise background runs are
+  rejected.
+
+---
+
 ## Bind Mounts and Allowlist
 
 - **`extra_writable`** — paths bind-mounted read-write at the same path

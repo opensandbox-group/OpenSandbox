@@ -45,6 +45,7 @@ describe("_get", () => {
             idle_remaining_seconds: 42,
             profile: "balanced",
             workspace: { path: "/workspace", mode: "overlay" },
+            overlays: [{ path: "/workspace", mode: "overlay", persist: false }],
             extra_writable: ["/tmp"],
             binds: [{ source: "/host/x", dest: "/sbx/x", readonly: false }],
             share_net: true,
@@ -76,6 +77,9 @@ describe("_get", () => {
       path: "/workspace",
       mode: "overlay",
     });
+    assert.deepStrictEqual(state.overlays, [
+      { path: "/workspace", mode: "overlay", persist: false },
+    ]);
     assert.deepStrictEqual(state.extra_writable, ["/tmp"]);
     assert.strictEqual(state.binds?.length, 1);
     assert.deepStrictEqual(state.binds[0], {

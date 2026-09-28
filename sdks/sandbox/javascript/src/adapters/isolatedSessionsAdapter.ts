@@ -184,6 +184,7 @@ export class IsolatedSessionsAdapter implements IsolationService {
     };
     if (state.profile !== undefined) info.profile = state.profile;
     if (state.workspace !== undefined) info.workspace = state.workspace;
+    if (state.overlays !== undefined) info.overlays = state.overlays;
     if (state.extra_writable !== undefined) info.extra_writable = state.extra_writable;
     if (state.binds !== undefined) info.binds = state.binds;
     if (state.share_net !== undefined) info.share_net = state.share_net;

@@ -598,6 +598,50 @@ def test_isolated_binds_omitted_when_unset() -> None:
     assert "uid_mode" not in body
 
 
+def test_isolated_overlays_serialize_to_wire_format() -> None:
+    """overlays serialize to the execd wire format, with workspace sugar."""
+    from opensandbox.models import (
+        CreateIsolatedSessionRequest,
+        IsolatedOverlaySpec,
+        IsolatedWorkspaceSpec,
+    )
+
+    req = CreateIsolatedSessionRequest(
+        workspace=IsolatedWorkspaceSpec(path="/workspace", mode="overlay"),
+        overlays=[
+            IsolatedOverlaySpec(path="/"),
+            IsolatedOverlaySpec(
+                path="/workspace", mode="overlay", persist=False
+            ),
+            IsolatedOverlaySpec(path="/data", mode="rw"),
+        ],
+    )
+    body = req.model_dump(exclude_none=True)
+
+    assert body["workspace"] == {"path": "/workspace", "mode": "overlay"}
+    assert body["overlays"] == [
+        {"path": "/"},
+        {"path": "/workspace", "mode": "overlay", "persist": False},
+        {"path": "/data", "mode": "rw"},
+    ]
+
+
+def test_isolated_overlays_only_request_is_serializable() -> None:
+    """A request with only overlays (no legacy workspace) is valid."""
+    from opensandbox.models import (
+        CreateIsolatedSessionRequest,
+        IsolatedOverlaySpec,
+    )
+
+    req = CreateIsolatedSessionRequest(
+        overlays=[IsolatedOverlaySpec(path="/workspace", mode="rw")],
+    )
+    body = req.model_dump(exclude_none=True)
+
+    assert "workspace" not in body
+    assert body["overlays"] == [{"path": "/workspace", "mode": "rw"}]
+
+
 def test_isolated_capabilities_parse_mode_availability() -> None:
     """Per-mode isolation capability flags are exposed to SDK callers."""
     from opensandbox.models import IsolatedCapabilities

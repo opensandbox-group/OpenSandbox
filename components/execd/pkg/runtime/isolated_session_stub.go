@@ -30,6 +30,7 @@ type IsolatedSessionOptions struct {
 	Profile            string
 	WorkspacePath      string
 	WorkspaceMode      string
+	Overlays           []IsolatedOverlayOptions
 	ExtraWritable      []string
 	Binds              []isolation.BindMount
 	ShareNet           *bool
@@ -39,6 +40,13 @@ type IsolatedSessionOptions struct {
 	Gid                *uint32
 	UidMode            string
 	IdleTimeoutSeconds int
+}
+
+// IsolatedOverlayOptions describes one overlay mount (Windows stub).
+type IsolatedOverlayOptions struct {
+	Path    string
+	Mode    string
+	Persist *bool
 }
 
 // StdoutCallback is called per line of stdout (Windows stub).
@@ -156,8 +164,7 @@ type IsolatedSessionState struct {
 	// Creation-parameter echoes. Never populated on Windows (isolation
 	// is unavailable) but kept to match the non-Windows struct layout.
 	Profile            string
-	WorkspacePath      string
-	WorkspaceMode      string
+	Overlays           []IsolatedOverlayOptions
 	ExtraWritable      []string
 	Binds              []isolation.BindMount
 	ShareNet           *bool

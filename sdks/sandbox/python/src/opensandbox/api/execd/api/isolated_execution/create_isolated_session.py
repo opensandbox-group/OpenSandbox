@@ -89,7 +89,10 @@ def sync_detailed(
     """Create an isolated bash session
 
     Args:
-        body (CreateIsolatedSessionRequest):
+        body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
+            mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
+            list: at least one of `workspace` or `overlays` must be provided, and when both are
+            present `workspace` is prepended to `overlays`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -118,7 +121,10 @@ def sync(
     """Create an isolated bash session
 
     Args:
-        body (CreateIsolatedSessionRequest):
+        body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
+            mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
+            list: at least one of `workspace` or `overlays` must be provided, and when both are
+            present `workspace` is prepended to `overlays`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -142,7 +148,10 @@ async def asyncio_detailed(
     """Create an isolated bash session
 
     Args:
-        body (CreateIsolatedSessionRequest):
+        body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
+            mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
+            list: at least one of `workspace` or `overlays` must be provided, and when both are
+            present `workspace` is prepended to `overlays`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -169,7 +178,10 @@ async def asyncio(
     """Create an isolated bash session
 
     Args:
-        body (CreateIsolatedSessionRequest):
+        body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
+            mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
+            list: at least one of `workspace` or `overlays` must be provided, and when both are
+            present `workspace` is prepended to `overlays`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

@@ -544,34 +544,40 @@ func (r *IsolatedRunner) removeSessionBackgroundRuns(s *isolatedSession) {
 
 // backgroundRunPaths holds namespace and host paths for a background run.
 type backgroundRunPaths struct {
-	nsRunDir      string // <workspace>/.execd/background-runs
-	nsWorkspace   string // workspace path as seen inside the namespace
+	nsRunDir      string // <primary overlay>/.execd/background-runs
+	nsWorkspace   string // primary overlay path as seen inside the namespace
 	hostRunDir    string // host-side run dir (upper layer for overlay, workspace for rw)
 	hostWorkspace string // host-side workspace root (upper dir for overlay)
 	hostRoot      string // host-side root all control-file ops are pinned to
 }
 
 // backgroundRunPaths returns the namespace and host paths of the background
-// run directory. The host path is the upper layer for overlay workspaces and
-// the workspace itself for rw workspaces; read-only workspaces reject
-// background runs (no host-visible writable location for logs).
+// run directory. The primary overlay (the first mount) plays the role the
+// single workspace played: its host path is the workspace itself for rw and
+// the upper layer for persistent overlay mounts; ephemeral overlay mounts
+// (persist=false) and read-only overlays have no host-visible writable
+// location and reject background runs.
 func (s *isolatedSession) backgroundRunPaths() (backgroundRunPaths, error) {
-	paths := backgroundRunPaths{
-		nsRunDir:      filepath.Join(s.opts.WorkspacePath, isolatedBackgroundRunDir),
-		nsWorkspace:   s.opts.WorkspacePath,
-		hostWorkspace: s.opts.WorkspacePath,
+	if len(s.overlays) == 0 {
+		return backgroundRunPaths{}, fmt.Errorf("background runs unavailable: session has no upper directory")
 	}
-	switch isolation.WorkspaceMode(s.opts.WorkspaceMode) {
+	primary := s.overlays[0]
+	paths := backgroundRunPaths{
+		nsRunDir:      filepath.Join(primary.path, isolatedBackgroundRunDir),
+		nsWorkspace:   primary.path,
+		hostWorkspace: primary.path,
+	}
+	switch primary.mode {
 	case isolation.WorkspaceRW:
 		paths.hostRunDir = paths.nsRunDir
-		paths.hostRoot = s.opts.WorkspacePath
+		paths.hostRoot = primary.path
 	case isolation.WorkspaceOverlay, "":
-		if s.upperDir == "" {
+		if !primary.persist || primary.upperDir == "" {
 			return backgroundRunPaths{}, fmt.Errorf("background runs unavailable: session has no upper directory")
 		}
-		paths.hostRunDir = filepath.Join(s.upperDir, isolatedBackgroundRunDir)
-		paths.hostWorkspace = s.upperDir
-		paths.hostRoot = s.upperDir
+		paths.hostRunDir = filepath.Join(primary.upperDir, isolatedBackgroundRunDir)
+		paths.hostWorkspace = primary.upperDir
+		paths.hostRoot = primary.upperDir
 	default: // WorkspaceRO
 		return backgroundRunPaths{}, fmt.Errorf("background runs not supported in read-only workspace mode")
 	}

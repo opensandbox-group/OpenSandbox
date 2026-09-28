@@ -46,6 +46,7 @@ from opensandbox.models.isolated import (
     CreateIsolatedSessionRequest,
     EnvPassthroughSpec,
     IsolatedCapabilities,
+    IsolatedOverlaySpec,
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
@@ -113,6 +114,7 @@ __all__ = [
     "IsolatedSessionInfo",
     "IsolatedSessionState",
     "IsolatedSessionSummary",
+    "IsolatedOverlaySpec",
     "IsolatedWorkspaceSpec",
     # Filesystem models
     "EntryInfo",

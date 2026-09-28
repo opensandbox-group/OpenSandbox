@@ -33,11 +33,25 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/sessionresource"
 )
 
+// IsolatedOverlayOptions describes one overlay mount requested for a
+// session. Mode defaults to overlay; Persist defaults to true and applies
+// to overlay mode only (false selects the ephemeral tmpfs upper).
+type IsolatedOverlayOptions struct {
+	Path    string
+	Mode    string // "" (default overlay) | "rw" | "overlay" | "ro"
+	Persist *bool  // overlay mode only; nil defaults to true
+}
+
 // IsolatedSessionOptions bundles the parameters for creating an isolated session.
 type IsolatedSessionOptions struct {
-	Profile            string
+	Profile string
+	// WorkspacePath/WorkspaceMode are the legacy single-workspace sugar.
+	// When WorkspacePath is non-empty it is prepended to Overlays during
+	// normalization (normalizeIsolatedOptions); the merged Overlays list is
+	// the single source of truth afterwards.
 	WorkspacePath      string
 	WorkspaceMode      string
+	Overlays           []IsolatedOverlayOptions
 	ExtraWritable      []string
 	Binds              []isolation.BindMount
 	ShareNet           *bool
@@ -47,6 +61,45 @@ type IsolatedSessionOptions struct {
 	Gid                *uint32
 	UidMode            string // "setpriv" (default) or "userns"
 	IdleTimeoutSeconds int
+}
+
+// sessionOverlay is one resolved overlay mount of a live session. For
+// overlay-mode mounts, persist reports whether a host upper directory was
+// requested (true, allocated before start) or the ephemeral tmpfs upper is
+// used (false); upperDir/workDir are empty for rw/ro binds and for
+// ephemeral overlay mounts.
+type sessionOverlay struct {
+	path     string
+	mode     isolation.WorkspaceMode
+	persist  bool
+	upperDir string
+	workDir  string
+}
+
+// resolveSessionOverlays merges the legacy single-workspace fields with
+// Overlays and applies the same defaults as normalizeIsolatedOptions. It is
+// idempotent on already-normalized options (WorkspacePath is cleared by
+// normalization) and keeps direct callers of newIsolatedSession working.
+func resolveSessionOverlays(opts *IsolatedSessionOptions) []sessionOverlay {
+	raw := make([]IsolatedOverlayOptions, 0, len(opts.Overlays)+1)
+	if opts.WorkspacePath != "" {
+		raw = append(raw, IsolatedOverlayOptions{Path: opts.WorkspacePath, Mode: opts.WorkspaceMode})
+	}
+	raw = append(raw, opts.Overlays...)
+
+	overlays := make([]sessionOverlay, 0, len(raw))
+	for _, ov := range raw {
+		mode := isolation.WorkspaceOverlay
+		switch isolation.WorkspaceMode(ov.Mode) {
+		case isolation.WorkspaceRW:
+			mode = isolation.WorkspaceRW
+		case isolation.WorkspaceRO:
+			mode = isolation.WorkspaceRO
+		}
+		persist := mode == isolation.WorkspaceOverlay && (ov.Persist == nil || *ov.Persist)
+		overlays = append(overlays, sessionOverlay{path: ov.Path, mode: mode, persist: persist})
+	}
+	return overlays
 }
 
 type sessionNamespacePins interface {
@@ -82,8 +135,7 @@ type isolatedSession struct {
 	doneCh               chan struct{} // closed after process wait and lifecycle drain
 	lifecycleMonitorDone chan struct{} // closed after drain-failure monitor exits
 	upperID              string        // key in UpperManager, used for Release/Remove
-	upperDir             string
-	workDir              string
+	overlays             []sessionOverlay
 	createdAt            time.Time
 	lastRunAt            time.Time
 	isolator             isolation.Isolator
@@ -115,6 +167,7 @@ func newIsolatedSession(
 	return &isolatedSession{
 		id:              id,
 		opts:            opts,
+		overlays:        resolveSessionOverlays(opts),
 		isolator:        iso,
 		namespacePinner: namespacePinner,
 		processWaited:   make(chan struct{}),
@@ -146,21 +199,17 @@ func (s *isolatedSession) start() error {
 		return fmt.Errorf("unknown isolation profile %q", s.opts.Profile)
 	}
 
-	overlayMode := isolation.WorkspaceOverlay
-	switch isolation.WorkspaceMode(s.opts.WorkspaceMode) {
-	case isolation.WorkspaceRW:
-		overlayMode = isolation.WorkspaceRW
-	case isolation.WorkspaceRO:
-		overlayMode = isolation.WorkspaceRO
+	// One mount segment per resolved overlay; bubblewrap orders them
+	// shallow-first so nested overlays shadow their ancestors.
+	wrapOpts.Overlays = make([]isolation.OverlaySpec, 0, len(s.overlays))
+	for _, ov := range s.overlays {
+		wrapOpts.Overlays = append(wrapOpts.Overlays, isolation.OverlaySpec{
+			Path:     ov.path,
+			Mode:     ov.mode,
+			UpperDir: ov.upperDir,
+			WorkDir:  ov.workDir,
+		})
 	}
-	// Single-workspace sessions carry one overlay; persist (UpperDir) is
-	// empty unless the controller allocated an upper for overlay mode.
-	wrapOpts.Overlays = []isolation.OverlaySpec{{
-		Path:     s.opts.WorkspacePath,
-		Mode:     overlayMode,
-		UpperDir: s.upperDir,
-		WorkDir:  s.workDir,
-	}}
 
 	if s.opts.ShareNet != nil {
 		wrapOpts.ShareNet = *s.opts.ShareNet

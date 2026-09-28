@@ -36,6 +36,29 @@ class IsolatedWorkspaceSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class IsolatedOverlaySpec(BaseModel):
+    """One overlay mount inside the isolated namespace.
+
+    ``mode='overlay'`` mounts a copy-on-write view: with ``persist=True``
+    (default) writes land in a host upper directory tracked by execd; with
+    ``persist=False`` the upper is an ephemeral tmpfs whose writes are
+    discarded when the session ends. ``rw`` and ``ro`` bind the host path
+    directly and ignore ``persist``.
+    """
+
+    path: str = Field(description="Mount destination inside the namespace (absolute)")
+    mode: str | None = Field(
+        default=None,
+        description="Mount mode: 'rw' (read-write), 'overlay' (copy-on-write), or 'ro' (read-only). None = server default ('overlay').",
+    )
+    persist: bool | None = Field(
+        default=None,
+        description="Overlay mode only. True (default) allocates a host upper directory; False uses an ephemeral tmpfs upper. None = server default.",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class EnvPassthroughSpec(BaseModel):
     """Environment variable passthrough configuration."""
 
@@ -68,10 +91,25 @@ class BindMount(BaseModel):
 
 
 class CreateIsolatedSessionRequest(BaseModel):
-    """Request to create an isolated bash session."""
+    """Request to create an isolated bash session.
 
-    workspace: IsolatedWorkspaceSpec = Field(
-        description="Workspace bind configuration"
+    The legacy ``workspace`` field is kept as sugar for a single-element
+    ``overlays`` list: at least one of ``workspace`` or ``overlays`` must be
+    provided, and when both are present ``workspace`` is prepended to
+    ``overlays``.
+    """
+
+    workspace: IsolatedWorkspaceSpec | None = Field(
+        default=None,
+        description="Workspace bind configuration (legacy single-workspace sugar)",
+    )
+    overlays: list[IsolatedOverlaySpec] | None = Field(
+        default=None,
+        description=(
+            "Independent overlay mounts inside one namespace. bubblewrap applies "
+            "mounts shallow-first, so a nested overlay shadows its ancestors "
+            "within its own subtree. Paths must be absolute and unique."
+        ),
     )
     profile: str | None = Field(
         default=None,
@@ -134,7 +172,11 @@ class IsolatedSessionInfo(BaseModel):
     )
     workspace: IsolatedWorkspaceSpec | None = Field(
         default=None,
-        description="Workspace bind configuration used at session creation.",
+        description="Workspace bind configuration used at session creation (single-overlay sessions only).",
+    )
+    overlays: list[IsolatedOverlaySpec] | None = Field(
+        default=None,
+        description="Effective overlay mounts of the session.",
     )
     extra_writable: list[str] | None = Field(
         default=None,
@@ -199,7 +241,11 @@ class IsolatedSessionState(BaseModel):
     )
     workspace: IsolatedWorkspaceSpec | None = Field(
         default=None,
-        description="Workspace bind configuration used at session creation.",
+        description="Workspace bind configuration used at session creation (single-overlay sessions only).",
+    )
+    overlays: list[IsolatedOverlaySpec] | None = Field(
+        default=None,
+        description="Effective overlay mounts of the session.",
     )
     extra_writable: list[str] | None = Field(
         default=None,

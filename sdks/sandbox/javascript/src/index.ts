@@ -206,6 +206,7 @@ export type { IsolationService, IsolationSession, RunOnceOpts } from "./services
 export type {
   CreateIsolatedSessionRequest,
   IsolatedWorkspaceSpec,
+  IsolatedOverlaySpec,
   EnvPassthroughSpec,
   BindMount,
   IsolatedSessionInfo,

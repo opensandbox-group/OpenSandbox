@@ -23,7 +23,7 @@ import (
 
 func baseIsolatedReq() CreateIsolatedSessionRequest {
 	return CreateIsolatedSessionRequest{
-		Workspace: WorkspaceSpec{Path: "/tmp", Mode: "rw"},
+		Workspace: &WorkspaceSpec{Path: "/tmp", Mode: "rw"},
 	}
 }
 
@@ -66,6 +66,110 @@ func TestCreateIsolatedSessionRequest_Validate_Binds(t *testing.T) {
 // serialize under the JSON keys defined in specs/execd-api.yaml so that
 // SDKs (that share model definitions with the spec) deserialize them
 // correctly when calling attach(sessionId).
+func TestCreateIsolatedSessionRequest_Validate_Overlays(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(r *CreateIsolatedSessionRequest)
+		wantErr string // substring; "" means no error
+	}{
+		{
+			name: "workspace only",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Overlays = nil
+			},
+		},
+		{
+			name: "overlays only",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = []OverlaySpec{{Path: "/workspace"}}
+			},
+		},
+		{
+			name: "workspace and overlays (workspace prepended)",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Overlays = []OverlaySpec{{Path: "/"}}
+			},
+		},
+		{
+			name: "neither workspace nor overlays",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = nil
+			},
+			wantErr: "workspace or overlays is required",
+		},
+		{
+			name: "invalid overlay mode",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = []OverlaySpec{{Path: "/ws", Mode: "bogus"}}
+			},
+			wantErr: `invalid overlays[0] mode "bogus"`,
+		},
+		{
+			name: "persist on rw overlay",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				persist := true
+				r.Overlays = []OverlaySpec{{Path: "/ws", Mode: "rw", Persist: &persist}}
+			},
+			wantErr: "persist applies only to mode",
+		},
+		{
+			name: "persist false on overlay",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				persist := false
+				r.Overlays = []OverlaySpec{{Path: "/ws", Mode: "overlay", Persist: &persist}}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := baseIsolatedReq()
+			tt.mutate(&req)
+			err := req.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCreateIsolatedSessionRequest_EffectiveOverlays(t *testing.T) {
+	t.Run("workspace prepended to overlays", func(t *testing.T) {
+		req := CreateIsolatedSessionRequest{
+			Workspace: &WorkspaceSpec{Path: "/ws", Mode: "overlay"},
+			Overlays:  []OverlaySpec{{Path: "/"}, {Path: "/data", Mode: "rw"}},
+		}
+		got := req.EffectiveOverlays()
+		if len(got) != 3 ||
+			got[0].Path != "/ws" || got[1].Path != "/" || got[2].Path != "/data" {
+			t.Fatalf("EffectiveOverlays = %+v", got)
+		}
+	})
+	t.Run("overlays only", func(t *testing.T) {
+		req := CreateIsolatedSessionRequest{
+			Overlays: []OverlaySpec{{Path: "/workspace"}},
+		}
+		got := req.EffectiveOverlays()
+		if len(got) != 1 || got[0].Path != "/workspace" {
+			t.Fatalf("EffectiveOverlays = %+v", got)
+		}
+	})
+}
+
 func TestSessionState_JSONRoundtrip(t *testing.T) {
 	shareNet := true
 	uid := uint32(42)
@@ -79,6 +183,7 @@ func TestSessionState_JSONRoundtrip(t *testing.T) {
 		LastRunAt:          now,
 		Profile:            "balanced",
 		Workspace:          &WorkspaceSpec{Path: "/tmp/ws", Mode: "overlay"},
+		Overlays:           []OverlaySpec{{Path: "/", Mode: "overlay"}, {Path: "/tmp/ws", Mode: "overlay", Persist: &[]bool{false}[0]}},
 		ExtraWritable:      []string{"/allowed"},
 		Binds:              []BindMount{{Source: "/host/src", Dest: "/mnt/src", ReadOnly: true}},
 		ShareNet:           &shareNet,
@@ -99,6 +204,7 @@ func TestSessionState_JSONRoundtrip(t *testing.T) {
 	for _, key := range []string{
 		`"profile":"balanced"`,
 		`"workspace":{`,
+		`"overlays":[`,
 		`"extra_writable":`,
 		`"binds":[`,
 		`"share_net":true`,
@@ -122,7 +228,7 @@ func TestSessionState_JSONRoundtrip(t *testing.T) {
 	}
 	s2 := string(b2)
 	for _, key := range []string{
-		"profile", "workspace", "extra_writable", "binds", "share_net",
+		"profile", "workspace", "overlays", "extra_writable", "binds", "share_net",
 		"env_passthrough", "uid", "gid", "uid_mode", "idle_timeout_seconds",
 	} {
 		if strings.Contains(s2, key) {
@@ -136,6 +242,12 @@ func TestSessionState_JSONRoundtrip(t *testing.T) {
 	}
 	if back.Profile != "balanced" || back.Workspace == nil || back.Workspace.Path != "/tmp/ws" {
 		t.Errorf("round-trip mismatch: %+v", back)
+	}
+	if len(back.Overlays) != 2 ||
+		back.Overlays[0].Path != "/" ||
+		back.Overlays[1].Path != "/tmp/ws" ||
+		back.Overlays[1].Persist == nil || *back.Overlays[1].Persist {
+		t.Errorf("overlays round-trip mismatch: %+v", back.Overlays)
 	}
 	if back.ShareNet == nil || !*back.ShareNet {
 		t.Errorf("ShareNet lost in round-trip")

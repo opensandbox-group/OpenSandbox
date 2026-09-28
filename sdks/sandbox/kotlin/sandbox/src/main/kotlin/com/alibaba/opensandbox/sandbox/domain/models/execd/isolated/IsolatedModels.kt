@@ -23,6 +23,21 @@ data class IsolatedWorkspaceSpec(
     val mode: String? = null,
 )
 
+/**
+ * One overlay mount inside the isolated namespace.
+ *
+ * `mode = "overlay"` mounts a copy-on-write view: with `persist = true`
+ * (default) writes land in a host upper directory tracked by execd; with
+ * `persist = false` the upper is an ephemeral tmpfs whose writes are
+ * discarded when the session ends. `rw` and `ro` bind the host path directly
+ * and ignore `persist`.
+ */
+data class IsolatedOverlaySpec(
+    val path: String,
+    val mode: String? = null,
+    val persist: Boolean? = null,
+)
+
 data class EnvPassthroughSpec(
     val mode: String = "deny",
     val keys: List<String> = emptyList(),
@@ -34,8 +49,16 @@ data class BindMount(
     val readonly: Boolean? = null,
 )
 
+/**
+ * Request to create an isolated bash session.
+ *
+ * The legacy [workspace] field is kept as sugar for a single-element
+ * [overlays] list: at least one of the two must be provided, and when both
+ * are present `workspace` is prepended to `overlays`.
+ */
 data class CreateIsolatedSessionRequest(
-    val workspace: IsolatedWorkspaceSpec,
+    val workspace: IsolatedWorkspaceSpec? = null,
+    val overlays: List<IsolatedOverlaySpec>? = null,
     val profile: String? = null,
     val extraWritable: List<String>? = null,
     val binds: List<BindMount>? = null,
@@ -53,6 +76,7 @@ data class IsolatedSessionInfo(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     val profile: String? = null,
     val workspace: IsolatedWorkspaceSpec? = null,
+    val overlays: List<IsolatedOverlaySpec>? = null,
     val extraWritable: List<String>? = null,
     val binds: List<BindMount>? = null,
     val shareNet: Boolean? = null,
@@ -71,6 +95,7 @@ data class IsolatedSessionState(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     val profile: String? = null,
     val workspace: IsolatedWorkspaceSpec? = null,
+    val overlays: List<IsolatedOverlaySpec>? = null,
     val extraWritable: List<String>? = null,
     val binds: List<BindMount>? = null,
     val shareNet: Boolean? = null,

@@ -31,8 +31,11 @@ const (
 // Create
 
 type CreateIsolatedSessionRequest struct {
-	Profile            string             `json:"profile"` // "strict" | "balanced"
-	Workspace          WorkspaceSpec      `json:"workspace" validate:"required"`
+	Profile string `json:"profile"` // "strict" | "balanced"
+	// Workspace is the legacy single-workspace sugar: when set it is
+	// prepended to Overlays. At least one of Workspace/Overlays is required.
+	Workspace          *WorkspaceSpec     `json:"workspace,omitempty"`
+	Overlays           []OverlaySpec      `json:"overlays,omitempty"`
 	ExtraWritable      []string           `json:"extra_writable,omitempty"`
 	Binds              []BindMount        `json:"binds,omitempty"`
 	ShareNet           *bool              `json:"share_net,omitempty"`
@@ -46,6 +49,15 @@ type CreateIsolatedSessionRequest struct {
 type WorkspaceSpec struct {
 	Path string `json:"path" validate:"required"`
 	Mode string `json:"mode,omitempty"` // "rw" | "overlay" | "ro", default per profile
+}
+
+// OverlaySpec is one overlay mount inside the isolated namespace. Mode
+// defaults to overlay; Persist defaults to true and applies to overlay mode
+// only (false selects the ephemeral tmpfs upper).
+type OverlaySpec struct {
+	Path    string `json:"path" validate:"required"`
+	Mode    string `json:"mode,omitempty"`    // "rw" | "overlay" | "ro"
+	Persist *bool  `json:"persist,omitempty"` // overlay mode only; default true
 }
 
 type EnvPassthroughSpec struct {
@@ -69,12 +81,30 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 	if err := v.Struct(r); err != nil {
 		return err
 	}
-	if r.Workspace.Mode != "" {
+	if r.Workspace == nil && len(r.Overlays) == 0 {
+		return fmt.Errorf("workspace or overlays is required")
+	}
+	if r.Workspace != nil && r.Workspace.Mode != "" {
 		switch r.Workspace.Mode {
 		case WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO:
 		default:
 			return fmt.Errorf("invalid workspace mode %q: must be %s, %s, or %s",
 				r.Workspace.Mode, WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO)
+		}
+	}
+	for i, ov := range r.Overlays {
+		if ov.Mode != "" {
+			switch ov.Mode {
+			case WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO:
+			default:
+				return fmt.Errorf("invalid overlays[%d] mode %q: must be %s, %s, or %s",
+					i, ov.Mode, WorkspaceModeRW, WorkspaceModeOverlay, WorkspaceModeRO)
+			}
+		}
+		if ov.Persist != nil &&
+			ov.Mode != WorkspaceModeOverlay && ov.Mode != "" {
+			return fmt.Errorf("overlays[%d]: persist applies only to mode %q",
+				i, WorkspaceModeOverlay)
 		}
 	}
 	if r.EnvPassthrough.Mode != "" {
@@ -105,6 +135,18 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 		}
 	}
 	return nil
+}
+
+// EffectiveOverlays returns the request's overlays with the legacy
+// workspace field (when present) prepended as the primary overlay,
+// mirroring the documented request semantics.
+func (r *CreateIsolatedSessionRequest) EffectiveOverlays() []OverlaySpec {
+	overlays := make([]OverlaySpec, 0, len(r.Overlays)+1)
+	if r.Workspace != nil {
+		overlays = append(overlays, OverlaySpec{Path: r.Workspace.Path, Mode: r.Workspace.Mode})
+	}
+	overlays = append(overlays, r.Overlays...)
+	return overlays
 }
 
 // Run
@@ -153,9 +195,12 @@ type SessionState struct {
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
 
 	// Creation-parameter echoes. All optional; a session_id-only client
-	// must tolerate any of these being absent.
+	// must tolerate any of these being absent. Workspace is echoed only
+	// for sessions with a single overlay (the legacy sugar shape); the
+	// full effective list is always available in Overlays.
 	Profile            string              `json:"profile,omitempty"`
 	Workspace          *WorkspaceSpec      `json:"workspace,omitempty"`
+	Overlays           []OverlaySpec       `json:"overlays,omitempty"`
 	ExtraWritable      []string            `json:"extra_writable,omitempty"`
 	Binds              []BindMount         `json:"binds,omitempty"`
 	ShareNet           *bool               `json:"share_net,omitempty"`

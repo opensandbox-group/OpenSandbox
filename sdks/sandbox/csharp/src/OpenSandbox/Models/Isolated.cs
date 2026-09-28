@@ -21,6 +21,19 @@ public record IsolatedWorkspaceSpec(
     [property: JsonPropertyName("mode")] string? Mode = null
 );
 
+/// <summary>
+/// One overlay mount inside the isolated namespace. Overlay mode mounts a
+/// copy-on-write view: with Persist=true (default) writes land in a host
+/// upper directory tracked by execd; with Persist=false the upper is an
+/// ephemeral tmpfs whose writes are discarded when the session ends. rw and
+/// ro bind the host path directly and ignore Persist.
+/// </summary>
+public record IsolatedOverlaySpec(
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("mode")] string? Mode = null,
+    [property: JsonPropertyName("persist")] bool? Persist = null
+);
+
 public record EnvPassthroughSpec(
     [property: JsonPropertyName("mode")] string? Mode = "deny",
     [property: JsonPropertyName("keys")] List<string>? Keys = null
@@ -33,7 +46,10 @@ public record BindMount(
 );
 
 public record CreateIsolatedSessionRequest(
-    [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec Workspace,
+    // Legacy single-workspace sugar. When both Workspace and Overlays are
+    // provided, Workspace is prepended to Overlays; at least one is required.
+    [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null,
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
     [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
@@ -51,6 +67,7 @@ public record IsolatedSessionInfo(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
     [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
     [property: JsonPropertyName("share_net")] bool? ShareNet = null,
@@ -69,6 +86,7 @@ public record IsolatedSessionState(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
     [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
     [property: JsonPropertyName("share_net")] bool? ShareNet = null,

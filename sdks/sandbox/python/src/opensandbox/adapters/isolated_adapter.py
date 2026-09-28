@@ -94,6 +94,7 @@ def _infer_exit_code(execution: Execution) -> int | None:
 _ECHO_FIELDS = (
     "profile",
     "workspace",
+    "overlays",
     "extra_writable",
     "binds",
     "share_net",

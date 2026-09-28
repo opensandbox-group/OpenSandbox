@@ -43,6 +43,8 @@ from .isolated_chmod_files_body import IsolatedChmodFilesBody
 from .isolated_create_session_response import IsolatedCreateSessionResponse
 from .isolated_get_files_info_response_200 import IsolatedGetFilesInfoResponse200
 from .isolated_make_dirs_body import IsolatedMakeDirsBody
+from .isolated_overlay_spec import IsolatedOverlaySpec
+from .isolated_overlay_spec_mode import IsolatedOverlaySpecMode
 from .isolated_replace_content_body import IsolatedReplaceContentBody
 from .isolated_replace_content_response_200 import IsolatedReplaceContentResponse200
 from .isolated_run_request import IsolatedRunRequest
@@ -104,6 +106,8 @@ __all__ = (
     "IsolatedCreateSessionResponse",
     "IsolatedGetFilesInfoResponse200",
     "IsolatedMakeDirsBody",
+    "IsolatedOverlaySpec",
+    "IsolatedOverlaySpecMode",
     "IsolatedReplaceContentBody",
     "IsolatedReplaceContentResponse200",
     "IsolatedRunRequest",

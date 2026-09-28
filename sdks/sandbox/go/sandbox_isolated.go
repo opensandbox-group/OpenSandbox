@@ -146,6 +146,7 @@ func (s *Sandbox) IsolationAttach(ctx context.Context, sessionID string) (*Isola
 		CreatedAt:          state.CreatedAt,
 		Profile:            state.Profile,
 		Workspace:          state.Workspace,
+		Overlays:           state.Overlays,
 		ExtraWritable:      state.ExtraWritable,
 		Binds:              state.Binds,
 		ShareNet:           state.ShareNet,

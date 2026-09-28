@@ -21,11 +21,13 @@ import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedOverlaySpec
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunOpts
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -234,6 +236,118 @@ class IsolatedSessionsAdapterTest {
         val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
         assertEquals(uidAboveInt, body["uid"]!!.jsonPrimitive.long)
         assertEquals(gidAboveInt, body["gid"]!!.jsonPrimitive.long)
+    }
+
+    @Test
+    fun `create serializes overlays with workspace sugar`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "session_id": "00000000-0000-0000-0000-000000000001",
+                      "created_at": "2026-01-02T03:04:05Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        adapter.create(
+            CreateIsolatedSessionRequest(
+                workspace = IsolatedWorkspaceSpec(path = "/workspace", mode = "overlay"),
+                overlays =
+                    listOf(
+                        IsolatedOverlaySpec(path = "/"),
+                        IsolatedOverlaySpec(path = "/data", mode = "rw"),
+                        IsolatedOverlaySpec(path = "/ephemeral", mode = "overlay", persist = false),
+                    ),
+            ),
+        )
+
+        val request = mockWebServer.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/v1/isolated/session", request.path)
+        val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals(
+            Json.parseToJsonElement("""{"path": "/workspace", "mode": "overlay"}"""),
+            body["workspace"],
+        )
+        val overlays = body["overlays"]!!.jsonArray
+        assertEquals(3, overlays.size)
+        assertEquals(
+            Json.parseToJsonElement("""{"path": "/"}"""),
+            overlays[0],
+        )
+        assertEquals(
+            Json.parseToJsonElement("""{"path": "/data", "mode": "rw"}"""),
+            overlays[1],
+        )
+        assertEquals(
+            Json.parseToJsonElement("""{"path": "/ephemeral", "mode": "overlay", "persist": false}"""),
+            overlays[2],
+        )
+    }
+
+    @Test
+    fun `create serializes overlays without workspace`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "session_id": "00000000-0000-0000-0000-000000000001"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        adapter.create(
+            CreateIsolatedSessionRequest(
+                overlays = listOf(IsolatedOverlaySpec(path = "/workspace", mode = "rw")),
+            ),
+        )
+
+        val request = mockWebServer.takeRequest()
+        val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals(null, body["workspace"])
+        assertEquals(
+            Json.parseToJsonElement("""[{"path": "/workspace", "mode": "rw"}]"""),
+            body["overlays"],
+        )
+    }
+
+    @Test
+    fun `attach populates overlays when execd echoes them`() {
+        val stateBody =
+            """
+            {
+              "status": "active",
+              "created_at": "2026-01-02T03:04:05Z",
+              "last_run_at": "2026-01-02T03:05:06Z",
+              "workspace": {"path": "/workspace", "mode": "rw"},
+              "overlays": [
+                {"path": "/", "mode": "overlay"},
+                {"path": "/workspace", "mode": "overlay", "persist": false}
+              ]
+            }
+            """.trimIndent()
+        // One response for attach, one for session.get().
+        mockWebServer.enqueue(MockResponse().setBody(stateBody))
+        mockWebServer.enqueue(MockResponse().setBody(stateBody))
+
+        val session = adapter.attach("sess-overlays")
+
+        val info = session.info
+        assertEquals(2, info.overlays?.size)
+        assertEquals("/", info.overlays?.get(0)?.path)
+        assertEquals("overlay", info.overlays?.get(0)?.mode)
+        assertEquals(null, info.overlays?.get(0)?.persist)
+        assertEquals("/workspace", info.overlays?.get(1)?.path)
+        assertEquals(false, info.overlays?.get(1)?.persist)
+
+        val state = session.get()
+        assertEquals(2, state.overlays?.size)
+        assertEquals(false, state.overlays?.get(1)?.persist)
     }
 
     @Test

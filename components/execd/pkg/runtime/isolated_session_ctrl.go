@@ -388,21 +388,44 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	// behavior.
 	normalizeIsolatedOptions(opts)
 
-	if err := os.MkdirAll(opts.WorkspacePath, 0o755); err != nil {
-		return "", fmt.Errorf("create workspace: %w", err)
+	if len(opts.Overlays) == 0 {
+		return "", fmt.Errorf("at least one overlay is required")
+	}
+
+	for _, ov := range opts.Overlays {
+		if err := os.MkdirAll(ov.Path, 0o755); err != nil {
+			return "", fmt.Errorf("create workspace %s: %w", ov.Path, err)
+		}
 	}
 
 	id := uuid.New().String()
 	session := newIsolatedSession(id, opts, r.isolator, r.namespacePinner)
 
-	if opts.WorkspaceMode == string(isolation.WorkspaceOverlay) || opts.WorkspaceMode == "" {
-		upperID, upperDir, workDir, err := r.upperMgr.Allocate()
+	// Persist overlay mounts get host upper/work pairs from one shared
+	// session directory; ephemeral (persist=false) overlays use the bwrap
+	// tmpfs upper and need no allocation.
+	persistCount := 0
+	for _, ov := range session.overlays {
+		if ov.mode == isolation.WorkspaceOverlay && ov.persist {
+			persistCount++
+		}
+	}
+	if persistCount > 0 {
+		upperID, pairs, err := r.upperMgr.AllocateN(persistCount)
 		if err != nil {
 			return "", fmt.Errorf("allocate upper: %w", err)
 		}
 		session.upperID = upperID
-		session.upperDir = upperDir
-		session.workDir = workDir
+		next := 0
+		for i := range session.overlays {
+			ov := &session.overlays[i]
+			if ov.mode != isolation.WorkspaceOverlay || !ov.persist {
+				continue
+			}
+			ov.upperDir = pairs[next].UpperDir
+			ov.workDir = pairs[next].WorkDir
+			next++
+		}
 	}
 
 	if err := session.start(); err != nil {
@@ -428,8 +451,32 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 
 	r.ctrl.isolatedSessionMap.Store(id, session)
 	go r.cleanupExitedSession(id, session)
-	log.Info("isolated session: created %s (profile=%s, mode=%s)", id, opts.Profile, opts.WorkspaceMode)
+	log.Info(
+		"isolated session: created %s (profile=%s, overlays=%s)",
+		id,
+		opts.Profile,
+		overlaySummary(session.overlays),
+	)
 	return id, nil
+}
+
+// overlaySummary renders resolved overlays for log lines, e.g.
+// "/workspace:overlay(persist)" or "/:overlay /workspace:rw".
+func overlaySummary(overlays []sessionOverlay) string {
+	parts := make([]string, 0, len(overlays))
+	for _, ov := range overlays {
+		switch ov.mode {
+		case isolation.WorkspaceOverlay:
+			if ov.persist {
+				parts = append(parts, ov.path+":overlay(persist)")
+			} else {
+				parts = append(parts, ov.path+":overlay(ephemeral)")
+			}
+		default:
+			parts = append(parts, ov.path+":"+string(ov.mode))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func (r *IsolatedRunner) cleanupExitedSession(
@@ -470,8 +517,7 @@ func (r *IsolatedRunner) GetIsolatedSession(id string) (*IsolatedSessionState, e
 		LastRunAt: s.lastRunAt,
 
 		Profile:            s.opts.Profile,
-		WorkspacePath:      s.opts.WorkspacePath,
-		WorkspaceMode:      s.opts.WorkspaceMode,
+		Overlays:           append([]IsolatedOverlayOptions(nil), s.opts.Overlays...),
 		ExtraWritable:      s.opts.ExtraWritable,
 		Binds:              s.opts.Binds,
 		ShareNet:           s.opts.ShareNet,
@@ -514,8 +560,7 @@ type IsolatedSessionState struct {
 	// Creation-parameter echoes. Populated for sessions the current execd
 	// process created; snapshot of the *IsolatedSessionOptions at GET time.
 	Profile            string
-	WorkspacePath      string
-	WorkspaceMode      string
+	Overlays           []IsolatedOverlayOptions
 	ExtraWritable      []string
 	Binds              []isolation.BindMount
 	ShareNet           *bool
@@ -854,17 +899,35 @@ func newMergedView(s *isolatedSession) vfs.FS {
 		}
 	}
 
-	mode := isolation.WorkspaceOverlay
-	upper := s.upperDir
-	switch isolation.WorkspaceMode(s.opts.WorkspaceMode) {
-	case isolation.WorkspaceRW:
-		mode = isolation.WorkspaceRW
-		upper = s.opts.WorkspacePath // writes go directly to workspace
-	case isolation.WorkspaceRO:
-		mode = isolation.WorkspaceRO
+	overlayView := func(ov sessionOverlay) *isolation.MergedView {
+		upper := ov.upperDir
+		if ov.mode == isolation.WorkspaceRW {
+			// Writes go directly to the workspace.
+			upper = ov.path
+		}
+		return isolation.NewMergedView(ov.path, upper, ov.mode, uid, gid)
 	}
 
-	return isolation.NewMergedView(s.opts.WorkspacePath, upper, mode, uid, gid)
+	if len(s.overlays) == 1 {
+		return overlayView(s.overlays[0])
+	}
+
+	views := make([]isolation.OverlayView, 0, len(s.overlays))
+	relativeBase := 0
+	for i, ov := range s.overlays {
+		if ov.path != "/" && s.overlays[relativeBase].path == "/" {
+			// The first non-root overlay is the workspace-like base for
+			// relative paths; a / root overlay must not capture them.
+			relativeBase = i
+		}
+		views = append(views, isolation.OverlayView{
+			Path:         ov.path,
+			FS:           overlayView(ov),
+			RelativeBase: false,
+		})
+	}
+	views[relativeBase].RelativeBase = true
+	return isolation.NewMultiMergedView(views)
 }
 
 func (r *IsolatedRunner) Capabilities() isolation.Capabilities {
@@ -1039,7 +1102,12 @@ func shellescape(s string) string {
 // values (including unknown enum strings) are left untouched so that
 // start() surfaces them as errors as before.
 //
-// Kept in sync with the switch statements in (*isolatedSession).start.
+// The legacy single-workspace fields are merged into Overlays (prepended,
+// matching the request-level sugar) and cleared, so Overlays is the single
+// canonical form afterwards.
+//
+// Kept in sync with resolveSessionOverlays and the switch statements in
+// (*isolatedSession).start.
 func normalizeIsolatedOptions(opts *IsolatedSessionOptions) {
 	if opts == nil {
 		return
@@ -1047,11 +1115,33 @@ func normalizeIsolatedOptions(opts *IsolatedSessionOptions) {
 	if opts.Profile == "" {
 		opts.Profile = string(isolation.ProfileStrict)
 	}
-	// start() treats any non-rw/non-ro string as overlay, but only "" is
-	// really "unset" from the caller's perspective. Unknown enum values
-	// are left in place so a future normalize→start mismatch is loud.
-	if opts.WorkspaceMode == "" {
-		opts.WorkspaceMode = string(isolation.WorkspaceOverlay)
+	if opts.WorkspacePath != "" {
+		opts.Overlays = append(
+			[]IsolatedOverlayOptions{{Path: opts.WorkspacePath, Mode: opts.WorkspaceMode}},
+			opts.Overlays...,
+		)
+		opts.WorkspacePath = ""
+		opts.WorkspaceMode = ""
+	}
+	for i := range opts.Overlays {
+		ov := &opts.Overlays[i]
+		// start()/resolveSessionOverlays treat any non-rw/non-ro string as
+		// overlay, but only "" is really "unset" from the caller's
+		// perspective. Unknown enum values are left in place so a future
+		// normalize→start mismatch is loud.
+		if ov.Mode == "" {
+			ov.Mode = string(isolation.WorkspaceOverlay)
+		}
+		switch isolation.WorkspaceMode(ov.Mode) {
+		case isolation.WorkspaceOverlay:
+			if ov.Persist == nil {
+				persist := true
+				ov.Persist = &persist
+			}
+		default:
+			// persist is not applicable to rw/ro binds.
+			ov.Persist = nil
+		}
 	}
 	if opts.EnvPassthroughMode == "" {
 		// The pre-normalization behavior of start() was: on empty mode,

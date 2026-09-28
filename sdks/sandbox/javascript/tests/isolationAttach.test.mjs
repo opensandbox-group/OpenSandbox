@@ -42,6 +42,10 @@ describe("attach", () => {
             idle_remaining_seconds: 30,
             profile: "strict",
             workspace: { path: "/workspace", mode: "rw" },
+            overlays: [
+              { path: "/", mode: "overlay" },
+              { path: "/workspace", mode: "overlay", persist: true },
+            ],
             extra_writable: ["/tmp", "/var/tmp"],
             binds: [{ source: "/host/a", dest: "/sbx/a", readonly: true }],
             share_net: false,
@@ -70,6 +74,10 @@ describe("attach", () => {
     assert.strictEqual(info.created_at, "2026-01-02T03:04:05Z");
     assert.strictEqual(info.profile, "strict");
     assert.deepStrictEqual(info.workspace, { path: "/workspace", mode: "rw" });
+    assert.deepStrictEqual(info.overlays, [
+      { path: "/", mode: "overlay" },
+      { path: "/workspace", mode: "overlay", persist: true },
+    ]);
     assert.deepStrictEqual(info.extra_writable, ["/tmp", "/var/tmp"]);
     assert.strictEqual(info.binds?.length, 1);
     assert.deepStrictEqual(info.binds[0], {
