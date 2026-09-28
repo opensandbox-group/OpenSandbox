@@ -129,6 +129,27 @@ func TestUpperManager_ReclaimStaleFailureRetainedForGC(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A second stale session in the AllocateN layout (pair 0 plus
+	// upper-1..2/work-1..2). The retained entry must track every pair so
+	// usage accounting counts all residue bytes until GC succeeds.
+	multiID := "00000000000000000000000000000004"
+	for _, name := range []string{
+		"upper", "work", "upper-1", "work-1", "upper-2", "work-2",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, multiID, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, upper := range []string{"upper", "upper-1", "upper-2"} {
+		if err := os.WriteFile(filepath.Join(root, multiID, upper, "residue.bin"), []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A regular file matching the upper-* glob must not be tracked as a pair.
+	if err := os.WriteFile(filepath.Join(root, multiID, "upper-notadir"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	// A mount or permission error can block reclamation at startup. The
 	// sweep must keep such residue tracked so the collector retries it.
 	mgr := &UpperManager{
@@ -141,6 +162,7 @@ func TestUpperManager_ReclaimStaleFailureRetainedForGC(t *testing.T) {
 
 	mgr.mu.Lock()
 	e := mgr.entries[staleID]
+	multi := mgr.entries[multiID]
 	mgr.mu.Unlock()
 	if e == nil {
 		t.Fatal("failed reclamation must remain tracked for a GC retry")
@@ -148,12 +170,22 @@ func TestUpperManager_ReclaimStaleFailureRetainedForGC(t *testing.T) {
 	if e.InUse {
 		t.Fatal("stale residue must be registered as released")
 	}
+	if multi == nil {
+		t.Fatal("failed AllocateN-layout reclamation must remain tracked")
+	}
+	mgr.mu.Lock()
+	multiPairs := len(multi.Pairs)
+	mgr.mu.Unlock()
+	if multiPairs != 3 {
+		t.Errorf("AllocateN-layout residue pairs = %d, want 3 (upper, upper-1, upper-2)", multiPairs)
+	}
 	usage, err := mgr.Usage()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage < 5 {
-		t.Errorf("Usage() = %d, want residue bytes counted", usage)
+	// Four residue files of 5 bytes each across the two sessions.
+	if usage < 20 {
+		t.Errorf("Usage() = %d, want all residue bytes counted (>= 20)", usage)
 	}
 
 	mgr.removeAll = os.RemoveAll
@@ -161,11 +193,13 @@ func TestUpperManager_ReclaimStaleFailureRetainedForGC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(freed) != 1 || freed[0] != staleID {
-		t.Fatalf("CollectWithErrors freed %v, want [%s]", freed, staleID)
+	if len(freed) != 2 {
+		t.Fatalf("CollectWithErrors freed %v, want both stale sessions", freed)
 	}
-	if _, err := os.Stat(filepath.Join(root, staleID)); !os.IsNotExist(err) {
-		t.Error("retried reclamation should remove the residue")
+	for _, id := range []string{staleID, multiID} {
+		if _, err := os.Stat(filepath.Join(root, id)); !os.IsNotExist(err) {
+			t.Errorf("retried reclamation should remove residue session %s", id)
+		}
 	}
 }
 
@@ -226,6 +260,109 @@ func TestUpperManager_Allocate(t *testing.T) {
 	}
 	if !e.InUse {
 		t.Error("entry should be InUse after allocation")
+	}
+}
+
+func TestUpperManager_AllocateN(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, pairs, err := mgr.AllocateN(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" {
+		t.Error("empty session ID")
+	}
+	if len(pairs) != 3 {
+		t.Fatalf("len(pairs) = %d, want 3", len(pairs))
+	}
+
+	// Pair 0 keeps the legacy layout (<id>/upper, <id>/work) so startup
+	// reclamation still recognizes the session directory.
+	wantNames := [][2]string{
+		{"upper", "work"},
+		{"upper-1", "work-1"},
+		{"upper-2", "work-2"},
+	}
+	for i, p := range pairs {
+		if filepath.Base(p.UpperDir) != wantNames[i][0] {
+			t.Errorf("pairs[%d].UpperDir = %s, want %s", i, p.UpperDir, wantNames[i][0])
+		}
+		if filepath.Base(p.WorkDir) != wantNames[i][1] {
+			t.Errorf("pairs[%d].WorkDir = %s, want %s", i, p.WorkDir, wantNames[i][1])
+		}
+		if filepath.Dir(p.UpperDir) != filepath.Dir(p.WorkDir) {
+			t.Errorf("pairs[%d] dirs must share the session dir", i)
+		}
+		for _, dir := range []string{p.UpperDir, p.WorkDir} {
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				t.Errorf("directory %s not created", dir)
+			}
+		}
+	}
+
+	// All pairs share one session directory...
+	if filepath.Dir(pairs[0].UpperDir) != filepath.Dir(pairs[2].UpperDir) {
+		t.Error("pairs must live under one session directory")
+	}
+
+	// ...so a single Remove clears every pair.
+	if err := mgr.Remove(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(pairs[0].UpperDir)); !os.IsNotExist(err) {
+		t.Error("session dir should be removed with all pairs")
+	}
+}
+
+func TestUpperManager_AllocateN_InvalidCount(t *testing.T) {
+	mgr := newTestUpperManager(t)
+	if _, _, err := mgr.AllocateN(0); err == nil {
+		t.Error("expected error for AllocateN(0)")
+	}
+	if _, _, err := mgr.AllocateN(-1); err == nil {
+		t.Error("expected error for AllocateN(-1)")
+	}
+}
+
+func TestUpperManager_AllocateN_UsageSumsAllPairs(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	_, pairs, err := mgr.AllocateN(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pairs[0].UpperDir, "a.bin"), make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pairs[1].UpperDir, "b.bin"), make([]byte, 50), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := mgr.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage < 150 {
+		t.Errorf("usage = %d, want at least 150 (both pairs counted)", usage)
+	}
+
+	// Limit accounting must see every pair: 150 bytes used of a 100-byte
+	// budget already blocks the next allocation.
+	root := filepath.Join(t.TempDir(), "isolation")
+	limited, err := NewUpperManager(root, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, lp, err := limited.AllocateN(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lp[0].UpperDir, "big.bin"), make([]byte, 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := limited.AllocateN(1); !errors.Is(err, ErrUpperLimitExceeded) {
+		t.Errorf("got %v, want ErrUpperLimitExceeded", err)
 	}
 }
 

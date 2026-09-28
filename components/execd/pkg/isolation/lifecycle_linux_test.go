@@ -911,9 +911,15 @@ func TestLifecycleArgvExecutesGateDescriptorAfterRestoringProc(t *testing.T) {
 	uid := uint32(65534)
 	gid := uint32(65534)
 	opts := WrapOptions{
-		Profile:       ProfileStrict,
-		Workspace:     WorkspaceSpec{Path: "/workspace", Mode: WorkspaceRW},
-		UpperDir:      "/var/lib/opensandbox/upper/session/upper",
+		Profile: ProfileStrict,
+		Overlays: []OverlaySpec{
+			{Path: "/workspace", Mode: WorkspaceRW},
+			{
+				Path:     "/root",
+				Mode:     WorkspaceOverlay,
+				UpperDir: "/var/lib/opensandbox/upper/session/upper",
+			},
+		},
 		ExtraWritable: []string{"/data"},
 		UidMode:       UidModeSetpriv,
 		Uid:           &uid,
@@ -1094,10 +1100,10 @@ func TestBwrapLifecycleEndToEnd(t *testing.T) {
 				command,
 				WrapOptions{
 					Profile: ProfileStrict,
-					Workspace: WorkspaceSpec{
+					Overlays: []OverlaySpec{{
 						Path: workspace,
 						Mode: WorkspaceRW,
-					},
+					}},
 					ShareNet:       test.shareNet,
 					UidMode:        UidModeSetpriv,
 					Uid:            test.uid,

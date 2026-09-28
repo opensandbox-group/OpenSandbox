@@ -91,7 +91,7 @@ func TestBuildArgv_TmpSegment(t *testing.T) {
 func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 	ws := func(mode WorkspaceMode) WrapOptions {
 		opts := basicWrapOpts()
-		opts.Workspace.Mode = mode
+		opts.Overlays[0].Mode = mode
 		return opts
 	}
 
@@ -119,8 +119,8 @@ func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 
 	t.Run("overlay_with_persist", func(t *testing.T) {
 		opts := ws(WorkspaceOverlay)
-		opts.UpperDir = "/var/lib/execd/isolation/abc"
-		opts.WorkDir = "/var/lib/execd/isolation/abc-work"
+		opts.Overlays[0].UpperDir = "/var/lib/execd/isolation/abc/upper"
+		opts.Overlays[0].WorkDir = "/var/lib/execd/isolation/abc/work"
 		argv, err := buildArgv(opts, "")
 		if err != nil {
 			t.Fatal(err)
@@ -129,8 +129,8 @@ func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 		for _, want := range []string{
 			"--overlay",
 			"/workspace",
-			"/var/lib/execd/isolation/abc",
-			"/var/lib/execd/isolation/abc-work",
+			"/var/lib/execd/isolation/abc/upper",
+			"/var/lib/execd/isolation/abc/work",
 		} {
 			if !strings.Contains(s, want) {
 				t.Errorf("missing %q", want)
@@ -140,7 +140,7 @@ func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 
 	t.Run("overlay_without_persist_tmpfs", func(t *testing.T) {
 		opts := ws(WorkspaceOverlay)
-		opts.UpperDir = "" // tmpfs upper
+		opts.Overlays[0].UpperDir = "" // tmpfs upper
 		argv, err := buildArgv(opts, "")
 		if err != nil {
 			t.Fatal(err)
@@ -149,6 +149,168 @@ func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 		if !strings.Contains(s, "--overlay-src") {
 			t.Error("missing --overlay-src")
 		}
+	})
+
+	t.Run("shallowest_valid_upperdir_accepted", func(t *testing.T) {
+		// <root>/<session>/upper (depth 3) derives a non-root upper root
+		// and must be accepted; anything shallower is rejected by
+		// validateWrapOptions.
+		opts := ws(WorkspaceOverlay)
+		opts.Overlays[0].UpperDir = "/upper-root/session/upper"
+		_, err := buildArgv(opts, "")
+		require.NoError(t, err)
+	})
+}
+
+func TestOverlaysCoverPath(t *testing.T) {
+	overlays := []OverlaySpec{
+		{Path: "/", Mode: WorkspaceOverlay},
+		{Path: "/data", Mode: WorkspaceOverlay},
+	}
+
+	assert.True(t, overlaysCoverPath(overlays, "/tmp"),
+		"a / overlay is an ancestor of /tmp and covers it")
+	assert.True(t, overlaysCoverPath(overlays, "/data/sub"),
+		"an exact overlay path covers its own subtree")
+	assert.False(t, overlaysCoverPath(overlays[1:], "/tmp"),
+		"a sibling overlay must not cover /tmp")
+}
+
+func TestBuildArgv_MultiOverlay(t *testing.T) {
+	t.Run("nested_overlays_ordered_shallow_first", func(t *testing.T) {
+		// Caller lists the deep workspace overlay first; argv must emit the
+		// root overlay before it so the nested mount shadows the root.
+		opts := basicWrapOpts()
+		opts.Overlays = []OverlaySpec{
+			{Path: "/workspace", Mode: WorkspaceOverlay},
+			{
+				Path:     "/",
+				Mode:     WorkspaceOverlay,
+				UpperDir: "/var/lib/execd/isolation/abc/root-upper",
+			},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+
+		rootIdx := indexArgvSequence(argv,
+			"--overlay-src", "/", "--overlay",
+			"/var/lib/execd/isolation/abc/root-upper",
+			"/var/lib/execd/isolation/abc/root-upper-work", "/")
+		if rootIdx < 0 {
+			t.Fatalf("root overlay segment missing: %v", argv)
+		}
+		wsIdx := indexArgvSequence(argv,
+			"--overlay-src", "/workspace", "--tmp-overlay", "/workspace")
+		if wsIdx < 0 {
+			t.Fatalf("workspace overlay segment missing: %v", argv)
+		}
+		if rootIdx > wsIdx {
+			t.Errorf("root overlay must precede nested /workspace overlay: %v", argv)
+		}
+	})
+
+	t.Run("mixed_modes", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Overlays = []OverlaySpec{
+			{Path: "/etc/config", Mode: WorkspaceRO},
+			{Path: "/data", Mode: WorkspaceOverlay},
+			{Path: "/mnt/project", Mode: WorkspaceRW},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		for _, want := range []string{
+			"--ro-bind /etc/config /etc/config",
+			"--overlay-src /data --tmp-overlay /data",
+			"--bind /mnt/project /mnt/project",
+		} {
+			assert.Contains(t, s, want)
+		}
+	})
+
+	t.Run("overlay_on_tmp_skips_tmp_segment", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Profile = ProfileStrict
+		opts.Overlays = []OverlaySpec{{Path: "/tmp", Mode: WorkspaceRW}}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		assert.NotContains(t, strings.Join(argv, " "), "--tmpfs /tmp",
+			"an overlay on /tmp replaces the /tmp tmpfs segment")
+	})
+
+	t.Run("root_overlay_covers_tmp_segment", func(t *testing.T) {
+		// A / overlay shadows every earlier mount in its subtree, so the
+		// /tmp segment would be dead weight; it must be skipped.
+		opts := basicWrapOpts()
+		opts.Profile = ProfileStrict
+		opts.Overlays = []OverlaySpec{
+			{Path: "/", Mode: WorkspaceOverlay, UpperDir: "/var/lib/execd/isolation/abc/root-upper"},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		assert.NotContains(t, strings.Join(argv, " "), "--tmpfs /tmp",
+			"a / overlay covers /tmp as its ancestor")
+	})
+
+	t.Run("sibling_overlay_keeps_tmp_segment", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Profile = ProfileStrict
+		opts.Overlays = []OverlaySpec{
+			{Path: "/data", Mode: WorkspaceOverlay, UpperDir: "/var/lib/execd/isolation/abc/upper"},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		assert.Contains(t, strings.Join(argv, " "), "--tmpfs /tmp",
+			"an overlay outside /tmp must not suppress the /tmp segment")
+	})
+
+	t.Run("hides_distinct_upper_roots_once", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Overlays = []OverlaySpec{
+			{
+				Path:     "/",
+				Mode:     WorkspaceOverlay,
+				UpperDir: "/var/lib/execd/isolation/abc/root-upper",
+			},
+			{
+				Path:     "/workspace",
+				Mode:     WorkspaceOverlay,
+				UpperDir: "/var/lib/execd/isolation/abc/upper-1",
+			},
+			{
+				Path:     "/data",
+				Mode:     WorkspaceOverlay,
+				UpperDir: "/var/lib/execd/other/session/root-upper",
+			},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+
+		// Collect every --tmpfs target. Pairs sharing a session dir collapse
+		// to one hidden upper root; a distinct session dir adds another.
+		hidden := make(map[string]int)
+		for i, arg := range argv {
+			if arg == "--tmpfs" && i+1 < len(argv) &&
+				strings.HasPrefix(argv[i+1], "/var/lib/execd") {
+				hidden[argv[i+1]]++
+			}
+		}
+		assert.Equal(t, map[string]int{
+			"/var/lib/execd/isolation": 1,
+			"/var/lib/execd/other":     1,
+		}, hidden)
+	})
+
+	t.Run("tmpfs_uppers_hide_nothing", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Overlays = []OverlaySpec{
+			{Path: "/workspace", Mode: WorkspaceOverlay},
+			{Path: "/data", Mode: WorkspaceOverlay},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		assert.NotContains(t, strings.Join(argv, " "), "--tmpfs /var/lib",
+			"ephemeral overlays have no host upper directory to hide")
 	})
 }
 
@@ -472,8 +634,8 @@ func TestBuildArgv_Seccomp(t *testing.T) {
 func TestBuildArgv_SegmentOrder(t *testing.T) {
 	opts := basicWrapOpts()
 	opts.Profile = ProfileStrict
-	opts.Workspace.Mode = WorkspaceOverlay
-	opts.UpperDir = "/tmp/upper"
+	opts.Overlays[0].Mode = WorkspaceOverlay
+	opts.Overlays[0].UpperDir = "/var/lib/execd/isolation/abc/upper"
 	opts.ExtraWritable = []string{"/data"}
 	opts.EnvPassthrough = EnvSpec{Mode: EnvModeDeny, Keys: []string{"TOKEN"}}
 
@@ -482,8 +644,11 @@ func TestBuildArgv_SegmentOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Expected segment order. We track by scanning argv for each marker
-	// and comparing the index of the first segment element.
+	// Expected segment order. Caller-controlled mounts (overlays, upper-root
+	// hiding, extra writable, binds) come first; the trusted base mounts
+	// (/run, /dev, procfs) follow so none of them can shadow the others.
+	// We track by scanning argv for each marker and comparing the index of
+	// the first segment element.
 	type seg struct {
 		label string
 		match string // single argv element
@@ -492,11 +657,11 @@ func TestBuildArgv_SegmentOrder(t *testing.T) {
 		{"1.ns", "--unshare-pid"},
 		{"2.rootfs", "--ro-bind"},
 		{"3.tmp", "/tmp"},
-		{"4.run", "/run"},
-		{"5.dev", "--dev"},
-		{"6.proc", "--proc"},
-		{"7.workspace", "--overlay-src"},
-		{"8.extra_writable", "--bind"},
+		{"4.overlays", "--overlay-src"},
+		{"5.extra_writable", "--bind"},
+		{"6.run", "/run"},
+		{"7.dev", "--dev"},
+		{"8.proc", "--proc"},
 		{"9.env", "--unsetenv"},
 		{"10.seccomp", "--seccomp"},
 		{"11.setpriv", "setpriv"},
@@ -519,8 +684,8 @@ func TestBuildArgv_SegmentOrder(t *testing.T) {
 func TestBuildArgv_SegmentOrder_Userns(t *testing.T) {
 	opts := basicWrapOpts()
 	opts.Profile = ProfileStrict
-	opts.Workspace.Mode = WorkspaceOverlay
-	opts.UpperDir = "/tmp/upper"
+	opts.Overlays[0].Mode = WorkspaceOverlay
+	opts.Overlays[0].UpperDir = "/var/lib/execd/isolation/abc/upper"
 	opts.ExtraWritable = []string{"/data"}
 	opts.EnvPassthrough = EnvSpec{Mode: EnvModeDeny, Keys: []string{"TOKEN"}}
 	u := uint32(1000)
@@ -535,16 +700,18 @@ func TestBuildArgv_SegmentOrder_Userns(t *testing.T) {
 		match string
 	}
 	// In userns mode: --unshare-user comes first, no setpriv at the end.
+	// Trusted base mounts (/run, /dev, procfs) follow the caller-controlled
+	// overlay segments.
 	order := []seg{
 		{"1.ns.userns", "--unshare-user"},
 		{"1.ns.pid", "--unshare-pid"},
 		{"2.rootfs", "--ro-bind"},
 		{"3.tmp", "/tmp"},
-		{"4.run", "/run"},
-		{"5.dev", "--dev"},
-		{"6.proc", "--proc"},
-		{"7.workspace", "--overlay-src"},
-		{"8.extra_writable", "--bind"},
+		{"4.overlays", "--overlay-src"},
+		{"5.extra_writable", "--bind"},
+		{"6.run", "/run"},
+		{"7.dev", "--dev"},
+		{"8.proc", "--proc"},
 		{"9.env", "--unsetenv"},
 		{"10.seccomp", "--seccomp"},
 	}
@@ -572,9 +739,37 @@ func TestBuildArgv_Validation(t *testing.T) {
 		opts WrapOptions
 		want string
 	}{
-		{"empty_workspace", WrapOptions{}, "workspace.path is required"},
-		{"bad_profile", WrapOptions{Workspace: WorkspaceSpec{Path: "/ws", Mode: WorkspaceRW}, Profile: "bogus"}, "unknown profile"},
-		{"bad_mode", WrapOptions{Profile: ProfileBalanced, Workspace: WorkspaceSpec{Path: "/ws", Mode: "bogus"}}, "unknown workspace mode"},
+		{"empty_overlays", WrapOptions{}, "at least one overlay is required"},
+		{"bad_profile", WrapOptions{Overlays: []OverlaySpec{{Path: "/ws", Mode: WorkspaceRW}}, Profile: "bogus"}, "unknown profile"},
+		{"bad_mode", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{Path: "/ws", Mode: "bogus"}}}, "unknown overlay mode"},
+		{"relative_overlay_path", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{Path: "rel/ws", Mode: WorkspaceRW}}}, "must be an absolute path"},
+		{"duplicate_overlay_path", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{
+			{Path: "/ws", Mode: WorkspaceRW},
+			{Path: "/ws", Mode: WorkspaceRO},
+		}}, "duplicate overlay path"},
+		{"workdir_without_upperdir", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{
+			Path: "/ws", Mode: WorkspaceOverlay, WorkDir: "/tmp/work",
+		}}}, "workdir requires an upperdir"},
+		{"shallow_upperdir", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{
+			Path: "/ws", Mode: WorkspaceOverlay, UpperDir: "/foo/upper",
+		}}}, "must live under an upper root"},
+		{"upperdir_at_root", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{
+			Path: "/ws", Mode: WorkspaceOverlay, UpperDir: "/upper",
+		}}}, "must live under an upper root"},
+		{"relative_upperdir", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{
+			Path: "/ws", Mode: WorkspaceOverlay, UpperDir: "rel/session/upper",
+		}}}, "must be an absolute path"},
+		{"relative_workdir", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{
+			Path: "/ws", Mode: WorkspaceOverlay, UpperDir: "/a/b/upper", WorkDir: "rel/work",
+		}}}, "must be an absolute path"},
+		{"upperdir_on_rw_mode", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{
+			Path: "/ws", Mode: WorkspaceRW, UpperDir: "/a/b/upper",
+		}}}, "upperdir/workdir apply only to overlay mode"},
+		{"overlay_path_under_upper_root", WrapOptions{Profile: ProfileBalanced, Overlays: []OverlaySpec{{
+			Path:     "/var/lib/execd/isolation/extra",
+			Mode:     WorkspaceOverlay,
+			UpperDir: "/var/lib/execd/isolation/abc/upper",
+		}}}, "is shadowed by the upper-root tmpfs"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -698,9 +893,9 @@ func TestUidMode_Valid(t *testing.T) {
 
 func basicWrapOpts() WrapOptions {
 	return WrapOptions{
-		Profile:   ProfileBalanced,
-		ShareNet:  true,
-		Workspace: WorkspaceSpec{Path: "/workspace", Mode: WorkspaceRW},
+		Profile:  ProfileBalanced,
+		ShareNet: true,
+		Overlays: []OverlaySpec{{Path: "/workspace", Mode: WorkspaceRW}},
 	}
 }
 
