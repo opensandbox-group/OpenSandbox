@@ -170,6 +170,8 @@ public class EndpointReadinessTests
             {
                 Id = "sb",
                 Status = new SandboxStatus { State = "Running" },
+                CreatedAt = DateTime.UtcNow,
+                Entrypoint = ["/bin/sh"],
             });
         lifecycle.Setup(s => s.GetSandboxEndpointAsync("sb", It.IsAny<int>(), false, It.IsAny<CancellationToken>()))
             .Returns(async (string _, int port, bool _, CancellationToken token) =>

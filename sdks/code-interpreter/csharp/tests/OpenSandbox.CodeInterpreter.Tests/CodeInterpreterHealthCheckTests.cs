@@ -182,7 +182,7 @@ public class CodeInterpreterHealthCheckTests
         return commands;
     }
 
-    private static async Task<Sandbox> CreateInterpreterAsync(
+    private static async Task<CodeInterpreter> CreateInterpreterAsync(
         IExecdCommands commands,
         bool skipHealthCheck = true)
     {
