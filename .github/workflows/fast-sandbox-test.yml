@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -49,6 +50,28 @@ jobs:
       - name: Run SDK e2e
         timeout-minutes: 30
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
+      # nodes/pods, controller / firecracker-runtime / fastlet / builder /
+      # server / gateway / RustFS log tails, SandboxTemplates, SandboxPool,
+      # events) plus live status, BEFORE teardown removes the cluster.
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          mkdir -p diagnostics
+          sudo cp -a "$work/logs" "$work/run.log" diagnostics/ 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" diagnostics || true
+          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status \
+            > diagnostics/live-status.txt 2>&1 || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-sandbox-diagnostics-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 7
 
       - name: Teardown
         if: always()

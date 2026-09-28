@@ -67,7 +67,9 @@
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
 
-set -euo pipefail
+# -E (errtrace): stage functions must inherit the ERR trap, or on_error
+# (and its failure dump) never fires — every stage runs inside a function.
+set -euEo pipefail
 
 OSB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -285,11 +287,13 @@ rc() {
 
 on_error() {
 	local task="$1"
+	# Dump while the cluster is still live; --auto-clean teardown destroys
+	# the evidence (pod logs, events) if it runs first.
+	failure_dump "$task"
 	if [[ "$AUTO_CLEAN" == 1 ]]; then
 		log "$ACTION failed at $task; --auto-clean: running down"
 		down >/dev/null 2>&1 || true
 	fi
-	failure_dump "$task"
 	printf '\033[1;31m[fast-sandbox-env] FAILED at %s; dump: %s\033[0m\n' \
 		"$task" "$LOGS_DIR/failure-$task-*.txt" >&2
 }
@@ -1788,7 +1792,9 @@ sdk_e2e() {
 	export OPENSANDBOX_TEST_API_KEY="$SERVER_API_KEY"
 	log "sdk e2e: template=$template_id server=$SERVER_URL -> tests/python/tests/test_fsb_e2e.py"
 	cd "$OSB_ROOT/tests/python" || die "tests/python not found under $OSB_ROOT"
-	exec uv run pytest tests/test_fsb_e2e.py
+	# No exec: the ERR trap (and the failure dump) must survive a pytest
+	# failure, and exec replaces the shell.
+	uv run pytest tests/test_fsb_e2e.py
 }
 
 # --- status / summary ---------------------------------------------------------------------
@@ -2015,7 +2021,11 @@ case "$ACTION" in
 		status
 		;;
 	sdk-e2e)
+		kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
+			|| die "cluster $KIND_CLUSTER is not up (run up first)"
+		trap 'on_error sdk-e2e' ERR
 		sdk_e2e
+		trap - ERR
 		;;
 	down)
 		down
