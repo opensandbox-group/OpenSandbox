@@ -224,6 +224,10 @@ jobs:
       OPENSANDBOX_E2E_SANDBOX_MEMORY: 512Mi
       E2E_TEST_SUITE: pool
       E2E_GATEWAY_ROUTE_MODE: ""
+      # Catch event-loop cross-thread misuse in the pool warmup loop.
+      PYTHONASYNCIODEBUG: "1"
+      # Lifecycle-stress test round count (tests/python POOL_STRESS_ROUNDS).
+      POOL_STRESS_ROUNDS: "10"
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

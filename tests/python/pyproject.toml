@@ -25,6 +25,7 @@ authors = [
 dependencies = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.21.0",
+    "pytest-rerunfailures>=13.0",
     "pytest-timeout>=2.1.0",
     "pytest-order>=1.2.0",
     "pydantic>=2.0.0",

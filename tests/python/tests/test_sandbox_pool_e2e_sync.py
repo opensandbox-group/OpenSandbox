@@ -294,27 +294,31 @@ class TestSandboxPoolSingleNodeE2ESync:
 
         assert not race_errors
 
-    @pytest.mark.timeout(360)
+    @pytest.mark.timeout(600)
     def test_concurrent_start_shutdown_stress_single_node(self) -> None:
         errors: list[BaseException] = []
-        start = threading.Event()
+        rounds = max(1, int(os.environ.get("POOL_STRESS_ROUNDS", "3")))
+        worker_count = 4
+        # Deterministically align all workers at the top of every round so
+        # start/shutdown calls overlap as much as possible, instead of relying
+        # on sleep timing. If a worker dies mid-run, the bounded timeout turns
+        # the stuck barrier into BrokenBarrierError instead of a hang.
+        barrier = threading.Barrier(worker_count, timeout=180)
 
         def worker(index: int) -> None:
             try:
-                start.wait()
-                for _ in range(3):
+                for _ in range(rounds):
+                    barrier.wait()
                     if index % 2 == 0:
                         self.pool.start()
                     else:
                         self.pool.shutdown(index % 3 == 0)
-                    time.sleep(0.05)
             except BaseException as exc:
                 errors.append(exc)
                 raise
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(worker, i) for i in range(4)]
-            start.set()
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(worker, i) for i in range(worker_count)]
             for future in as_completed(futures, timeout=180):
                 future.result()
 
