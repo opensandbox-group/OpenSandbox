@@ -22,11 +22,7 @@ export interface IsolatedOverlaySpec {
   path: string;
   /** Mount mode. Defaults to "overlay". */
   mode?: "rw" | "overlay" | "ro";
-  /**
-   * Overlay mode only. When true (default) the copy-on-write upper is a host
-   * directory allocated per session; when false it is an ephemeral tmpfs
-   * whose writes are discarded when the session ends.
-   */
+  /** Overlay mode only. Defaults to true; false uses an ephemeral tmpfs upper. */
   persist?: boolean;
 }
 
@@ -42,10 +38,7 @@ export interface BindMount {
 }
 
 export interface CreateIsolatedSessionRequest {
-  /**
-   * Legacy single-workspace sugar. When both `workspace` and `overlays` are
-   * provided, `workspace` is prepended to `overlays`; at least one is required.
-   */
+  /** Legacy sugar, prepended to `overlays`; at least one is required. */
   workspace?: IsolatedWorkspaceSpec;
   /** Independent overlay mounts inside one namespace. */
   overlays?: IsolatedOverlaySpec[];

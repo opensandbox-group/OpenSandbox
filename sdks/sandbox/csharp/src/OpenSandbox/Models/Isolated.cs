@@ -22,12 +22,10 @@ public record IsolatedWorkspaceSpec(
 );
 
 /// <summary>
-/// One overlay mount inside the isolated namespace. Overlay mode mounts a
-/// copy-on-write view: with Persist=true (default) writes land in a host
-/// upper directory tracked by execd; with Persist=false the upper is an
-/// ephemeral tmpfs whose writes are discarded when the session ends. rw and
-/// ro bind the host path directly; Persist applies to overlay mode only and
-/// must be left unset for rw/ro (execd rejects the request otherwise).
+/// One overlay mount. Overlay mode mounts a copy-on-write view:
+/// Persist=true (default) uses a host upper directory, Persist=false an
+/// ephemeral tmpfs discarded with the session. rw and ro bind directly;
+/// Persist must be left unset for them.
 /// </summary>
 public record IsolatedOverlaySpec(
     [property: JsonPropertyName("path")] string Path,
@@ -47,10 +45,8 @@ public record BindMount(
 );
 
 public record CreateIsolatedSessionRequest(
-    // Legacy single-workspace sugar. When both Workspace and Overlays are
-    // provided, Workspace is prepended to Overlays; at least one is required.
-    // Overlays is appended last so existing positional call sites keep
-    // compiling (JSON order is unaffected by parameter order).
+    // Legacy sugar; prepended to Overlays. At least one is required.
+    // Overlays is appended last so positional call sites keep compiling.
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,

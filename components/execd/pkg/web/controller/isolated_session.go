@@ -183,9 +183,7 @@ func (c *IsolatedSessionController) Get() {
 			}
 			resp.Overlays = append(resp.Overlays, spec)
 		}
-		// The legacy workspace echo is only meaningful for the
-		// single-overlay (sugar) shape; multi-overlay sessions expose
-		// their mounts through overlays alone.
+		// The legacy workspace echo applies to single-overlay sessions only.
 		if len(state.Overlays) == 1 {
 			resp.Workspace = &model.WorkspaceSpec{
 				Path: state.Overlays[0].Path,

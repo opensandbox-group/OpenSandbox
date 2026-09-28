@@ -34,8 +34,8 @@ import (
 )
 
 // IsolatedOverlayOptions describes one overlay mount requested for a
-// session. Mode defaults to overlay; Persist defaults to true and applies
-// to overlay mode only (false selects the ephemeral tmpfs upper).
+// session. Mode defaults to overlay; Persist (overlay mode only) defaults
+// to true.
 type IsolatedOverlayOptions struct {
 	Path    string
 	Mode    string // "" (default overlay) | "rw" | "overlay" | "ro"
@@ -45,10 +45,8 @@ type IsolatedOverlayOptions struct {
 // IsolatedSessionOptions bundles the parameters for creating an isolated session.
 type IsolatedSessionOptions struct {
 	Profile string
-	// WorkspacePath/WorkspaceMode are the legacy single-workspace sugar.
-	// When WorkspacePath is non-empty it is prepended to Overlays during
-	// normalization (normalizeIsolatedOptions); the merged Overlays list is
-	// the single source of truth afterwards.
+	// Legacy single-workspace sugar, merged into Overlays by
+	// normalizeIsolatedOptions.
 	WorkspacePath      string
 	WorkspaceMode      string
 	Overlays           []IsolatedOverlayOptions
@@ -64,10 +62,8 @@ type IsolatedSessionOptions struct {
 }
 
 // sessionOverlay is one resolved overlay mount of a live session. For
-// overlay-mode mounts, persist reports whether a host upper directory was
-// requested (true, allocated before start) or the ephemeral tmpfs upper is
-// used (false); upperDir/workDir are empty for rw/ro binds and for
-// ephemeral overlay mounts.
+// overlay-mode mounts persist reports whether a host upper directory was
+// requested; upperDir/workDir are otherwise empty.
 type sessionOverlay struct {
 	path     string
 	mode     isolation.WorkspaceMode
@@ -76,10 +72,8 @@ type sessionOverlay struct {
 	workDir  string
 }
 
-// resolveSessionOverlays merges the legacy single-workspace fields with
-// Overlays and applies the same defaults as normalizeIsolatedOptions. It is
-// idempotent on already-normalized options (WorkspacePath is cleared by
-// normalization) and keeps direct callers of newIsolatedSession working.
+// resolveSessionOverlays merges the legacy workspace fields into Overlays
+// and applies the same defaults as normalizeIsolatedOptions.
 func resolveSessionOverlays(opts *IsolatedSessionOptions) []sessionOverlay {
 	raw := make([]IsolatedOverlayOptions, 0, len(opts.Overlays)+1)
 	if opts.WorkspacePath != "" {
@@ -199,8 +193,7 @@ func (s *isolatedSession) start() error {
 		return fmt.Errorf("unknown isolation profile %q", s.opts.Profile)
 	}
 
-	// One mount segment per resolved overlay; bubblewrap orders them
-	// shallow-first so nested overlays shadow their ancestors.
+	// One mount segment per resolved overlay.
 	wrapOpts.Overlays = make([]isolation.OverlaySpec, 0, len(s.overlays))
 	for _, ov := range s.overlays {
 		wrapOpts.Overlays = append(wrapOpts.Overlays, isolation.OverlaySpec{

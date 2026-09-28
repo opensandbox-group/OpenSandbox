@@ -39,13 +39,10 @@ class IsolatedWorkspaceSpec(BaseModel):
 class IsolatedOverlaySpec(BaseModel):
     """One overlay mount inside the isolated namespace.
 
-    ``mode='overlay'`` mounts a copy-on-write view: with ``persist=True``
-    (default; execd treats an omitted value as true) writes land in a host
-    upper directory tracked by execd; with ``persist=False`` the upper is an
-    ephemeral tmpfs whose writes are discarded when the session ends.
-    ``rw`` and ``ro`` bind the host path directly; ``persist`` applies to
-    overlay mode only and must be left unset for them (execd rejects the
-    create request otherwise).
+    ``mode='overlay'`` mounts a copy-on-write view: ``persist=True``
+    (default) uses a host upper directory, ``persist=False`` an ephemeral
+    tmpfs discarded with the session. ``rw``/``ro`` bind directly and must
+    leave ``persist`` unset.
     """
 
     path: str = Field(description="Mount destination inside the namespace (absolute)")
@@ -95,10 +92,9 @@ class BindMount(BaseModel):
 class CreateIsolatedSessionRequest(BaseModel):
     """Request to create an isolated bash session.
 
-    The legacy ``workspace`` field is kept as sugar for a single-element
-    ``overlays`` list: at least one of ``workspace`` or ``overlays`` must be
-    provided, and when both are present ``workspace`` is prepended to
-    ``overlays``.
+    ``workspace`` is legacy sugar: at least one of ``workspace`` or
+    ``overlays`` is required, and ``workspace`` is prepended when both are
+    set.
     """
 
     workspace: IsolatedWorkspaceSpec | None = Field(

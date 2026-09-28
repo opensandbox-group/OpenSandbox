@@ -30,13 +30,10 @@ type IsolatedWorkspaceSpec struct {
 	Mode string `json:"mode,omitempty"` // "rw" | "overlay" | "ro"
 }
 
-// IsolatedOverlaySpec describes one overlay mount inside the isolated
-// namespace. Overlay mode mounts a copy-on-write view: with Persist=true
-// (default) writes land in a host upper directory tracked by execd; with
-// Persist=false the upper is an ephemeral tmpfs whose writes are discarded
-// when the session ends. rw and ro bind the host path directly; Persist
-// applies to overlay mode only and must be left unset for rw/ro (execd
-// rejects the request otherwise).
+// IsolatedOverlaySpec describes one overlay mount. Overlay mode mounts a
+// copy-on-write view: Persist=true (default) uses a host upper directory,
+// Persist=false an ephemeral tmpfs discarded with the session. rw and ro
+// bind directly; Persist must be left unset for them.
 type IsolatedOverlaySpec struct {
 	Path    string `json:"path"`
 	Mode    string `json:"mode,omitempty"`    // "rw" | "overlay" | "ro"
@@ -57,9 +54,8 @@ type BindMount struct {
 }
 
 // CreateIsolatedSessionRequest is the request body for creating an isolated
-// session. Workspace is the legacy single-workspace sugar: at least one of
-// Workspace or Overlays must be set, and when both are present Workspace is
-// prepended to Overlays.
+// session. Workspace is legacy sugar: at least one of Workspace/Overlays is
+// required, and Workspace is prepended when both are set.
 type CreateIsolatedSessionRequest struct {
 	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
 	Overlays           []IsolatedOverlaySpec  `json:"overlays,omitempty"`

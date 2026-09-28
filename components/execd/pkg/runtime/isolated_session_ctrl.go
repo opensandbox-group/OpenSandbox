@@ -401,9 +401,8 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	id := uuid.New().String()
 	session := newIsolatedSession(id, opts, r.isolator, r.namespacePinner)
 
-	// Persist overlay mounts get host upper/work pairs from one shared
-	// session directory; ephemeral (persist=false) overlays use the bwrap
-	// tmpfs upper and need no allocation.
+	// Persist overlays get host upper/work pairs; ephemeral overlays use
+	// the bwrap tmpfs upper and need no allocation.
 	persistCount := 0
 	for _, ov := range session.overlays {
 		if ov.mode == isolation.WorkspaceOverlay && ov.persist {
@@ -460,8 +459,7 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	return id, nil
 }
 
-// overlaySummary renders resolved overlays for log lines, e.g.
-// "/workspace:overlay(persist)" or "/:overlay /workspace:rw".
+// overlaySummary renders resolved overlays for log lines.
 func overlaySummary(overlays []sessionOverlay) string {
 	parts := make([]string, 0, len(overlays))
 	for _, ov := range overlays {
@@ -908,9 +906,7 @@ func newMergedView(s *isolatedSession) vfs.FS {
 		return isolation.NewMergedView(ov.path, upper, ov.mode, uid, gid)
 	}
 
-	// A directly-constructed session may carry no overlays at all; the
-	// empty router fails every lookup with ErrPathOutsideOverlays instead
-	// of panicking on the views slice.
+	// Empty overlays yield an empty router rather than a panic.
 	if len(s.overlays) <= 1 {
 		if len(s.overlays) == 0 {
 			return isolation.NewMultiMergedView(nil)
@@ -922,8 +918,7 @@ func newMergedView(s *isolatedSession) vfs.FS {
 	relativeBase := 0
 	for i, ov := range s.overlays {
 		if ov.path != "/" && s.overlays[relativeBase].path == "/" {
-			// The first non-root overlay is the workspace-like base for
-			// relative paths; a / root overlay must not capture them.
+			// The first non-root overlay is the base for relative paths.
 			relativeBase = i
 		}
 		views = append(views, isolation.OverlayView{
@@ -1101,19 +1096,11 @@ func shellescape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-// normalizeIsolatedOptions fills in the effective values for fields that
-// (*isolatedSession).start would otherwise substitute silently, so that
-// GetIsolatedSession echoes back the configuration execd is actually
-// running with. Only empty/omitted string fields are rewritten; explicit
-// values (including unknown enum strings) are left untouched so that
-// start() surfaces them as errors as before.
-//
-// The legacy single-workspace fields are merged into Overlays (prepended,
-// matching the request-level sugar) and cleared, so Overlays is the single
-// canonical form afterwards.
-//
-// Kept in sync with resolveSessionOverlays and the switch statements in
-// (*isolatedSession).start.
+// normalizeIsolatedOptions fills in the effective values start would
+// otherwise substitute silently, so GetIsolatedSession echoes the config
+// execd is actually running with. The legacy workspace fields are merged
+// into Overlays (prepended) and cleared. Explicit values, including
+// unknown enum strings, are left for start() to surface as errors.
 func normalizeIsolatedOptions(opts *IsolatedSessionOptions) {
 	if opts == nil {
 		return
@@ -1131,10 +1118,7 @@ func normalizeIsolatedOptions(opts *IsolatedSessionOptions) {
 	}
 	for i := range opts.Overlays {
 		ov := &opts.Overlays[i]
-		// start()/resolveSessionOverlays treat any non-rw/non-ro string as
-		// overlay, but only "" is really "unset" from the caller's
-		// perspective. Unknown enum values are left in place so a future
-		// normalize→start mismatch is loud.
+		// Unknown enum values are left in place so start() rejects them.
 		if ov.Mode == "" {
 			ov.Mode = string(isolation.WorkspaceOverlay)
 		}

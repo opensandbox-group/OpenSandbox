@@ -24,14 +24,10 @@ data class IsolatedWorkspaceSpec(
 )
 
 /**
- * One overlay mount inside the isolated namespace.
- *
- * `mode = "overlay"` mounts a copy-on-write view: with `persist = true`
- * (default) writes land in a host upper directory tracked by execd; with
- * `persist = false` the upper is an ephemeral tmpfs whose writes are
- * discarded when the session ends. `rw` and `ro` bind the host path directly;
- * `persist` applies to overlay mode only and must be left unset for `rw`/`ro`
- * (execd rejects the create request otherwise).
+ * One overlay mount. `mode = "overlay"` mounts a copy-on-write view:
+ * `persist = true` (default) uses a host upper directory, `persist = false`
+ * an ephemeral tmpfs discarded with the session. `rw` and `ro` bind
+ * directly; `persist` must be left unset for them.
  */
 data class IsolatedOverlaySpec(
     val path: String,
@@ -51,11 +47,9 @@ data class BindMount(
 )
 
 /**
- * Request to create an isolated bash session.
- *
- * The legacy [workspace] field is kept as sugar for a single-element
- * [overlays] list: at least one of the two must be provided, and when both
- * are present `workspace` is prepended to `overlays`.
+ * Request to create an isolated bash session. [workspace] is legacy sugar:
+ * at least one of [workspace]/[overlays] is required, and [workspace] is
+ * prepended when both are set.
  */
 data class CreateIsolatedSessionRequest(
     val workspace: IsolatedWorkspaceSpec? = null,

@@ -52,9 +52,8 @@ type WorkspaceSpec struct {
 	Mode string `json:"mode,omitempty"` // "rw" | "overlay" | "ro", default per profile
 }
 
-// OverlaySpec is one overlay mount inside the isolated namespace. Mode
-// defaults to overlay; Persist defaults to true and applies to overlay mode
-// only (false selects the ephemeral tmpfs upper).
+// OverlaySpec is one overlay mount. Mode defaults to overlay; Persist
+// (overlay mode only) defaults to true; false selects the tmpfs upper.
 type OverlaySpec struct {
 	Path    string `json:"path" validate:"required"`
 	Mode    string `json:"mode,omitempty"`    // "rw" | "overlay" | "ro"
@@ -118,9 +117,7 @@ func validateEnum(field, value string, allowed ...string) error {
 	return fmt.Errorf("invalid %s %q: must be one of %s", field, value, strings.Join(allowed, ", "))
 }
 
-// validateMounts checks the workspace/overlays combination: at least one
-// mount, valid modes, overlay-only persist, and absolute unique paths over
-// the effective (workspace-prepended) list.
+// validateMounts checks workspace/overlays presence, modes, and persist.
 func (r *CreateIsolatedSessionRequest) validateMounts() error {
 	if r.Workspace == nil && len(r.Overlays) == 0 {
 		return fmt.Errorf("workspace or overlays is required")
@@ -145,10 +142,9 @@ func (r *CreateIsolatedSessionRequest) validateMounts() error {
 	return r.validateMountPaths()
 }
 
-// validateMountPaths requires absolute, unique paths across the effective
-// mount list: CreateIsolatedSession runs host-side MkdirAll on each path
-// before bwrap validates, so a relative or duplicated path must fail here
-// with 400 instead of creating stray host directories and surfacing as 500.
+// validateMountPaths requires absolute, unique mount paths: the runtime
+// MkdirAlls each path on the host before bwrap validates it, so relative
+// or duplicated paths must fail here with 400.
 func (r *CreateIsolatedSessionRequest) validateMountPaths() error {
 	seenPaths := make(map[string]struct{}, len(r.Overlays)+1)
 	for _, ov := range r.EffectiveOverlays() {
@@ -164,9 +160,8 @@ func (r *CreateIsolatedSessionRequest) validateMountPaths() error {
 	return nil
 }
 
-// EffectiveOverlays returns the request's overlays with the legacy
-// workspace field (when present) prepended as the primary overlay,
-// mirroring the documented request semantics.
+// EffectiveOverlays returns the overlays with the legacy workspace field
+// (when present) prepended.
 func (r *CreateIsolatedSessionRequest) EffectiveOverlays() []OverlaySpec {
 	overlays := make([]OverlaySpec, 0, len(r.Overlays)+1)
 	if r.Workspace != nil {
@@ -221,10 +216,8 @@ type SessionState struct {
 	LastRunAt            time.Time `json:"last_run_at"`
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
 
-	// Creation-parameter echoes. All optional; a session_id-only client
-	// must tolerate any of these being absent. Workspace is echoed only
-	// for sessions with a single overlay (the legacy sugar shape); the
-	// full effective list is always available in Overlays.
+	// Creation-parameter echoes, all optional. Workspace is echoed only
+	// for single-overlay sessions; Overlays always carries the full list.
 	Profile            string              `json:"profile,omitempty"`
 	Workspace          *WorkspaceSpec      `json:"workspace,omitempty"`
 	Overlays           []OverlaySpec       `json:"overlays,omitempty"`

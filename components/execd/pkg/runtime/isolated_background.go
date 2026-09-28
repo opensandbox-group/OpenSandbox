@@ -552,11 +552,9 @@ type backgroundRunPaths struct {
 }
 
 // backgroundRunPaths returns the namespace and host paths of the background
-// run directory. The primary overlay (the first mount) plays the role the
-// single workspace played: its host path is the workspace itself for rw and
-// the upper layer for persistent overlay mounts; ephemeral overlay mounts
-// (persist=false) and read-only overlays have no host-visible writable
-// location and reject background runs.
+// run directory, rooted at the primary (first) overlay: the workspace itself
+// for rw, the upper layer for persistent overlay mounts. Ephemeral and
+// read-only primaries have no host-visible writable location and reject.
 func (s *isolatedSession) backgroundRunPaths() (backgroundRunPaths, error) {
 	if len(s.overlays) == 0 {
 		return backgroundRunPaths{}, fmt.Errorf("background runs unavailable: session has no upper directory")

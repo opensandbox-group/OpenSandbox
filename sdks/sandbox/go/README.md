@@ -146,9 +146,7 @@ environment with bind mounts — reachable through `Sandbox.IsolationCreate`:
 shareNet := true
 ephemeral := false
 session, err := sbx.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
-    // Workspace is now a pointer (breaking vs. previous releases): pass the
-    // address of the literal. Alternatively use Overlays for multiple
-    // independent mounts — when both are set, Workspace is prepended.
+    // Workspace is a pointer; Overlays carries additional independent mounts.
     Workspace: &opensandbox.IsolatedWorkspaceSpec{Path: "/workspace", Mode: "rw"},
     Overlays: []opensandbox.IsolatedOverlaySpec{{
         Path:    "/data/scratch",
