@@ -133,6 +133,18 @@ For every classified PR, read `body` and extract:
 
 Fall back to the PR title + diff summary (`gh pr view <num> --repo <owner>/<repo>`) only when the body is empty or uninformative.
 
+### Step 4b: Verify pinned third-party upstream changes against the upstream repo
+
+Fast Sandbox is vendored from `opensandbox-group/fast-sandbox` via a pin file; the OpenSandbox PRs that bump it ("chore(manifests): bump fast-sandbox pin to …") summarize upstream changes in their bodies — **do not trust those summaries as the source of truth**. Verify every upstream claim against the actual upstream git history before it enters the note:
+
+1. Resolve the pin: read `manifests/third-party/fast-sandbox.commit` (repo URL + pinned SHA) and the previous pin from the PR diff (or git history of that file). The local checkout `.fast-sandbox/src` (created by `manifests/release/build-fast-sandbox.sh`) is usually already at the pin — confirm with `git -C .fast-sandbox/src rev-parse HEAD`; fetch inside it if needed.
+2. List the real range: `git -C .fast-sandbox/src log --oneline <old-pin>..<new-pin>` and check every claim in the PR body ("Upstream highlights" etc.) maps to a real commit subject; note the commits that carry `!`/`BREAKING CHANGE` — they must appear in the note and in Upgrade & Compatibility. Claims that don't resolve to a commit get dropped, not paraphrased.
+3. Spot-check semantic claims in code at the pin, not in the PR text — e.g. `git -C .fast-sandbox/src grep -n '<symbol>' <pin> -- pkg cmd config` (examples: a new controller flag like `--fastlet-proxy-image`, env-file semantics like `sandbox-init.env`, a CRD plural like `sandboxsnapshots`).
+4. Check the chart/manifest adaptation matches the upstream change: e.g. after the `vmlinux.bin` drop, no stale `kernelPath`/`kernelURL` default may remain in `manifests/charts/fast-sandbox`; after the CEL drop (`x-kubernetes-validations` removed upstream), the vendored `manifests/charts/base/files/fast-sandbox-crds.yaml` must contain no CEL rules — beware grep hits that are only explanatory comments.
+5. Confirm the vendored CRD bundle is in sync with the pin: run `manifests/release/build-fast-sandbox.sh --no-build --sync-crds` and require `git diff --stat manifests/charts/base/files/fast-sandbox-crds.yaml` to be empty; a dirty diff means the pin bump PR's sync claim was wrong — flag it in the handoff.
+
+The same rule applies to any other pinned third-party source under `manifests/third-party/`.
+
 ### Step 5: Draft the note
 
 Copy `docs/releases/TEMPLATE.md` structure exactly; delete section headers with no entries; strip all HTML comments. Sections in order: title `# OpenSandbox <version>`, one-paragraph summary, `## Highlights` (1–3 bullets max), then component sections (Server, SDKs, Controller, Execd, Networking, Fast Sandbox), `## Misc`, `## Upgrade & Compatibility`, `## 👥 Contributors`, `## Artifacts`, `## Installation`.
