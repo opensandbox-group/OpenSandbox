@@ -572,7 +572,11 @@ func (s *isolatedSession) backgroundRunPaths() (backgroundRunPaths, error) {
 		paths.hostRunDir = paths.nsRunDir
 		paths.hostRoot = primary.path
 	case isolation.WorkspaceOverlay, "":
-		if !primary.persist || primary.upperDir == "" {
+		if !primary.persist {
+			return backgroundRunPaths{}, fmt.Errorf(
+				"background runs unavailable: primary overlay is ephemeral (persist=false)")
+		}
+		if primary.upperDir == "" {
 			return backgroundRunPaths{}, fmt.Errorf("background runs unavailable: session has no upper directory")
 		}
 		paths.hostRunDir = filepath.Join(primary.upperDir, isolatedBackgroundRunDir)

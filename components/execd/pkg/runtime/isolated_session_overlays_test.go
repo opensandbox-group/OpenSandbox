@@ -306,7 +306,7 @@ func TestBackgroundRunPaths_MultiOverlay(t *testing.T) {
 				persist: false,
 			}},
 			wantNSErr:    true,
-			wantNSErrMsg: "no upper directory",
+			wantNSErrMsg: "ephemeral",
 		},
 		{
 			name: "ephemeral primary is rejected even with a persist secondary",
@@ -315,7 +315,7 @@ func TestBackgroundRunPaths_MultiOverlay(t *testing.T) {
 				{path: "/data", mode: isolation.WorkspaceOverlay, persist: true, upperDir: upper},
 			},
 			wantNSErr:    true,
-			wantNSErrMsg: "no upper directory",
+			wantNSErrMsg: "ephemeral",
 		},
 		{
 			name:         "ro primary is rejected",

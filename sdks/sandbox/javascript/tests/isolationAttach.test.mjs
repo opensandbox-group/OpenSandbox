@@ -41,7 +41,8 @@ describe("attach", () => {
             last_run_at: "2026-01-02T03:05:06Z",
             idle_remaining_seconds: 30,
             profile: "strict",
-            workspace: { path: "/workspace", mode: "rw" },
+            // workspace echo is only emitted for single-overlay sessions,
+            // so it is deliberately absent from this multi-overlay fixture.
             overlays: [
               { path: "/", mode: "overlay" },
               { path: "/workspace", mode: "overlay", persist: true },
@@ -73,7 +74,7 @@ describe("attach", () => {
     assert.strictEqual(info.session_id, "sess-full");
     assert.strictEqual(info.created_at, "2026-01-02T03:04:05Z");
     assert.strictEqual(info.profile, "strict");
-    assert.deepStrictEqual(info.workspace, { path: "/workspace", mode: "rw" });
+    assert.strictEqual(info.workspace, undefined);
     assert.deepStrictEqual(info.overlays, [
       { path: "/", mode: "overlay" },
       { path: "/workspace", mode: "overlay", persist: true },

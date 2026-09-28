@@ -1364,7 +1364,7 @@ export interface components {
             /** @enum {string} */
             mode?: "rw" | "overlay" | "ro";
         };
-        /** @description One overlay mount inside the isolated namespace. `mode=overlay` mounts a copy-on-write view: with `persist=true` (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the session ends. `rw` and `ro` bind the host path directly and ignore `persist`. */
+        /** @description One overlay mount inside the isolated namespace. `mode=overlay` mounts a copy-on-write view: with `persist=true` (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the session ends. `rw` and `ro` bind the host path directly; `persist` applies to overlay mode only and must be omitted for them (execd rejects the request otherwise). */
         IsolatedOverlaySpec: {
             /**
              * @description Mount destination inside the namespace (absolute).
@@ -1376,11 +1376,8 @@ export interface components {
              * @enum {string}
              */
             mode?: "rw" | "overlay" | "ro";
-            /**
-             * @description Overlay mode only. When true (default) the copy-on-write upper is a host directory allocated per session; when false it is an ephemeral tmpfs whose writes are discarded when the session ends. Must be omitted for `rw` and `ro` modes. Because an ephemeral upper lives inside the namespace only, the filesystem API serves `persist=false` overlays from their host-side (lower) content: in-session writes under such an overlay are not observable through the files API and files-API writes into the overlay are rejected. Overlay mounts with `persist=false` also cannot host background-run logs, so background runs are rejected unless the first overlay is `rw` or `overlay` with `persist=true`.
-             * @default true
-             */
-            persist: boolean;
+            /** @description Overlay mode only. When true (default; execd treats an omitted value as true) the copy-on-write upper is a host directory allocated per session; when false it is an ephemeral tmpfs whose writes are discarded when the session ends. Must be omitted for `rw` and `ro` modes (execd rejects the request otherwise). Because an ephemeral upper lives inside the namespace only, the filesystem API serves `persist=false` overlays from their host-side (lower) content: in-session writes under such an overlay are not observable through the files API and files-API writes into the overlay are rejected. Overlay mounts with `persist=false` also cannot host background-run logs, so background runs are rejected unless the first overlay is `rw` or `overlay` with `persist=true`. */
+            persist?: boolean;
         };
         BindMount: {
             /** @description Host path to bind-mount into the namespace. */

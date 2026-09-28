@@ -29,8 +29,9 @@ data class IsolatedWorkspaceSpec(
  * `mode = "overlay"` mounts a copy-on-write view: with `persist = true`
  * (default) writes land in a host upper directory tracked by execd; with
  * `persist = false` the upper is an ephemeral tmpfs whose writes are
- * discarded when the session ends. `rw` and `ro` bind the host path directly
- * and ignore `persist`.
+ * discarded when the session ends. `rw` and `ro` bind the host path directly;
+ * `persist` applies to overlay mode only and must be left unset for `rw`/`ro`
+ * (execd rejects the create request otherwise).
  */
 data class IsolatedOverlaySpec(
     val path: String,

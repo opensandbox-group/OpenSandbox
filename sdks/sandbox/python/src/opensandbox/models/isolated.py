@@ -40,10 +40,12 @@ class IsolatedOverlaySpec(BaseModel):
     """One overlay mount inside the isolated namespace.
 
     ``mode='overlay'`` mounts a copy-on-write view: with ``persist=True``
-    (default) writes land in a host upper directory tracked by execd; with
-    ``persist=False`` the upper is an ephemeral tmpfs whose writes are
-    discarded when the session ends. ``rw`` and ``ro`` bind the host path
-    directly and ignore ``persist``.
+    (default; execd treats an omitted value as true) writes land in a host
+    upper directory tracked by execd; with ``persist=False`` the upper is an
+    ephemeral tmpfs whose writes are discarded when the session ends.
+    ``rw`` and ``ro`` bind the host path directly; ``persist`` applies to
+    overlay mode only and must be left unset for them (execd rejects the
+    create request otherwise).
     """
 
     path: str = Field(description="Mount destination inside the namespace (absolute)")
@@ -322,8 +324,9 @@ class IsolatedRunOpts(BaseModel):
 class IsolatedBackgroundRun(BaseModel):
     """Handle returned when a run is started with background: true.
 
-    Background runs require a writable log location, so sessions with a
-    read-only (``ro``) workspace reject them with an error.
+    Background runs require a writable log location under the first
+    overlay, so sessions whose first overlay is read-only (``ro``) or an
+    ephemeral overlay (``persist=False``) reject them with an error.
     """
 
     session_id: str = Field(description="Session the run was started in")

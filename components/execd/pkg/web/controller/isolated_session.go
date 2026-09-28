@@ -135,6 +135,7 @@ func classifyIsolatedCreateError(err error) (int, model.ErrorCode) {
 		strings.Contains(err.Error(), "unknown isolation profile") ||
 		strings.Contains(err.Error(), "must be an existing path") ||
 		strings.Contains(err.Error(), "must be an absolute path") ||
+		strings.Contains(err.Error(), "duplicate overlay path") ||
 		strings.Contains(err.Error(), "source is required") {
 		return http.StatusBadRequest, model.ErrorCodeRuntimeError
 	}

@@ -908,7 +908,13 @@ func newMergedView(s *isolatedSession) vfs.FS {
 		return isolation.NewMergedView(ov.path, upper, ov.mode, uid, gid)
 	}
 
-	if len(s.overlays) == 1 {
+	// A directly-constructed session may carry no overlays at all; the
+	// empty router fails every lookup with ErrPathOutsideOverlays instead
+	// of panicking on the views slice.
+	if len(s.overlays) <= 1 {
+		if len(s.overlays) == 0 {
+			return isolation.NewMultiMergedView(nil)
+		}
 		return overlayView(s.overlays[0])
 	}
 

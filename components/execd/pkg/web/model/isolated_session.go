@@ -16,6 +16,7 @@ package model
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -83,6 +84,22 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 	}
 	if r.Workspace == nil && len(r.Overlays) == 0 {
 		return fmt.Errorf("workspace or overlays is required")
+	}
+	// The effective mount list (legacy workspace prepended) must carry
+	// absolute, unique paths: CreateIsolatedSession runs host-side
+	// MkdirAll on each path before bwrap validates, so a relative or
+	// duplicated path must fail here with 400 instead of creating stray
+	// host directories and surfacing as a 500.
+	seenPaths := make(map[string]struct{}, len(r.Overlays)+1)
+	for _, ov := range r.EffectiveOverlays() {
+		if !strings.HasPrefix(ov.Path, "/") {
+			return fmt.Errorf("overlays: path %q must be an absolute path", ov.Path)
+		}
+		cleaned := filepath.Clean(ov.Path)
+		if _, dup := seenPaths[cleaned]; dup {
+			return fmt.Errorf("overlays: duplicate path %q", ov.Path)
+		}
+		seenPaths[cleaned] = struct{}{}
 	}
 	if r.Workspace != nil && r.Workspace.Mode != "" {
 		switch r.Workspace.Mode {

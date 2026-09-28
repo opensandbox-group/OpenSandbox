@@ -124,6 +124,38 @@ func TestCreateIsolatedSessionRequest_Validate_Overlays(t *testing.T) {
 				r.Overlays = []OverlaySpec{{Path: "/ws", Mode: "overlay", Persist: &persist}}
 			},
 		},
+		{
+			name: "relative overlay path",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = []OverlaySpec{{Path: "rel/ws"}}
+			},
+			wantErr: "must be an absolute path",
+		},
+		{
+			name: "relative legacy workspace path",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = &WorkspaceSpec{Path: "rel/ws"}
+				r.Overlays = nil
+			},
+			wantErr: "must be an absolute path",
+		},
+		{
+			name: "duplicate overlay paths",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = []OverlaySpec{{Path: "/ws"}, {Path: "/ws/"}}
+			},
+			wantErr: `duplicate path`,
+		},
+		{
+			name: "workspace duplicating an overlay path",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = &WorkspaceSpec{Path: "/ws"}
+				r.Overlays = []OverlaySpec{{Path: "/ws"}}
+			},
+			wantErr: `duplicate path`,
+		},
 	}
 
 	for _, tt := range tests {

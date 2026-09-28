@@ -102,6 +102,34 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TestMultiOverlayEchoContract()
+    {
+        var session = await _sandbox!.Isolation.CreateAsync(new CreateIsolatedSessionRequest(
+            Overlays: new List<IsolatedOverlaySpec>
+            {
+                new(Path: "/tmp"),
+                new(Path: "/workspace", Mode: "rw"),
+            },
+            Profile: "balanced"));
+        try
+        {
+            var state = await session.GetAsync();
+            Assert.NotNull(state.Overlays);
+            Assert.Equal(2, state.Overlays!.Count);
+            Assert.Equal("/tmp", state.Overlays[0].Path);
+            Assert.Equal("overlay", state.Overlays[0].Mode);
+            Assert.Equal("/workspace", state.Overlays[1].Path);
+            // The legacy workspace echo is emitted only for single-overlay
+            // sessions; multi-overlay sessions expose mounts via overlays.
+            Assert.Null(state.Workspace);
+        }
+        finally
+        {
+            await session.DeleteAsync();
+        }
+    }
+
+    [Fact]
     public async Task TestRunEcho()
     {
         var session = await _sandbox!.Isolation.CreateAsync(

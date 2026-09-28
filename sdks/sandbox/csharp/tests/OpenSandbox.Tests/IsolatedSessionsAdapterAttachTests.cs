@@ -171,6 +171,30 @@ public class IsolatedSessionsAdapterAttachTests
     }
 
     [Fact]
+    public async Task CreateAsync_WorkspaceOnlyOmitsOverlays()
+    {
+        var handler = new RouteHandler(request =>
+        {
+            if (request.Method == HttpMethod.Post &&
+                request.RequestUri!.PathAndQuery == "/v1/isolated/session")
+            {
+                return new RouteResponse(HttpStatusCode.Created, """
+                { "session_id": "sess-ws-only" }
+                """);
+            }
+            return new RouteResponse(HttpStatusCode.InternalServerError, "wrong endpoint");
+        });
+        var adapter = CreateAdapter(handler);
+
+        await adapter.CreateAsync(new CreateIsolatedSessionRequest(
+            Workspace: new IsolatedWorkspaceSpec(Path: "/workspace", Mode: "rw")));
+
+        var body = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(handler.Requests[0].Body!);
+        body!.Should().NotContainKey("overlays");
+        body["workspace"].GetProperty("path").GetString().Should().Be("/workspace");
+    }
+
+    [Fact]
     public async Task AttachAsync_ToleratesMissingCreationParams_WhenExecdIsOlder()
     {
         var getCallCount = 0;
@@ -219,6 +243,7 @@ public class IsolatedSessionsAdapterAttachTests
         info.CreatedAt.Should().Be(DateTimeOffset.Parse("2026-01-02T03:04:05Z"));
         info.Profile.Should().BeNull();
         info.Workspace.Should().BeNull();
+        info.Overlays.Should().BeNull();
         info.ExtraWritable.Should().BeNull();
         info.Binds.Should().BeNull();
         info.ShareNet.Should().BeNull();

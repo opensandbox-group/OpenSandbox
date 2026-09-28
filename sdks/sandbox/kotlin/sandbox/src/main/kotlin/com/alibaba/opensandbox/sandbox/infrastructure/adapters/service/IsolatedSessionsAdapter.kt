@@ -141,6 +141,8 @@ private data class IsolatedSessionStateResponse(
     val idle_timeout_seconds: Int? = null,
 )
 
+private fun IsolatedOverlayBody.toDomain(): IsolatedOverlaySpec = IsolatedOverlaySpec(path = path, mode = mode, persist = persist)
+
 @Serializable
 private data class IsolatedSessionSummaryResponse(
     val session_id: String,
@@ -228,6 +230,9 @@ internal class IsolatedSessionsAdapter(
         "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
 
     override fun create(request: CreateIsolatedSessionRequest): IsolationSession {
+        require(request.workspace != null || !request.overlays.isNullOrEmpty()) {
+            "workspace or overlays is required"
+        }
         try {
             val body =
                 IsolatedCreateBody(
@@ -309,14 +314,7 @@ internal class IsolatedSessionsAdapter(
                             resp.workspace?.let {
                                 IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
                             },
-                        overlays =
-                            resp.overlays?.map {
-                                IsolatedOverlaySpec(
-                                    path = it.path,
-                                    mode = it.mode,
-                                    persist = it.persist,
-                                )
-                            },
+                        overlays = resp.overlays?.map { it.toDomain() },
                         extraWritable = resp.extra_writable,
                         binds =
                             resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },
@@ -367,14 +365,7 @@ internal class IsolatedSessionsAdapter(
                         resp.workspace?.let {
                             IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
                         },
-                    overlays =
-                        resp.overlays?.map {
-                            IsolatedOverlaySpec(
-                                path = it.path,
-                                mode = it.mode,
-                                persist = it.persist,
-                            )
-                        },
+                    overlays = resp.overlays?.map { it.toDomain() },
                     extraWritable = resp.extra_writable,
                     binds =
                         resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },

@@ -34,8 +34,9 @@ type IsolatedWorkspaceSpec struct {
 // namespace. Overlay mode mounts a copy-on-write view: with Persist=true
 // (default) writes land in a host upper directory tracked by execd; with
 // Persist=false the upper is an ephemeral tmpfs whose writes are discarded
-// when the session ends. rw and ro bind the host path directly and ignore
-// Persist.
+// when the session ends. rw and ro bind the host path directly; Persist
+// applies to overlay mode only and must be left unset for rw/ro (execd
+// rejects the request otherwise).
 type IsolatedOverlaySpec struct {
 	Path    string `json:"path"`
 	Mode    string `json:"mode,omitempty"`    // "rw" | "overlay" | "ro"

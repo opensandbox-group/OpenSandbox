@@ -26,7 +26,8 @@ public record IsolatedWorkspaceSpec(
 /// copy-on-write view: with Persist=true (default) writes land in a host
 /// upper directory tracked by execd; with Persist=false the upper is an
 /// ephemeral tmpfs whose writes are discarded when the session ends. rw and
-/// ro bind the host path directly and ignore Persist.
+/// ro bind the host path directly; Persist applies to overlay mode only and
+/// must be left unset for rw/ro (execd rejects the request otherwise).
 /// </summary>
 public record IsolatedOverlaySpec(
     [property: JsonPropertyName("path")] string Path,
@@ -48,8 +49,9 @@ public record BindMount(
 public record CreateIsolatedSessionRequest(
     // Legacy single-workspace sugar. When both Workspace and Overlays are
     // provided, Workspace is prepended to Overlays; at least one is required.
+    // Overlays is appended last so existing positional call sites keep
+    // compiling (JSON order is unaffected by parameter order).
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
-    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null,
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
     [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
@@ -58,7 +60,8 @@ public record CreateIsolatedSessionRequest(
     [property: JsonPropertyName("uid")] long? Uid = null,
     [property: JsonPropertyName("gid")] long? Gid = null,
     [property: JsonPropertyName("uid_mode")] string? UidMode = null,
-    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null
 );
 
 public record IsolatedSessionInfo(
@@ -67,7 +70,6 @@ public record IsolatedSessionInfo(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
-    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
     [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
     [property: JsonPropertyName("share_net")] bool? ShareNet = null,
@@ -75,7 +77,8 @@ public record IsolatedSessionInfo(
     [property: JsonPropertyName("uid")] long? Uid = null,
     [property: JsonPropertyName("gid")] long? Gid = null,
     [property: JsonPropertyName("uid_mode")] string? UidMode = null,
-    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null
 );
 
 public record IsolatedSessionState(
@@ -86,7 +89,6 @@ public record IsolatedSessionState(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
-    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
     [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
     [property: JsonPropertyName("share_net")] bool? ShareNet = null,
@@ -94,7 +96,8 @@ public record IsolatedSessionState(
     [property: JsonPropertyName("uid")] long? Uid = null,
     [property: JsonPropertyName("gid")] long? Gid = null,
     [property: JsonPropertyName("uid_mode")] string? UidMode = null,
-    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null
 );
 
 public record IsolatedSessionSummary(
