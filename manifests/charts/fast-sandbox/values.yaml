@@ -148,7 +148,9 @@ runtimeEnvironments: |-
           firecracker:
             binaryPath: /opt/fast-sandbox/firecracker/firecracker
             jailerPath: /opt/fast-sandbox/firecracker/jailer
-            kernelPath: /opt/fast-sandbox/firecracker/vmlinux.bin
+            # No kernelPath: restore never boots a kernel (the bundled
+            # vmlinux.bin was dropped upstream); direct-boot operators
+            # pin one here explicitly.
             rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs
             stateRoot: /var/lib/fast-sandbox/firecracker
 
@@ -223,6 +225,6 @@ runtime:
   # -- Agent config (agent.yaml). Empty = the chart default (upstream
   # config/dev/agent-config.yaml with the dart discover URL pointing at
   # this chart's namespace). socket/stateRoot/registryConfig/p2p are
-  # startup-only; the nodeReadiness section (fcVersion, kernelURL,
-  # interval, minFree, minMemory) hot-reloads on every readiness pass.
+  # startup-only; the nodeReadiness section (fcVersion, interval,
+  # minFree, minMemory) hot-reloads on every readiness pass.
   config: ""

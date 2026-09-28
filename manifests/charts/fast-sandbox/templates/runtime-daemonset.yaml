@@ -124,7 +124,6 @@ data:
       enabled: true
       assetsDir: /opt/fast-sandbox/firecracker
       fcVersion: v1.16.1
-      kernelURL: ""
       interval: 5m
       minFree: 10GiB
       minMemory: 2GiB
