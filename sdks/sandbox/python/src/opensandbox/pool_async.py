@@ -545,6 +545,7 @@ class SandboxPoolAsync:
             ):
                 self._lifecycle_state = PoolLifecycleState.STOPPED
                 return
+            run_generation = self._run_generation
             if not graceful:
                 self._accept_warmup_commits = False
                 await self._stop_reconcile(wait_for_warmup=False)
@@ -559,8 +560,14 @@ class SandboxPoolAsync:
                 f"Async pool graceful shutdown timed out waiting in-flight operations: pool_name={self._config.pool_name} in_flight={self._in_flight} timeout_ms={int(self._config.drain_timeout.total_seconds() * 1000)}"
             )
         async with self._lifecycle_lock:
+            if self._run_generation != run_generation:
+                # A start() installed a newer run while this shutdown was
+                # draining; the new run owns the tasks and the terminal state.
+                return
             self._accept_warmup_commits = False
-            await self._stop_reconcile(wait_for_warmup=False)
+            await self._stop_reconcile(
+                wait_for_warmup=False, run_generation=run_generation
+            )
             self._lifecycle_state = PoolLifecycleState.STOPPED
             await self._close_provider()
 
@@ -1289,7 +1296,12 @@ class SandboxPoolAsync:
         *,
         wait_for_warmup: bool,
         join_scheduler: bool = True,
+        run_generation: int | None = None,
     ) -> None:
+        # run_generation=None tears down unconditionally; an int skips teardown
+        # when a newer start() run already owns the tasks.
+        if run_generation is not None and self._run_generation != run_generation:
+            return
         self._stop_event.set()
         task = self._scheduler_task
         current = asyncio.current_task()

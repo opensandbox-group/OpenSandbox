@@ -1088,6 +1088,40 @@ def _create_pool(
     )
 
 
+async def test_async_graceful_shutdown_superseded_by_start_keeps_new_run_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a graceful shutdown releases _lifecycle_lock while draining
+    in-flight operations. A start() that installs a newer run inside that
+    window must survive: the superseded shutdown may not cancel the new run's
+    scheduler/heartbeat tasks, tear down its warmup tasks, or stomp its
+    RUNNING state to STOPPED.
+    """
+    pool = _create_pool(max_idle=0)
+    await pool.start()
+    old_generation = pool._run_generation
+    drain_started = asyncio.Event()
+    release_drain = asyncio.Event()
+    original_drain = pool._await_in_flight_drain
+
+    async def paused_drain(timeout: timedelta) -> bool:
+        drain_started.set()
+        await release_drain.wait()
+        return await original_drain(timeout)
+
+    monkeypatch.setattr(pool, "_await_in_flight_drain", paused_drain)
+    shutdown_task = asyncio.create_task(pool.shutdown(graceful=True))
+    await drain_started.wait()
+    await pool.start()
+    release_drain.set()
+    await shutdown_task
+    assert pool._run_generation == old_generation + 1
+    assert pool._lifecycle_state == PoolLifecycleState.RUNNING
+    assert pool._scheduler_task is not None and not pool._scheduler_task.done()
+    assert pool._heartbeat_task is not None and not pool._heartbeat_task.done()
+    await pool.shutdown(graceful=False)
+
+
 async def test_async_acquire_retry_next_idle_empty_raises_pool_empty() -> None:
     pool = _create_pool(max_idle=0)
     await pool.start()
