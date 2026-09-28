@@ -17,6 +17,8 @@ The adapter and endpoint integration live in this repository. FastPath, the Fast
 
 ![Fast Sandbox architecture](../../public/images/fast-sandbox-architecture.svg)
 
+👉 <a href="/architecture/fast-sandbox/architecture.html" target="_blank" rel="noopener">Interactive architecture diagram</a> — explore sandbox creation, template artifact flow, checkpoints, and deployment topology in a full-view explorable map.
+
 ## Core components
 
 | Component | Responsibility | Design goal |
@@ -43,6 +45,7 @@ The adapter and endpoint integration live in this repository. FastPath, the Fast
 
 | Page | Content |
 |---|---|
+| <a href="/architecture/fast-sandbox/architecture.html" target="_blank" rel="noopener">Interactive Architecture</a> | Explorable component map: sandbox creation, template artifact flow, checkpoints, and deployment topology |
 | [Templates](/architecture/fast-sandbox/templates) | Template catalog, golden-image builds, artifact publication |
 | [Scheduling](/architecture/fast-sandbox/scheduling) | Pools and Fastlets, the create hot path, lifecycle and pause/resume |
 | [Networking](/architecture/fast-sandbox/networking) | Network slots, inbound route scopes and resolution, outbound egress enforcement |

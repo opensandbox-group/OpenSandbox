@@ -1,0 +1,509 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "OpenSandbox × fast-sandbox Integration Architecture",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1360,
+      540
+    ],
+    "output": "opensandbox-fast-sandbox-architecture.html",
+    "views": [
+      {
+        "id": "template-flow",
+        "label": "Template artifact flow",
+        "focus": [
+          "server_db",
+          "server",
+          "fastpath",
+          "builder",
+          "s3_store"
+        ],
+        "note": "From Server DB source of truth to content-addressed golden images in S3"
+      },
+      {
+        "id": "sandbox-create",
+        "label": "Sandbox creation",
+        "focus": [
+          "clients",
+          "server",
+          "fastpath",
+          "fastlet",
+          "node_rt"
+        ],
+        "note": "templateId create: FastPath constant-time admission to a ready microVM"
+      },
+      {
+        "id": "access-path",
+        "label": "Traffic access",
+        "focus": [
+          "clients",
+          "ingress",
+          "fastpath",
+          "fastlet"
+        ],
+        "note": "The server issues gateway endpoints; signed routes reach Fastlets directly"
+      },
+      {
+        "id": "artifacts",
+        "label": "Artifacts & checkpoints",
+        "focus": [
+          "s3_store",
+          "oci_reg",
+          "fastlet",
+          "node_rt",
+          "controller",
+          "sbx_pod"
+        ],
+        "note": "Digest-first pause checkpoints and snapshot images"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "SDK · CLI · MCP",
+      "sublabel": "Python·TS·Go·Java·C#·osb",
+      "tag": "Client-side",
+      "pos": [
+        20,
+        150
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "server_db",
+      "type": "database",
+      "label": "Server DB",
+      "sublabel": "Template · snapshot metadata",
+      "tag": "SQLite/PG",
+      "pos": [
+        20,
+        312
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "opensandbox-server",
+      "sublabel": "FastAPI /v1 · runtime routing",
+      "tag": "Deployment",
+      "pos": [
+        280,
+        32
+      ],
+      "size": [
+        175,
+        80
+      ]
+    },
+    {
+      "id": "controller",
+      "type": "backend",
+      "label": "controller-manager",
+      "sublabel": "BatchSandbox/Pool/Snapshot CRs",
+      "tag": "Deployment",
+      "pos": [
+        275,
+        150
+      ],
+      "size": [
+        185,
+        76
+      ]
+    },
+    {
+      "id": "ingress",
+      "type": "backend",
+      "label": "ingress-gateway",
+      "sublabel": "Traffic :28888 · signed routes",
+      "tag": "Deployment ×2",
+      "pos": [
+        565,
+        32
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "fastpath",
+      "type": "backend",
+      "label": "fsb-controller · FastPath",
+      "sublabel": "gRPC :9090 · admit/pause/resume",
+      "tag": "Deployment ×1",
+      "pos": [
+        565,
+        150
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "builder",
+      "type": "backend",
+      "label": "Template Builder",
+      "sublabel": "SandboxTemplate → golden image",
+      "tag": "Pod · on demand",
+      "pos": [
+        855,
+        32
+      ],
+      "size": [
+        190,
+        80
+      ]
+    },
+    {
+      "id": "fastlet",
+      "type": "cloud",
+      "label": "Fastlet Pod",
+      "sublabel": "N microVMs + proxy + egress",
+      "tag": "Pod · pre-warmed",
+      "pos": [
+        855,
+        150
+      ],
+      "size": [
+        190,
+        100
+      ]
+    },
+    {
+      "id": "node_rt",
+      "type": "cloud",
+      "label": "firecracker-runtime",
+      "sublabel": "UDS · DART :9000 · state root",
+      "tag": "DaemonSet",
+      "pos": [
+        855,
+        312
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "sbx_pod",
+      "type": "backend",
+      "label": "BatchSandbox Pod",
+      "sublabel": "execd :44772 · tasks :5758",
+      "tag": "Pod",
+      "pos": [
+        855,
+        432
+      ],
+      "size": [
+        190,
+        80
+      ]
+    },
+    {
+      "id": "s3_store",
+      "type": "database",
+      "label": "S3 Artifact Store",
+      "sublabel": "s3://sandbox-images/publish",
+      "tag": "MinIO/S3",
+      "pos": [
+        1155,
+        32
+      ],
+      "size": [
+        170,
+        80
+      ]
+    },
+    {
+      "id": "oci_reg",
+      "type": "database",
+      "label": "OCI Registry",
+      "sublabel": "snap-gen* · snap-* images",
+      "tag": "Registry",
+      "pos": [
+        1155,
+        432
+      ],
+      "size": [
+        170,
+        72
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "opensandbox-system · Control Plane",
+      "wraps": [
+        "server",
+        "controller",
+        "ingress",
+        "fastpath"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "Nodes · Data Plane (fsb CRs: opensandbox-dataplane)",
+      "wraps": [
+        "builder",
+        "fastlet",
+        "node_rt",
+        "sbx_pod"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "Artifact Storage · External",
+      "wraps": [
+        "s3_store",
+        "oci_reg"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "from": "clients",
+      "to": "server",
+      "label": "HTTP /v1 · API Key",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          210,
+          186
+        ],
+        [
+          210,
+          4
+        ],
+        [
+          367.5,
+          4
+        ]
+      ],
+      "labelAt": [
+        180,
+        116
+      ]
+    },
+    {
+      "from": "server",
+      "to": "server_db",
+      "label": "Templates · snapshot metadata",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [
+        [
+          240,
+          72
+        ],
+        [
+          240,
+          348
+        ]
+      ],
+      "labelAt": [
+        240,
+        260
+      ]
+    },
+    {
+      "from": "server",
+      "to": "fastpath",
+      "label": "gRPC :9090",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          520,
+          72
+        ],
+        [
+          520,
+          190
+        ]
+      ]
+    },
+    {
+      "from": "server",
+      "to": "controller",
+      "label": "BatchSandbox CR · pause",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        368,
+        131
+      ]
+    },
+    {
+      "from": "ingress",
+      "to": "fastpath",
+      "label": "ResolveEndpoint",
+      "variant": "dashed",
+      "labelAt": [
+        655,
+        131
+      ]
+    },
+    {
+      "from": "controller",
+      "to": "sbx_pod",
+      "label": "Pool alloc · /setTasks",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          367.5,
+          472
+        ]
+      ]
+    },
+    {
+      "from": "controller",
+      "to": "oci_reg",
+      "label": "image-committer push · resume pull",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          500,
+          188
+        ],
+        [
+          500,
+          410
+        ],
+        [
+          1130,
+          410
+        ],
+        [
+          1130,
+          468
+        ]
+      ]
+    },
+    {
+      "from": "fastpath",
+      "to": "builder",
+      "label": "Reconcile SandboxTemplate",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          800,
+          190
+        ],
+        [
+          800,
+          130
+        ],
+        [
+          950,
+          130
+        ]
+      ],
+      "labelAt": [
+        950,
+        124
+      ]
+    },
+    {
+      "from": "builder",
+      "to": "s3_store",
+      "label": "Golden images"
+    },
+    {
+      "from": "fastpath",
+      "to": "fastlet",
+      "label": "Admission · slots first",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          655,
+          278
+        ],
+        [
+          950,
+          278
+        ]
+      ]
+    },
+    {
+      "from": "fastlet",
+      "to": "s3_store",
+      "label": "Pause checkpoints, digest first"
+    },
+    {
+      "from": "s3_store",
+      "to": "node_rt",
+      "label": "DART block fetch :9000",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "right",
+      "via": [
+        [
+          1240,
+          350
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Control plane & access",
+      "items": [
+        "All control-plane components: Helm Deployments",
+        "FastPath: single replica, state in CRDs",
+        "Server DB: template catalog + snapshot metadata",
+        "Signed :28888 routes; endpoints issued by server"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Template artifact flow",
+      "items": [
+        "Server DB truth → SandboxTemplate CR",
+        "Builder bakes immutable golden images",
+        "Content-addressed in the S3 artifact store"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Sandbox lifecycle & artifacts",
+      "items": [
+        "templateId → FastSandboxService → FastPath admission",
+        "Slots first, CR first; reflink restore; execd :44772",
+        "Pause: digest-first to S3; Fastlet released",
+        "Resume anywhere; re-resolve endpoints",
+        "BatchSandbox: image-committer → OCI Registry"
+      ]
+    }
+  ]
+}
