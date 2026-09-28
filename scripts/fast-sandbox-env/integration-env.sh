@@ -568,9 +568,20 @@ stateroot_xfs_up() {
 		return 0
 	}
 	if findmnt -no FSTYPE "$XFS_MOUNT_POINT" 2>/dev/null | grep -qx xfs; then
-		log "XFS StateRoot already mounted at $XFS_MOUNT_POINT"
-		pass "XFS StateRoot ready (reflink CoW rootfs)"
-		return 0
+		# Leftover from a run that died before teardown (concurrency cancel,
+		# runner restart): jails/snapshots still occupy the StateRoot, and
+		# once free space drops under the agent's 10GiB min-free floor the
+		# readiness check strips the kvm node label and template builds stop
+		# scheduling. By this point the leftover-cluster check has already
+		# run down(), so no live workload holds these files.
+		stateroot_scrub
+		if (( $(stateroot_free_gib) >= XFS_MIN_FREE_GIB )); then
+			pass "XFS StateRoot ready (reflink CoW rootfs, scrubbed)"
+			return 0
+		fi
+		log "StateRoot below ${XFS_MIN_FREE_GIB}GiB free after scrub; recreating the XFS image"
+		sudo_ umount "$XFS_MOUNT_POINT" || die "unmount $XFS_MOUNT_POINT failed"
+		rm -f "$XFS_LOOP_FILE"
 	fi
 	ensure_xfsprogs
 	if [[ ! -f "$XFS_LOOP_FILE" ]]; then
@@ -593,6 +604,29 @@ stateroot_xfs_up() {
 		die "reflink probe failed on $XFS_MOUNT_POINT (CoW rootfs would not work)"
 	fi
 }
+
+# Purge the per-node runtime caches inside the mounted StateRoot (shared by
+# down() and the reuse branch of stateroot_xfs_up). snapshots/ is the big
+# one: publish/pull staging dirs plus committed snapshot state are never
+# swept at runtime and leak across interrupted runs.
+stateroot_scrub() {
+	local node_dir
+	for node_dir in "$XFS_MOUNT_POINT"/*/; do
+		[[ -d "${node_dir}firecracker" ]] || continue
+		log "purging node runtime cache under ${node_dir%/}"
+		sudo_ rm -rf "${node_dir}firecracker/images" \
+			"${node_dir}firecracker/agent" \
+			"${node_dir}firecracker/jails" \
+			"${node_dir}firecracker/cache" \
+			"${node_dir}firecracker/snapshots" 2>/dev/null || true
+	done
+}
+
+# Free space on the mounted StateRoot, in GiB (GNU df).
+stateroot_free_gib() {
+	df -BG --output=avail "$XFS_MOUNT_POINT" 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0
+}
+XFS_MIN_FREE_GIB="${XFS_MIN_FREE_GIB:-12}"
 
 stateroot_xfs_down() {
 	[[ "$XFS_STATEROOT" == 1 ]] || return 0
@@ -1898,16 +1932,7 @@ down() {
 	# committed cache as FINAL (idempotent, never refreshed), so a rebuilt
 	# SandboxTemplate would otherwise keep being ignored when the StateRoot
 	# survives teardown (e.g. XFS_STATEROOT=0 plain directories).
-	local node_dir
-	for node_dir in control-plane worker; do
-		if [[ -d "$XFS_MOUNT_POINT/$node_dir/firecracker" ]]; then
-			log "down: purging node runtime cache under $XFS_MOUNT_POINT/$node_dir"
-			sudo_ rm -rf "$XFS_MOUNT_POINT/$node_dir/firecracker/images" \
-				"$XFS_MOUNT_POINT/$node_dir/firecracker/agent" \
-				"$XFS_MOUNT_POINT/$node_dir/firecracker/jails" \
-				"$XFS_MOUNT_POINT/$node_dir/firecracker/cache" 2>/dev/null || true
-		fi
-	done
+	stateroot_scrub
 	pass "host cleanup complete"
 }
 
