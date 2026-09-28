@@ -342,7 +342,10 @@ one-element list; when both are present, `workspace` is prepended):
 - `persist` (overlay mode only, default `true`): `true` allocates a host
   upper directory under `upper_root`; `false` uses an ephemeral tmpfs upper
   whose writes are discarded when the session ends. `rw`/`ro` entries must
-  not set `persist`.
+  not set `persist`. An ephemeral upper lives inside the namespace only, so
+  the files API serves `persist=false` overlays from their host-side
+  content: in-session writes under such an overlay are not observable
+  through the files API and files-API writes into it are rejected.
 - The files API routes each request to the overlay whose mount path is the
   longest prefix of the requested path; relative paths resolve against the
   first overlay.

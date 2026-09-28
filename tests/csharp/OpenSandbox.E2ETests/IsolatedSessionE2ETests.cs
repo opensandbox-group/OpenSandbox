@@ -258,9 +258,9 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
         await _sandbox!.Commands.RunAsync("mkdir -p /workspace");
 
         var sessionA = await _sandbox.Isolation.CreateAsync(
-            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/workspace", "rw"), "strict"));
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/workspace", "rw"), Profile: "strict"));
         var sessionB = await _sandbox.Isolation.CreateAsync(
-            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/workspace", "rw"), "strict"));
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/workspace", "rw"), Profile: "strict"));
         try
         {
             await sessionA.RunAsync("echo secret > /tmp/isolated_test_file.txt");

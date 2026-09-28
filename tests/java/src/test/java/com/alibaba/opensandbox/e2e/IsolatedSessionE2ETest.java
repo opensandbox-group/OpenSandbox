@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.e2e;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceEntry;
@@ -1318,14 +1319,35 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                                 new IsolatedOverlaySpec(dirA, "overlay", true),
                                 new IsolatedOverlaySpec(dirB, "overlay", false)));
         try {
-            // Both mounts work in-session regardless of persist.
+            // Both mounts accept in-session writes regardless of persist.
             session.run(
                     new IsolatedRunRequest(
                             "echo p > " + dirA + "/f.txt && echo e > " + dirB + "/f.txt",
                             null,
                             null));
+
+            // The persistent overlay's upper is host-visible, so the files
+            // API observes in-session writes on it.
             assertEquals("p", session.getFiles().readFile(dirA + "/f.txt").trim());
-            assertEquals("e", session.getFiles().readFile(dirB + "/f.txt").trim());
+
+            // An ephemeral (persist=false) overlay's tmpfs upper is internal
+            // to the namespace: the files API serves the host-side view only,
+            // so an in-session-only file is not observable and files-API
+            // writes into the ephemeral overlay are rejected.
+            assertThrows(
+                    SandboxApiException.class,
+                    () -> session.getFiles().readFile(dirB + "/f.txt"));
+            assertThrows(
+                    SandboxApiException.class,
+                    () ->
+                            session.getFiles()
+                                    .write(
+                                            List.of(
+                                                    WriteEntry.builder()
+                                                            .path(dirB + "/api.txt")
+                                                            .data("x")
+                                                            .mode(644)
+                                                            .build())));
 
             var state = session.get();
             assertEquals(2, state.getOverlays().size());
