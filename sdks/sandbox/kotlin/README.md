@@ -238,7 +238,9 @@ the session around:
 ```java
 IsolationSession session = sandbox.isolation().create(
     new CreateIsolatedSessionRequest(
-        new IsolatedWorkspaceSpec("/workspace", "rw"),  // path, mode
+        new IsolatedWorkspaceSpec("/workspace", "rw"),  // legacy workspace sugar, prepended
+        List.of(                                        // overlays: path, mode, persist
+            new IsolatedOverlaySpec("/data/scratch", "overlay", false)),
         "strict",                                       // profile
         null,                                           // extraWritable
         List.of(new BindMount("/data", "/data", true)), // binds: source, dest, readonly

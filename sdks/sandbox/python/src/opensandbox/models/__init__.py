@@ -110,11 +110,11 @@ __all__ = [
     "CreateIsolatedSessionRequest",
     "EnvPassthroughSpec",
     "IsolatedCapabilities",
+    "IsolatedOverlaySpec",
     "IsolatedRunOpts",
     "IsolatedSessionInfo",
     "IsolatedSessionState",
     "IsolatedSessionSummary",
-    "IsolatedOverlaySpec",
     "IsolatedWorkspaceSpec",
     # Filesystem models
     "EntryInfo",

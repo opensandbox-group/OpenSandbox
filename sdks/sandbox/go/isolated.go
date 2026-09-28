@@ -36,7 +36,7 @@ type IsolatedWorkspaceSpec struct {
 // bind directly; Persist must be left unset for them.
 type IsolatedOverlaySpec struct {
 	Path    string `json:"path"`
-	Mode    string `json:"mode,omitempty"`    // "rw" | "overlay" | "ro"
+	Mode    string `json:"mode,omitempty"`    // "" | "rw" | "overlay" | "ro"; "" defaults to overlay
 	Persist *bool  `json:"persist,omitempty"` // overlay mode only; nil = true
 }
 
@@ -72,8 +72,9 @@ type CreateIsolatedSessionRequest struct {
 
 // IsolatedSessionInfo is the response from creating an isolated session.
 //
-// The creation-parameter echo fields (Profile, Workspace, ExtraWritable, Binds,
-// ShareNet, EnvPassthrough, Uid, Gid, UidMode, IdleTimeoutSeconds) are populated
+// The creation-parameter echo fields (Profile, Workspace, Overlays,
+// ExtraWritable, Binds, ShareNet, EnvPassthrough, Uid, Gid, UidMode,
+// IdleTimeoutSeconds) are populated
 // only when the info is built by IsolationAttach against an execd build that
 // echoes creation parameters on GET /v1/isolated/session/{id}. Older execd
 // builds and the POST /v1/isolated/session create response leave them zero

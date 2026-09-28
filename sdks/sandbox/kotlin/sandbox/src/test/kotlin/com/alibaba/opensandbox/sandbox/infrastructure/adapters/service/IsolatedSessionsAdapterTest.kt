@@ -239,6 +239,19 @@ class IsolatedSessionsAdapterTest {
     }
 
     @Test
+    fun `create requires workspace or overlays`() {
+        // Neither mount configured fails fast, client-side.
+        assertThrows(IllegalArgumentException::class.java) {
+            adapter.create(CreateIsolatedSessionRequest(profile = "balanced"))
+        }
+        // An empty overlays list counts as absent.
+        assertThrows(IllegalArgumentException::class.java) {
+            adapter.create(CreateIsolatedSessionRequest(overlays = emptyList()))
+        }
+        assertEquals(0, mockWebServer.requestCount)
+    }
+
+    @Test
     fun `create serializes overlays with workspace sugar`() {
         mockWebServer.enqueue(
             MockResponse()

@@ -1341,7 +1341,7 @@ export interface components {
             /** @enum {string} */
             profile?: "strict" | "balanced";
             workspace?: components["schemas"]["IsolatedWorkspaceSpec"];
-            /** @description Independent overlay mounts inside one namespace. Each entry gets its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a nested overlay (for example `/workspace` on top of a `/` root overlay) shadows its ancestors within its own subtree. Paths must be absolute and unique across entries. */
+            /** @description Independent overlay mounts inside one namespace. Each entry gets its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a nested overlay (for example `/workspace` on top of a `/` root overlay) shadows its ancestors within its own subtree. Paths must be absolute, unique, and clean (no trailing slash, `.` or `..` segments); at most 16 mounts per session (including the legacy `workspace`). */
             overlays?: components["schemas"]["IsolatedOverlaySpec"][];
             extra_writable?: string[];
             /** @description Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist. */

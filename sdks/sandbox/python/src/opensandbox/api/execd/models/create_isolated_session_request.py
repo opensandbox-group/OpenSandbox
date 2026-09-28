@@ -48,7 +48,8 @@ class CreateIsolatedSessionRequest:
             overlays (list[IsolatedOverlaySpec] | Unset): Independent overlay mounts inside one namespace. Each entry gets
                 its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a
                 nested overlay (for example `/workspace` on top of a `/` root overlay) shadows its ancestors within its own
-                subtree. Paths must be absolute and unique across entries.
+                subtree. Paths must be absolute, unique, and clean (no trailing slash, `.` or `..` segments); at most 16 mounts
+                per session (including the legacy `workspace`).
             extra_writable (list[str] | Unset):
             binds (list[BindMount] | Unset): Additional host paths bind-mounted into the namespace with an explicit source-
                 to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map

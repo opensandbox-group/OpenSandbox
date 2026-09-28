@@ -44,7 +44,8 @@ public class IsolatedSessionsAdapterAttachTests
                   "workspace": { "path": "/workspace", "mode": "rw" },
                   "overlays": [
                     { "path": "/", "mode": "overlay" },
-                    { "path": "/workspace", "mode": "overlay", "persist": true }
+                    { "path": "/workspace", "mode": "overlay", "persist": true },
+                    { "path": "/ephemeral", "mode": "overlay", "persist": false }
                   ],
                   "extra_writable": ["/tmp", "/var/tmp"],
                   "binds": [{ "source": "/host/a", "dest": "/sbx/a", "readonly": true }],
@@ -80,12 +81,14 @@ public class IsolatedSessionsAdapterAttachTests
         info.Workspace!.Path.Should().Be("/workspace");
         info.Workspace.Mode.Should().Be("rw");
         info.Overlays.Should().NotBeNull();
-        info.Overlays!.Should().HaveCount(2);
+        info.Overlays!.Should().HaveCount(3);
         info.Overlays![0].Path.Should().Be("/");
         info.Overlays![0].Mode.Should().Be("overlay");
         info.Overlays![0].Persist.Should().BeNull();
         info.Overlays![1].Path.Should().Be("/workspace");
         info.Overlays![1].Persist.Should().Be(true);
+        info.Overlays![2].Path.Should().Be("/ephemeral");
+        info.Overlays![2].Persist.Should().Be(false);
         info.ExtraWritable.Should().Equal("/tmp", "/var/tmp");
         info.Binds.Should().NotBeNull();
         info.Binds!.Should().ContainSingle();

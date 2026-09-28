@@ -2270,13 +2270,16 @@ components:
           $ref: "#/components/schemas/IsolatedWorkspaceSpec"
         overlays:
           type: array
+          maxItems: 16
           description: >-
             Independent overlay mounts inside one namespace. Each entry gets
             its own copy-on-write upper (or a direct/ro bind for rw/ro
             modes). bubblewrap applies mounts shallow-first, so a nested
             overlay (for example `/workspace` on top of a `/` root overlay)
             shadows its ancestors within its own subtree. Paths must be
-            absolute and unique across entries.
+            absolute, unique, and clean (no trailing slash, `.` or `..`
+            segments); at most 16 mounts per session (including the legacy
+            `workspace`).
           items:
             $ref: "#/components/schemas/IsolatedOverlaySpec"
         extra_writable:

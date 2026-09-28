@@ -117,7 +117,10 @@ func validateEnum(field, value string, allowed ...string) error {
 	return fmt.Errorf("invalid %s %q: must be one of %s", field, value, strings.Join(allowed, ", "))
 }
 
-// validateMounts checks workspace/overlays presence, modes, and persist.
+// MaxIsolatedOverlays caps the per-session mount count: every entry costs
+// a host MkdirAll, an upper/work pair, and a bwrap argv segment.
+const MaxIsolatedOverlays = 16
+
 func (r *CreateIsolatedSessionRequest) validateMounts() error {
 	if r.Workspace == nil && len(r.Overlays) == 0 {
 		return fmt.Errorf("workspace or overlays is required")
@@ -139,23 +142,32 @@ func (r *CreateIsolatedSessionRequest) validateMounts() error {
 				i, WorkspaceModeOverlay)
 		}
 	}
+	if n := len(r.EffectiveOverlays()); n > MaxIsolatedOverlays {
+		return fmt.Errorf("overlays: at most %d mounts are allowed, got %d",
+			MaxIsolatedOverlays, n)
+	}
 	return r.validateMountPaths()
 }
 
-// validateMountPaths requires absolute, unique mount paths: the runtime
-// MkdirAlls each path on the host before bwrap validates it, so relative
-// or duplicated paths must fail here with 400.
+// validateMountPaths requires absolute, unique, already-clean mount paths
+// (no trailing slash, "." or ".."): the runtime MkdirAlls each path on the
+// host verbatim, and the files API resolves mounts by their cleaned path,
+// so anything else would 400 here or 404 later.
 func (r *CreateIsolatedSessionRequest) validateMountPaths() error {
 	seenPaths := make(map[string]struct{}, len(r.Overlays)+1)
 	for _, ov := range r.EffectiveOverlays() {
 		if !strings.HasPrefix(ov.Path, "/") {
-			return fmt.Errorf("overlays: path %q must be an absolute path", ov.Path)
+			return fmt.Errorf("mount path %q must be an absolute path", ov.Path)
 		}
-		cleaned := filepath.Clean(ov.Path)
-		if _, dup := seenPaths[cleaned]; dup {
-			return fmt.Errorf("overlays: duplicate path %q", ov.Path)
+		if filepath.Clean(ov.Path) != ov.Path {
+			return fmt.Errorf(
+				"mount path %q must be a clean path (no trailing /, . or .. segments)",
+				ov.Path)
 		}
-		seenPaths[cleaned] = struct{}{}
+		if _, dup := seenPaths[ov.Path]; dup {
+			return fmt.Errorf("duplicate mount path %q", ov.Path)
+		}
+		seenPaths[ov.Path] = struct{}{}
 	}
 	return nil
 }

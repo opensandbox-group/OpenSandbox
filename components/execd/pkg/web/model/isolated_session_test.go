@@ -16,6 +16,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -144,9 +145,9 @@ func TestCreateIsolatedSessionRequest_Validate_Overlays(t *testing.T) {
 			name: "duplicate overlay paths",
 			mutate: func(r *CreateIsolatedSessionRequest) {
 				r.Workspace = nil
-				r.Overlays = []OverlaySpec{{Path: "/ws"}, {Path: "/ws/"}}
+				r.Overlays = []OverlaySpec{{Path: "/ws"}, {Path: "/ws"}}
 			},
-			wantErr: `duplicate path`,
+			wantErr: `duplicate mount path`,
 		},
 		{
 			name: "workspace duplicating an overlay path",
@@ -154,7 +155,34 @@ func TestCreateIsolatedSessionRequest_Validate_Overlays(t *testing.T) {
 				r.Workspace = &WorkspaceSpec{Path: "/ws"}
 				r.Overlays = []OverlaySpec{{Path: "/ws"}}
 			},
-			wantErr: `duplicate path`,
+			wantErr: `duplicate mount path`,
+		},
+		{
+			name: "trailing slash is not a clean path",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = []OverlaySpec{{Path: "/ws/"}}
+			},
+			wantErr: "must be a clean path",
+		},
+		{
+			name: "dot-dot segments are not a clean path",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = []OverlaySpec{{Path: "/a/../b"}}
+			},
+			wantErr: "must be a clean path",
+		},
+		{
+			name: "too many overlays",
+			mutate: func(r *CreateIsolatedSessionRequest) {
+				r.Workspace = nil
+				r.Overlays = make([]OverlaySpec, MaxIsolatedOverlays+1)
+				for i := range r.Overlays {
+					r.Overlays[i] = OverlaySpec{Path: fmt.Sprintf("/m%d", i)}
+				}
+			},
+			wantErr: "at most 16 mounts are allowed",
 		},
 	}
 
