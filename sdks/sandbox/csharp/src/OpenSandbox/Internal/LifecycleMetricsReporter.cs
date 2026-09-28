@@ -34,6 +34,9 @@ namespace OpenSandbox.Internal;
 internal static class LifecycleMetricsReporter
 {
     // Shared: a per-event HttpClient churns sockets on a fire-and-forget path.
+    // Deliberately capped at 5s regardless of RequestTimeoutSeconds: telemetry
+    // must never extend or block the create/connect path. Slow-network users
+    // raising RequestTimeoutSeconds will still have telemetry dropped at 5s.
     private static readonly HttpClient TelemetryClient = new HttpClient
     {
         Timeout = TimeSpan.FromSeconds(5),

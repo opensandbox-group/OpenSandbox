@@ -185,3 +185,32 @@ async def test_create_times_out_when_runtime_process_missing(monkeypatch) -> Non
             ready_timeout=timedelta(milliseconds=50),
             health_check_polling_interval=timedelta(milliseconds=10),
         )
+
+
+@pytest.mark.asyncio
+async def test_create_failure_releases_service_clients(monkeypatch) -> None:
+    from code_interpreter.adapters.factory import AdapterFactory
+
+    async def failing_check(self, timeout, polling_interval) -> None:
+        raise SandboxReadyTimeoutException("health check timed out")
+
+    monkeypatch.setattr(CodeInterpreter, "check_ready", failing_check)
+
+    created: list[CodesAdapter] = []
+    original = AdapterFactory.create_code_execution_service
+
+    def capture(self, endpoint):
+        service = original(self, endpoint)
+        created.append(service)
+        return service
+
+    monkeypatch.setattr(AdapterFactory, "create_code_execution_service", capture)
+
+    sbx = _FakeSandbox()
+    with pytest.raises(SandboxReadyTimeoutException):
+        await CodeInterpreter.create(sandbox=sbx)  # type: ignore[arg-type]
+
+    # The health check failed after the service was built; its HTTP
+    # clients must be released instead of leaking connection pools.
+    assert created and created[0]._httpx_client.is_closed
+    assert created[0]._sse_client.is_closed

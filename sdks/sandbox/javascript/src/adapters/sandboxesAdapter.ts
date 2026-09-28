@@ -444,10 +444,34 @@ export class SandboxesAdapter implements Sandboxes {
     if (!this.endpointCache) {
       return this.fetchSandboxEndpoint(sandboxId, port, useServerProxy, signal);
     }
-    // getOrFetch gives the signal path the same dedup + generation guards.
-    return this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
-      this.fetchSandboxEndpoint(sandboxId, port, useServerProxy, signal)
+    // Dedupe on a signal-less fetch: the shared inflight promise must not
+    // capture any single caller's signal, or aborting that caller would
+    // fail every coalesced waiter (including signal-less ones like
+    // Sandbox.getEndpoint()). Waiters with a signal race the shared
+    // promise locally, so an abort fails only that waiter; the shared
+    // fetch itself stays bounded by requestTimeoutSeconds.
+    const shared = this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
+      this.fetchSandboxEndpoint(sandboxId, port, useServerProxy)
     );
+    if (!signal) return shared;
+    return this.raceSignal(shared, signal);
+  }
+
+  private async raceSignal(
+    promise: Promise<Endpoint>,
+    signal: AbortSignal,
+  ): Promise<Endpoint> {
+    if (signal.aborted) throw signal.reason ?? new Error("Aborted");
+    let onAbort: (() => void) | undefined;
+    const abortPromise = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error("Aborted"));
+      signal.addEventListener("abort", onAbort, { once: true } as any);
+    });
+    try {
+      return await Promise.race([promise, abortPromise]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort as any);
+    }
   }
 
   private async fetchSandboxEndpoint(

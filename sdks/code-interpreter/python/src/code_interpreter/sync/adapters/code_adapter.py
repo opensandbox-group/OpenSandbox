@@ -105,12 +105,26 @@ class CodesAdapterSync(CodesSync):
             **(self.execd_endpoint.headers or {}),
         }
 
+        # Transport ownership: httpx clients always close their transport on
+        # close(), so the clients must never sit on a transport the adapter
+        # does not own. A user-supplied transport is wrapped (it stays the
+        # transport for all SDK clients) but close() then leaves the clients
+        # open — closing them would tear down the caller's transport. Without
+        # one, the adapter builds its own stack via new_owned_transport() and
+        # releases it in close(); the sandbox's shared transport is untouched
+        # either way (its pool is released by sandbox.close()).
+        self._owns_clients = self.connection_config.owns_transport
+        main_transport: httpx.BaseTransport | None
+        if self._owns_clients:
+            main_transport = self.connection_config.new_owned_transport()
+        else:
+            main_transport = self.connection_config.transport
         self._client = Client(base_url=base_url, timeout=timeout)
         self._httpx_client = httpx.Client(
             base_url=base_url,
             headers=headers,
             timeout=timeout,
-            transport=self.connection_config.transport,
+            transport=main_transport,
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -122,12 +136,17 @@ class CodesAdapterSync(CodesSync):
         # SSE bootstraps bypass the retry wrapper: request bodies are
         # not replayable and a non-idempotent status opt-in would cause
         # duplicate execution on a resent SSE POST.
+        sse_transport = (
+            self.connection_config.new_owned_transport()
+            if self._owns_clients
+            else self.connection_config.transport
+        )
         self._sse_client = httpx.Client(
             headers=sse_headers,
             timeout=httpx.Timeout(
                 connect=timeout_seconds, read=None, write=timeout_seconds, pool=None
             ),
-            transport=unwrap_retry_transport(self.connection_config.transport),
+            transport=unwrap_retry_transport(sse_transport),
         )
 
     def _get_execd_url(self, path: str) -> str:
@@ -140,10 +159,19 @@ class CodesAdapterSync(CodesSync):
         """Release the adapter-owned HTTP clients.
 
         The generated API client reuses the injected ``httpx.Client``, so
-        closing the main client and the SSE client is sufficient.
+        closing the main client and the SSE client is sufficient. The shared
+        ``connection_config.transport`` (used by the sandbox's own adapters)
+        is never closed: adapter clients run on adapter-owned transports, and
+        clients wrapping a user-supplied transport are left open because
+        httpx would close the caller's transport with them. The underlying
+        sandbox stays fully usable after ``close()``.
         """
-        self._httpx_client.close()
-        self._sse_client.close()
+        if not self._owns_clients:
+            return
+        try:
+            self._httpx_client.close()
+        finally:
+            self._sse_client.close()
 
     def create_context(self, language: str) -> CodeContextSync:
         """

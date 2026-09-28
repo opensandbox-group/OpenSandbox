@@ -132,29 +132,31 @@ internal sealed class EndpointCache
         var lazy = _inflight.GetOrAdd(key, _ => new Lazy<Task<Endpoint>>(() => FetchAndCache(key, fetcher, genBefore)));
 
         var fetchTask = lazy.Value;
-        try
+        // Drop the shared entry once the fetch settles — even when every
+        // waiter has already left (e.g. cancelled) — so a later caller never
+        // gets a cached fault (stale retry-less failure) or a completed
+        // entry that bypasses the TTL. The value-matched removal only
+        // deletes this lazy: a newer entry installed by Invalidate() (or a
+        // fresh fetch after expiry) is never evicted.
+        _ = fetchTask.ContinueWith(
+            _ => ((ICollection<KeyValuePair<EndpointCacheKey, Lazy<Task<Endpoint>>>>)_inflight)
+                .Remove(new KeyValuePair<EndpointCacheKey, Lazy<Task<Endpoint>>>(key, lazy)),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        if (cancellationToken.CanBeCanceled)
         {
-            if (cancellationToken.CanBeCanceled)
+            var tcs = new TaskCompletionSource<bool>();
+            using (cancellationToken.Register(() => tcs.TrySetResult(true)))
             {
-                var tcs = new TaskCompletionSource<bool>();
-                using (cancellationToken.Register(() => tcs.TrySetResult(true)))
+                if (await Task.WhenAny(fetchTask, tcs.Task).ConfigureAwait(false) == tcs.Task)
                 {
-                    if (await Task.WhenAny(fetchTask, tcs.Task).ConfigureAwait(false) == tcs.Task)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                    }
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
             }
-            return await fetchTask.ConfigureAwait(false);
         }
-        finally
-        {
-            // Keep a still-running shared fetch for other waiters.
-            if (fetchTask.IsCompleted)
-            {
-                _inflight.TryRemove(key, out _);
-            }
-        }
+        return await fetchTask.ConfigureAwait(false);
     }
 
     private async Task<Endpoint> FetchAndCache(EndpointCacheKey key, Func<Task<Endpoint>> fetcher, long genBefore)

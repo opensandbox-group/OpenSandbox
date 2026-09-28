@@ -49,6 +49,7 @@ class ServerState:
     sandboxes: dict[str, Sandbox] = field(default_factory=dict)
     connection_config: ConnectionConfig = field(default_factory=ConnectionConfig)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    connecting: dict[str, asyncio.Task[Sandbox]] = field(default_factory=dict)
 
     async def add(self, sandbox: Sandbox) -> None:
         async with self.lock:
@@ -61,6 +62,15 @@ class ServerState:
     async def remove(self, sandbox_id: str) -> Sandbox | None:
         async with self.lock:
             return self.sandboxes.pop(sandbox_id, None)
+
+
+def _discard_connecting(
+    state: ServerState, sandbox_id: str, task: asyncio.Task[Sandbox]
+) -> None:
+    # Pop only if this task is still the mapped entry so a late callback
+    # from a stale connect can never evict a newer in-flight connect.
+    if state.connecting.get(sandbox_id) is task:
+        state.connecting.pop(sandbox_id)
 
 
 class StatusResponse(BaseModel):
@@ -119,21 +129,35 @@ def register_tools(
         *,
         connect_if_missing: bool,
     ) -> Sandbox:
-        # Lock held across get -> connect -> add to avoid duplicate connects.
+        # The lock is only held for registry lookup + in-flight dedup book
+        # keeping. The connect itself runs outside the lock, so a slow or
+        # unreachable sandbox cannot stall unrelated tool calls (other ids'
+        # connects, kill/remove, registry reads) for the whole connect
+        # budget. Concurrent connects for the *same* id still coalesce onto
+        # one in-flight task, preserving the no-duplicate-connect guarantee.
         async with state.lock:
             sandbox = state.sandboxes.get(sandbox_id)
             if sandbox is not None:
                 return sandbox
-            if not connect_if_missing:
-                raise ValueError(
-                    "Sandbox not found in local registry. Call sandbox_connect or "
-                    "set connect_if_missing=True with connection parameters."
+            task = state.connecting.get(sandbox_id)
+            if task is None:
+                if not connect_if_missing:
+                    raise ValueError(
+                        "Sandbox not found in local registry. Call sandbox_connect or "
+                        "set connect_if_missing=True with connection parameters."
+                    )
+                task = asyncio.ensure_future(
+                    Sandbox.connect(
+                        sandbox_id, connection_config=_borrowed_config(state)
+                    )
                 )
-            sandbox = await Sandbox.connect(
-                sandbox_id, connection_config=_borrowed_config(state)
-            )
-            state.sandboxes[sandbox_id] = sandbox
-            return sandbox
+                state.connecting[sandbox_id] = task
+                task.add_done_callback(
+                    lambda t: _discard_connecting(state, sandbox_id, t)
+                )
+        sandbox = await task
+        await state.add(sandbox)
+        return sandbox
 
     @tool()
     async def sandbox_create(

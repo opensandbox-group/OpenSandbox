@@ -160,3 +160,80 @@ async def test_concurrent_connect_creates_single_registry_entry(
         "concurrent calls raced past the registry and connected twice"
     )
     assert state.sandboxes["sbx-race"].id == "sbx-race"
+
+
+@pytest.mark.asyncio
+async def test_slow_connect_does_not_block_unrelated_registry_ops(
+    server, monkeypatch
+) -> None:
+    """A hanging connect for one sandbox id must not stall other ids' tool calls.
+
+    The registry lock is only held for lookup/dedup book keeping; the connect
+    itself runs outside it (coalesced per id via an in-flight task), so a
+    slow or unreachable sandbox cannot serialize every registry-touching
+    operation for the whole connect budget.
+    """
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            entered.set()
+            await release.wait()
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    slow = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-slow", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    # sbx-slow's connect is hanging; an unrelated kill must not wait on it.
+    response = await asyncio.wait_for(
+        fake.tools["sandbox_kill"]("sbx-other"), timeout=1
+    )
+    assert response.status == "killed"
+    assert _FakeManager.instances[-1].killed == ["sbx-other"]
+
+    release.set()
+    metrics = await asyncio.wait_for(slow, timeout=1)
+    assert metrics == "metrics"
+    assert state.sandboxes["sbx-slow"].id == "sbx-slow"
+
+
+@pytest.mark.asyncio
+async def test_failed_connect_is_not_sticky(server, monkeypatch) -> None:
+    """After a failed connect, a later call must start a fresh attempt."""
+    fake, state = server
+    attempts: list[str] = []
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            attempts.append(sandbox_id)
+            if len(attempts) == 1:
+                raise RuntimeError("transient connect failure")
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    with pytest.raises(RuntimeError, match="transient connect failure"):
+        await fake.tools["sandbox_get_metrics"]("sbx-flaky", connect_if_missing=True)
+
+    metrics = await fake.tools["sandbox_get_metrics"](
+        "sbx-flaky", connect_if_missing=True
+    )
+    assert metrics == "metrics"
+    assert attempts == ["sbx-flaky", "sbx-flaky"]
+    assert state.connecting == {}

@@ -37,12 +37,12 @@ object SupportedLanguage {
  * Represents an execution context for code interpretation.
  *
  * A CodeContext maintains the execution environment for a specific programming
- * language, including the working directory, language configuration, and
- * persistent state across multiple code executions.
+ * language, including language configuration and persistent state across
+ * multiple code executions.
  *
  * ## Context Lifecycle
  *
- * 1. **Creation**: Context is created with language and working directory
+ * 1. **Creation**: Context is created with a language
  * 2. **Execution**: Code runs within this context, building up state
  * 3. **Persistence**: Variables, imports, and functions persist between executions
  * 4. **Cleanup**: Context can be explicitly destroyed or garbage collected
@@ -88,7 +88,7 @@ class CodeContext private constructor(
  *
  * This model encapsulates all the information needed to execute a piece of
  * code, including the code itself and the execution context. The context
- * determines the language interpreter, working directory, and persistent state.
+ * determines the language interpreter and persistent state.
  *
  * ## Usage Patterns
  *

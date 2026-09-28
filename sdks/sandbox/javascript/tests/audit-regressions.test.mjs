@@ -105,6 +105,19 @@ test("instance resume gives the resumed sandbox its own transport", async () => 
   // Regression: both instances used to share one undici agent, so closing the
   // original killed the resumed sandbox's connections.
   assert.notEqual(resumed.connectionConfig, original.connectionConfig);
+  // Regression: the resumed instance used to *leak* its fresh transport —
+  // connect's reference-equality check marked the pre-initialized config
+  // caller-owned, so close() never released the dedicated undici agent.
+  assert.equal(resumed.connectionConfig.ownsTransport, true);
+
+  let resumedCloseCalls = 0;
+  const resumedClose = resumed.connectionConfig.closeTransport.bind(resumed.connectionConfig);
+  resumed.connectionConfig.closeTransport = async () => {
+    resumedCloseCalls += 1;
+    await resumedClose();
+  };
+  await resumed.close();
+  assert.equal(resumedCloseCalls, 1, "resumed.close() must release its own transport");
 });
 
 test("failed instance resume does not close the original sandbox transport", async () => {
@@ -124,10 +137,28 @@ test("failed instance resume does not close the original sandbox transport", asy
     await realClose();
   };
 
+  // The fresh transport is allocated for the resumed instance; detect its
+  // release via the prototype (the instance does not exist yet).
+  const protoClose = ConnectionConfig.prototype.closeTransport;
+  let freshCloseCalls = 0;
+  ConnectionConfig.prototype.closeTransport = async function () {
+    if (this !== original.connectionConfig) freshCloseCalls += 1;
+    await protoClose.call(this);
+  };
+
   // Resume fails at the endpoint lookup (calls 3+); the SDK must tear down
   // only the transport it allocated for the resumed instance.
-  await assert.rejects(original.resume({ skipHealthCheck: true }));
+  try {
+    await assert.rejects(original.resume({ skipHealthCheck: true }));
+  } finally {
+    ConnectionConfig.prototype.closeTransport = protoClose;
+  }
   assert.equal(originalClosed, false);
+  assert.equal(
+    freshCloseCalls,
+    1,
+    "failed resume must release the transport allocated for the resumed instance",
+  );
 
   // The original sandbox is still fully usable.
   assert.equal(await original.isHealthy(), true);
@@ -169,7 +200,7 @@ test("readBytesStream releases the body lock when the consumer exits early", asy
 });
 
 test("stale in-flight completion does not delete a newer fetch entry", async () => {
-  const cache = new EndpointCache(8, 60_000);
+  const cache = new EndpointCache({ maxSize: 8, ttlMs: 60_000 });
   const gates = [];
   const fetchCount = { value: 0 };
 

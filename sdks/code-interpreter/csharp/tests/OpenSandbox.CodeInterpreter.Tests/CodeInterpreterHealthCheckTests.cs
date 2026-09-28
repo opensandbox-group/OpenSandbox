@@ -160,20 +160,96 @@ public class CodeInterpreterHealthCheckTests
             .ReturnsAsync(() =>
             {
                 calls++;
-                return new Execution
+                if (calls <= executionErrorOnFirstAttempts)
                 {
-                    Error = calls <= executionErrorOnFirstAttempts
-                        ? new ExecutionError
+                    // Mirrors CommandsAdapter's inference: a failed foreground
+                    // run reports the numeric error value as its exit code.
+                    return new Execution
+                    {
+                        Error = new ExecutionError
                         {
                             Name = "CommandExecError",
                             Value = "1",
                             Timestamp = 0,
                             Traceback = Array.Empty<string>()
-                        }
-                        : null
-                };
+                        },
+                        ExitCode = 1
+                    };
+                }
+
+                // Foreground runs end with ExitCode 0 on success; the strict
+                // health check treats an indeterminate null exit as unhealthy.
+                return new Execution { ExitCode = 0 };
             });
         return commands;
+    }
+
+    private static async Task<Sandbox> CreateInterpreterAsync(
+        IExecdCommands commands,
+        bool skipHealthCheck = true)
+    {
+        var sandbox = await CreateConnectedSandboxAsync(commands);
+        var interpreter = await CodeInterpreter.CreateAsync(sandbox, new CodeInterpreterCreateOptions
+        {
+            AdapterFactory = new FakeAdapterFactory(new FakeCodes(pingSucceedsAfter: 1)),
+            SkipHealthCheck = skipHealthCheck
+        });
+        return interpreter;
+    }
+
+    [Fact]
+    public async Task IsHealthyAsync_TreatsNonZeroExitWithoutErrorAsUnhealthy()
+    {
+        // Only reachable via custom IExecdCommands stacks: the built-in
+        // CommandsAdapter never reports a non-zero exit without an error.
+        var commands = new Mock<IExecdCommands>();
+        commands
+            .Setup(x => x.RunAsync(
+                It.IsAny<string>(),
+                It.IsAny<RunCommandOptions?>(),
+                It.IsAny<ExecutionHandlers?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Execution { ExitCode = 1 });
+        var interpreter = await CreateInterpreterAsync(commands.Object);
+
+        Assert.False(await interpreter.IsHealthyAsync());
+        await interpreter.Sandbox.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task IsHealthyAsync_TreatsIndeterminateResultAsUnhealthy()
+    {
+        // Neither Complete nor Error observed (e.g. a stream dropped
+        // mid-command): not proof that the runtime is serving.
+        var commands = new Mock<IExecdCommands>();
+        commands
+            .Setup(x => x.RunAsync(
+                It.IsAny<string>(),
+                It.IsAny<RunCommandOptions?>(),
+                It.IsAny<ExecutionHandlers?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Execution());
+        var interpreter = await CreateInterpreterAsync(commands.Object);
+
+        Assert.False(await interpreter.IsHealthyAsync());
+        await interpreter.Sandbox.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task IsHealthyAsync_RequiresConfirmedZeroExit()
+    {
+        var commands = new Mock<IExecdCommands>();
+        commands
+            .Setup(x => x.RunAsync(
+                It.IsAny<string>(),
+                It.IsAny<RunCommandOptions?>(),
+                It.IsAny<ExecutionHandlers?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Execution { ExitCode = 0 });
+        var interpreter = await CreateInterpreterAsync(commands.Object);
+
+        Assert.True(await interpreter.IsHealthyAsync());
+        await interpreter.Sandbox.DisposeAsync();
     }
 
     private static async Task<Sandbox> CreateConnectedSandboxAsync(IExecdCommands? commands = null)

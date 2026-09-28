@@ -88,7 +88,8 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
 
     /// <summary>
     /// Like <see cref="Internal.HttpClientWrapper"/>, raises a typed
-    /// <see cref="SandboxApiException"/> on an empty body instead of an NRE.
+    /// <see cref="SandboxApiException"/> on an empty or malformed body
+    /// instead of an NRE or a raw <see cref="JsonException"/>.
     /// </summary>
     private static T DeserializeBody<T>(string body, string operation) where T : class
     {
@@ -100,12 +101,24 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
                 error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Unexpected empty response body"),
                 rawBody: body);
         }
-        return JsonSerializer.Deserialize<T>(body, JsonOptions)
-            ?? throw new SandboxApiException(
-                message: $"{operation} returned an unexpected response body",
+        try
+        {
+            return JsonSerializer.Deserialize<T>(body, JsonOptions)
+                ?? throw new SandboxApiException(
+                    message: $"{operation} returned an unexpected response body",
+                    statusCode: 200,
+                    error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Unexpected response body"),
+                    rawBody: body);
+        }
+        catch (JsonException ex)
+        {
+            throw new SandboxApiException(
+                message: $"{operation} returned a malformed response body: {ex.Message}",
                 statusCode: 200,
-                error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Unexpected response body"),
-                rawBody: body);
+                error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Malformed response body"),
+                rawBody: body,
+                innerException: ex);
+        }
     }
 
     public IsolatedSessionsAdapter(

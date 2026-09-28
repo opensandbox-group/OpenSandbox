@@ -100,9 +100,11 @@ public class RunCodeOptions
 
     /// <summary>
     /// Gets or sets the language for a new ephemeral context.
-    /// Cannot be used together with Context.
     /// </summary>
     /// <remarks>
+    /// May be set together with <see cref="Context"/> only when both values
+    /// match; a mismatch throws
+    /// <see cref="OpenSandbox.Core.InvalidArgumentException"/>.
     /// When only <see cref="Language"/> is provided and <see cref="Context"/> is null, execd creates or reuses
     /// a default session for that language, so state can persist across runs.
     /// </remarks>

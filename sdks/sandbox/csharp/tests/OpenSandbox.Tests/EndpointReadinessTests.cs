@@ -160,6 +160,43 @@ public class EndpointReadinessTests
         health.Verify(h => h.PingAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    [Fact]
+    public async Task CreateSharesOneBudgetAcrossEndpointsAndHealth()
+    {
+        // Mirrors ConnectSharesOneBudgetAcrossEndpointsAndHealth for the
+        // create flow: a slow endpoint publication must consume the same
+        // ready timeout as the health check, not run on two stacked budgets.
+        var lifecycle = new Mock<ISandboxes>();
+        lifecycle.Setup(s => s.CreateSandboxAsync(It.IsAny<CreateSandboxRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new CreateSandboxResponse
+            {
+                Id = "sb",
+                Status = new SandboxStatus { State = "Running" },
+            });
+        lifecycle.Setup(s => s.GetSandboxEndpointAsync("sb", It.IsAny<int>(), false, It.IsAny<CancellationToken>()))
+            .Returns(async (string _, int port, bool _, CancellationToken token) =>
+            {
+                if (port == Constants.DefaultExecdPort) await Task.Delay(600, token);
+                return new Endpoint { EndpointAddress = "localhost:44772" };
+            });
+        var health = new Mock<IExecdHealth>();
+        health.Setup(h => h.PingAsync(It.IsAny<CancellationToken>())).Returns(async (CancellationToken token) =>
+        {
+            await Task.Delay(Timeout.Infinite, token);
+            return true;
+        });
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAsync<SandboxReadyTimeoutException>(() => Sandbox.CreateFromTemplateAsync(new SandboxCreateFromTemplateOptions
+        {
+            TemplateId = "tpl",
+            TimeoutSeconds = 60,
+            AdapterFactory = Factory(lifecycle.Object, health.Object).Object,
+            ReadyTimeoutSeconds = 1
+        }));
+        Assert.True(started.ElapsedMilliseconds < 1400);
+        health.Verify(h => h.PingAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
     private static Mock<IAdapterFactory> Factory(ISandboxes sandboxes, IExecdHealth? health = null)
     {
         var factory = new Mock<IAdapterFactory>();

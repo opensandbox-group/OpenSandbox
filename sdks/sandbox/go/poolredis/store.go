@@ -455,8 +455,11 @@ func (s *RedisPoolStateStore) SnapshotIdleEntries(ctx context.Context, poolName 
 			continue
 		}
 		expiresAt := time.UnixMilli(expiresMs)
-		if !expiresAt.IsZero() && now.After(expiresAt) {
+		if expiresMs != 0 && now.After(expiresAt) {
 			// Not yet reaped by Redis; hide it like the in-memory store does.
+			// (expiresMs is written by putIdleScript as now_ms+ttl, so 0 is
+			// not expected today; if a "no expiry" encoding is ever
+			// introduced, it must be handled here explicitly.)
 			continue
 		}
 		entries = append(entries, opensandbox.IdleEntry{

@@ -124,8 +124,9 @@ export class CodesAdapter implements Codes {
   }
 
   async interrupt(executionId: string): Promise<void> {
-    // The query id targets an *execution*, not a context (mirrors the Python
-    // SDK's interrupt(execution_id)); a context id silently fails server-side.
+    // The query id targets an *execution* session id (mirrors the Python
+    // SDK's interrupt(execution_id)); passing a context id yields a 500
+    // "no such session" error from execd.
     if (!executionId?.trim()) {
       throw new InvalidArgumentException({ message: "executionId cannot be empty" });
     }

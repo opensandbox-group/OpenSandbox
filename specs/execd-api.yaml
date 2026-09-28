@@ -272,10 +272,14 @@ paths:
         - name: id
           in: query
           required: true
-          description: Session ID of the execution context to interrupt
+          description: |
+            Execution session ID of the running code execution to interrupt
+            (the `init` event's id for the current run). Passing an unknown
+            id fails loudly with a 500 "no such session" error; it is not
+            silently ignored.
           schema:
             type: string
-          example: session-123
+          example: exec-123
       responses:
         "200":
           description: Code execution successfully interrupted

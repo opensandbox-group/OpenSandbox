@@ -39,7 +39,6 @@ import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationSession
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.Serializable
@@ -635,33 +634,15 @@ internal class IsolatedSessionsAdapter(
         }
     }
 
-    private fun decodeEventLine(line: String): EventNode? {
-        if (line.isBlank()) return null
-        val payload =
-            when {
-                line.startsWith(":") -> return null
-                line.startsWith("event:") -> return null
-                line.startsWith("id:") -> return null
-                line.startsWith("retry:") -> return null
-                line.startsWith("data:") -> line.drop(5).trim()
-                else -> line
-            }
-        if (payload.isEmpty()) return null
-        return try {
-            jsonParser.decodeFromString(EventNode.serializer(), payload)
-        } catch (e: Exception) {
-            logger.error("Failed to parse SSE line: {}", line, e)
-            null
+    // Delegates to the shared execd helpers so commands, isolated-session,
+    // and code-interpreter paths parse SSE lines and infer exit codes
+    // identically (no per-adapter drift in whitespace/payload handling).
+    private fun decodeEventLine(line: String): EventNode? =
+        ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
+            logger.error("Failed to parse SSE line: {}", failingLine, error)
         }
-    }
 
-    private fun inferExitCode(execution: Execution): Int? {
-        if (execution.error != null) {
-            return execution.error?.value?.trim()?.toIntOrNull()
-        }
-        if (execution.complete != null) return 0
-        return null
-    }
+    private fun inferExitCode(execution: Execution): Int? = ExecdEventSupport.inferForegroundExitCode(execution)
 
     private fun parseDateTime(value: String): OffsetDateTime? {
         return try {

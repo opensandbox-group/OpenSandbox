@@ -124,4 +124,104 @@ public class EndpointCacheTests
         Assert.Null(cache.Get(new EndpointCacheKey("sb-1", 8080, false)));
         Assert.NotNull(cache.Get(new EndpointCacheKey("sb-0", 8080, false)));
     }
+
+    [Fact]
+    public async Task GetOrFetchAsync_RemovesEntry_WhenAllWaitersCancelBeforeFault()
+    {
+        // Regression: when the last waiter cancelled, the old finally-based
+        // removal left the shared entry in place. If the fetch then faulted,
+        // the next caller was served the cached fault instantly instead of
+        // retrying with a fresh fetch.
+        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fetchCount = 0;
+
+        async Task<Endpoint> Fetcher()
+        {
+            Interlocked.Increment(ref fetchCount);
+            await release.Task;
+            throw new InvalidOperationException("boom");
+        }
+
+        using var cts = new CancellationTokenSource();
+        var waiter = cache.GetOrFetchAsync(key, Fetcher, cts.Token);
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+
+        // The fetch faults with every waiter gone; the entry must be dropped.
+        release.TrySetResult(true);
+        await Task.Yield();
+        await Task.Delay(50);
+
+        var result = await cache.GetOrFetchAsync(key, () => Task.FromResult(Ep("fresh")));
+        Assert.Equal(2, fetchCount);
+        Assert.Equal("fresh", result.EndpointAddress);
+    }
+
+    [Fact]
+    public async Task GetOrFetchAsync_RemovesSettledEntry_EvenWithoutWaiters()
+    {
+        // Regression: a completed entry used to linger in the inflight map
+        // when its only waiter cancelled, so a later caller after TTL expiry
+        // was served the stale endpoint instead of triggering a fresh fetch.
+        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var fetchCount = 0;
+
+        async Task<Endpoint> Fetcher()
+        {
+            Interlocked.Increment(ref fetchCount);
+            // Yield so the fetch is still in flight when the waiter cancels.
+            await Task.Yield();
+            return Ep("first");
+        }
+
+        using (var cts = new CancellationTokenSource())
+        {
+            var waiter = cache.GetOrFetchAsync(key, Fetcher, cts.Token);
+            await cts.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+        }
+
+        await Task.Delay(50);
+        var result = await cache.GetOrFetchAsync(
+            key,
+            () => { Interlocked.Increment(ref fetchCount); return Task.FromResult(Ep("second")); });
+        Assert.Equal(2, fetchCount);
+        Assert.Equal("second", result.EndpointAddress);
+    }
+
+    [Fact]
+    public async Task GetOrFetchAsync_StaleSettledRemoval_DoesNotEvictNewerFetch()
+    {
+        // Invalidate() during a fetch installs a new generation; when the
+        // stale fetch settles it must only remove its own entry, not the
+        // newer fetch's — otherwise a duplicate-fetch window opens.
+        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var firstRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fetchCount = 0;
+
+        Task<Endpoint> Fetcher()
+        {
+            var n = Interlocked.Increment(ref fetchCount);
+            return n == 1
+                ? firstRelease.Task.ContinueWith(_ => Ep("stale"))
+                : Task.FromResult(Ep("fresh"));
+        }
+
+        var stale = cache.GetOrFetchAsync(key, Fetcher);
+        cache.Invalidate("sb-1");
+        var fresh = cache.GetOrFetchAsync(key, Fetcher);
+
+        firstRelease.TrySetResult(true);
+        await stale;
+
+        // Served from the cache entry the fresh fetch installed; a third
+        // fetch here would mean the stale removal evicted the fresh entry.
+        var third = await cache.GetOrFetchAsync(key, Fetcher);
+        Assert.Equal(2, fetchCount);
+        Assert.Equal("fresh", third.EndpointAddress);
+    }
 }

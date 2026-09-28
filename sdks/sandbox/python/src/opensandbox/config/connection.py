@@ -136,6 +136,39 @@ class ConnectionConfig(BaseModel):
 
         client_ip.apply_client_ip(self.headers)
 
+    @property
+    def owns_transport(self) -> bool:
+        """True when this config created (and may close) its transport."""
+        return self._owns_transport
+
+    def new_owned_transport(
+        self,
+        *,
+        max_connections: int | None = 100,
+        max_keepalive_connections: int = 20,
+        keepalive_expiry: float = 30.0,
+    ) -> httpx.AsyncBaseTransport:
+        """
+        Build a fresh transport stack owned by the caller.
+
+        Mirrors the default stack built by `with_transport_if_missing`:
+        an `AsyncHTTPTransport` wrapped by the configured `retry_policy`
+        when the policy wraps transports. Callers that hand the returned
+        transport to an httpx client they close themselves (e.g. adapter
+        clients with their own cleanup lifecycle) can do so safely: the
+        shared `transport` on this config is never touched.
+        """
+        inner = httpx.AsyncHTTPTransport(
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+                keepalive_expiry=keepalive_expiry,
+            ),
+        )
+        if self.retry_policy.wraps_transport():
+            return RetryAsyncTransport(inner, self.retry_policy, owns_inner=True)
+        return inner
+
     def with_transport_if_missing(
         self,
         *,
@@ -154,19 +187,15 @@ class ConnectionConfig(BaseModel):
         """
         if self.transport is not None:
             return self
-        inner = httpx.AsyncHTTPTransport(
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_keepalive_connections,
-                keepalive_expiry=keepalive_expiry,
-            ),
+        config = self.model_copy(
+            update={
+                "transport": self.new_owned_transport(
+                    max_connections=max_connections,
+                    max_keepalive_connections=max_keepalive_connections,
+                    keepalive_expiry=keepalive_expiry,
+                )
+            }
         )
-        wrapped: httpx.AsyncBaseTransport
-        if self.retry_policy.wraps_transport():
-            wrapped = RetryAsyncTransport(inner, self.retry_policy, owns_inner=True)
-        else:
-            wrapped = inner
-        config = self.model_copy(update={"transport": wrapped})
         config._owns_transport = True
         return config
 

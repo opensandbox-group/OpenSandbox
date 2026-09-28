@@ -15,7 +15,8 @@
 // Regression tests for the #1768 SDK audit fixes on the code interpreter:
 // - run() accepts a matching context+language pair (only mismatches throw)
 // - interrupt() targets an execution id, named accordingly
-// - the core run() streaming path (NDJSON + SSE `data:` frames) is covered
+// - the core run() streaming path is covered for both NDJSON and
+//   SSE `data:`-prefixed frames (loop and tail-flush)
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -103,4 +104,22 @@ test("interrupt() sends the execution id as the id query parameter", async () =>
 
   // The parameter is an execution id; an empty value must fail fast.
   await assert.rejects(codes.interrupt(""), InvalidArgumentException);
+});
+
+test("run() parses SSE data:-framed events, including an unterminated tail frame", async () => {
+  const sseFetchImpl = async () =>
+    sseResponse([
+      // Framed events with blank-line separators...
+      `data: {"type":"stdout","timestamp":1,"text":"a"}\n\n`,
+      `data: {"type":"stdout","timestamp":2,"text":"b"}\n\n`,
+      // ...and a tail frame flushed without a trailing blank line.
+      `data: {"type":"execution_complete","timestamp":3,"execution_time":4}`,
+    ]);
+  const codes = makeCodes({ fetchImpl: async () => new Response("unused", { status: 404 }), sseFetchImpl });
+
+  const execution = await codes.run("print('ab')");
+  assert.deepEqual(
+    execution.logs.stdout.map((entry) => entry.text),
+    ["a", "b"],
+  );
 });

@@ -72,10 +72,17 @@ export interface SandboxFilter {
 export class SandboxManager {
   private readonly sandboxes: Sandboxes;
   private readonly connectionConfig: ConnectionConfig;
+  /** True when this manager allocated (and may close) the transport. */
+  private readonly ownsTransport: boolean;
 
-  private constructor(opts: { sandboxes: Sandboxes; connectionConfig: ConnectionConfig }) {
+  private constructor(opts: {
+    sandboxes: Sandboxes;
+    connectionConfig: ConnectionConfig;
+    ownsTransport: boolean;
+  }) {
     this.sandboxes = opts.sandboxes;
     this.connectionConfig = opts.connectionConfig;
+    this.ownsTransport = opts.ownsTransport;
   }
 
   static create(opts: SandboxManagerOptions = {}): SandboxManager {
@@ -83,6 +90,10 @@ export class SandboxManager {
       ? opts.connectionConfig
       : new ConnectionConfig(opts.connectionConfig);
     const connectionConfig = baseConnectionConfig.withTransportIfMissing();
+    // Only close transports this manager allocated: a caller-initialized
+    // config (e.g. shared between a manager and Sandbox instances) is
+    // closed by its owner, mirroring Sandbox.connect()/close().
+    const ownsTransport = connectionConfig !== baseConnectionConfig;
     const lifecycleBaseUrl = connectionConfig.getBaseUrl();
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
     let sandboxes: Sandboxes;
@@ -92,10 +103,12 @@ export class SandboxManager {
         lifecycleBaseUrl,
       }).sandboxes;
     } catch (err) {
-      void connectionConfig.closeTransport().catch(() => undefined);
+      if (ownsTransport) {
+        void connectionConfig.closeTransport().catch(() => undefined);
+      }
       throw err;
     }
-    return new SandboxManager({ sandboxes, connectionConfig });
+    return new SandboxManager({ sandboxes, connectionConfig, ownsTransport });
   }
 
   listSandboxInfos(filter: SandboxFilter = {}): Promise<ListSandboxesResponse> {
@@ -188,9 +201,15 @@ export class SandboxManager {
   /**
    * Release the HTTP agent resources allocated for this manager instance.
    *
-   * Each manager clone owns a scoped `ConnectionConfig` clone.
+   * The transport is closed only when this manager allocated it
+   * (`connectionConfig` arrived uninitialized). A caller-initialized config
+   * stays caller-owned: close it yourself via
+   * `connectionConfig.closeTransport()` when finished with it.
    */
   async close(): Promise<void> {
-    await this.connectionConfig.closeTransport();
+    // Shared (caller-initialized) transports are closed by their owner.
+    if (this.ownsTransport) {
+      await this.connectionConfig.closeTransport();
+    }
   }
 }

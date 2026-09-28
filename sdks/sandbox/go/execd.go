@@ -109,10 +109,11 @@ func (e *ExecdClient) InterruptCode(ctx context.Context, sessionID string) error
 
 // CreateSession creates a new bash session and returns it with a session ID.
 // An optional CreateSessionRequest sets the session's working directory.
+// At most one option is honored (first wins, matching DownloadFile).
 func (e *ExecdClient) CreateSession(ctx context.Context, opts ...CreateSessionRequest) (*Session, error) {
 	req := CreateSessionRequest{}
-	for _, o := range opts {
-		req = o
+	if len(opts) > 0 {
+		req = opts[0]
 	}
 	var result Session
 	err := e.client.doRequest(ctx, http.MethodPost, "/session", req, &result)

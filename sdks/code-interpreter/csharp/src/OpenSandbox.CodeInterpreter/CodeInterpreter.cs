@@ -283,8 +283,10 @@ public sealed class CodeInterpreter
             var execution = await Sandbox.Commands.RunAsync(
                 CodeInterpreterHealthCheck.RuntimeCheckCommand,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            // A non-zero exit without an error event is still a failure.
-            return execution is { Error: null, ExitCode: null or 0 };
+            // A non-zero exit without an error event is still a failure;
+            // an indeterminate result (neither Complete nor Error observed,
+            // e.g. a dropped stream) is not proof of health either.
+            return execution is { Error: null, ExitCode: 0 };
         }
         catch (Exception ex)
         {

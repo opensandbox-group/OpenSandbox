@@ -28,7 +28,13 @@ package com.alibaba.opensandbox.sandbox.domain.models.execd.executions
  * @property result List of structured results produced by the code execution
  * @property error Error information if the execution failed
  * @property complete Completion metadata for the streamed execution
- * @property exitCode Command exit code when available; null for code execution or unfinished/background commands
+ * @property exitCode Foreground command exit code: `0` for completed
+ *   foreground commands, the numeric `error.value` when the command failed
+ *   with one, `null` for unfinished/background commands. For streamed code
+ *   runs (code-interpreter SDKs in Kotlin/C#) it is inferred best-effort the
+ *   same way — `0` on completion, or the numeric kernel `error.value` (e.g.
+ *   a `SystemExit` code) — while the Python and JS code-interpreter SDKs do
+ *   not expose an exit code at all and always report `null` there.
  * @property logs Container for stdout and stderr output messages
  */
 class Execution(

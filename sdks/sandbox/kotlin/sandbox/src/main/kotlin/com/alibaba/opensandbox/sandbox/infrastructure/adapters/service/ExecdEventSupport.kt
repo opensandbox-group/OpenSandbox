@@ -25,10 +25,13 @@ public object ExecdEventSupport {
     /**
      * Decode one SSE/NDJSON line into an [EventNode], skipping framing lines
      * and unwrapping the `data:` prefix. Returns null for non-payload lines.
+     *
+     * [onError] is invoked for lines carrying a payload that fails to parse;
+     * callers must pass it so malformed SSE lines are never dropped silently.
      */
     public fun decodeEventLine(
         line: String,
-        onError: (String, Exception) -> Unit = { _, _ -> },
+        onError: (String, Exception) -> Unit,
     ): EventNode? {
         if (line.isBlank()) {
             return null

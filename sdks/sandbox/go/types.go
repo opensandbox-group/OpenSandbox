@@ -715,9 +715,9 @@ type RunCommandRequest struct {
 	Cwd  string   `json:"cwd,omitempty"`
 	// Background runs the command asynchronously when true.
 	Background bool `json:"background,omitempty"`
-	// Timeout is the maximum command duration in milliseconds. Zero means the
-	// server default applies. Note this differs from the second-based
-	// TimeoutSeconds fields elsewhere in the SDK.
+	// Timeout is the maximum command duration in milliseconds. Zero omits the
+	// field and the server enforces no timeout (see execd-api.yaml). Note this
+	// differs from the second-based TimeoutSeconds fields elsewhere in the SDK.
 	Timeout int64             `json:"timeout,omitempty"`
 	UID     *int32            `json:"uid,omitempty"`
 	GID     *int32            `json:"gid,omitempty"`
@@ -728,8 +728,8 @@ type RunCommandRequest struct {
 type RunInSessionRequest struct {
 	Command string `json:"command"`
 	Cwd     string `json:"cwd,omitempty"`
-	// Timeout is the maximum command duration in milliseconds. Zero means the
-	// server default applies.
+	// Timeout is the maximum command duration in milliseconds. Zero omits the
+	// field and the server may not enforce any timeout (see execd-api.yaml).
 	Timeout int64 `json:"timeout,omitempty"`
 }
 

@@ -17,6 +17,7 @@
 Synchronous Code Interpreter SDK.
 """
 
+import contextlib
 import logging
 import time
 from datetime import timedelta
@@ -311,9 +312,15 @@ class CodeInterpreterSync:
             code_service = factory.create_code_execution_service(endpoint)
 
             interpreter = cls(sandbox, code_service)
-
-            if not skip_health_check:
-                interpreter.check_ready(ready_timeout, health_check_polling_interval)
+            try:
+                if not skip_health_check:
+                    interpreter.check_ready(ready_timeout, health_check_polling_interval)
+            except Exception:
+                # Release the service's HTTP clients so a failed creation
+                # (e.g. ready timeout) does not leak connection pools.
+                with contextlib.suppress(Exception):
+                    interpreter.close()
+                raise
 
             logger.info(f"Code interpreter {sandbox.id} created successfully")
             return interpreter

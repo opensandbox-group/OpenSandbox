@@ -22,6 +22,7 @@ support, session management, and variable persistence.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from datetime import timedelta
@@ -361,9 +362,17 @@ class CodeInterpreter:
             )
 
             interpreter = cls(sandbox, code_execution_service)
-
-            if not skip_health_check:
-                await interpreter.check_ready(ready_timeout, health_check_polling_interval)
+            try:
+                if not skip_health_check:
+                    await interpreter.check_ready(
+                        ready_timeout, health_check_polling_interval
+                    )
+            except Exception:
+                # Release the service's HTTP clients so a failed creation
+                # (e.g. ready timeout) does not leak connection pools.
+                with contextlib.suppress(Exception):
+                    await interpreter.aclose()
+                raise
 
             logger.info(f"Code interpreter {sandbox.id} created successfully")
 

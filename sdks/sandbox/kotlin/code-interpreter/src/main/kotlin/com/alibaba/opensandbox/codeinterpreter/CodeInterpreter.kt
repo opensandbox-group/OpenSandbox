@@ -326,9 +326,12 @@ class CodeInterpreter internal constructor(
      * ## Usage Example
      *
      * ```kotlin
-     * // First create a sandbox with desired configuration
+     * // First create a sandbox from the code-interpreter image; the strict
+     * // health check requires the Jupyter runtime, which a plain base image
+     * // (e.g. "python:3.11") can never pass.
      * val sandbox = Sandbox.builder()
-     *     .image("python:3.11")
+     *     .image("opensandbox/code-interpreter:latest")
+     *     .entrypoint(listOf("/opt/code-interpreter/code-interpreter.sh"))
      *     .resource { put("memory", "4Gi") }
      *     .env { put("PYTHONPATH", "/custom/path") }
      *     .build()

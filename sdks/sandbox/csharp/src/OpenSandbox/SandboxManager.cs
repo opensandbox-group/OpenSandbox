@@ -258,7 +258,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// <param name="templateId">The template ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The template information.</returns>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="templateId"/> is null or empty.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<TemplateInfo> GetTemplateAsync(
         string templateId,
@@ -292,7 +291,6 @@ public sealed class SandboxManager : IAsyncDisposable
     /// </summary>
     /// <param name="templateId">The template ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="templateId"/> is null or empty.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task DeleteTemplateAsync(
         string templateId,

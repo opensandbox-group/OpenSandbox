@@ -123,15 +123,29 @@ class ConnectionConfigSync(BaseModel):
 
         client_ip.apply_client_ip(self.headers)
 
-    def with_transport_if_missing(
+    @property
+    def owns_transport(self) -> bool:
+        """True when this config created (and may close) its transport."""
+        return self._owns_transport
+
+    def new_owned_transport(
         self,
         *,
         max_connections: int | None = 100,
         max_keepalive_connections: int = 20,
         keepalive_expiry: float = 30.0,
-    ) -> "ConnectionConfigSync":
-        if self.transport is not None:
-            return self
+    ) -> httpx.BaseTransport:
+        """
+        Build a fresh transport stack owned by the caller.
+
+        Mirrors the default stack built by `with_transport_if_missing`:
+        a deadline-aware `HTTPTransport` wrapped by the configured
+        `retry_policy` when the policy wraps transports. Callers that
+        hand the returned transport to an httpx client they close
+        themselves (e.g. adapter clients with their own cleanup
+        lifecycle) can do so safely: the shared `transport` on this
+        config is never touched.
+        """
         ssl_context = httpx.create_ssl_context()
         inner = httpx.HTTPTransport(
             verify=ssl_context,
@@ -142,12 +156,28 @@ class ConnectionConfigSync(BaseModel):
             ),
         )
         bounded = DeadlineSyncTransport(inner, ssl_context)
-        wrapped: httpx.BaseTransport
         if self.retry_policy.wraps_transport():
-            wrapped = RetrySyncTransport(bounded, self.retry_policy, owns_inner=True)
-        else:
-            wrapped = bounded
-        config = self.model_copy(update={"transport": wrapped})
+            return RetrySyncTransport(bounded, self.retry_policy, owns_inner=True)
+        return bounded
+
+    def with_transport_if_missing(
+        self,
+        *,
+        max_connections: int | None = 100,
+        max_keepalive_connections: int = 20,
+        keepalive_expiry: float = 30.0,
+    ) -> "ConnectionConfigSync":
+        if self.transport is not None:
+            return self
+        config = self.model_copy(
+            update={
+                "transport": self.new_owned_transport(
+                    max_connections=max_connections,
+                    max_keepalive_connections=max_keepalive_connections,
+                    keepalive_expiry=keepalive_expiry,
+                )
+            }
+        )
         config._owns_transport = True
         return config
 
