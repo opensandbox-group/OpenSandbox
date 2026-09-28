@@ -15,8 +15,8 @@
 apiVersion: v2
 name: ingress-gateway
 description: Helm chart for deploying the OpenSandbox ingress gateway (components/ingress)
-version: 1.1.0
-appVersion: "1.1.0"
+version: 1.1.1-rc.1
+appVersion: "1.1.1-rc.1"
 
 keywords:
   - sandbox

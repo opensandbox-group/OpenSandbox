@@ -87,7 +87,7 @@ controller:
   tolerations: []
   # -- Image injected as the platform-owned Fastlet Proxy sidecar into
   # fastlet Pods. Override for clusters that cannot pull from docker.io.
-  fastletProxyImage: fast-sandbox/fastlet-proxy:dev
+  fastletProxyImage: fast-sandbox/fastlet-proxy:release-1.1.1-rc.1
 
 # Artifact store shared by the controller, the runtime-agent and golden-image
 # builds. Rendered into the fast-sandbox-artifact-store ConfigMap.
