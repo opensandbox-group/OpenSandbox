@@ -13,4 +13,7 @@ data:
   {{- with .Values.controller.podRecovery.maxAttempts }}
   pod-recovery-max-attempts: {{ . | quote }}
   {{- end }}
+  {{- with .Values.controller.podRecovery.admissionReasons }}
+  pod-recovery-admission-reasons: {{ . | quote }}
+  {{- end }}
 {{- end }}

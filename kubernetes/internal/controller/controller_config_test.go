@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 func TestFeatureConfigDuration(t *testing.T) {
@@ -58,6 +59,25 @@ func TestFeatureConfigPositiveInt(t *testing.T) {
 
 	cfg.Load(map[string]string{featureConfigKeyPodRecoveryMaxAttempts: "many"})
 	assert.Equal(t, defaultPodRecoveryMaxAttempts, cfg.positiveInt(featureConfigKeyPodRecoveryMaxAttempts, defaultPodRecoveryMaxAttempts))
+}
+
+func TestFeatureConfigAdmissionReasons(t *testing.T) {
+	// Without any config the built-in defaults apply.
+	refreshRecoverableAdmissionReasons(nil)
+	assert.Equal(t, defaultRecoverableAdmissionReasons, recoverableAdmissionReasons())
+
+	// A non-empty list replaces the defaults; surrounding whitespace and
+	// empty items are tolerated and duplicates collapse.
+	refreshRecoverableAdmissionReasons(map[string]string{
+		featureConfigKeyPodRecoveryAdmissionReasons: " KubeletNotReady , CustomAdmissionReject ,,",
+	})
+	assert.Equal(t, sets.New("KubeletNotReady", "CustomAdmissionReject"), recoverableAdmissionReasons())
+
+	// An empty entry restores the defaults.
+	refreshRecoverableAdmissionReasons(map[string]string{
+		featureConfigKeyPodRecoveryAdmissionReasons: "   ",
+	})
+	assert.Equal(t, defaultRecoverableAdmissionReasons, recoverableAdmissionReasons())
 }
 
 func TestFeatureConfigReloadAndClear(t *testing.T) {

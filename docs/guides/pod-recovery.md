@@ -18,7 +18,7 @@ The sandbox stays `Pending` forever: kubelet keeps retrying on the same broken n
 The controller watches sandboxes that have **never been Ready** (`Phase` is `Pending` or empty). A pod is considered stuck when it stays in one of the tracked failure conditions longer than the threshold. Today's tracked conditions:
 
 - **Image pull failures** — `ImagePullBackOff` / `ErrImagePull`, typically caused by a broken node (for example a full disk).
-- **Kubelet admission rejections** — the scheduler placed the pod, but kubelet's local resource ledger disagreed (insufficient CPU, memory, or ephemeral storage; node cordoned or not ready; node-pressure eviction). These pods land in `Failed` with reasons like `OutOfcpu`, `OutOfmemory`, `OutOfephemeral-storage`, `Evicted`, `NodeNotSchedulable`, `KubeletNotReady`, or `UnexpectedAdmissionError`, and Kubernetes never retries them on its own.
+- **Kubelet admission rejections** — the scheduler placed the pod, but kubelet's local resource ledger disagreed (insufficient CPU, memory, or ephemeral storage; node cordoned or not ready; node-pressure eviction). These pods land in `Failed` with reasons like `OutOfcpu`, `OutOfmemory`, `OutOfephemeral-storage`, `Evicted`, `NodeNotSchedulable`, `KubeletNotReady`, or `UnexpectedAdmissionError`, and Kubernetes never retries them on its own. The tracked rejection reason set is configurable via `pod-recovery-admission-reasons` (see [Configuration](#configuration)).
 
 For a stuck pod:
 
@@ -59,6 +59,12 @@ data:
   # Maximum number of stuck-pod replacements per BatchSandbox template.
   # Defaults to 3.
   pod-recovery-max-attempts: "3"
+  # Optional: comma-separated kubelet admission rejection reasons that
+  # replacement can recover. When set, it replaces the built-in set
+  # (NodeNotSchedulable, KubeletNotReady, UnexpectedAdmissionError, Evicted);
+  # the OutOf* family (OutOfcpu, OutOfmemory, ...) always applies. Useful for
+  # vendor-specific kubelet rejection reasons.
+  # pod-recovery-admission-reasons: "KubeletNotReady,Evicted"
 ```
 
 Missing or invalid entries fall back to the built-in defaults (`1m` / `3`), and deleting the ConfigMap restores the defaults.
@@ -70,6 +76,8 @@ controller:
   podRecovery:
     stuckThreshold: "1m"
     maxAttempts: 3
+    # Optional; leave empty for the built-in admission reasons.
+    admissionReasons: ""
 ```
 
 ## Monitoring

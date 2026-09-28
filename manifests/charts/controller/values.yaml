@@ -71,6 +71,11 @@ controller:
     # -- Maximum number of stuck-pod replacements per BatchSandbox generation
     # (`pod-recovery-max-attempts`).
     maxAttempts: 3
+    # -- Comma-separated kubelet admission rejection reasons that pod replacement
+    # can recover (`pod-recovery-admission-reasons`). Replaces the built-in set
+    # (NodeNotSchedulable, KubeletNotReady, UnexpectedAdmissionError, Evicted;
+    # OutOf* reasons always apply). Leave empty to use the built-in defaults.
+    admissionReasons: ""
 
   # -- Pause/Resume snapshot configuration
   snapshot:

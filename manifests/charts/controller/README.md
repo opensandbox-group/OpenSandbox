@@ -84,7 +84,8 @@ The following table lists the configurable parameters of the chart and their def
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
-| controller.podRecovery | object | `{"maxAttempts":3,"stuckThreshold":"1m"}` | Image pull stuck pod recovery during initial startup (BatchSandbox). Rendered into the `feature-flags` ConfigMap in the controller namespace; the controller hot-reloads it without a restart. |
+| controller.podRecovery | object | `{"admissionReasons":"","maxAttempts":3,"stuckThreshold":"1m"}` | Image pull stuck pod recovery during initial startup (BatchSandbox). Rendered into the `feature-flags` ConfigMap in the controller namespace; the controller hot-reloads it without a restart. |
+| controller.podRecovery.admissionReasons | string | `""` | Comma-separated kubelet admission rejection reasons that pod replacement can recover (`pod-recovery-admission-reasons`). Replaces the built-in set (NodeNotSchedulable, KubeletNotReady, UnexpectedAdmissionError, Evicted; OutOf* reasons always apply). Leave empty to use the built-in defaults. |
 | controller.podRecovery.maxAttempts | int | `3` | Maximum number of stuck-pod replacements per BatchSandbox generation (`pod-recovery-max-attempts`). |
 | controller.podRecovery.stuckThreshold | string | `"1m"` | How long a pod must stay in ImagePullBackOff/ErrImagePull during initial startup before the controller replaces it (`pod-recovery-stuck-threshold`). |
 | controller.podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context |

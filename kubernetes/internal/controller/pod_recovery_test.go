@@ -373,4 +373,27 @@ func TestReconcilePodRecovery(t *testing.T) {
 		h.reconcile()
 		require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, h.bs.Status.Phase)
 	})
+
+	t.Run("recovers custom admission reasons from feature config", func(t *testing.T) {
+		t.Cleanup(func() { refreshRecoverableAdmissionReasons(nil) })
+		h := setup(t, "recovery-custom-reason")
+		h.r.FeatureConfig.Load(map[string]string{
+			featureConfigKeyPodRecoveryStuckThreshold:   time.Minute.String(),
+			featureConfigKeyPodRecoveryMaxAttempts:      "3",
+			featureConfigKeyPodRecoveryAdmissionReasons: "ClusterSpecificReject",
+		})
+		h.pod.Status.Phase = corev1.PodFailed
+		h.pod.Status.Reason = "ClusterSpecificReject"
+		require.NoError(t, apiClient.Status().Update(testContext, h.pod))
+		h.sync(h.pod)
+
+		h.r.podRecoveryNow = func() time.Time { return time.Now().Add(10 * time.Minute) }
+		h.reconcile()
+		require.Equal(t, sandboxv1alpha1.BatchSandboxPhasePending, h.bs.Status.Phase)
+		require.False(t, hasTrueBatchSandboxCondition(h.bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionPodFailed))
+		require.Eventually(t, func() bool {
+			return apierrors.IsNotFound(h.r.Get(testContext, client.ObjectKeyFromObject(h.pod), &corev1.Pod{}))
+		}, 5*time.Second, 20*time.Millisecond)
+		assert.True(t, strings.Contains(strings.Join(h.events(), "\n"), "Normal ReplacedStuckPod"))
+	})
 }

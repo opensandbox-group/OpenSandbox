@@ -56,7 +56,7 @@ Do not change annotation keys or JSON shapes without updating both writers and a
 
 ## ConfigMap Contracts
 
-- `feature-flags` (controller's own namespace, discovered via `POD_NAMESPACE`): plain `data` key-value entries for controller feature configuration, hot-reloaded by the controller. Current keys: `pod-recovery-stuck-threshold` (duration), `pod-recovery-max-attempts` (positive int). Missing or invalid keys fall back to built-in defaults. These knobs back the pod provisioning failure recovery, which is generic over conditions (image pull today; more conditions may plug in later).
+- `feature-flags` (controller's own namespace, discovered via `POD_NAMESPACE`): plain `data` key-value entries for controller feature configuration, hot-reloaded by the controller. Current keys: `pod-recovery-stuck-threshold` (duration), `pod-recovery-max-attempts` (positive int), `pod-recovery-admission-reasons` (comma-separated kubelet admission rejection reasons; replaces the built-in set when present, restores defaults when missing or empty). Missing or invalid keys fall back to built-in defaults. These knobs back the pod provisioning failure recovery, which is generic over conditions (image pull today; more conditions may plug in later).
 
 ## Label Contracts
 

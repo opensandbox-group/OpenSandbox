@@ -40,6 +40,10 @@ const (
 
 	featureConfigKeyPodRecoveryStuckThreshold = "pod-recovery-stuck-threshold"
 	featureConfigKeyPodRecoveryMaxAttempts    = "pod-recovery-max-attempts"
+	// featureConfigKeyPodRecoveryAdmissionReasons holds a comma-separated
+	// list of kubelet admission rejection reasons; it replaces the built-in
+	// set when present.
+	featureConfigKeyPodRecoveryAdmissionReasons = "pod-recovery-admission-reasons"
 )
 
 var featureConfigLog = logf.Log.WithName("feature-config")
@@ -62,8 +66,12 @@ func (c *FeatureConfig) Load(data map[string]string) {
 		loaded[k] = strings.TrimSpace(v)
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.data = loaded
+	c.mu.Unlock()
+	// The pod recovery feature keeps its effective admission reasons in a
+	// package-level snapshot; republish it on every reload so ConfigMap
+	// changes hot-apply. Same-package coupling is intentional.
+	refreshRecoverableAdmissionReasons(loaded)
 }
 
 func (c *FeatureConfig) get(key string) (string, bool) {

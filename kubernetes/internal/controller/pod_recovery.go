@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -62,6 +63,8 @@ var (
 )
 
 func init() {
+	admissionReasons := defaultRecoverableAdmissionReasons.Clone()
+	recoverableAdmissionReasonsSnapshot.Store(&admissionReasons)
 	metrics.Registry.MustRegister(podRecoveryReplacements, podRecoverySkips)
 }
 
@@ -78,21 +81,59 @@ type provisioningFailure struct {
 // CreateContainerConfigError and terminal failures are excluded on purpose.
 var recoverableImagePullReasons = sets.New("ImagePullBackOff", "ErrImagePull")
 
-// Kubelet admission rejection reasons a replacement can recover. The "OutOf"
-// prefix covers OutOfcpu / OutOfmemory / OutOfephemeral-storage / OutOfpods.
-var recoverableAdmissionReasons = sets.New(
+// defaultRecoverableAdmissionReasons is the built-in set of kubelet admission
+// rejection reasons a replacement can recover. The "OutOf" prefix always
+// applies on top and covers OutOfcpu / OutOfmemory / OutOfephemeral-storage /
+// OutOfpods.
+var defaultRecoverableAdmissionReasons = sets.New(
 	"NodeNotSchedulable",
 	"KubeletNotReady",
 	"UnexpectedAdmissionError",
 	"Evicted",
 )
 
+// recoverableAdmissionReasonsSnapshot holds the effective admission reasons and
+// is published on every feature config reload; reads are race-free through the
+// atomic pointer.
+var recoverableAdmissionReasonsSnapshot atomic.Pointer[sets.Set[string]]
+
+// recoverableAdmissionReasons returns the effective kubelet admission rejection
+// reasons a replacement can recover.
+func recoverableAdmissionReasons() sets.Set[string] {
+	if snapshot := recoverableAdmissionReasonsSnapshot.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return defaultRecoverableAdmissionReasons
+}
+
+// refreshRecoverableAdmissionReasons publishes the admission reasons from
+// feature config data; a missing or empty entry restores the built-in
+// defaults. Unknown reason names are accepted on purpose so clusters can cover
+// vendor-specific kubelet rejections.
+func refreshRecoverableAdmissionReasons(data map[string]string) {
+	reasons := parseCSVSet(data[featureConfigKeyPodRecoveryAdmissionReasons])
+	if reasons.Len() == 0 {
+		reasons = defaultRecoverableAdmissionReasons.Clone()
+	}
+	recoverableAdmissionReasonsSnapshot.Store(&reasons)
+}
+
+func parseCSVSet(raw string) sets.Set[string] {
+	reasons := sets.New[string]()
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			reasons.Insert(item)
+		}
+	}
+	return reasons
+}
+
 func isRecoverableAdmissionFailure(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodFailed {
 		return false
 	}
 	reason := pod.Status.Reason
-	return strings.HasPrefix(reason, "OutOf") || recoverableAdmissionReasons.Has(reason)
+	return strings.HasPrefix(reason, "OutOf") || recoverableAdmissionReasons().Has(reason)
 }
 
 // permanentImagePullFailureMarkers are kubelet pull error message fragments
