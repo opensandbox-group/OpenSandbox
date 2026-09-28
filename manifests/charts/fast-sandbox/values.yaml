@@ -30,8 +30,9 @@
 # The default image tags are empty and resolve to the `release-<appVersion>`
 # companion image tags built from the source pinned in
 # manifests/third-party/fast-sandbox.commit by
-# manifests/release/build-fast-sandbox.sh. Only the fastlet-proxy sidecar
-# image pins an explicit tag (`dev`) by default.
+# manifests/release/build-fast-sandbox.sh. The fastlet-proxy sidecar value is
+# a single image string, so it pins the released companion image explicitly
+# instead of using the empty-tag fallback.
 
 # -- Override the name of the chart
 nameOverride: ""
@@ -86,8 +87,10 @@ controller:
   # -- Tolerations for the controller pod
   tolerations: []
   # -- Image injected as the platform-owned Fastlet Proxy sidecar into
-  # fastlet Pods. Override for clusters that cannot pull from docker.io.
-  fastletProxyImage: fast-sandbox/fastlet-proxy:release-1.1.1-rc.1
+  # fastlet Pods. Defaults to the released companion image published by the
+  # umbrella release (build-fast-sandbox.sh); override for clusters that
+  # cannot pull from docker.io.
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.1.1-rc.1
 
 # Artifact store shared by the controller, the runtime-agent and golden-image
 # builds. Rendered into the fast-sandbox-artifact-store ConfigMap.
