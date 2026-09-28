@@ -255,3 +255,69 @@ func TestMergedView_ReadOnly_AllWritesDenied(t *testing.T) {
 	assert.Error(t, mv.Rename("a", "b"))
 	assert.Error(t, mv.Chmod("x.txt", 0o755))
 }
+
+func newQuotaTestView(t *testing.T, maxBytes int64) (*MergedView, *UpperManager) {
+	t.Helper()
+	mgr, err := NewUpperManager(filepath.Join(t.TempDir(), "isolation"), maxBytes)
+	require.NoError(t, err)
+	_, upper, _, err := mgr.Allocate()
+	require.NoError(t, err)
+	// Canonicalize so rejectSymlink accepts the path on hosts where the temp
+	// directory is reached through a symlink (e.g. /var on macOS).
+	upper, err = filepath.EvalSymlinks(upper)
+	require.NoError(t, err)
+	mv := NewMergedView(t.TempDir(), upper, WorkspaceOverlay, uint32(os.Getuid()), uint32(os.Getgid()))
+	mv.Quota = mgr
+	return mv, mgr
+}
+
+func TestMergedView_WriteFileQuotaRejectsOverBudget(t *testing.T) {
+	mv, _ := newQuotaTestView(t, 1000)
+
+	err := mv.WriteFile("big.bin", make([]byte, 2000), 0o644)
+	require.ErrorIs(t, err, ErrUpperLimitExceeded)
+	_, statErr := os.Stat(filepath.Join(mv.UpperDir, "big.bin"))
+	require.True(t, os.IsNotExist(statErr), "rejected write must not create the file")
+}
+
+func TestMergedView_WriteFileQuotaCountsReplacement(t *testing.T) {
+	mv, mgr := newQuotaTestView(t, 1000)
+
+	require.NoError(t, mv.WriteFile("a.bin", make([]byte, 700), 0o644))
+	// Replacing a.bin with a smaller payload frees budget: 700-700+500.
+	require.NoError(t, mv.WriteFile("a.bin", make([]byte, 500), 0o644))
+	// 500 + 600 = 1100 > 1000: rejected, file untouched.
+	require.ErrorIs(t, mv.WriteFile("b.bin", make([]byte, 600), 0o644), ErrUpperLimitExceeded)
+	_, statErr := os.Stat(filepath.Join(mv.UpperDir, "b.bin"))
+	require.True(t, os.IsNotExist(statErr), "rejected write must not create the file")
+	// 500 + 400 = 900 <= 1000: fits.
+	require.NoError(t, mv.WriteFile("b.bin", make([]byte, 400), 0o644))
+
+	usage, err := mgr.Usage()
+	require.NoError(t, err)
+	assert.Equal(t, int64(900), usage)
+}
+
+func TestMergedView_WriteFileReaderQuotaRejectsWhenOverBudget(t *testing.T) {
+	mv, _ := newQuotaTestView(t, 1000)
+
+	// Exact fit is allowed for known-size writes.
+	require.NoError(t, mv.WriteFile("full.bin", make([]byte, 1000), 0o644))
+	// A streaming write of unknown length at a fresh path must be refused.
+	n, err := mv.WriteFileReader("more.bin", strings.NewReader("more"), 0o644)
+	require.ErrorIs(t, err, ErrUpperLimitExceeded)
+	assert.Equal(t, int64(0), n)
+	_, statErr := os.Stat(filepath.Join(mv.UpperDir, "more.bin"))
+	require.True(t, os.IsNotExist(statErr), "rejected streaming write must not create the file")
+	// Replacing full.bin frees the budget, so the stream is admitted.
+	n, err = mv.WriteFileReader("full.bin", strings.NewReader("x"), 0o644)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+}
+
+func TestMergedView_WriteFileQuotaNilMeansUnlimited(t *testing.T) {
+	upper, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	mv := NewMergedView(t.TempDir(), upper, WorkspaceOverlay, uint32(os.Getuid()), uint32(os.Getgid()))
+	require.NoError(t, mv.WriteFile("uncapped.bin", make([]byte, 128<<10), 0o644))
+}

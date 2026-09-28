@@ -464,9 +464,12 @@ Point execd at an optional TOML file:
 # Parent directory for per-session overlay upper dirs.
 upper_root = "/var/lib/execd/isolation"
 
-# Allocation-time threshold for total overlay upper-directory size (bytes).
-# Existing sessions can write beyond this value.
-# Default: 8 GiB. Set to 0 to disable the allocation check.
+# Admission threshold for total overlay upper-directory size (bytes).
+# New session creation is rejected once usage reaches it, execd-mediated
+# writes (Files API) are checked against it before landing, and the rejection
+# names the largest contributing sessions. Writes made inside a session by the
+# workload (kernel overlay) are not capped.
+# Default: 8 GiB. Set to 0 to disable all checks.
 upper_max_bytes = 8589934592  # 8 GiB
 
 # Sources allowed for extra_writable / binds (symlink-resolved).

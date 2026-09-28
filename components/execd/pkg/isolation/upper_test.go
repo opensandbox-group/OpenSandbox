@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -630,4 +631,167 @@ func newTestUpperManager(t *testing.T) *UpperManager {
 		t.Fatal(err)
 	}
 	return mgr
+}
+
+func TestUpperManager_AllocateRejectionNamesLargestSessions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+	mgr, err := NewUpperManager(root, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	idA, upperA, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upperA, "big.bin"), make([]byte, 800), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idB, upperB, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upperB, "mid.bin"), make([]byte, 150), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idC, upperC, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upperC, "small.bin"), make([]byte, 45), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idD, upperD, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upperD, "tiny.bin"), make([]byte, 5), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Total 1000 >= 1000: the next allocation must be rejected and name the
+	// three largest contributors in descending order, omitting the fourth.
+	_, _, _, err = mgr.Allocate()
+	if err == nil {
+		t.Fatal("expected error when upper limit exceeded")
+	}
+	if !errors.Is(err, ErrUpperLimitExceeded) {
+		t.Fatalf("got %v, want ErrUpperLimitExceeded", err)
+	}
+	msg := err.Error()
+	posA := strings.Index(msg, idA+"=800")
+	posB := strings.Index(msg, idB+"=150")
+	posC := strings.Index(msg, idC+"=45")
+	if posA < 0 || posB < 0 || posC < 0 {
+		t.Fatalf("rejection missing contributors: %s", msg)
+	}
+	if !(posA < posB && posB < posC) {
+		t.Fatalf("contributors not ordered largest-first: %s", msg)
+	}
+	if strings.Contains(msg, idD+"=") {
+		t.Fatalf("fourth-largest session must be omitted: %s", msg)
+	}
+	if !strings.Contains(msg, "; largest sessions: ") {
+		t.Fatalf("rejection missing contributor prefix: %s", msg)
+	}
+}
+
+func TestUpperManager_CheckWriteBudget(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+	mgr, err := NewUpperManager(root, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, upper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upper, "seed.bin"), make([]byte, 700), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(upper, "target.bin")
+	// Fits: 700 + 250 = 950 <= 1000.
+	if err := mgr.CheckWriteBudget(target, 250); err != nil {
+		t.Fatalf("write within budget rejected: %v", err)
+	}
+	// Over: 700 + 400 = 1100 > 1000.
+	if err := mgr.CheckWriteBudget(target, 400); !errors.Is(err, ErrUpperLimitExceeded) {
+		t.Fatalf("got %v, want ErrUpperLimitExceeded", err)
+	}
+	// Replacement is counted net: 700 - 700 + 300 = 300 <= 1000.
+	if err := mgr.CheckWriteBudget(filepath.Join(upper, "seed.bin"), 300); err != nil {
+		t.Fatalf("shrinking replacement rejected: %v", err)
+	}
+	// Exact fit is allowed: 700 - 700 + 1000 = 1000, not > 1000.
+	if err := mgr.CheckWriteBudget(filepath.Join(upper, "seed.bin"), 1000); err != nil {
+		t.Fatalf("exact-fit write rejected: %v", err)
+	}
+
+	// maxBytes=0 disables the check entirely.
+	mgr0, err := NewUpperManager(filepath.Join(t.TempDir(), "isolation"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr0.CheckWriteBudget(filepath.Join(t.TempDir(), "any"), 1<<20); err != nil {
+		t.Fatalf("maxBytes=0 must disable the check: %v", err)
+	}
+}
+
+func TestUpperManager_CheckWriteBudgetFailsOpenOnWalkError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+	mgr, err := NewUpperManager(root, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, upper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace the root with a regular file: the usage walk now fails with
+	// ENOTDIR (not ErrNotExist), which must fail open like Allocate does.
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.CheckWriteBudget(filepath.Join(upper, "x.bin"), 5000); err != nil {
+		t.Fatalf("walk failure must fail open: %v", err)
+	}
+}
+
+func TestUpperManager_CheckStreamingBudget(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+	mgr, err := NewUpperManager(root, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, upper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := filepath.Join(upper, "full.bin")
+	if err := os.WriteFile(full, make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// At the limit with nothing to replace: a streaming write must be refused.
+	if err := mgr.CheckStreamingBudget(filepath.Join(upper, "new.bin")); !errors.Is(err, ErrUpperLimitExceeded) {
+		t.Fatalf("got %v, want ErrUpperLimitExceeded", err)
+	}
+	// Replacing the full file frees the budget: allowed.
+	if err := mgr.CheckStreamingBudget(full); err != nil {
+		t.Fatalf("budget-freeing replacement rejected: %v", err)
+	}
+
+	// maxBytes=0 disables the check entirely.
+	mgr0, err := NewUpperManager(filepath.Join(t.TempDir(), "isolation"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr0.CheckStreamingBudget(filepath.Join(t.TempDir(), "any")); err != nil {
+		t.Fatalf("maxBytes=0 must disable the check: %v", err)
+	}
 }

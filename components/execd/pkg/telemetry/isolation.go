@@ -25,6 +25,13 @@ import (
 type IsolationStats struct {
 	ActiveSessions  int64
 	UpperUsageBytes int64
+	// UpperUsageValid reports whether UpperUsageBytes reflects a successful
+	// usage scan. When false, the usage gauge is skipped rather than exported
+	// as a misleading zero.
+	UpperUsageValid bool
+	// UpperUsageScanErrors is the cumulative count of usage scans that failed
+	// since startup.
+	UpperUsageScanErrors int64
 }
 
 // IsolationStatsProvider is called by observable gauge callbacks to get

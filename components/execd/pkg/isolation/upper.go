@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -173,9 +174,12 @@ func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair,
 	defer m.mu.Unlock()
 
 	if m.maxBytes > 0 {
-		usage, usageErr := m.usageLocked()
+		usage, per, usageErr := m.usageByEntryLocked()
 		if usageErr == nil && usage >= m.maxBytes {
-			return "", nil, fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
+			return "", nil, fmt.Errorf(
+				"%w: %d >= %d bytes%s",
+				ErrUpperLimitExceeded, usage, m.maxBytes, topUsageSuffix(per, 3),
+			)
 		}
 	}
 
@@ -299,20 +303,37 @@ func (m *UpperManager) Usage() (int64, error) {
 // partially removed before a GC retry) contribute zero instead of failing the
 // whole sum.
 func (m *UpperManager) usageLocked() (int64, error) {
+	total, _, err := m.usageByEntryLocked()
+	return total, err
+}
+
+// entryUsage is one tracked session's contribution to total upper usage.
+type entryUsage struct {
+	sessionID string
+	bytes     int64
+}
+
+// usageByEntryLocked is usageLocked with the per-session breakdown retained,
+// so rejection paths can name the largest contributors. Caller must hold m.mu.
+func (m *UpperManager) usageByEntryLocked() (int64, []entryUsage, error) {
 	var total int64
-	for _, e := range m.entries {
+	per := make([]entryUsage, 0, len(m.entries))
+	for id, e := range m.entries {
+		var size int64
 		for _, p := range e.Pairs {
-			size, err := dirSize(p.UpperDir)
+			pairSize, err := dirSize(p.UpperDir)
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
 					continue
 				}
-				return 0, err
+				return 0, nil, err
 			}
-			total += size
+			size += pairSize
 		}
+		total += size
+		per = append(per, entryUsage{sessionID: id, bytes: size})
 	}
-	return total, nil
+	return total, per, nil
 }
 
 func (m *UpperManager) Root() string {
@@ -321,6 +342,88 @@ func (m *UpperManager) Root() string {
 
 func (m *UpperManager) MaxBytes() int64 {
 	return m.maxBytes
+}
+
+// CheckWriteBudget reports whether writing incoming bytes to a mediated path
+// (net of the file currently at path, if any) would keep total upper usage
+// within maxBytes. Semantics mirror Allocate: no check when maxBytes is unset,
+// and fail-open when the usage walk fails. Accounting is best-effort — it is
+// evaluated once per call, so concurrent writes can jointly cross the limit,
+// and in-session kernel overlay writes are not visible to execd at all.
+func (m *UpperManager) CheckWriteBudget(path string, incoming int64) error {
+	if m.maxBytes <= 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	usage, err := m.usageLocked()
+	if err != nil {
+		return nil
+	}
+	var existing int64
+	if st, statErr := os.Stat(path); statErr == nil && !st.IsDir() {
+		existing = st.Size()
+	}
+	if projected := usage - existing + incoming; projected > m.maxBytes {
+		return fmt.Errorf(
+			"%w: mediated write of %d byte(s) (replacing %d) would reach %d of %d bytes",
+			ErrUpperLimitExceeded, incoming, existing, projected, m.maxBytes,
+		)
+	}
+	return nil
+}
+
+// CheckStreamingBudget reports whether a mediated write of unknown length may
+// start at path. Because the length is unknown before the copy, it requires
+// the budget net of the file being replaced to be strictly below maxBytes,
+// mirroring Allocate's admission semantics. Fail-open and best-effort caveats
+// are the same as CheckWriteBudget's.
+func (m *UpperManager) CheckStreamingBudget(path string) error {
+	if m.maxBytes <= 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	usage, err := m.usageLocked()
+	if err != nil {
+		return nil
+	}
+	var existing int64
+	if st, statErr := os.Stat(path); statErr == nil && !st.IsDir() {
+		existing = st.Size()
+	}
+	if usage-existing >= m.maxBytes {
+		return fmt.Errorf(
+			"%w: mediated streaming write would start at %d of %d bytes (incoming size unknown)",
+			ErrUpperLimitExceeded, usage-existing, m.maxBytes,
+		)
+	}
+	return nil
+}
+
+// topUsageSuffix formats the n largest per-session contributors for rejection
+// errors, largest first, so operators can see which session to reclaim. Ties
+// break by session ID for stable output. Returns "" when there is nothing to
+// report.
+func topUsageSuffix(per []entryUsage, n int) string {
+	if len(per) == 0 {
+		return ""
+	}
+	s := append([]entryUsage(nil), per...)
+	sort.Slice(s, func(i, j int) bool {
+		if s[i].bytes != s[j].bytes {
+			return s[i].bytes > s[j].bytes
+		}
+		return s[i].sessionID < s[j].sessionID
+	})
+	if len(s) > n {
+		s = s[:n]
+	}
+	parts := make([]string, len(s))
+	for i, e := range s {
+		parts[i] = fmt.Sprintf("%s=%d", e.sessionID, e.bytes)
+	}
+	return "; largest sessions: " + strings.Join(parts, ", ")
 }
 
 func newSessionID() string {

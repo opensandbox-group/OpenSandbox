@@ -44,6 +44,12 @@ type MergedView struct {
 	UpperDir string
 	Uid, Gid uint32
 	Mode     WorkspaceMode
+	// Quota optionally bounds mediated writes to UpperDir against the
+	// UpperManager's configured max_bytes. Checks are admission-time and
+	// best-effort, mirroring Allocate (fail-open on usage-walk failure).
+	// In-session kernel overlay writes are not visible to execd and remain
+	// unbounded regardless. Nil disables the check.
+	Quota *UpperManager
 }
 
 // NewMergedView creates a merged view. upperDir may be empty (tmpfs).
@@ -259,6 +265,11 @@ func (m *MergedView) WriteFile(path string, data []byte, perm os.FileMode) error
 	if err := m.rejectSymlink(upperPath); err != nil {
 		return err
 	}
+	if m.Quota != nil {
+		if err := m.Quota.CheckWriteBudget(upperPath, int64(len(data))); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(upperPath), 0o755); err != nil {
 		return err
 	}
@@ -285,6 +296,13 @@ func (m *MergedView) WriteFileReader(path string, r io.Reader, perm os.FileMode)
 	upperPath := m.resolveUpper(rel)
 	if err := m.rejectSymlink(upperPath); err != nil {
 		return 0, err
+	}
+	if m.Quota != nil {
+		// The stream length is unknown before the copy; admit only when the
+		// budget is not already exhausted net of the file being replaced.
+		if err := m.Quota.CheckStreamingBudget(upperPath); err != nil {
+			return 0, err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(upperPath), 0o755); err != nil {
 		return 0, err

@@ -187,7 +187,25 @@ func registerExecdMetrics() error {
 			if isolationStatsProvider == nil {
 				return nil
 			}
-			obs.Observe(isolationStatsProvider().UpperUsageBytes, metric.WithAttributes(sharedAttrs()...))
+			if stats := isolationStatsProvider(); stats.UpperUsageValid {
+				obs.Observe(stats.UpperUsageBytes, metric.WithAttributes(sharedAttrs()...))
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"execd.isolation.upper.usage_scan_errors",
+		metric.WithDescription("Cumulative failed upper-usage scans since execd start (a failed scan is skipped, not zeroed, in usage_bytes)"),
+		metric.WithUnit("{errors}"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			if isolationStatsProvider == nil {
+				return nil
+			}
+			obs.Observe(isolationStatsProvider().UpperUsageScanErrors, metric.WithAttributes(sharedAttrs()...))
 			return nil
 		}),
 	)

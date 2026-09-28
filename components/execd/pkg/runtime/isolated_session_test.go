@@ -818,3 +818,65 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 		t.Errorf("expected existing-path rejection, got: %v", err)
 	}
 }
+
+func TestGetMergedViewAttachesUpperQuota(t *testing.T) {
+	runner := newTestRunner(t)
+
+	newSession := func(id, mode string) *isolatedSession {
+		upperID, upperDir, workDir, err := runner.upperMgr.Allocate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		upperDir, err = filepath.EvalSymlinks(upperDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &isolatedSession{
+			id: id,
+			opts: &IsolatedSessionOptions{
+				WorkspacePath: ws,
+				WorkspaceMode: mode,
+			},
+			processWaited: make(chan struct{}),
+			doneCh:        make(chan struct{}),
+			upperID:       upperID,
+			upperDir:      upperDir,
+			workDir:       workDir,
+			lastRunAt:     time.Now(),
+		}
+	}
+
+	overlay := newSession("quota-overlay", string(isolation.WorkspaceOverlay))
+	runner.ctrl.isolatedSessionMap.Store(overlay.id, overlay)
+	fsOverlay, err := runner.GetMergedView(overlay.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mvOverlay := fsOverlay.(*isolatedSessionFS).delegate.(*isolation.MergedView)
+	if mvOverlay.Quota != runner.upperMgr {
+		t.Fatal("overlay view must carry the runner's upper manager as its quota")
+	}
+
+	rw := newSession("quota-rw", string(isolation.WorkspaceRW))
+	runner.ctrl.isolatedSessionMap.Store(rw.id, rw)
+	fsRW, err := runner.GetMergedView(rw.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mvRW := fsRW.(*isolatedSessionFS).delegate.(*isolation.MergedView)
+	if mvRW.Quota != nil {
+		t.Fatal("rw-workspace view must not be bounded by the upper quota")
+	}
+
+	stats := runner.statsSnapshot()
+	if !stats.UpperUsageValid {
+		t.Fatalf("healthy walk reported invalid: %+v", stats)
+	}
+	if stats.UpperUsageScanErrors != 0 {
+		t.Fatalf("healthy walk counted scan errors: %+v", stats)
+	}
+}

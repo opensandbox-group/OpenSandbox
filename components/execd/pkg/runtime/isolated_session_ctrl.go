@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,6 +50,9 @@ type IsolatedRunner struct {
 	allowedWritable []string
 	namespacePinner sessionNamespacePinner
 	stopGC          chan struct{}
+	// usageScanErrors counts upper-usage walks that failed since startup, so
+	// the telemetry gauge can distinguish "no data" from a fake zero.
+	usageScanErrors atomic.Uint64
 	// bgRuns tracks detached background runs (map[runID]*IsolatedBackgroundRun),
 	// swept when the owning session is deleted or GC'd.
 	bgRuns      sync.Map
@@ -103,10 +107,17 @@ func (r *IsolatedRunner) statsSnapshot() telemetry.IsolationStats {
 		sessionCount++
 		return true
 	})
-	usage, _ := r.upperMgr.Usage()
+	usage, usageErr := r.upperMgr.Usage()
+	if usageErr != nil {
+		// A failed walk must not surface as a zero-valued sample: that looks
+		// like recovery while the sessions and their data are still there.
+		r.usageScanErrors.Add(1)
+	}
 	return telemetry.IsolationStats{
-		ActiveSessions:  sessionCount,
-		UpperUsageBytes: usage,
+		ActiveSessions:       sessionCount,
+		UpperUsageBytes:      usage,
+		UpperUsageValid:      usageErr == nil,
+		UpperUsageScanErrors: int64(r.usageScanErrors.Load()),
 	}
 }
 
@@ -804,7 +815,7 @@ func (r *IsolatedRunner) GetMergedView(id string) (vfs.FS, error) {
 
 	return &isolatedSessionFS{
 		session:  s,
-		delegate: newMergedView(s),
+		delegate: newMergedView(s, r.upperMgr),
 	}, nil
 }
 
@@ -830,12 +841,15 @@ func (r *IsolatedRunner) GetMergedViewWithLease(id string) (vfs.FS, func(), erro
 	release := func() {
 		once.Do(s.endOperation)
 	}
-	return newMergedView(s), release, nil
+	return newMergedView(s, r.upperMgr), release, nil
 }
 
 // newMergedView snapshots the immutable filesystem configuration. The caller
-// must hold s.mu for reading while constructing the view.
-func newMergedView(s *isolatedSession) vfs.FS {
+// must hold s.mu for reading while constructing the view. upperQuota bounds
+// mediated overlay writes by upper_max_bytes; it is attached only for
+// overlay-mode views with a real upper directory (rw-workspace writes target
+// the workspace itself, and tmpfs sessions have no upper to account).
+func newMergedView(s *isolatedSession, upperQuota *isolation.UpperManager) vfs.FS {
 	// MergedView chowns files on the host side (execd's namespace).
 	// In setpriv mode the requested uid/gid are real host IDs, so use them.
 	// In userns mode the requested uid/gid are in-namespace IDs mapped to
@@ -864,7 +878,11 @@ func newMergedView(s *isolatedSession) vfs.FS {
 		mode = isolation.WorkspaceRO
 	}
 
-	return isolation.NewMergedView(s.opts.WorkspacePath, upper, mode, uid, gid)
+	view := isolation.NewMergedView(s.opts.WorkspacePath, upper, mode, uid, gid)
+	if mode == isolation.WorkspaceOverlay && upper != "" {
+		view.Quota = upperQuota
+	}
+	return view
 }
 
 func (r *IsolatedRunner) Capabilities() isolation.Capabilities {
