@@ -938,6 +938,52 @@ def _create_pool(
     )
 
 
+def test_concurrent_shutdown_closes_warmup_loop_once() -> None:
+    """Regression for issue #2025: concurrent shutdown() calls must not race past
+    the lifecycle check and double-close the shared warmup event loop
+    (ValueError: Invalid file descriptor: -1 / 'NoneType' object has no
+    attribute 'close').
+    """
+    pool = _create_pool(max_idle=0)
+    pool.start()
+    loop = pool._warmup_loop
+    assert loop is not None
+    original_close = loop.close
+    close_threads: list[int] = []
+
+    def slow_close() -> None:
+        close_threads.append(threading.get_ident())
+        # Keep close() in flight so a racing teardown that captured the same
+        # loop would call close() on it concurrently before this one returns.
+        time.sleep(0.2)
+        original_close()
+
+    loop.close = slow_close  # type: ignore[method-assign]
+    barrier = threading.Barrier(4)
+    errors: list[Exception] = []
+
+    def worker(graceful: bool) -> None:
+        barrier.wait()
+        try:
+            pool.shutdown(graceful)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(index % 2 == 0,)) for index in range(4)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert len(close_threads) == 1
+    finally:
+        pool.shutdown(False)
+
+
 def test_acquire_retry_next_idle_empty_raises_pool_empty() -> None:
     pool = _create_pool(max_idle=0)
     pool.start()

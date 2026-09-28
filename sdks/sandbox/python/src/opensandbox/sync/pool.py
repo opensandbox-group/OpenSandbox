@@ -157,6 +157,7 @@ class SandboxPoolSync:
         self._current_max_idle = max_idle
         self._lifecycle_state = PoolLifecycleState.NOT_STARTED
         self._lifecycle_lock = threading.RLock()
+        self._stop_lock = threading.Lock()
         self._reconcile_lock = threading.Lock()
         self._in_flight = 0
         self._in_flight_condition = threading.Condition()
@@ -1481,68 +1482,81 @@ class SandboxPoolSync:
         wait_for_warmup: bool,
         join_scheduler: bool = True,
     ) -> None:
-        self._stop_event.set()
-        thread = self._scheduler_thread
-        if (
-            join_scheduler
-            and thread is not None
-            and thread is not threading.current_thread()
-        ):
-            thread.join(timeout=5)
-        if join_scheduler:
-            self._scheduler_thread = None
-        heartbeat = self._heartbeat_thread
-        if heartbeat is not None and heartbeat is not threading.current_thread():
-            heartbeat.join(timeout=5)
-        self._heartbeat_thread = None
-        warmup_futures = tuple(self._warmup_futures)
-        if not wait_for_warmup:
+        # Serialize teardown so concurrent stop paths (shutdown() racing
+        # shutdown(), or start()'s failure path racing shutdown()) cannot
+        # capture-and-close the same warmup loop or executors twice.
+        # Everything inside the lock is bounded (join/future timeouts), and
+        # never acquires _lifecycle_lock, so a failed start() holding
+        # _lifecycle_lock cannot deadlock against this lock.
+        with self._stop_lock:
+            self._stop_event.set()
+            thread = self._scheduler_thread
+            if (
+                join_scheduler
+                and thread is not None
+                and thread is not threading.current_thread()
+            ):
+                thread.join(timeout=5)
+            if join_scheduler:
+                self._scheduler_thread = None
+            heartbeat = self._heartbeat_thread
+            if heartbeat is not None and heartbeat is not threading.current_thread():
+                heartbeat.join(timeout=5)
+            self._heartbeat_thread = None
+            warmup_futures = tuple(self._warmup_futures)
+            if not wait_for_warmup:
+                for future in warmup_futures:
+                    future.cancel()
+            deadline = time.monotonic() + _WARMUP_TERMINATION_TIMEOUT_SECONDS
+            # Cancelling the thread-safe Future marks that wrapper done before the
+            # coroutine's shielded cleanup has finished. Keep the dispatch loop
+            # alive until every warmup token reaches its terminal callback.
+            while time.monotonic() < deadline:
+                with self._warming_lock:
+                    if not self._warmup_tokens:
+                        break
+                time.sleep(0.01)
             for future in warmup_futures:
-                future.cancel()
-        deadline = time.monotonic() + _WARMUP_TERMINATION_TIMEOUT_SECONDS
-        # Cancelling the thread-safe Future marks that wrapper done before the
-        # coroutine's shielded cleanup has finished. Keep the dispatch loop
-        # alive until every warmup token reaches its terminal callback.
-        while time.monotonic() < deadline:
-            with self._warming_lock:
-                if not self._warmup_tokens:
-                    break
-            time.sleep(0.01)
-        for future in warmup_futures:
-            try:
-                future.result(timeout=max(0.0, deadline - time.monotonic()))
-            except BaseException:
-                pass
-        loop = self._warmup_loop
-        loop_thread = self._warmup_loop_thread
-        if loop is not None:
-            loop.call_soon_threadsafe(loop.stop)
-        if loop_thread is not None and loop_thread is not threading.current_thread():
-            loop_thread.join(timeout=5)
-        if loop is not None and not loop.is_running():
-            loop.close()
-        self._warmup_loop = None
-        self._warmup_loop_thread = None
-        create_executor = self._create_executor
-        if create_executor is not None:
-            create_executor.shutdown(wait=False, cancel_futures=True)
-            if wait_for_warmup:
-                create_executor.shutdown(wait=True)
-            else:
-                self._await_executor_threads(
-                    create_executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
-                )
-        self._create_executor = None
-        executor = self._warmup_executor
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
-            if wait_for_warmup:
-                executor.shutdown(wait=True)
-            else:
-                self._await_executor_threads(
-                    executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
-                )
-        self._warmup_executor = None
+                try:
+                    future.result(timeout=max(0.0, deadline - time.monotonic()))
+                except BaseException:
+                    pass
+            loop = self._warmup_loop
+            loop_thread = self._warmup_loop_thread
+            self._warmup_loop = None
+            self._warmup_loop_thread = None
+            if loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
+            if (
+                loop_thread is not None
+                and loop_thread is not threading.current_thread()
+            ):
+                loop_thread.join(timeout=5)
+            if loop is not None and not loop.is_running():
+                loop.close()
+            create_executor = self._create_executor
+            self._create_executor = None
+            if create_executor is not None:
+                create_executor.shutdown(wait=False, cancel_futures=True)
+                if wait_for_warmup:
+                    create_executor.shutdown(wait=True)
+                else:
+                    self._await_executor_threads(
+                        create_executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
+                    )
+            executor = self._warmup_executor
+            self._warmup_executor = None
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+                if wait_for_warmup:
+                    executor.shutdown(wait=True)
+                else:
+                    self._await_executor_threads(
+                        executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
+                    )
+        # Idempotent bookkeeping kept outside _stop_lock: _mark_primary_lost
+        # takes _lifecycle_lock, which must never be awaited while holding
+        # _stop_lock (lock-order inversion with start()'s failure path).
         self._release_primary_lock_best_effort()
         self._mark_primary_lost()
 
