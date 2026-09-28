@@ -153,7 +153,10 @@ public class EndpointCacheTests
         await Task.Yield();
         await Task.Delay(50);
 
-        var result = await cache.GetOrFetchAsync(key, () => Task.FromResult(Ep("fresh")));
+        // A cached fault would surface "boom" here instead of refetching.
+        var result = await cache.GetOrFetchAsync(
+            key,
+            () => { Interlocked.Increment(ref fetchCount); return Task.FromResult(Ep("fresh")); });
         Assert.Equal(2, fetchCount);
         Assert.Equal("fresh", result.EndpointAddress);
     }
@@ -161,17 +164,20 @@ public class EndpointCacheTests
     [Fact]
     public async Task GetOrFetchAsync_RemovesSettledEntry_EvenWithoutWaiters()
     {
-        // Regression: a settled entry used to linger when its only waiter
-        // cancelled, so a post-TTL caller was served the stale endpoint.
-        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        // Regression: a settled entry used to linger in the inflight map
+        // when its only waiter cancelled, so a later cache-miss caller was
+        // served the stale endpoint instead of triggering a fresh fetch.
+        var cache = new EndpointCache(maxSize: 1, ttlSeconds: 60);
         var key = new EndpointCacheKey("sb-1", 8080, false);
+        var other = new EndpointCacheKey("sb-2", 8080, false);
         var fetchCount = 0;
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         async Task<Endpoint> Fetcher()
         {
             Interlocked.Increment(ref fetchCount);
-            // Yield so the fetch is still in flight when the waiter cancels.
-            await Task.Yield();
+            // Gate the fetch so it is still in flight when the waiter cancels.
+            await release.Task;
             return Ep("first");
         }
 
@@ -180,9 +186,15 @@ public class EndpointCacheTests
             var waiter = cache.GetOrFetchAsync(key, Fetcher, cts.Token);
             await cts.CancelAsync();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+            // The fetch settles with every waiter gone.
+            release.TrySetResult(true);
         }
 
         await Task.Delay(50);
+        // Evict the cached endpoint so the next lookup is a cache miss; a
+        // lingering inflight entry would serve "first" without refetching.
+        cache.Put(other, Ep("other"));
+
         var result = await cache.GetOrFetchAsync(
             key,
             () => { Interlocked.Increment(ref fetchCount); return Task.FromResult(Ep("second")); });

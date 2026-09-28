@@ -207,6 +207,9 @@ public class EndpointReadinessTests
             Metrics = Mock.Of<IExecdMetrics>(), Isolation = Mock.Of<IIsolatedSessions>()
         });
         factory.Setup(f => f.CreateEgressStack(It.IsAny<CreateEgressStackOptions>())).Returns(new EgressStack { Egress = Mock.Of<IEgress>() });
+        // Template-backed create flows route egress through this stack.
+        factory.Setup(f => f.CreateNetworkPolicyStack(It.IsAny<CreateNetworkPolicyStackOptions>()))
+            .Returns(new NetworkPolicyStack { Egress = Mock.Of<IEgress>() });
         return factory;
     }
 
