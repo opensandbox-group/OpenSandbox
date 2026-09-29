@@ -50,7 +50,7 @@ from opensandbox.adapters.converter.response_handler import (
 )
 from opensandbox.adapters.sse import iter_sse_events
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import (
     CommandLogs,
     CommandStatus,
@@ -281,9 +281,8 @@ class CommandsAdapterSync(CommandsSync):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def create_session(self, *, working_directory: str | None = None) -> str:
-        from opensandbox.api.execd.api.command.create_session import (
-            sync as create_session_sync,
-        )
+        from opensandbox.adapters.converter.response_handler import require_parsed
+        from opensandbox.api.execd.api.command import create_session
         from opensandbox.api.execd.models.create_session_request import (
             CreateSessionRequest,
         )
@@ -296,19 +295,12 @@ class CommandsAdapterSync(CommandsSync):
             CreateSessionRequest(cwd=working_directory) if working_directory else UNSET
         )
         try:
-            parsed = create_session_sync(client=self._client, body=body)
-            if parsed is None:
-                raise SandboxApiException(
-                    message="create_session returned no body",
-                    status_code=0,
-                )
-            if isinstance(parsed, CreateSessionResponse):
-                return parsed.session_id
-            handle_api_error(parsed, "create_session")
-            raise SandboxApiException(
-                message="create_session unexpected response",
-                status_code=200,
+            response_obj = create_session.sync_detailed(client=self._client, body=body)
+            handle_api_error(response_obj, "create_session")
+            parsed = require_parsed(
+                response_obj, CreateSessionResponse, "create_session"
             )
+            return parsed.session_id
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -347,13 +339,12 @@ class CommandsAdapterSync(CommandsSync):
     def delete_session(self, session_id: str) -> None:
         if not (session_id and session_id.strip()):
             raise InvalidArgumentException("session_id cannot be empty")
-        from opensandbox.api.execd.api.command.delete_session import (
-            sync as delete_session_sync,
-        )
+        from opensandbox.api.execd.api.command import delete_session
 
         try:
-            parsed = delete_session_sync(client=self._client, session_id=session_id)
-            if parsed is not None:
-                handle_api_error(parsed, "delete_session")
+            response_obj = delete_session.sync_detailed(
+                client=self._client, session_id=session_id
+            )
+            handle_api_error(response_obj, "delete_session")
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e

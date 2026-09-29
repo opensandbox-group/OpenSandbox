@@ -58,7 +58,7 @@ from opensandbox.adapters.converter.response_handler import (
 )
 from opensandbox.adapters.sse import aiter_sse_events
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import (
     CommandLogs,
     CommandStatus,
@@ -318,9 +318,8 @@ class CommandsAdapter(Commands):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def create_session(self, *, working_directory: str | None = None) -> str:
-        from opensandbox.api.execd.api.command.create_session import (
-            asyncio as create_session_asyncio,
-        )
+        from opensandbox.adapters.converter.response_handler import require_parsed
+        from opensandbox.api.execd.api.command import create_session
         from opensandbox.api.execd.models.create_session_request import (
             CreateSessionRequest,
         )
@@ -334,19 +333,14 @@ class CommandsAdapter(Commands):
         )
         try:
             client = await self._get_client()
-            parsed = await create_session_asyncio(client=client, body=body)
-            if parsed is None:
-                raise SandboxApiException(
-                    message="create_session returned no body",
-                    status_code=0,
-                )
-            if isinstance(parsed, CreateSessionResponse):
-                return parsed.session_id
-            handle_api_error(parsed, "create_session")
-            raise SandboxApiException(
-                message="create_session unexpected response",
-                status_code=200,
+            response_obj = await create_session.asyncio_detailed(
+                client=client, body=body
             )
+            handle_api_error(response_obj, "create_session")
+            parsed = require_parsed(
+                response_obj, CreateSessionResponse, "create_session"
+            )
+            return parsed.session_id
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -385,14 +379,13 @@ class CommandsAdapter(Commands):
     async def delete_session(self, session_id: str) -> None:
         if not (session_id and session_id.strip()):
             raise InvalidArgumentException("session_id cannot be empty")
-        from opensandbox.api.execd.api.command.delete_session import (
-            asyncio as delete_session_asyncio,
-        )
+        from opensandbox.api.execd.api.command import delete_session
 
         try:
             client = await self._get_client()
-            parsed = await delete_session_asyncio(client=client, session_id=session_id)
-            if parsed is not None:
-                handle_api_error(parsed, "delete_session")
+            response_obj = await delete_session.asyncio_detailed(
+                client=client, session_id=session_id
+            )
+            handle_api_error(response_obj, "delete_session")
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
