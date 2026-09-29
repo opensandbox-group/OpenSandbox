@@ -441,10 +441,12 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	kernel.pid = cmd.Process.Pid
 	c.storeCommandKernel(session, kernel)
 
+	done := make(chan struct{})
 	safego.Go(func() {
 		defer pipe.Close()
 
 		err = mp.Wait()
+		close(done)
 		cancel()
 		if err != nil {
 			log.Error("command: run failed: %v", err)
@@ -461,9 +463,22 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	// ensure we kill the whole process group if the context is cancelled (e.g., timeout).
 	safego.Go(func() {
-		<-ctx.Done()
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // best-effort
+		select {
+		case <-done:
+			// The command exited on its own (the cancel() above also fires
+			// ctx). Leave the group alone, as the foreground path does: its
+			// children keep running, and an empty group's pgid may be reused.
+			return
+		case <-ctx.Done():
+			// Re-check done: mp.Wait() may have returned concurrently.
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // best-effort
+			}
 		}
 	})
 
