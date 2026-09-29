@@ -399,6 +399,42 @@ def test_list_snapshots_converges_creating_rows_from_runtime(tmp_path) -> None:
     assert stored.status.state == SnapshotState.FAILED
 
 
+def test_read_time_sync_waits_for_pending_worker(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = WatchableStubSnapshotRuntime()
+    executor = CapturingExecutor()
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=executor,
+        recover_unfinished_snapshots=False,
+    )
+    # The worker is queued but has not run, so the runtime has no snapshot
+    # yet and inspect_snapshot reports it as missing (FAILED).
+    created = service.create_snapshot("sbx-001", CreateSnapshotRequest(name="early-read"))
+
+    assert service.get_snapshot(created.id).status.state == "Creating"
+    listed = service.list_snapshots(ListSnapshotsRequest(filter=SnapshotFilter(), pagination=None))
+    assert listed.items[0].status.state == "Creating"
+    service.start_background_sync()
+    runtime.watch_callbacks[0](created.id, "default")
+    stored = repo.get(created.id)
+    assert stored is not None
+    assert stored.status.state == SnapshotState.CREATING
+
+    # Once the worker has submitted the snapshot, reads converge again.
+    worker, args, kwargs = executor.submitted[0]
+    runtime.create_result = SnapshotRuntimeStatus(state=SnapshotState.CREATING)
+    worker(*args, **kwargs)
+    runtime.inspect_status_by_snapshot_id[created.id] = SnapshotRuntimeStatus(
+        state=SnapshotState.READY,
+        image="registry/sandbox:snap",
+    )
+
+    assert service.get_snapshot(created.id).status.state == "Ready"
+
+
 def test_background_sync_converges_creating_row_on_runtime_event(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = WatchableStubSnapshotRuntime()
