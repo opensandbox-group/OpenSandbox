@@ -19,10 +19,10 @@
       "brace-expansion@^2.0.0": "2.1.4",
       "brace-expansion@^5.0.0": "5.0.7",
       "flatted@^3.0.0": "3.4.2",
-      "fast-uri@^3.0.0": "3.1.6",
+      "fast-uri@^3.0.0": "3.1.7",
       "@humanfs/node": "0.16.8",
       "js-yaml@^4.0.0": "4.3.2",
-      "undici": "7.29.0"
+      "undici": "7.29.1"
     }
   },
   "devDependencies": {

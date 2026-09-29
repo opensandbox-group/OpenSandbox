@@ -3,7 +3,7 @@ module github.com/alibaba/OpenSandbox/sandbox-k8s
 go 1.25.0
 
 require (
-	github.com/containerd/containerd v1.7.35
+	github.com/containerd/containerd v1.7.36
 	github.com/containerd/errdefs v0.3.0
 	github.com/distribution/reference v0.6.0
 	github.com/golang/mock v1.6.0
