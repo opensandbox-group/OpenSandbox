@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="728" viewBox="0 0 1500 728" role="img" aria-labelledby="title desc">
+<title id="title">Pause and resume phases</title>
+<desc id="desc">State machine of BatchSandbox phases: Pending becomes Succeed when a pod is ready. spec.pause=true moves Succeed through Pausing to Paused; failure records PauseFailed and returns to Succeed. spec.pause=false moves Paused through Resuming back to Succeed; failure records ResumeFailed and returns to Paused. Succeed can end in Failed on terminal runtime failure.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="blocked" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#8b9aa7"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1500" height="728" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Pause / resume phases</text>
+<text x="48" y="96" class="body">spec.pause intent · controller-driven transitions · single-replica sandboxes</text>
+<path d="M980 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="1026" y="60" class="edge" style="fill:#dc6b2e">Pause</text>
+<path d="M1130 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1176" y="60" class="edge" style="fill:#2563eb">Resume</text>
+<path d="M1290 54h36" fill="none" stroke="#8b9aa7" stroke-width="2.3" stroke-dasharray="5 5" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#blocked)"/>
+<text x="1336" y="60" class="edge" style="fill:#597080">Failure path</text>
+
+<circle cx="40" cy="288" r="7" fill="#182636"/>
+<path d="M47 288H66" fill="none" stroke="#8b9aa7" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#blocked)"/>
+
+<rect x="70" y="240" width="240" height="96" rx="10" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="86" y="270" class="heading">Pending</text>
+<text x="86" y="296" class="label">no ready pod yet</text>
+<rect x="420" y="240" width="240" height="96" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="436" y="270" class="heading">Succeed</text>
+<text x="436" y="296" class="label">steady state</text>
+<text x="436" y="320" class="label">not task completion</text>
+<rect x="860" y="240" width="240" height="96" rx="10" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="876" y="270" class="heading">Pausing</text>
+<text x="876" y="296" class="label">snapshot committing</text>
+<rect x="1220" y="240" width="240" height="96" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="1236" y="270" class="heading">Paused</text>
+<text x="1236" y="296" class="label">pods released</text>
+<text x="1236" y="320" class="label">runtime quiesced</text>
+<rect x="860" y="480" width="240" height="96" rx="10" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="876" y="510" class="heading">Resuming</text>
+<text x="876" y="536" class="label">restoring snapshot</text>
+<rect x="420" y="480" width="240" height="96" rx="10" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="436" y="510" class="heading">Failed</text>
+<text x="436" y="536" class="label">inspect conditions</text>
+<text x="436" y="560" class="label">and pod events</text>
+
+<path d="M310 288H416" fill="none" stroke="#8b9aa7" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#blocked)"/>
+<text x="318" y="276" class="edge">ready</text>
+<path d="M660 288H856" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="668" y="276" class="edge" style="fill:#dc6b2e">spec.pause = true</text>
+<path d="M1100 288H1216" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="1104" y="276" class="edge" style="fill:#dc6b2e">committed</text>
+<path d="M1340 336V408H980V476" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1010" y="400" class="edge" style="fill:#2563eb">spec.pause = false</text>
+<path d="M860 528H540V340" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="580" y="516" class="edge" style="fill:#2563eb">snapshot pod Ready</text>
+<path d="M920 336V408H640V340" fill="none" stroke="#8b9aa7" stroke-width="2.3" stroke-dasharray="5 5" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#blocked)"/>
+<text x="670" y="400" class="edge" style="fill:#597080">PauseFailed</text>
+<path d="M1100 528H1340V340" fill="none" stroke="#8b9aa7" stroke-width="2.3" stroke-dasharray="5 5" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#blocked)"/>
+<text x="1140" y="516" class="edge" style="fill:#597080">ResumeFailed</text>
+<path d="M480 336V476" fill="none" stroke="#8b9aa7" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#blocked)"/>
+<text x="320" y="412" class="edge" style="fill:#597080">terminal failure</text>
+
+<rect x="48" y="620" width="1404" height="64" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="648" class="heading">Lifecycle contract</text>
+<text x="280" y="648" class="body">spec.pause is the intent — the controller never clears it; progress is acked via status.pauseObservedGeneration</text>
+<text x="72" y="672" class="label">single-replica only (spec.replicas = 1) · pause/resume runs through an internal SandboxSnapshot</text>
+</svg>
