@@ -648,10 +648,22 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 // commitPolicy applies one logical change: optional disk persist → merge always file rules → nft
 // static (with nameserver allow-IPs) → then update in-memory user policy (POST/PATCH/GET view).
+// If the change fails, the policy file is restored to its previous contents.
 func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, pol *policy.NetworkPolicy, op string) bool {
+	prevFile, prevFileExists, readErr := s.readPolicyFile()
+	if readErr != nil {
+		logEgressUpdateFailedError(fmt.Sprintf("read policy file: %v", readErr))
+		log.Errorf("policy API: read policy file failed: %v", readErr)
+		http.Error(w, fmt.Sprintf("failed to persist policy: %v", readErr), http.StatusInternalServerError)
+		return false
+	}
 	if err := s.persistPolicy(pol); err != nil {
 		logEgressUpdateFailedError(fmt.Sprintf("persist policy: %v", err))
 		log.Errorf("policy API: persist policy failed: %v", err)
+		// A failed write may leave a truncated file behind.
+		if restoreErr := s.restorePolicyFile(prevFile, prevFileExists); restoreErr != nil {
+			log.Errorf("policy API: restore policy file after failed persist: %v", restoreErr)
+		}
 		http.Error(w, fmt.Sprintf("failed to persist policy: %v", err), http.StatusInternalServerError)
 		return false
 	}
@@ -663,6 +675,11 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 		if err := s.nft.ApplyStatic(nftCtx, merged.WithExtraAllowIPs(s.nameserverIPs)); err != nil {
 			logEgressUpdateFailedError(fmt.Sprintf("nftables apply (%s): %v", op, err))
 			log.Errorf("policy API: nftables apply failed (%s): %v", op, err)
+			// The policy was not applied, so it must not be loaded on the
+			// next restart either.
+			if restoreErr := s.restorePolicyFile(prevFile, prevFileExists); restoreErr != nil {
+				log.Errorf("policy API: restore policy file after failed apply: %v", restoreErr)
+			}
 			http.Error(w, fmt.Sprintf("failed to apply nftables policy: %v", err), http.StatusInternalServerError)
 			return false
 		}
@@ -858,4 +875,33 @@ func (s *policyServer) persistPolicy(p *policy.NetworkPolicy) error {
 		return nil
 	}
 	return policy.SavePolicyFile(s.policyFile, p)
+}
+
+// readPolicyFile returns the policy file's current contents so that a change
+// which fails to apply can be undone on disk with restorePolicyFile.
+func (s *policyServer) readPolicyFile() (data []byte, exists bool, err error) {
+	if s.policyFile == "" {
+		return nil, false, nil
+	}
+	data, err = os.ReadFile(s.policyFile)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func (s *policyServer) restorePolicyFile(data []byte, exists bool) error {
+	if s.policyFile == "" {
+		return nil
+	}
+	if !exists {
+		if err := os.Remove(s.policyFile); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return os.WriteFile(s.policyFile, data, 0o600)
 }

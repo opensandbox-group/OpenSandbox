@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -298,6 +299,74 @@ func TestHandlePolicy_NftFailureReturns500(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "expected 500")
 	require.Equal(t, 1, nft.calls, "expected nft ApplyStatic called once")
 	require.Nil(t, proxy.updated, "expected proxy policy not updated on nft failure")
+}
+
+func TestHandlePolicy_NftFailureRestoresPolicyFile(t *testing.T) {
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	previous := []byte(`{"defaultAction":"deny","egress":[{"action":"allow","target":"2.2.2.2"}]}`)
+	require.NoError(t, os.WriteFile(policyFile, previous, 0o600))
+	srv := &policyServer{
+		proxy:           &stubProxy{},
+		nft:             &stubNft{err: errors.New("boom")},
+		enforcementMode: "dns+nft",
+		policyFile:      policyFile,
+	}
+
+	body := `{"defaultAction":"allow"}`
+	req := httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	srv.handlePolicy(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Result().StatusCode)
+	got, err := os.ReadFile(policyFile)
+	require.NoError(t, err)
+	require.Equal(t, string(previous), string(got), "rejected policy must not stay on disk")
+}
+
+func TestHandlePolicy_NftFailureRemovesNewPolicyFile(t *testing.T) {
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	srv := &policyServer{
+		proxy:           &stubProxy{},
+		nft:             &stubNft{err: errors.New("boom")},
+		enforcementMode: "dns+nft",
+		policyFile:      policyFile,
+	}
+
+	body := `{"defaultAction":"allow"}`
+	req := httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	srv.handlePolicy(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Result().StatusCode)
+	_, err := os.Stat(policyFile)
+	require.True(t, os.IsNotExist(err), "rejected policy must not stay on disk")
+}
+
+func TestHandlePolicy_SuccessPersistsPolicyFile(t *testing.T) {
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	srv := &policyServer{
+		proxy:           &stubProxy{},
+		nft:             &stubNft{},
+		enforcementMode: "dns+nft",
+		policyFile:      policyFile,
+	}
+
+	body := `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.1.1.1"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	srv.handlePolicy(w, req)
+
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+	data, err := os.ReadFile(policyFile)
+	require.NoError(t, err)
+	saved, err := policy.ParsePolicy(string(data))
+	require.NoError(t, err)
+	require.Equal(t, policy.ActionDeny, saved.DefaultAction)
+	require.Len(t, saved.Egress, 1)
+	require.Equal(t, "1.1.1.1", saved.Egress[0].Target)
 }
 
 func TestHandleGet_ReturnsEnforcementMode(t *testing.T) {
