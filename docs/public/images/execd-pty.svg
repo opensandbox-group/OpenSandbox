@@ -1,43 +1,60 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="360" viewBox="0 0 1120 360" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
-  <defs>
-    <marker id="mB" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#2563eb"/></marker>
-    <marker id="mG" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker>
-    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.12"/></filter>
-  </defs>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760" role="img" aria-labelledby="title desc">
+<title id="title">PTY terminals — one writer, many viewers</title>
+<desc id="desc">Each execd terminal session is a real PTY over WebSocket. The holder owns the keyboard exclusively; any number of read-only viewers can join, replay past output from the buffer, and follow live. A second writer is rejected.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="neutral" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#597080"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1600" height="760" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">PTY terminals — one writer, many viewers</text>
+<text x="48" y="96" class="body">An interactive terminal per session over WebSocket. A second writer is rejected; read-only viewers can join, replay, and watch.</text>
+<path d="M1150 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1196" y="60" class="edge" style="fill:#2563eb">Terminal I/O</text>
+<path d="M1400 54h36" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#neutral)"/>
+<text x="1446" y="60" class="edge" style="fill:#597080">Replay + live</text>
 
-  <rect width="1120" height="360" fill="#ffffff"/>
-  <text x="40" y="36" font-size="20" font-weight="700" fill="#0f172a">PTY terminals — one writer, many viewers</text>
-  <text x="40" y="58" font-size="12" fill="#64748b">An interactive terminal per session over WebSocket. A second writer is rejected; read-only viewers can join, replay, and watch.</text>
+<!-- writer -->
+<rect x="48" y="128" width="350" height="300" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="162" class="section">WRITER</text>
+<rect x="72" y="186" width="302" height="150" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="92" y="222" class="heading">Holder</text>
+<text x="92" y="254" class="body">read-write · exclusive</text>
+<text x="92" y="282" class="label">takeover replaces it</text>
 
-  <rect x="60" y="120" width="230" height="100" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
-  <text x="80" y="150" font-size="14" font-weight="700" fill="#0f172a">Holder</text>
-  <text x="80" y="174" font-size="11" fill="#475569">read-write · exclusive</text>
-  <text x="80" y="192" font-size="11" fill="#94a3b8">takeover replaces it</text>
+<!-- session -->
+<rect x="588" y="128" width="520" height="420" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="612" y="162" class="section">PTY SESSION</text>
+<rect x="612" y="186" width="472" height="310" rx="10" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="632" y="222" class="heading">PTY session</text>
+<text x="632" y="260" class="body">bash, POSIX sh fallback</text>
+<text x="632" y="296" class="body">replay buffer: viewers catch up</text>
+<text x="632" y="332" class="body">from a point in the past (since=N)</text>
+<text x="632" y="372" class="label">survives holder reconnects</text>
 
-  <rect x="430" y="100" width="280" height="140" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
-  <text x="450" y="130" font-size="14" font-weight="700" fill="#0f172a">PTY session</text>
-  <text x="450" y="154" font-size="11" fill="#475569">bash, POSIX sh fallback</text>
-  <text x="450" y="176" font-size="11" fill="#475569">replay buffer: viewers catch up</text>
-  <text x="450" y="194" font-size="11" fill="#475569">from a point in the past (since=N)</text>
-  <text x="450" y="216" font-size="11" fill="#94a3b8">survives holder reconnects</text>
+<!-- viewers -->
+<rect x="1188" y="128" width="364" height="420" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1212" y="162" class="section">VIEWERS — READ-ONLY</text>
+<rect x="1212" y="186" width="316" height="150" rx="10" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1232" y="222" class="heading">Viewer A</text>
+<text x="1232" y="254" class="body">replay + live follow</text>
+<text x="1232" y="282" class="label">never acquires the holder</text>
+<rect x="1212" y="366" width="316" height="110" rx="10" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1232" y="402" class="heading">Viewer B</text>
+<text x="1232" y="432" class="label">can join mid-session</text>
 
-  <rect x="850" y="110" width="230" height="100" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
-  <text x="870" y="140" font-size="14" font-weight="700" fill="#0f172a">Viewer A</text>
-  <text x="870" y="164" font-size="11" fill="#475569">read-only · replay + live</text>
-  <text x="870" y="182" font-size="11" fill="#94a3b8">never acquires the holder</text>
+<!-- arrows -->
+<path d="M374 240H604" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="384" y="222" class="edge" style="fill:#2563eb">stdin · resize · signals</text>
+<path d="M608 290L378 296" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="384" y="326" class="edge" style="fill:#2563eb">stdout / stderr</text>
+<path d="M1084 250H1204" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#neutral)"/>
+<path d="M1084 300L1204 408" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#neutral)"/>
+<text x="1094" y="232" class="edge" style="fill:#597080">replay + live</text>
 
-  <rect x="850" y="230" width="230" height="70" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.5" filter="url(#sh)"/>
-  <text x="870" y="258" font-size="14" font-weight="700" fill="#0f172a">Viewer B</text>
-  <text x="870" y="282" font-size="11" fill="#475569">can join mid-session</text>
-
-  <path d="M290,158 L424,150" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
-  <text x="300" y="142" font-size="10.5" fill="#2563eb">stdin · resize · signals</text>
-  <path d="M424,190 L290,196" stroke="#2563eb" stroke-width="2" marker-end="url(#mB)" fill="none"/>
-  <text x="296" y="214" font-size="10.5" fill="#2563eb">stdout / stderr</text>
-  <path d="M710,160 L844,158" stroke="#64748b" stroke-width="2" marker-end="url(#mG)" fill="none"/>
-  <path d="M710,220 L844,262" stroke="#64748b" stroke-width="2" marker-end="url(#mG)" fill="none"/>
-  <text x="720" y="146" font-size="10.5" fill="#64748b">replay + live</text>
-
-  <text x="60" y="330" font-size="11" fill="#64748b">Viewers can join only while the shell is running; when it exits, everyone receives the exit frame. The bounded replay buffer is</text>
-  <text x="60" y="348" font-size="11" fill="#64748b">retained, so a viewer rejoining with since=0 still sees the previous lifetime's output.</text>
+<!-- bottom note -->
+<rect x="48" y="640" width="1504" height="88" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="676" class="body">Viewers can join only while the shell is running; when it exits, everyone receives the exit frame.</text>
+<text x="72" y="708" class="body">The bounded replay buffer is retained, so a viewer rejoining with since=0 still sees the previous lifetime's output.</text>
 </svg>

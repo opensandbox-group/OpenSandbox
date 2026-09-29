@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1020" viewBox="0 0 1600 1020" role="img" aria-labelledby="title desc">
+<title id="title">execd request pipeline</title>
+<desc id="desc">Every request to execd walks the same middleware chain: request log and OpenTelemetry metrics, the runtime-init gate that answers 503 before the binding is applied, access token verification, and the reverse proxy, before reaching the business endpoints. Health, readiness and the internal init call always stay reachable without a token.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="reject" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#597080"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1600" height="1020" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">execd request pipeline</text>
+<text x="48" y="96" class="body">Every request walks the same chain — observability, the runtime-init gate, token auth, then the reverse proxy.</text>
+<path d="M1040 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1086" y="60" class="edge" style="fill:#2563eb">Request flow</text>
+<path d="M1240 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 5" marker-end="url(#data)"/>
+<text x="1286" y="60" class="edge" style="fill:#2563eb">Always open</text>
+<path d="M1420 54h36" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#reject)"/>
+<text x="1466" y="60" class="edge" style="fill:#597080">Rejected</text>
+
+<!-- request path -->
+<rect x="48" y="128" width="1504" height="200" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="72" y="162" class="section">REQUEST PATH</text>
+<rect x="72" y="186" width="210" height="104" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="92" y="222" class="heading">Clients</text>
+<text x="92" y="252" class="label">SDKs · CLI · MCP</text>
+<text x="92" y="276" class="label">lifecycle server</text>
+<rect x="342" y="186" width="240" height="104" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="362" y="222" class="heading">Observability</text>
+<text x="362" y="252" class="label">request log · OTel</text>
+<text x="362" y="276" class="label">http metrics</text>
+<rect x="652" y="186" width="260" height="104" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="672" y="222" class="heading">Runtime-init gate</text>
+<text x="672" y="252" class="label">business API: 503</text>
+<text x="672" y="276" class="label">before init</text>
+<rect x="982" y="186" width="240" height="104" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="1002" y="222" class="heading">Access token</text>
+<text x="1002" y="252" class="label">X-EXECD-ACCESS-TOKEN</text>
+<text x="1002" y="276" class="label">hash from the binding</text>
+<rect x="1292" y="186" width="224" height="104" rx="9" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="1312" y="222" class="heading">Reverse proxy</text>
+<text x="1312" y="252" class="label">/proxy/{port} →</text>
+<text x="1312" y="276" class="label">any sandbox port</text>
+<path d="M282 238H338" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M582 238H648" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M912 238H978" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M1222 238H1288" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+
+<!-- always open + rejections -->
+<rect x="48" y="392" width="520" height="110" rx="12" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="72" y="426" class="section">ALWAYS OPEN — NO TOKEN</text>
+<text x="72" y="458" class="heading">Health &amp; init</text>
+<text x="72" y="486" class="label">GET /ping · GET /ready · POST /internal/init (platform only)</text>
+<path d="M182 332V386" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 5" marker-end="url(#data)"/>
+<rect x="632" y="392" width="300" height="110" rx="10" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="652" y="430" class="heading">503 — before init</text>
+<text x="652" y="462" class="body">pre-init (runtime-init mode)</text>
+<text x="652" y="488" class="label">/ping · /ready · /init pass</text>
+<path d="M782 332V386" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#reject)"/>
+<rect x="952" y="392" width="300" height="110" rx="10" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="972" y="430" class="heading">401 — unauthorized</text>
+<text x="972" y="462" class="body">missing or wrong token</text>
+<text x="972" y="488" class="label">X-EXECD-ACCESS-TOKEN</text>
+<path d="M1102 332V386" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#reject)"/>
+
+<!-- business endpoints -->
+<path d="M1404 332V546" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<rect x="48" y="552" width="1504" height="330" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="586" class="section">BUSINESS ENDPOINTS</text>
+<text x="400" y="586" class="label">one router — specs/execd-api.yaml</text>
+<rect x="72" y="604" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="92" y="640" class="heading">/command</text>
+<text x="92" y="670" class="label">run · interrupt · status · logs</text>
+<rect x="442" y="604" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="462" y="640" class="heading">/session</text>
+<text x="462" y="670" class="label">persistent shell</text>
+<rect x="812" y="604" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="832" y="640" class="heading">/code</text>
+<text x="832" y="670" class="label">contexts · execution</text>
+<rect x="1182" y="604" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1202" y="640" class="heading">/pty</text>
+<text x="1202" y="670" class="label">WebSocket terminal</text>
+<rect x="72" y="720" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="92" y="756" class="heading">/files · /directories</text>
+<text x="92" y="786" class="label">upload · download · search · chmod</text>
+<rect x="442" y="720" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="462" y="756" class="heading">/metrics</text>
+<text x="462" y="786" class="label">snapshot · /metrics/watch</text>
+<rect x="812" y="720" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="832" y="756" class="heading">/v1/isolated</text>
+<text x="832" y="786" class="label">private namespace · own file API</text>
+<rect x="1182" y="720" width="346" height="96" rx="9" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1202" y="756" class="heading">Auth</text>
+<text x="1202" y="786" class="label">X-EXECD-ACCESS-TOKEN</text>
+<text x="1202" y="810" class="label">required when configured</text>
+
+<!-- bottom note -->
+<rect x="48" y="918" width="1504" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="945" class="heading">Order mirrors pkg/web/router.go</text>
+<text x="500" y="945" class="body">log → OTel → runtime-init gate → access token → proxy</text>
+<text x="72" y="971" class="label">Request log and OTel metrics wrap every request, including rejections.</text>
+</svg>

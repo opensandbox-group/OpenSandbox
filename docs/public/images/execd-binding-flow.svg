@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+<title id="title">A fresh identity per allocation</title>
+<desc id="desc">Sandboxes pre-warmed in pools stay gated with every business endpoint answering 503. At assignment the platform delivers a per-allocation binding and calls the internal init endpoint; execd applies the binding atomically, reports ready, and only then opens the API to client traffic carrying the new token. Nothing from the previous allocation survives the swap.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1600" height="1000" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">A fresh identity per allocation</text>
+<text x="48" y="96" class="body">Warm sandboxes serve no one until the platform delivers the binding — then the swap is atomic.</text>
+<path d="M1150 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1196" y="60" class="edge" style="fill:#2563eb">Delivery / traffic</text>
+<path d="M1400 54h36" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 5"/>
+<text x="1446" y="60" class="edge" style="fill:#597080">Gated state</text>
+
+<!-- lanes -->
+<rect x="200" y="128" width="300" height="88" rx="10" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="220" y="164" class="heading">Platform</text>
+<text x="220" y="192" class="label">control plane · pool manager</text>
+<rect x="650" y="128" width="360" height="88" rx="10" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="670" y="164" class="heading">execd — warm sandbox</text>
+<text x="670" y="192" class="label">port 44772 · gated at boot</text>
+<rect x="1180" y="128" width="280" height="88" rx="10" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="1200" y="164" class="heading">Client</text>
+<text x="1200" y="192" class="label">SDK · agent</text>
+<path d="M350 216V880" fill="none" stroke="#c9d4de" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M830 216V880" fill="none" stroke="#c9d4de" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M1320 216V880" fill="none" stroke="#c9d4de" stroke-width="1.5" stroke-dasharray="5 5"/>
+
+<!-- gated state -->
+<rect x="640" y="252" width="380" height="104" rx="10" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="660" y="288" class="heading">Warm in pool — gated</text>
+<text x="660" y="318" class="body">every business endpoint answers 503</text>
+<text x="660" y="344" class="label">/ping · /ready stay open</text>
+
+<!-- 1: allocation assigned -->
+<path d="M354 420H824" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="370" y="404" class="edge" style="fill:#2563eb">1 · allocation assigned</text>
+<text x="370" y="450" class="label">sandbox id · env · token hash · lifecycle hooks</text>
+
+<!-- 2: internal init -->
+<path d="M354 505H824" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="370" y="489" class="edge" style="fill:#2563eb">2 · POST /internal/init</text>
+
+<!-- 3: atomic apply -->
+<rect x="640" y="535" width="380" height="104" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="660" y="571" class="heading">3 · applied atomically</text>
+<text x="660" y="601" class="body">binding swapped · lifecycle hooks run</text>
+
+<!-- 4: ready -->
+<path d="M826 700H354" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="370" y="684" class="edge" style="fill:#2563eb">4 · GET /ready → 200 — API opens</text>
+<text x="370" y="730" class="label">business endpoints leave 503</text>
+
+<!-- 5: client traffic -->
+<path d="M1316 800H834" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="850" y="784" class="edge" style="fill:#2563eb">5 · real traffic — new token required</text>
+<text x="850" y="830" class="label">the previous token is already invalid</text>
+
+<!-- bottom note -->
+<rect x="48" y="912" width="1504" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="945" class="heading">Nothing from the previous allocation survives</text>
+<text x="660" y="945" class="body">environment · access token · telemetry attribution — replaced atomically</text>
+</svg>
