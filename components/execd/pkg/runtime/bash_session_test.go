@@ -825,3 +825,48 @@ func TestNewBashSessionEnvOverlaysFileAndKeepsBlacklist(t *testing.T) {
 		require.NotContains(t, env, name, "blacklisted execd var %s must not enter the session env", name)
 	}
 }
+
+func TestBashSession_TimeoutKillsChildren(t *testing.T) {
+	requireBash(t)
+	marker := filepath.Join(t.TempDir(), "child.done")
+
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	start := time.Now()
+	err := session.run(context.Background(), &ExecuteCodeRequest{
+		// The subshell inherits stdout, so it keeps the output pipe open
+		// after bash itself is killed.
+		Code:    `(sleep 2; touch "` + marker + `")`,
+		Timeout: 300 * time.Millisecond,
+	})
+	require.ErrorContains(t, err, "timeout")
+	require.Less(t, time.Since(start), 1500*time.Millisecond, "run did not return at the timeout")
+
+	// Give a surviving child time to write the marker.
+	time.Sleep(2500 * time.Millisecond)
+	_, statErr := os.Stat(marker)
+	require.True(t, os.IsNotExist(statErr), "child survived the session run timeout")
+}
+
+// A run that finishes normally must not kill jobs it started in the
+// background; only a timeout or cancel does.
+func TestBashSession_NormalExitKeepsBackgroundJob(t *testing.T) {
+	requireBash(t)
+	marker := filepath.Join(t.TempDir(), "child.done")
+
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `(sleep 1; touch "` + marker + `") >/dev/null 2>&1 &`,
+		Timeout: 10 * time.Second,
+	}))
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond, "background job was killed after a normal run")
+}
