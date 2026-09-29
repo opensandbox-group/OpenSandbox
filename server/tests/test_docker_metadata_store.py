@@ -141,6 +141,35 @@ class TestDockerMetadataStore:
         result = store.get("sbx-001", labels)
         assert result == {"team": "platform", "old": "remove", "project": "new"}
 
+    def test_patch_after_delete_does_not_restore_deleted_key(self, tmp_path: Path):
+        store = self._make_store(tmp_path)
+        labels = {"team": "infra", "env": "dev"}
+        store.patch("sbx-001", labels, {"env": None})
+        store.patch("sbx-001", labels, {"owner": "alice"})
+        result = store.get("sbx-001", labels)
+        assert result == {"team": "infra", "owner": "alice"}
+
+    def test_patch_after_deleting_all_keys_does_not_restore_labels(self, tmp_path: Path):
+        store = self._make_store(tmp_path)
+        labels = {"team": "infra", "env": "dev"}
+        store.patch("sbx-001", labels, {"team": None, "env": None})
+        assert store.get("sbx-001", labels) is None
+
+        store.patch("sbx-001", labels, {"owner": "alice"})
+        result = store.get("sbx-001", labels)
+        assert result == {"owner": "alice"}
+
+    def test_patch_non_object_override_falls_back_to_labels(self, tmp_path: Path):
+        store = self._make_store(tmp_path)
+        labels = {"team": "infra"}
+        override = tmp_path / "metadata" / "sbx-001.json"
+        override.parent.mkdir(parents=True)
+        override.write_text("[]")
+
+        store.patch("sbx-001", labels, {"owner": "alice"})
+        result = store.get("sbx-001", labels)
+        assert result == {"team": "infra", "owner": "alice"}
+
     def test_patch_ignores_system_labels(self, tmp_path: Path):
         store = self._make_store(tmp_path)
         labels = {

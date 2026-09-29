@@ -79,11 +79,12 @@ class DockerMetadataStore:
         """
         path = self._sandbox_path(sandbox_id)
 
-        current = _extract_user_labels(container_labels)
-        if path.exists():
-            overrides = self._read_file(path)
-            if overrides:
-                current.update(overrides)
+        # The override file holds the full effective metadata (see get()), so
+        # it replaces the container labels rather than being merged onto them;
+        # merging would resurrect keys removed by an earlier patch.
+        current = self._read_file(path)
+        if not isinstance(current, dict):
+            current = _extract_user_labels(container_labels)
 
         for key, value in patch.items():
             if value is None:
