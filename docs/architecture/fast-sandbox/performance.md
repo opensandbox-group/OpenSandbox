@@ -161,3 +161,22 @@ N=100 CONCURRENCY=1 BATCH_PAUSE=0 \
 Keep the pool shape constant between runs (same Fastlet count and slot count) so the serial and concurrent figures are comparable.
 
 When re-measuring, pin: node hardware, kernel version, Firecracker version, template digest, pool shape, and artifact-store placement — otherwise the numbers are not comparable across runs.
+
+### Integration environment failures
+
+The OpenSandbox integration script keeps the full Kind creation output in
+`$WORK/logs/kind-create.log` and prints its last 40 lines when creation fails.
+The `Fast Sandbox Integration Tests` workflow uploads these logs in its
+`fast-sandbox-diagnostics-<attempt>` artifact before teardown.
+
+For stage command failures, only the main script process collects diagnostics
+and performs `--auto-clean` teardown. A failed command substitution exits with
+its original status instead of cleaning up the shared environment from a child
+shell and continuing the stage. Diagnostic or logging failures do not prevent
+the main process from attempting cleanup.
+
+If a runner was interrupted, check for an older integration script still
+running before starting another run against the same environment. The cleanup
+path does not recover from `SIGKILL`; an existing orphaned process needs to be
+stopped on the runner. An exit status of 137 alone does not establish an OOM:
+inspect the Kind log and host evidence before choosing a recovery action.

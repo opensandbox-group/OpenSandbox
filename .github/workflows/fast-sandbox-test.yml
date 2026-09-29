@@ -44,6 +44,9 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Test integration script failure handling
+        run: python3 -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
+
       - name: Run integration tests
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 

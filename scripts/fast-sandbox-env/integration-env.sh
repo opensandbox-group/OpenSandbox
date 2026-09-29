@@ -70,6 +70,7 @@
 # -E (errtrace): stage functions must inherit the ERR trap, or on_error
 # (and its failure dump) never fires — every stage runs inside a function.
 set -euEo pipefail
+ENV_PID=$BASHPID
 
 OSB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -286,16 +287,26 @@ rc() {
 # --- failure dump ------------------------------------------------------------------
 
 on_error() {
-	local task="$1"
+	local rc=$? task="$1"
+	# ERR is inherited by command substitutions and subshells. They must
+	# propagate the error, not tear down resources owned by the main process.
+	# Command substitutions normally clear errexit, so returning here would
+	# let a failed child continue and potentially report success.
+	trap - ERR
+	[[ "$BASHPID" == "$ENV_PID" ]] || exit "$rc"
+	# A cancelled runner may have closed the output pipe. Logging must not
+	# kill the handler before cleanup or replace the original exit status.
+	trap '' PIPE
 	# Dump while the cluster is still live; --auto-clean teardown destroys
 	# the evidence (pod logs, events) if it runs first.
-	failure_dump "$task"
+	failure_dump "$task" || true
 	if [[ "$AUTO_CLEAN" == 1 ]]; then
-		log "$ACTION failed at $task; --auto-clean: running down"
-		down >/dev/null 2>&1 || true
+		log "$ACTION failed at $task; --auto-clean: running down" || true
+		(down) >/dev/null 2>&1 || true
 	fi
 	printf '\033[1;31m[fast-sandbox-env] FAILED at %s; dump: %s\033[0m\n' \
-		"$task" "$LOGS_DIR/failure-$task-*.txt" >&2
+		"$task" "$LOGS_DIR/failure-$task-*.txt" >&2 || true
+	exit "$rc"
 }
 
 failure_dump() {
@@ -712,15 +723,18 @@ kind_up() {
 		if [[ -n "${KIND_NODE_IMAGE:-}" ]]; then
 			log "pulling kind node image $KIND_NODE_IMAGE (this can take minutes)"
 			ensure_image "$KIND_NODE_IMAGE" || die "kind node image unavailable locally and pull failed (KIND_NODE_IMAGE=$KIND_NODE_IMAGE)"
-			kind create cluster --name "$KIND_CLUSTER" --image "$KIND_NODE_IMAGE" \
-				${create_args+"${create_args[@]}"} --config "$kind_config" > "$LOGS_DIR/kind-create.log" 2>&1 \
-				|| fail "kind create failed (full log: $LOGS_DIR/kind-create.log)"
+			create_args+=(--image "$KIND_NODE_IMAGE")
 		else
 			log "creating cluster (pulling kindest/node may take minutes; set KIND_NODE_IMAGE to a mirror if it fails)"
-			kind create cluster --name "$KIND_CLUSTER" \
-				${create_args+"${create_args[@]}"} --config "$kind_config" > "$LOGS_DIR/kind-create.log" 2>&1 \
-				|| fail "kind create failed (full log: $LOGS_DIR/kind-create.log)"
 		fi
+		kind create cluster --name "$KIND_CLUSTER" \
+			${create_args+"${create_args[@]}"} --config "$kind_config" > "$LOGS_DIR/kind-create.log" 2>&1 || {
+			local rc=$?
+			tail -40 "$LOGS_DIR/kind-create.log" >&2 || true
+			log "kind create failed (full log: $LOGS_DIR/kind-create.log)" || true
+			# Return through ERR so diagnostics and --auto-clean run as well.
+			return "$rc"
+		}
 		pass "kind cluster created"
 	fi
 	local node
@@ -1972,6 +1986,9 @@ See the header of this script.
 EOF
 	exit 1
 }
+
+# Allow focused tests to load the stage functions without starting the environment.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 for arg in "$@"; do
 	case "$arg" in
