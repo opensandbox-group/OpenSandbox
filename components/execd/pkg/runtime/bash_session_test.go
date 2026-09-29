@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +86,35 @@ func TestBashSession_NonZeroExitEmitsError(t *testing.T) {
 	case <-completeCh:
 		require.Fail(t, "did not expect completion hook on non-zero exit")
 	default:
+	}
+}
+
+func TestBashSession_RemovesScriptFile(t *testing.T) {
+	requireBash(t)
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	for _, code := range []string{"exit 0", "exit 3"} {
+		var stdoutLines []string
+		require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+			// List the script first to prove it was created under tmpDir.
+			Code:    `ls "` + tmpDir + `"; ` + code,
+			Timeout: 3 * time.Second,
+			Hooks: ExecuteResultHook{
+				OnExecuteStdout: func(line string) { stdoutLines = append(stdoutLines, line) },
+			},
+		}))
+		require.True(t, slices.ContainsFunc(stdoutLines, func(line string) bool {
+			return strings.HasPrefix(line, "execd_bash_")
+		}), "script file was not created under TMPDIR: %v", stdoutLines)
+
+		leftover, err := filepath.Glob(filepath.Join(tmpDir, "execd_bash_*.sh"))
+		require.NoError(t, err)
+		require.Empty(t, leftover, "script file left behind after %q", code)
 	}
 }
 

@@ -248,6 +248,8 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		return fmt.Errorf("create script file: %w", err)
 	}
 	scriptPath := scriptFile.Name()
+	// The script embeds the session environment; do not leave it behind.
+	defer os.Remove(scriptPath)
 	if _, err := scriptFile.WriteString(script); err != nil {
 		_ = scriptFile.Close()
 		return fmt.Errorf("write script file: %w", err)
