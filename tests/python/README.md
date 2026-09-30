@@ -101,6 +101,21 @@ Not covered here (needs a different stack or out of scope): credential
 vault (fsb has no egress sidecar), execd background/isolated-session
 APIs, signed endpoint expiry.
 
+### Execd-as-init stress accounting
+
+The execd-init stress test keeps its 30-second fork workload and zero-zombie
+checks, then waits for its own ten-second background sleepers to disappear
+before applying the existing baseline-plus-12 process bound. Each sleeper is
+identified by PID and `/proc` start time. The fixed deadline allows ten seconds
+from launch-response receipt plus two seconds for scheduling and reaping; the
+test neither kills nor waits on those children. This preserves the existing
+residual-process tolerance and does not establish absence of every small leak.
+The accounting regressions run without Docker:
+
+```bash
+uv run --frozen pytest tests/test_execd_init_accounting.py
+```
+
 ### Foreground command stream completion
 
 ```bash
