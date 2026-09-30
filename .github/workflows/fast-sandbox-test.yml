@@ -45,7 +45,8 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Test integration script failure handling
-        run: python3 -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
+        # The self-hosted runner's system python3 may still be Python 3.6.
+        run: uv run --no-project --python 3.12 python -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
 
       - name: Run integration tests
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
