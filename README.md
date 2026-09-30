@@ -20,16 +20,23 @@
   <hr />
 </div>
 
-OpenSandbox is a **general-purpose sandbox platform** for AI applications. It gives Coding Agents, GUI Agents, Agent Evaluation, AI Code Execution, and RL Training workloads a secure, scalable place to run — with the same API from a laptop to a large cluster.
+**Run AI agents in sandboxes on your own infrastructure.**
+
+OpenSandbox gives AI applications isolated environments to execute code, run commands, manage files, and operate browsers or desktops. Start locally with Docker and deploy on Kubernetes through a unified sandbox API.
+
+Choose your runtime isolation, control outbound access, and keep real credentials out of sandbox workloads with Credential Vault.
 
 ## Features
 
-- 🧩 **SDKs, CLI, and MCP**: Native SDKs for Python, Java/Kotlin, TypeScript, C#/.NET, and Go, plus the `osb` CLI and an MCP server — one API surface for sandbox creation, command execution, and file operations. See [SDKs](#sdks), [CLI](#cli), and [MCP](#mcp).
-- 📜 **Open Protocol**: Sandbox lifecycle and execution APIs are defined as public OpenAPI contracts, so custom runtimes can plug in without changing client code. See [API specs](specs/README.md).
-- 🚀 **Sandbox Runtime and Environments**: Docker and Kubernetes runtimes behind the same SDK calls, with built-in Command, Filesystem, and Code Interpreter environments — covering Coding Agents (e.g., Claude Code), browser automation (Chrome, Playwright), and desktop environments (VNC, VS Code). See [Kubernetes runtime](./kubernetes).
-- ⚡ **Hybrid Deployment**: Mix long-running, Kubernetes-native container workloads with short-lived microVM sandboxes in one cluster. Pre-warmed, Firecracker-backed pools give constant-time admission and ~80ms startup; FastSandbox pause/resume checkpoints state to the artifact store and releases all compute, resuming on any host. See [Fast Sandbox](docs/architecture/fast-sandbox/scheduling.md).
-- 🚦 **Network Policy and Credential Vault**: Unified ingress gateway with multiple routing strategies, per-sandbox egress controls, and secure credential injection that keeps real secrets away from sandbox workloads. See [Ingress Gateway](components/ingress), [egress controls](components/egress), and [Credential Vault](docs/guides/credential-vault.md).
-- 🏰 **Strong Isolation**: Run workloads under gVisor, Kata Containers, or Firecracker microVMs for strong isolation from the host. See the [Secure Container Runtime Guide](docs/guides/secure-container.md).
+| Feature | What it enables | Learn more |
+|---------|-----------------|------------|
+| **Fast Sandbox runtime** | Fast, high-density sandboxes on Kubernetes. Reference Firecracker snapshot timings on KVM with XFS reflink: **~55 ms sandbox creation**, including **~33 ms VM snapshot restore**, excluding application readiness and the OpenSandbox SDK path. | [Fast Sandbox](https://github.com/opensandbox-group/fast-sandbox) · [Performance baseline](https://github.com/opensandbox-group/fast-sandbox/blob/master/docs/guides/firecracker-integration-env.md#4-verification-and-the-delivery-baseline) |
+| **Agent working environments** | Execute commands, manage files, and run code with built-in APIs. Integration examples show how to run coding agents, browsers, and desktops inside sandboxes. | [Examples](docs/examples/index.md) |
+| **Network access control** | Route inbound traffic through a unified ingress gateway and control outbound access with per-sandbox egress policies. | [Ingress](docs/architecture/network/ingress.md) · [Egress](docs/architecture/network/egress.md) |
+| **Credential Vault** | Let agents call external services while keeping real credentials out of sandbox workloads. The outbound proxy injects credentials into requests that match configured bindings. | [Credential Vault](docs/guides/credential-vault.md) |
+| **Local development to cluster deployment** | Start with Docker and deploy on Kubernetes through a unified lifecycle API. Kubernetes resource pools and batch creation support workloads such as agent evaluation and RL training. | [Kubernetes runtime](docs/architecture/control-plane/operator.md) |
+| **SDKs, CLI, and MCP** | Integrate sandbox operations into applications with multi-language SDKs, manage them from the terminal with `osb`, or expose them as tools to MCP-capable clients. | [SDKs](#sdks) · [CLI](#cli) · [MCP](#mcp) |
+| **Extensible sandbox protocol** | Build custom runtime integrations against defined sandbox lifecycle and execution APIs. | [API specs](specs/README.md) |
 
 ## Official Container Images
 
@@ -231,35 +238,16 @@ if __name__ == "__main__":
 
 ### More Examples
 
-OpenSandbox provides examples covering SDK usage, agent integrations, browser automation, and training workloads. All example code is located in the `examples/` directory.
+Explore examples by what you want your agent to do. Runnable source code lives in [`examples/`](examples/).
 
-#### 🎯 Basic Examples
+| Use case | What you can build | Examples |
+|----------|--------------------|----------|
+| **Coding agents** | Run coding agents in isolated environments to edit files, execute commands, and complete development tasks. | [Claude Code](docs/examples/claude-code.md) · [Codex CLI](docs/examples/codex-cli.md) · [DeerFlow](docs/examples/deer-flow.md) |
+| **Code execution and data analysis** | Execute model-generated code and work with results through the Code Interpreter SDK. | [Code Interpreter](docs/examples/code-interpreter.md) |
+| **Browser and desktop automation** | Automate web interactions and testing, or give agents access to a desktop environment. | [Playwright](docs/examples/playwright.md) · [Chrome](docs/examples/chrome.md) · [Desktop](docs/examples/desktop.md) |
+| **Agent evaluation** | Run evaluations with a separate sandbox for each trial. | [Harbor Evaluation](docs/examples/harbor-evaluation.md) |
 
-- **[code-interpreter](docs/examples/code-interpreter.md)** - End-to-end Code Interpreter SDK workflow in a sandbox.
-- **[aio-sandbox](docs/examples/aio-sandbox.md)** - All-in-One sandbox setup using the OpenSandbox SDK.
-- **[agent-sandbox](docs/examples/agent-sandbox.md)** - Example integration for running OpenSandbox workloads on Kubernetes with [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox).
-- **Volumes** — [Docker PVC / named volumes](docs/examples/docker-pvc-volume-mount.md), [Docker OSSFS](docs/examples/docker-ossfs-volume-mount.md), [Kubernetes PVC](docs/examples/kubernetes-pvc-volume-mount.md): persistent and shared storage patterns.
-
-#### 🤖 Coding Agent Integrations
-
-- **Coding CLIs** — [Claude Code](docs/examples/claude-code.md), [Gemini CLI](docs/examples/gemini-cli.md), [OpenAI Codex CLI](docs/examples/codex-cli.md), [OpenCode](docs/examples/opencode.md), [Qwen Code](docs/examples/qwen-code.md), [Kimi CLI](docs/examples/kimi-cli.md): run each CLI inside OpenSandbox.
-- **[langgraph](docs/examples/langgraph.md)** - LangGraph state-machine workflow that creates/runs a sandbox job with fallback retry.
-- **[google-adk](docs/examples/google-adk.md)** - Google ADK agent using OpenSandbox tools to write/read files and run commands.
-- **[openclaw](docs/examples/openclaw.md)** - Launch an OpenClaw Gateway inside a sandbox.
-- **[deer-flow](docs/examples/deer-flow.md)** - DeerFlow agent turns whose shell, file, and search tools run inside a sandbox through its built-in OpenSandbox provider.
-
-#### 🌐 Browser and Desktop Environments
-
-- **[chrome](docs/examples/chrome.md)** - Chromium sandbox with VNC and DevTools access for automation and debugging.
-- **[playwright](docs/examples/playwright.md)** - Playwright + Chromium headless scraping and testing example.
-- **[desktop](docs/examples/desktop.md)** - Full desktop environment in a sandbox with VNC access.
-- **[vscode](docs/examples/vscode.md)** - code-server (VS Code Web) running inside a sandbox for remote dev.
-
-#### 🧠 Training and Evaluation
-
-- **[harbor-evaluation](docs/examples/harbor-evaluation.md)** - Run a [Harbor](https://github.com/harbor-framework/harbor) agent evaluation on OpenSandbox, one sandbox per trial.
-
-For more details, please refer to the [examples documentation](docs/examples/index.md).
+See the [full example catalog](docs/examples/index.md) for more coding agents, framework integrations, remote development environments, Kubernetes deployment, and storage patterns.
 
 ## Documentation
 
