@@ -329,14 +329,20 @@ class PersistedSnapshotService(SnapshotService):
             return
         self._converge_from_runtime(record)
 
+    def _worker_in_flight(self, snapshot_id: str) -> bool:
+        """Whether this process has a create worker queued or running for the row.
+
+        Until the worker returns, the runtime snapshot may not exist yet, so a
+        "not found" from the runtime is expected rather than a failure. Readers
+        leave such rows to the worker and converge them once it is done.
+        """
+        with self._inflight_lock:
+            return snapshot_id in self._inflight_snapshot_ids
+
     def _converge_from_runtime(self, record: SnapshotRecord) -> bool:
         """One runtime observation; CAS-complete the row when terminal."""
-        with self._inflight_lock:
-            if record.id in self._inflight_snapshot_ids:
-                # Until the worker returns, the runtime snapshot may not exist
-                # yet, so "not found" is expected rather than a failure.
-                # Convergence resumes once the worker is done.
-                return False
+        if self._worker_in_flight(record.id):
+            return False
         runtime_status = self._observe_runtime(record)
         if runtime_status is None or runtime_status.state not in (
             SnapshotState.READY,
@@ -584,6 +590,8 @@ class PersistedSnapshotService(SnapshotService):
 
     def _recover_unfinished_snapshot(self, record: SnapshotRecord) -> bool:
         if record.status.state == SnapshotState.CREATING:
+            if self._worker_in_flight(record.id):
+                return False
             runtime_status = self._snapshot_runtime.inspect_snapshot(
                 record.id,
                 image=record.restore_config.image,

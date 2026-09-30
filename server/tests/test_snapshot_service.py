@@ -972,6 +972,49 @@ def test_postgresql_kubernetes_recovery_does_not_queue_duplicate_local_workers(
         service.close()
 
 
+def test_postgresql_kubernetes_recovery_waits_for_pending_worker(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    executor = CapturingExecutor()
+    service = PostgreSQLKubernetesSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        recovery_interval_seconds=60,
+        snapshot_executor=executor,
+    )
+    service._recovery_stop.set()
+    service._recovery_thread.join()
+    try:
+        # The worker is queued but has not run, so the runtime has no snapshot
+        # yet and reports it as missing (FAILED), as fsb does.
+        created = service.create_snapshot("sbx-001", CreateSnapshotRequest(name="queued"))
+
+        service.recover_unfinished_snapshots()
+
+        stored = repo.get(created.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.CREATING
+        assert len(executor.submitted) == 1
+
+        # Once the worker has submitted the snapshot, recovery converges again.
+        worker, args, kwargs = executor.submitted[0]
+        runtime.create_result = SnapshotRuntimeStatus(state=SnapshotState.CREATING)
+        worker(*args, **kwargs)
+        runtime.inspect_status_by_snapshot_id[created.id] = SnapshotRuntimeStatus(
+            state=SnapshotState.READY,
+            image="registry/sandbox:snap",
+        )
+
+        service.recover_unfinished_snapshots()
+
+        stored = repo.get(created.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.READY
+    finally:
+        service.close()
+
+
 @pytest.mark.parametrize(
     ("store_type", "runtime_type", "expected_type"),
     [
