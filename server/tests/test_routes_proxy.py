@@ -1360,7 +1360,7 @@ def test_proxy_maps_connect_failure_to_502(
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
-            return Endpoint(endpoint="10.57.1.91:40109")
+            return Endpoint(endpoint="10.57.1.91:40109", headers={"X-Endpoint-Token": "endpoint-secret"})
 
     monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
     fake_client = _FakeAsyncClient()
@@ -1375,7 +1375,48 @@ def test_proxy_maps_connect_failure_to_502(
     assert response.status_code == 502
     payload = response.json()
     assert payload["code"] == "BACKEND_CONNECTION_FAILED"
-    assert "Could not connect to the backend sandbox" in payload["message"]
+    assert "Could not connect to the backend sandbox 10.57.1.91:40109" in payload["message"]
+    assert "endpoint-secret" not in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("backend_error", "expected_status", "expected_code"),
+    [
+        (httpx.ReadTimeout("read timed out"), 504, "BACKEND_TIMEOUT"),
+        (httpx.WriteTimeout("write timed out"), 504, "BACKEND_TIMEOUT"),
+        (httpx.RemoteProtocolError("server disconnected"), 502, "BACKEND_RESPONSE_FAILED"),
+        (httpx.ReadError("connection reset"), 502, "BACKEND_RESPONSE_FAILED"),
+        (httpx.WriteError("broken pipe"), 502, "BACKEND_RESPONSE_FAILED"),
+    ],
+)
+def test_proxy_maps_backend_failure_after_connect_to_gateway_error(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    backend_error: httpx.RequestError,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109", headers={"X-Endpoint-Token": "endpoint-secret"})
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    fake_client = _FakeAsyncClient()
+    fake_client.connection_error = backend_error
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772/healthz",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == expected_status
+    payload = response.json()
+    assert payload["code"] == expected_code
+    assert "10.57.1.91:40109" in payload["message"]
+    assert "endpoint-secret" not in payload["message"]
 
 
 def test_proxy_maps_unexpected_error_to_500(

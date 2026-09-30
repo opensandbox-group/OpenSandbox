@@ -428,7 +428,23 @@ async def _proxy_http_request(
             status_code=502,
             detail={
                 "code": "BACKEND_CONNECTION_FAILED",
-                "message": f"Could not connect to the backend sandbox {endpoint}: {e}",
+                "message": f"Could not connect to the backend sandbox {endpoint.endpoint}: {e}",
+            },
+        ) from e
+    except (httpx.ReadTimeout, httpx.WriteTimeout) as e:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "code": "BACKEND_TIMEOUT",
+                "message": f"The backend sandbox {endpoint.endpoint} did not respond in time: {e}",
+            },
+        ) from e
+    except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "BACKEND_RESPONSE_FAILED",
+                "message": f"The backend sandbox {endpoint.endpoint} dropped the connection or sent an invalid response: {e}",
             },
         ) from e
     except HTTPException:
