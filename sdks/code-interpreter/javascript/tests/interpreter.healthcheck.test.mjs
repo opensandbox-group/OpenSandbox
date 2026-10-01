@@ -177,3 +177,18 @@ test("CodeInterpreter.create skips the health check when skipHealthCheck is set"
   assert.equal(interpreter.id, "sandbox-id");
   assert.equal(commands.calls.length, 0);
 });
+
+test("CodeInterpreter.isHealthy is false when execd answers ping with an empty error response", async () => {
+  // No codes.ping, so isHealthy falls back to probing execd directly.
+  const adapterFactory = { createCodes: () => ({}) };
+  const { sandbox } = fakeSandbox();
+  sandbox.connectionConfig.fetch = async () =>
+    new Response(null, { status: 503, headers: { "Content-Length": "0" } });
+
+  const interpreter = await CodeInterpreter.create(sandbox, {
+    adapterFactory,
+    skipHealthCheck: true,
+  });
+
+  assert.equal(await interpreter.isHealthy(), false);
+});

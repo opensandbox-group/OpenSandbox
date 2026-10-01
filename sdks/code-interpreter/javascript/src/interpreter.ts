@@ -149,11 +149,11 @@ export class CodeInterpreter {
     if (typeof this.codes.ping === "function") {
       return await this.codes.ping(signal);
     }
-    const { error } = await this.execdPingClient().GET("/ping", {
+    const { response } = await this.execdPingClient().GET("/ping", {
       parseAs: "text",
       signal,
     });
-    return error == null;
+    return response.ok;
   }
 
   private execdPingClient() {

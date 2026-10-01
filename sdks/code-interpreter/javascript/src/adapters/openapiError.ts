@@ -18,7 +18,9 @@ export function throwOnOpenApiFetchError(
   result: { error?: unknown; response: Response },
   fallbackMessage: string,
 ): void {
-  if (!result.error) return;
+  // openapi-fetch leaves `error` unset (or an empty string) when an error
+  // response has no body, so the status code must decide as well.
+  if (!result.error && result.response.ok) return;
 
   const requestId = result.response.headers.get("x-request-id") ?? undefined;
   const status = (result.response as any).status ?? 0;
