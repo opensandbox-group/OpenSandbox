@@ -216,6 +216,20 @@ class Sandbox:
         """
         return self._filesystem_service
 
+    def files_with_identity(self, uid: int, gid: int) -> Filesystem:
+        """Return a separate filesystem client running as the given Linux UID/GID.
+
+        Requires identity-aware Execd. Unsupported servers fail without falling
+        back to the default identity. The existing files client is unchanged.
+        """
+        from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
+
+        if not isinstance(self._filesystem_service, FilesystemAdapter):
+            raise NotImplementedError(
+                "The selected filesystem adapter does not support execution identity"
+            )
+        return self._filesystem_service.with_identity(uid, gid)
+
     @property
     def commands(self) -> Commands:
         """

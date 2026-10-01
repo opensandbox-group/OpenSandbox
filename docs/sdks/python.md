@@ -391,6 +391,28 @@ For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`;
 use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()`
 also accept `offset` and `limit` for partial reads.
 
+#### File operations with an explicit identity
+
+Bind a filesystem client to a Linux UID and GID:
+
+```python
+files = sandbox.files_with_identity(1001, 2000)
+```
+
+Both the asynchronous and synchronous Sandbox clients expose this helper.
+
+The bound client exposes the usual file operations and shares the sandbox
+connection, authentication, and endpoint routing headers. The existing file
+client retains its default identity. Select the UID/GID separately for command
+execution.
+
+This requires Linux and an Execd version that supports filesystem execution
+identity. Unsupported servers return an error; requests never fall back to the
+default filesystem routes. Keep sandbox credentials and identity selection in
+the trusted backend. Linux filesystem permissions apply; this feature does not
+create a tenant isolation boundary. See [Execd](/architecture/data-plane/execd)
+for permission and workspace provisioning details.
+
 ### 5. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.

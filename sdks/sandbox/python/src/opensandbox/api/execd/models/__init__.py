@@ -38,6 +38,12 @@ from .file_metadata import FileMetadata
 from .get_files_info_response_200 import GetFilesInfoResponse200
 from .hardening_layer_state import HardeningLayerState
 from .hardening_layer_state_state import HardeningLayerStateState
+from .identity_chmod_files_body import IdentityChmodFilesBody
+from .identity_get_files_info_response_200 import IdentityGetFilesInfoResponse200
+from .identity_make_dirs_body import IdentityMakeDirsBody
+from .identity_replace_content_body import IdentityReplaceContentBody
+from .identity_replace_content_response_200 import IdentityReplaceContentResponse200
+from .identity_upload_file_body import IdentityUploadFileBody
 from .isolated_background_run_response import IsolatedBackgroundRunResponse
 from .isolated_chmod_files_body import IsolatedChmodFilesBody
 from .isolated_create_session_response import IsolatedCreateSessionResponse
@@ -101,6 +107,12 @@ __all__ = (
     "GetFilesInfoResponse200",
     "HardeningLayerState",
     "HardeningLayerStateState",
+    "IdentityChmodFilesBody",
+    "IdentityGetFilesInfoResponse200",
+    "IdentityMakeDirsBody",
+    "IdentityReplaceContentBody",
+    "IdentityReplaceContentResponse200",
+    "IdentityUploadFileBody",
     "IsolatedBackgroundRunResponse",
     "IsolatedChmodFilesBody",
     "IsolatedCreateSessionResponse",
