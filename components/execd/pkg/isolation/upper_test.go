@@ -48,34 +48,55 @@ func TestNewUpperManager_EmptyRoot(t *testing.T) {
 	}
 }
 
-func TestNewUpperManager_ReclaimsStaleChildren(t *testing.T) {
+func TestNewUpperManager_ReclaimsRecordedSessions(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "isolation")
-
-	// Simulate a previous execd lifetime: one session-layout residue with
-	// payload, one bare session-layout residue, and unrelated children that
-	// a shared upper_root must never lose.
-	staleID := "00000000000000000000000000000001"
-	staleUpper := filepath.Join(root, staleID, "upper")
-	if err := os.MkdirAll(staleUpper, 0o755); err != nil {
+	owner, err := NewUpperManager(root, 8<<30)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, staleID, "work"), 0o755); err != nil {
+
+	staleID, staleUpper, staleWork, err := owner.Allocate()
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(staleUpper, "residue.bin"), []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	bareID := "00000000000000000000000000000002"
-	if err := os.MkdirAll(filepath.Join(root, bareID, "upper"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(staleWork, "scratch.bin"), []byte("scratch"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, bareID, "work"), 0o755); err != nil {
+
+	multiID, multiPairs, err := owner.AllocateN(2)
+	if err != nil {
 		t.Fatal(err)
 	}
+	for _, pair := range multiPairs {
+		if err := os.WriteFile(filepath.Join(pair.UpperDir, "residue.bin"), []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Unrecorded children, including allocator-shaped trees, are not proof of
+	// execd ownership and must survive startup.
 	if err := os.WriteFile(filepath.Join(root, "junk.txt"), []byte("junk"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "shared-data"), 0o755); err != nil {
+	sharedPayload := filepath.Join(root, "shared-data", "upper", "important.bin")
+	if err := os.MkdirAll(filepath.Dir(sharedPayload), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sharedPayload, []byte("unrelated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unrecordedID := "00112233445566778899aabbccddeeff"
+	unrecordedPayload := filepath.Join(root, unrecordedID, "upper", "important.bin")
+	if err := os.MkdirAll(filepath.Dir(unrecordedPayload), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, unrecordedID, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unrecordedPayload, []byte("also unrelated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,22 +105,23 @@ func TestNewUpperManager_ReclaimsStaleChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, p := range []string{
-		filepath.Join(root, staleID),
-		filepath.Join(root, bareID),
-	} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("stale session dir %s should be reclaimed at startup", p)
+	for _, id := range []string{staleID, multiID} {
+		parent := filepath.Join(root, id)
+		if _, err := os.Stat(parent); !os.IsNotExist(err) {
+			t.Errorf("recorded session dir %s should be reclaimed at startup", parent)
+		}
+		if _, err := os.Stat(filepath.Join(root, cleanupRegistryName, id)); !os.IsNotExist(err) {
+			t.Errorf("cleanup record %s should be retired at startup", id)
 		}
 	}
 
-	// Children without the execd session layout must survive the sweep.
 	for _, p := range []string{
 		filepath.Join(root, "junk.txt"),
-		filepath.Join(root, "shared-data"),
+		sharedPayload,
+		unrecordedPayload,
 	} {
 		if _, err := os.Stat(p); err != nil {
-			t.Errorf("unrecognized child %s must not be touched: %v", p, err)
+			t.Errorf("unrecorded child %s must not be touched: %v", p, err)
 		}
 	}
 
@@ -115,91 +137,81 @@ func TestNewUpperManager_ReclaimsStaleChildren(t *testing.T) {
 	}
 }
 
-func TestUpperManager_ReclaimStaleFailureRetainedForGC(t *testing.T) {
+func TestUpperManager_RecordedReclaimFailureRetainedForGC(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged UID for the real permission failure")
+	}
+
 	root := filepath.Join(t.TempDir(), "isolation")
-	staleID := "00000000000000000000000000000003"
-	staleUpper := filepath.Join(root, staleID, "upper")
-	if err := os.MkdirAll(staleUpper, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, staleID, "work"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(staleUpper, "residue.bin"), []byte("stale"), 0o644); err != nil {
+	owner, err := NewUpperManager(root, 8<<30)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	// A second stale session in the AllocateN layout (pair 0 plus
-	// upper-1..2/work-1..2). The retained entry must track every pair so
-	// usage accounting counts all residue bytes until GC succeeds.
-	multiID := "00000000000000000000000000000004"
-	for _, name := range []string{
-		"upper", "work", "upper-1", "work-1", "upper-2", "work-2",
-	} {
-		if err := os.MkdirAll(filepath.Join(root, multiID, name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, upper := range []string{"upper", "upper-1", "upper-2"} {
-		if err := os.WriteFile(filepath.Join(root, multiID, upper, "residue.bin"), []byte("stale"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// A regular file matching the upper-* glob must not be tracked as a pair.
-	if err := os.WriteFile(filepath.Join(root, multiID, "upper-notadir"), []byte("x"), 0o644); err != nil {
+	id, pairs, err := owner.AllocateN(3)
+	if err != nil {
 		t.Fatal(err)
 	}
+	for _, pair := range pairs {
+		if err := os.WriteFile(filepath.Join(pair.UpperDir, "residue.bin"), []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, pair := range pairs {
+		if err := os.Chmod(pair.UpperDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, pair := range pairs {
+			_ = os.Chmod(pair.UpperDir, 0o700)
+		}
+	})
 
 	// A mount or permission error can block reclamation at startup. The
-	// sweep must keep such residue tracked so the collector retries it.
-	mgr := &UpperManager{
-		root:      root,
-		maxBytes:  8 << 30,
-		removeAll: func(string) error { return errors.New("device or resource busy") },
-		entries:   make(map[string]*UpperEntry),
+	// durable record must keep such residue released and tracked for GC.
+	mgr, err := NewUpperManager(root, 8<<30)
+	if err != nil {
+		t.Fatal(err)
 	}
-	mgr.reclaimStale()
 
 	mgr.mu.Lock()
-	e := mgr.entries[staleID]
-	multi := mgr.entries[multiID]
+	entry := mgr.entries[id]
 	mgr.mu.Unlock()
-	if e == nil {
+	if entry == nil {
 		t.Fatal("failed reclamation must remain tracked for a GC retry")
 	}
-	if e.InUse {
+	if entry.InUse {
 		t.Fatal("stale residue must be registered as released")
 	}
-	if multi == nil {
-		t.Fatal("failed AllocateN-layout reclamation must remain tracked")
+	if len(entry.Pairs) != 3 {
+		t.Fatalf("AllocateN-layout residue pairs = %d, want 3", len(entry.Pairs))
 	}
-	mgr.mu.Lock()
-	multiPairs := len(multi.Pairs)
-	mgr.mu.Unlock()
-	if multiPairs != 3 {
-		t.Errorf("AllocateN-layout residue pairs = %d, want 3 (upper, upper-1, upper-2)", multiPairs)
+	if _, err := os.Stat(filepath.Join(root, cleanupRegistryName, id)); err != nil {
+		t.Fatalf("failed reclamation lost its cleanup record: %v", err)
 	}
 	usage, err := mgr.Usage()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Four residue files of 5 bytes each across the two sessions.
-	if usage < 20 {
-		t.Errorf("Usage() = %d, want all residue bytes counted (>= 20)", usage)
+	if usage < 15 {
+		t.Errorf("Usage() = %d, want all residue bytes counted (>= 15)", usage)
 	}
 
-	mgr.removeAll = os.RemoveAll
+	for _, pair := range pairs {
+		if err := os.Chmod(pair.UpperDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	freed, err := mgr.CollectWithErrors()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(freed) != 2 {
-		t.Fatalf("CollectWithErrors freed %v, want both stale sessions", freed)
+	if len(freed) != 1 || freed[0] != id {
+		t.Fatalf("CollectWithErrors freed %v, want [%s]", freed, id)
 	}
-	for _, id := range []string{staleID, multiID} {
-		if _, err := os.Stat(filepath.Join(root, id)); !os.IsNotExist(err) {
-			t.Errorf("retried reclamation should remove residue session %s", id)
-		}
+	if _, err := os.Stat(filepath.Join(root, id)); !os.IsNotExist(err) {
+		t.Error("retried reclamation should remove the residue")
 	}
 }
 
