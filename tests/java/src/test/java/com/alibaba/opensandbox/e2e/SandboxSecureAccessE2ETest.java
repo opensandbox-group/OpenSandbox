@@ -92,7 +92,7 @@ public class SandboxSecureAccessE2ETest extends BaseE2ETest {
             assertNotNull(sdkRun);
             assertNull(sdkRun.getError(), "SDK command should include endpoint headers");
             assertEquals(1, sdkRun.getLogs().getStdout().size());
-            assertEquals("secure-access-sdk-ok", sdkRun.getLogs().getStdout().get(0).getText());
+            assertEquals("secure-access-sdk-ok\n", sdkRun.getLogs().getStdout().get(0).getText());
 
             HttpClient client =
                     HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();

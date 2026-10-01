@@ -247,7 +247,7 @@ class TestSandboxE2ESync:
             )
             assert connect_result.error is None
             assert len(connect_result.logs.stdout) == 1
-            assert connect_result.logs.stdout[0].text == "connect-ok"
+            assert connect_result.logs.stdout[0].text == "connect-ok\n"
         finally:
             sandbox2.close()
 
@@ -452,7 +452,7 @@ class TestSandboxE2ESync:
                 time.sleep(0.5)
             assert result.error is None, f"Failed to read marker file: {result.error}"
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "opensandbox-e2e-marker"
+            assert result.logs.stdout[0].text == "opensandbox-e2e-marker\n"
             logger.info("✓ Host marker file read successfully inside sandbox")
 
             # Step 2: Write a file from inside the sandbox to the mounted path (read-write)
@@ -470,14 +470,14 @@ class TestSandboxE2ESync:
                 time.sleep(0.5)
             assert result.error is None
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "written-from-sandbox"
+            assert result.logs.stdout[0].text == "written-from-sandbox\n"
             logger.info("✓ File written and verified inside sandbox")
 
             # Step 4: Verify the mount path is a proper directory
             result = sandbox.commands.run(f"test -d {container_mount_path} && echo OK")
             assert result.error is None
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "OK"
+            assert result.logs.stdout[0].text == "OK\n"
             logger.info("✓ Mount path is a valid directory")
 
         finally:
@@ -535,7 +535,7 @@ class TestSandboxE2ESync:
                 time.sleep(0.5)
             assert result.error is None, f"Failed to read marker file: {result.error}"
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "opensandbox-e2e-marker"
+            assert result.logs.stdout[0].text == "opensandbox-e2e-marker\n"
             logger.info("✓ Host marker file read successfully in read-only mount")
 
             # Step 2: Verify writing is denied on read-only mount
@@ -597,7 +597,7 @@ class TestSandboxE2ESync:
                 time.sleep(0.5)
             assert result.error is None, f"Failed to read marker file: {result.error}"
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "pvc-marker-data"
+            assert result.logs.stdout[0].text == "pvc-marker-data\n"
             logger.info("✓ PVC marker file read successfully inside sandbox")
 
             # Step 2: Write a file from inside the sandbox to the named volume
@@ -615,14 +615,14 @@ class TestSandboxE2ESync:
                 time.sleep(0.5)
             assert result.error is None
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "written-to-pvc"
+            assert result.logs.stdout[0].text == "written-to-pvc\n"
             logger.info("✓ File written and verified inside sandbox via PVC mount")
 
             # Step 4: Verify the mount path is a proper directory
             result = sandbox.commands.run(f"test -d {container_mount_path} && echo OK")
             assert result.error is None
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "OK"
+            assert result.logs.stdout[0].text == "OK\n"
             logger.info("✓ PVC mount path is a valid directory")
 
         finally:
@@ -677,7 +677,7 @@ class TestSandboxE2ESync:
                 time.sleep(0.5)
             assert result.error is None, f"Failed to read marker file: {result.error}"
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "pvc-marker-data"
+            assert result.logs.stdout[0].text == "pvc-marker-data\n"
             logger.info("✓ PVC marker file read successfully in read-only mount")
 
             # Step 2: Verify writing is denied on read-only mount
@@ -740,7 +740,7 @@ class TestSandboxE2ESync:
                 time.sleep(0.5)
             assert result.error is None, f"Failed to read subpath marker file: {result.error}"
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "pvc-subpath-marker"
+            assert result.logs.stdout[0].text == "pvc-subpath-marker\n"
             logger.info("✓ SubPath marker file read successfully")
 
             # Step 2: Verify we only see the subpath contents (not the full volume)
@@ -763,7 +763,7 @@ class TestSandboxE2ESync:
                 time.sleep(1)
             assert result.error is None
             assert len(result.logs.stdout) == 1
-            assert result.logs.stdout[0].text == "subpath-write-test"
+            assert result.logs.stdout[0].text == "subpath-write-test\n"
             logger.info("✓ File written and verified inside subPath mount")
 
         finally:
@@ -834,7 +834,7 @@ class TestSandboxE2ESync:
         assert echo_result.id is not None and echo_result.id.strip()
         assert echo_result.error is None
         assert len(echo_result.logs.stdout) == 1
-        assert echo_result.logs.stdout[0].text == "Hello OpenSandbox E2E"
+        assert echo_result.logs.stdout[0].text == "Hello OpenSandbox E2E\n"
         assert echo_result.logs.stdout[0].is_error is False
         _assert_recent_timestamp_ms(echo_result.logs.stdout[0].timestamp)
         assert len(echo_result.logs.stderr) == 0
@@ -850,7 +850,7 @@ class TestSandboxE2ESync:
         assert completed_events[0].execution_time_in_millis >= 0
 
         assert len(stdout_messages) == 1
-        assert stdout_messages[0].text == "Hello OpenSandbox E2E"
+        assert stdout_messages[0].text == "Hello OpenSandbox E2E\n"
         assert stdout_messages[0].is_error is False
         _assert_recent_timestamp_ms(stdout_messages[0].timestamp)
         assert len(errors) == 0
@@ -863,7 +863,7 @@ class TestSandboxE2ESync:
         assert pwd_result.id is not None and pwd_result.id.strip()
         assert pwd_result.error is None
         assert len(pwd_result.logs.stdout) == 1
-        assert pwd_result.logs.stdout[0].text == "/tmp"
+        assert pwd_result.logs.stdout[0].text == "/tmp\n"
         assert pwd_result.logs.stdout[0].is_error is False
         _assert_recent_timestamp_ms(pwd_result.logs.stdout[0].timestamp)
         assert pwd_result.exit_code == 0
@@ -1302,7 +1302,7 @@ class TestSandboxE2ESync:
             verified = (
                 verify_dirs_deleted.error is None
                 and len(verify_dirs_deleted.logs.stdout) == 1
-                and verify_dirs_deleted.logs.stdout[0].text == "OK"
+                and verify_dirs_deleted.logs.stdout[0].text == "OK\n"
             )
             if verified:
                 break
@@ -1313,7 +1313,7 @@ class TestSandboxE2ESync:
             )
         assert verify_dirs_deleted.error is None
         assert len(verify_dirs_deleted.logs.stdout) == 1
-        assert verify_dirs_deleted.logs.stdout[0].text == "OK"
+        assert verify_dirs_deleted.logs.stdout[0].text == "OK\n"
 
     @pytest.mark.timeout(60)
     @pytest.mark.order(4)
@@ -1509,7 +1509,7 @@ class TestSandboxE2ESync:
         echo = sandbox.commands.run("echo resume-ok")
         assert echo.error is None
         assert len(echo.logs.stdout) == 1
-        assert echo.logs.stdout[0].text == "resume-ok"
+        assert echo.logs.stdout[0].text == "resume-ok\n"
 
     @pytest.mark.timeout(120)
     @pytest.mark.order(8)

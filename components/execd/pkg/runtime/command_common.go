@@ -238,9 +238,8 @@ func (c *Controller) StartCommandOutputJanitor(ctx context.Context) error {
 // commandOutputTail retains an unfinished line while reading only appended bytes.
 // Each stdout/stderr tail goroutine owns its own state.
 type commandOutputTail struct {
-	offset    int64
-	pending   bytes.Buffer
-	lastWasCR bool
+	offset  int64
+	pending bytes.Buffer
 }
 
 func (t *commandOutputTail) read(path string, onExecute func(string), flushIncomplete bool) {
@@ -265,23 +264,11 @@ func (t *commandOutputTail) read(path string, onExecute func(string), flushIncom
 			break
 		}
 		t.offset++
-
-		if b == '\n' || b == '\r' {
-			switch {
-			case t.pending.Len() > 0:
-				onExecute(t.pending.String())
-				t.pending.Reset()
-			case b == '\n' && t.lastWasCR:
-				// The preceding CR already emitted this line.
-			default:
-				onExecute("\n")
-			}
-			t.lastWasCR = b == '\r'
-			continue
-		}
-
-		t.lastWasCR = false
 		t.pending.WriteByte(b)
+		if b == '\n' || b == '\r' {
+			onExecute(t.pending.String())
+			t.pending.Reset()
+		}
 	}
 	// Reuse storage within a poll, but release completed long lines between polls.
 	if t.pending.Len() == 0 {

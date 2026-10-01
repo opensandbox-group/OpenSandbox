@@ -110,6 +110,20 @@ class ExecutionLogs(BaseModel):
         self.stderr.append(message)
 
 
+def _format_output_messages(messages: list[OutputMessage]) -> str:
+    """Format both legacy line events and events carrying their own line endings."""
+    parts: list[str] = []
+    last_char = ""
+    for message in messages:
+        text = message.text
+        if text and last_char and last_char not in "\r\n" and text[0] not in "\r\n":
+            parts.append("\n")
+        parts.append(text)
+        if text:
+            last_char = text[-1]
+    return "".join(parts).replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
 class ExecutionComplete(BaseModel):
     """
     Execution completion event.
@@ -180,15 +194,14 @@ class Execution(BaseModel):
     def text(self) -> str:
         """Return combined stdout and result text.
 
-        Includes both stdout log messages and execution results,
-        stripping trailing newlines from each chunk to avoid double
-        line breaks when messages already contain trailing newlines
-        (e.g. code-interpreter streaming output).
+        Includes both stdout log messages and execution results, preserving
+        blank lines while normalizing line endings for display.
         """
         chunks: list[str] = []
 
-        for msg in self.logs.stdout:
-            chunks.append(msg.text.rstrip("\n"))
+        stdout_text = _format_output_messages(self.logs.stdout)
+        if stdout_text:
+            chunks.append(stdout_text)
 
         for res in self.result:
             if res.text:
@@ -204,7 +217,7 @@ class Execution(BaseModel):
             parts.append(self.text)
 
         if self.logs.stderr:
-            stderr_text = "\n".join(msg.text.rstrip("\n") for msg in self.logs.stderr)
+            stderr_text = _format_output_messages(self.logs.stderr)
             parts.append(f"[stderr]\n{stderr_text}")
 
         if self.error:

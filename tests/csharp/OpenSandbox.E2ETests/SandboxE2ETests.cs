@@ -77,7 +77,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var result = await sandbox2.Commands.RunAsync("echo connect-ok");
             Assert.Null(result.Error);
             Assert.Single(result.Logs.Stdout);
-            Assert.Equal("connect-ok", result.Logs.Stdout[0].Text);
+            Assert.Equal("connect-ok\n", result.Logs.Stdout[0].Text);
         }
         finally
         {
@@ -345,7 +345,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var marker = await RunWithRetryAsync(volumeSandbox, $"cat {containerMountPath}/marker.txt");
             Assert.Null(marker.Error);
             Assert.Single(marker.Logs.Stdout);
-            Assert.Equal("opensandbox-e2e-marker", marker.Logs.Stdout[0].Text);
+            Assert.Equal("opensandbox-e2e-marker\n", marker.Logs.Stdout[0].Text);
 
             var write = await volumeSandbox.Commands.RunAsync(
                 $"echo 'written-from-sandbox' > {containerMountPath}/sandbox-output.txt");
@@ -355,7 +355,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var readBack = await RunWithRetryAsync(volumeSandbox, $"cat {containerMountPath}/sandbox-output.txt");
             Assert.Null(readBack.Error);
             Assert.Single(readBack.Logs.Stdout);
-            Assert.Equal("written-from-sandbox", readBack.Logs.Stdout[0].Text);
+            Assert.Equal("written-from-sandbox\n", readBack.Logs.Stdout[0].Text);
         }
         finally
         {
@@ -400,7 +400,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var marker = await RunWithRetryAsync(roSandbox, $"cat {containerMountPath}/marker.txt");
             Assert.Null(marker.Error);
             Assert.Single(marker.Logs.Stdout);
-            Assert.Equal("opensandbox-e2e-marker", marker.Logs.Stdout[0].Text);
+            Assert.Equal("opensandbox-e2e-marker\n", marker.Logs.Stdout[0].Text);
 
             var write = await roSandbox.Commands.RunAsync($"touch {containerMountPath}/should-fail.txt");
             var stat = await roSandbox.Commands.RunAsync(
@@ -409,7 +409,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var fileWasNotCreated =
                 stat.Error is null &&
                 stat.Logs.Stdout.Count == 1 &&
-                stat.Logs.Stdout[0].Text == "OK";
+                stat.Logs.Stdout[0].Text == "OK\n";
             Assert.True(
                 writeWasRejected || fileWasNotCreated,
                 "Write on read-only host volume should fail or leave no created file.");
@@ -457,7 +457,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var marker = await RunWithRetryAsync(pvcSandbox, $"cat {containerMountPath}/marker.txt");
             Assert.Null(marker.Error);
             Assert.Single(marker.Logs.Stdout);
-            Assert.Equal("pvc-marker-data", marker.Logs.Stdout[0].Text);
+            Assert.Equal("pvc-marker-data\n", marker.Logs.Stdout[0].Text);
 
             var write = await pvcSandbox.Commands.RunAsync(
                 $"echo 'written-to-pvc' > {containerMountPath}/pvc-output.txt");
@@ -467,7 +467,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var readBack = await RunWithRetryAsync(pvcSandbox, $"cat {containerMountPath}/pvc-output.txt");
             Assert.Null(readBack.Error);
             Assert.Single(readBack.Logs.Stdout);
-            Assert.Equal("written-to-pvc", readBack.Logs.Stdout[0].Text);
+            Assert.Equal("written-to-pvc\n", readBack.Logs.Stdout[0].Text);
         }
         finally
         {
@@ -512,7 +512,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var marker = await RunWithRetryAsync(roSandbox, $"cat {containerMountPath}/marker.txt");
             Assert.Null(marker.Error);
             Assert.Single(marker.Logs.Stdout);
-            Assert.Equal("pvc-marker-data", marker.Logs.Stdout[0].Text);
+            Assert.Equal("pvc-marker-data\n", marker.Logs.Stdout[0].Text);
 
             var write = await roSandbox.Commands.RunAsync($"touch {containerMountPath}/should-fail.txt");
             var stat = await roSandbox.Commands.RunAsync(
@@ -521,7 +521,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var fileWasNotCreated =
                 stat.Error is null &&
                 stat.Logs.Stdout.Count == 1 &&
-                stat.Logs.Stdout[0].Text == "OK";
+                stat.Logs.Stdout[0].Text == "OK\n";
             Assert.True(
                 writeWasRejected || fileWasNotCreated,
                 "Write on read-only PVC volume should fail or leave no created file.");
@@ -570,7 +570,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var marker = await RunWithRetryAsync(subPathSandbox, $"cat {containerMountPath}/marker.txt");
             Assert.Null(marker.Error);
             Assert.Single(marker.Logs.Stdout);
-            Assert.Equal("pvc-subpath-marker", marker.Logs.Stdout[0].Text);
+            Assert.Equal("pvc-subpath-marker\n", marker.Logs.Stdout[0].Text);
 
             var ls = await subPathSandbox.Commands.RunAsync($"ls {containerMountPath}/");
             Assert.Null(ls.Error);
@@ -586,7 +586,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var readBack = await RunWithRetryAsync(subPathSandbox, $"cat {containerMountPath}/output.txt");
             Assert.Null(readBack.Error);
             Assert.Single(readBack.Logs.Stdout);
-            Assert.Equal("subpath-write-test", readBack.Logs.Stdout[0].Text);
+            Assert.Equal("subpath-write-test\n", readBack.Logs.Stdout[0].Text);
         }
         finally
         {
@@ -628,7 +628,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         Assert.False(string.IsNullOrWhiteSpace(echoResult.Id));
         Assert.Null(echoResult.Error);
         Assert.Single(echoResult.Logs.Stdout);
-        Assert.Equal("Hello OpenSandbox E2E", echoResult.Logs.Stdout[0].Text);
+        Assert.Equal("Hello OpenSandbox E2E\n", echoResult.Logs.Stdout[0].Text);
         AssertRecentTimestampMs(echoResult.Logs.Stdout[0].Timestamp, 60_000);
         Assert.Equal(0, echoResult.ExitCode);
         Assert.NotNull(echoResult.Complete);
@@ -640,7 +640,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             options: new RunCommandOptions { WorkingDirectory = "/tmp" });
         Assert.Null(pwdResult.Error);
         Assert.Single(pwdResult.Logs.Stdout);
-        Assert.Equal("/tmp", pwdResult.Logs.Stdout[0].Text);
+        Assert.Equal("/tmp\n", pwdResult.Logs.Stdout[0].Text);
         Assert.Equal(0, pwdResult.ExitCode);
         Assert.NotNull(pwdResult.Complete);
 
@@ -984,7 +984,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             var verified =
                 verify.Error is null &&
                 verify.Logs.Stdout.Count == 1 &&
-                verify.Logs.Stdout[0].Text == "OK";
+                verify.Logs.Stdout[0].Text == "OK\n";
             if (verified)
             {
                 break;
@@ -997,7 +997,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         }
         Assert.Null(verify.Error);
         Assert.Single(verify.Logs.Stdout);
-        Assert.Equal("OK", verify.Logs.Stdout[0].Text);
+        Assert.Equal("OK\n", verify.Logs.Stdout[0].Text);
     }
 
     [Fact(Timeout = 60 * 1000)]
@@ -1114,7 +1114,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         var echo = await resumed.Commands.RunAsync("echo resume-ok");
         Assert.Null(echo.Error);
         Assert.Single(echo.Logs.Stdout);
-        Assert.Equal("resume-ok", echo.Logs.Stdout[0].Text);
+        Assert.Equal("resume-ok\n", echo.Logs.Stdout[0].Text);
     }
 
     private static void AssertRecentTimestampMs(long ts, long toleranceMs)

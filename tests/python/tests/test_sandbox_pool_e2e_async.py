@@ -104,7 +104,7 @@ class TestSandboxPoolSingleNodeE2EAsync:
         assert await sandbox.is_healthy()
         result = await sandbox.commands.run("echo py-async-pool-ok")
         assert result.error is None
-        assert result.logs.stdout[0].text == "py-async-pool-ok"
+        assert result.logs.stdout[0].text == "py-async-pool-ok\n"
 
         await self.pool.resize(0)
         released = await self.pool.release_all_idle()
@@ -576,7 +576,7 @@ class TestSandboxPoolSingleNodeE2EAsync:
 
             result = await sandbox.commands.run("echo py-async-retry-next-idle-ok")
             assert result.error is None
-            assert result.logs.stdout[0].text == "py-async-retry-next-idle-ok"
+            assert result.logs.stdout[0].text == "py-async-retry-next-idle-ok\n"
 
             # The stale id must not silently reappear in the idle queue.
             remaining = await mixed_store.snapshot_idle_entries(mixed_pool_name)
@@ -627,7 +627,7 @@ class TestSandboxPoolSingleNodeE2EAsync:
 
             result = await sandbox.commands.run("echo py-async-retry-then-create-ok")
             assert result.error is None
-            assert result.logs.stdout[0].text == "py-async-retry-then-create-ok"
+            assert result.logs.stdout[0].text == "py-async-retry-then-create-ok\n"
 
             remaining = await all_stale_store.snapshot_idle_entries(all_stale_pool_name)
             remaining_ids = {entry.sandbox_id for entry in remaining}

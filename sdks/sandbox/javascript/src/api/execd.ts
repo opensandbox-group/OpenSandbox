@@ -229,6 +229,9 @@ export interface paths {
          * @description Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply exactly one input mode.
          *     The command can run in foreground or background mode. The response includes stdout, stderr,
          *     execution status, and completion events.
+         *     In foreground mode, stdout and stderr event text preserves the original line endings
+         *     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
+         *     the final event may contain an unterminated fragment.
          *     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
          *     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
          *     with specific user/group IDs, and `envs` to inject environment variables.
