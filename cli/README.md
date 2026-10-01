@@ -297,6 +297,10 @@ osb command status <sandbox-id> <execution-id> -o json
 osb command logs <sandbox-id> <execution-id> -o json
 ```
 
+Background start errors or a stream ending before startup confirmation make the
+CLI exit non-zero without success metadata. After a successful start, use
+`command status` and `command logs` to check the process's eventual result.
+
 By default the payload after `--` is joined into one shell command string, so
 pipelines, redirection, and `$VAR` expansion work as in a terminal. Add `--argv`
 to pass the arguments to the executable as a literal argv list (no shell) when

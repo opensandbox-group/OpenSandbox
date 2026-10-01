@@ -279,6 +279,12 @@ osb command interrupt <sandbox-id> <execution-id> -o json
 Foreground `command run` accepts `-o raw`; background execution accepts
 `table`, `json`, or `yaml`.
 
+Background execution metadata is returned only after execd confirms startup.
+An execution error or a stream that ends before this confirmation makes the CLI
+exit non-zero without printing success metadata. A successful background start
+does not mean the process has finished; use `command status` and `command logs`
+to check its eventual result.
+
 Persistent shell session:
 
 ```bash
