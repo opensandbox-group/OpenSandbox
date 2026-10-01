@@ -30,7 +30,8 @@ import (
 // ExecdClient provides access to the OpenSandbox Execd API for code execution,
 // command execution, file operations, and system metrics.
 type ExecdClient struct {
-	client *Client
+	client        *Client
+	instanceCache executionInstanceCache
 }
 
 // execdAuthHeader is the authentication header used by the Execd API.

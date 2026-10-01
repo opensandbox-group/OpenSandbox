@@ -196,7 +196,13 @@ func NewClient(baseURL, apiKey, authHeader string, opts ...Option) *Client {
 // not retried and cannot double the effective timeout. This is always on and
 // independent of the opt-in RetryConfig.
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, result any) error {
-	return c.doRequestCapture(ctx, method, path, body, result, nil)
+	return c.doRequestWithHeaders(ctx, method, path, body, result, nil)
+}
+
+// doRequestWithHeaders applies call-local headers without copying or mutating the
+// shared client. Every retry builds its own request with the same headers.
+func (c *Client) doRequestWithHeaders(ctx context.Context, method, path string, body any, result any, headers map[string]string) error {
+	return c.doRequestWithMetadata(ctx, method, path, body, result, headers, nil)
 }
 
 // doRequestCapture behaves like doRequest and additionally invokes capture
@@ -204,14 +210,18 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, r
 // non-nil. It exists for callers that need server-reported response metadata
 // (e.g. the OPEN-SANDBOX-ORIGIN header) that is not part of the JSON body.
 func (c *Client) doRequestCapture(ctx context.Context, method, path string, body, result any, capture func(http.Header)) error {
+	return c.doRequestWithMetadata(ctx, method, path, body, result, nil, capture)
+}
+
+func (c *Client) doRequestWithMetadata(ctx context.Context, method, path string, body, result any, headers map[string]string, capture func(http.Header)) error {
 	return c.withRetry(ctx, func() error {
 		var reused bool
-		err := c.doRequestOnce(ctx, method, path, body, result, &reused, capture)
+		err := c.doRequestOnce(ctx, method, path, body, result, &reused, headers, capture)
 		if err != nil && reused && c.shouldRetryOnFreshConn(ctx, method, err) {
 			// The reused pooled connection was likely silently dropped by an
 			// intermediary. Drop idle connections so the retry dials a new one.
 			c.httpClient.CloseIdleConnections()
-			err = c.doRequestOnce(ctx, method, path, body, result, nil, capture)
+			err = c.doRequestOnce(ctx, method, path, body, result, nil, headers, capture)
 		}
 		return err
 	})
@@ -255,7 +265,7 @@ func (c *Client) shouldRetryOnFreshConn(ctx context.Context, method string, err 
 // non-nil it is set to whether this attempt was carried over a reused pooled
 // connection (observed via httptrace GotConn). If capture is non-nil it is
 // invoked with the response headers once the response is deemed successful.
-func (c *Client) doRequestOnce(ctx context.Context, method, path string, body any, result any, reused *bool, capture func(http.Header)) error {
+func (c *Client) doRequestOnce(ctx context.Context, method, path string, body any, result any, reused *bool, headers map[string]string, capture func(http.Header)) error {
 	var bodyReader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -280,6 +290,9 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 
 	req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
 	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	if c.apiKey != "" {
