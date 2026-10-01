@@ -652,8 +652,8 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             ) from e
 
-        pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
+        pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[CreateSandboxResponse] = loop.create_future()
 
@@ -666,6 +666,18 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 )
                 loop.call_soon_threadsafe(future.set_result, result)
             except BaseException as exc:
+                # _provision_sandbox only removes these when it fails inside its
+                # main try block. Earlier failures (the image pull, request
+                # checks) would leak them, and delete_sandbox never runs for a
+                # sandbox that was never created. Removal is idempotent, and a
+                # cleanup error must not keep exc from reaching the caller.
+                try:
+                    self._cleanup_managed_volumes(sandbox_id, auto_created_volumes)
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    logger.warning(
+                        f"sandbox={sandbox_id} | failed to clean up volumes "
+                        f"after create failure: {cleanup_exc}"
+                    )
                 try:
                     loop.call_soon_threadsafe(future.set_exception, exc)
                 except RuntimeError:

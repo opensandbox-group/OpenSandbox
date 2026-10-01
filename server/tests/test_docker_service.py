@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -3433,6 +3434,73 @@ class TestDockerVolumeValidation:
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
         assert exc_info.value.detail["code"] == SandboxErrorCodes.PVC_VOLUME_NOT_FOUND
+
+    @staticmethod
+    async def _create_with_failing_image_pull(mock_docker, remove_volume=None):
+        """Create a sandbox whose image pull fails after an auto-created PVC volume.
+
+        Returns the raised exception, the pull error, and the volumes left behind.
+        """
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        volumes: dict[str, dict] = {}
+
+        def inspect_volume(name):
+            if name not in volumes:
+                raise DockerNotFound("volume not found")
+            return volumes[name]
+
+        def create_volume(name, labels):
+            volumes[name] = {"Name": name, "Labels": labels}
+
+        mock_client.api.inspect_volume.side_effect = inspect_volume
+        mock_client.api.create_volume.side_effect = create_volume
+        mock_client.api.remove_volume.side_effect = remove_volume or volumes.pop
+        mock_docker.from_env.return_value = mock_client
+
+        service = DockerSandboxService(config=_app_config())
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:does-not-exist"),
+            timeout=120,
+            resourceLimits=ResourceLimits(root={}),
+            env={},
+            metadata={},
+            entrypoint=["python"],
+            volumes=[
+                Volume(
+                    name="scratch",
+                    pvc=PVC(claim_name="scratch", delete_on_sandbox_termination=True),
+                    mount_path="/mnt/scratch",
+                )
+            ],
+        )
+        pull_failed = HTTPException(status_code=500, detail="pull failed")
+
+        with patch.object(service, "_ensure_image_available", side_effect=pull_failed):
+            with pytest.raises(HTTPException) as exc_info:
+                await asyncio.wait_for(service.create_sandbox(request), timeout=5)
+        return exc_info.value, pull_failed, volumes
+
+    @pytest.mark.asyncio
+    async def test_auto_created_pvc_volume_removed_when_image_pull_fails(self, mock_docker):
+        """A volume auto-created for the request is removed if creation fails before provisioning."""
+        raised, pull_failed, volumes = await self._create_with_failing_image_pull(mock_docker)
+
+        assert raised is pull_failed
+        assert "scratch" not in volumes
+
+    @pytest.mark.asyncio
+    async def test_create_failure_still_raised_when_volume_cleanup_fails(self, mock_docker):
+        """A cleanup error must not swallow the create failure or leave the request hanging."""
+
+        def remove_volume(name):
+            raise RuntimeError("unexpected cleanup failure")
+
+        raised, pull_failed, _ = await self._create_with_failing_image_pull(
+            mock_docker, remove_volume=remove_volume
+        )
+
+        assert raised is pull_failed
 
     def test_pvc_volume_auto_created_when_not_found(self, mock_docker):
         """PVC backend auto-creates Docker named volume when createIfNotExists is true (default)."""
