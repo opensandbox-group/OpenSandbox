@@ -136,6 +136,24 @@ func validRenderedBinding(binding *ActiveBinding, redactions map[string]struct{}
 	if len(seenHosts) == 0 || !validRenderedCredentials(binding, redactions) {
 		return false
 	}
+	if len(binding.Match.RequestHeaders) > 4 {
+		return false
+	}
+	seenRequestHeaders := make(map[string]struct{}, len(binding.Match.RequestHeaders))
+	for _, header := range binding.Match.RequestHeaders {
+		if header.Name == "" || !headerFieldNamePattern.MatchString(header.Name) || header.Value == "" ||
+			header.Value != strings.Trim(header.Value, " \t") {
+			return false
+		}
+		key := strings.ToLower(header.Name)
+		if _, denied := reservedRequestSelectorNames[key]; denied {
+			return false
+		}
+		if _, duplicate := seenRequestHeaders[key]; duplicate {
+			return false
+		}
+		seenRequestHeaders[key] = struct{}{}
+	}
 	binding.Headers = append([]InjectionHeader{}, binding.Headers...)
 	binding.Substitutions = append([]InjectionSubstitution{}, binding.Substitutions...)
 	for i := range binding.Substitutions {

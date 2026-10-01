@@ -517,10 +517,18 @@ const (
 type CredentialMatch struct {
 	Schemes []CredentialScheme `json:"schemes,omitempty"`
 	// Deprecated: Ports is ignored; port is derived from Schemes (https→443, http→80).
-	Ports   []int    `json:"ports,omitempty"`
-	Hosts   []string `json:"hosts"`
-	Methods []string `json:"methods,omitempty"`
-	Paths   []string `json:"paths,omitempty"`
+	Ports          []int                             `json:"ports,omitempty"`
+	Hosts          []string                          `json:"hosts"`
+	Methods        []string                          `json:"methods,omitempty"`
+	Paths          []string                          `json:"paths,omitempty"`
+	RequestHeaders []CredentialRequestHeaderSelector `json:"requestHeaders,omitempty"`
+}
+
+// CredentialRequestHeaderSelector routes a binding by one request header.
+// Value is omitted from sanitized vault metadata and required by the create and patch APIs.
+type CredentialRequestHeaderSelector struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
 }
 
 // CustomHeaderEntry describes one custom header injection rule.

@@ -29,6 +29,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialListRes
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMatch
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMetadata
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMutationSet
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialRequestHeaderSelector
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSubstitution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultCreateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultPatchRequest
@@ -329,6 +330,19 @@ internal class EgressAdapter(
             put("hosts", hosts.toStringJsonArray())
             methods?.let { put("methods", it.toStringJsonArray()) }
             paths?.let { put("paths", it.toStringJsonArray()) }
+            requestHeaders?.let { selectors ->
+                put(
+                    "requestHeaders",
+                    JsonArray(
+                        selectors.map { selector ->
+                            buildJsonObject {
+                                put("name", JsonPrimitive(selector.name))
+                                selector.value?.let { put("value", JsonPrimitive(it)) }
+                            }
+                        },
+                    ),
+                )
+            }
         }
 
     private fun CredentialAuth.toJsonObject(): JsonObject =
@@ -442,6 +456,17 @@ internal class EgressAdapter(
         }
         optionalStringArray("methods")?.let { builder.methods(it) }
         optionalStringArray("paths")?.let { builder.paths(it) }
+        optionalArray("requestHeaders")?.let { selectors ->
+            builder.requestHeaders(
+                selectors.map { selector ->
+                    val item = selector.jsonObject
+                    CredentialRequestHeaderSelector.builder()
+                        .name(item.requiredString("name"))
+                        .apply { item.optionalString("value")?.let { value(it) } }
+                        .build()
+                },
+            )
+        }
         return builder.build()
     }
 

@@ -544,6 +544,14 @@ export interface components {
              *     ]
              */
             paths: string[];
+            /** @description Optional routing selectors. Every predicate must match. Header names are ASCII case-insensitive RFC 9110 field-name tokens and are not trimmed. Values are compared case-sensitively after trimming only outer SP and HTAB. Authorization and Content-Type are allowed; Host, Content-Length, Transfer-Encoding, Connection, Upgrade, TE, Trailer, Cookie, Proxy-Authorization, Proxy-Authenticate, Forwarded, X-Forwarded-For, X-Forwarded-Host, and X-Forwarded-Proto are rejected. A selected header must occur exactly once; missing or repeated field lines do not match. A comma-containing single field is compared as one value. Selectors route requests and do not authorize users or processes. */
+            requestHeaders?: components["schemas"]["CredentialRequestHeaderSelector"][];
+        };
+        CredentialRequestHeaderSelector: {
+            /** @description RFC 9110 field-name token; matching is ASCII case-insensitive. */
+            name: string;
+            /** @description Required on writes. Must not be empty after trimming outer SP and HTAB. The remaining value is matched case-sensitively and is never returned in binding metadata. */
+            value?: string;
         };
         CredentialAuth: components["schemas"]["BearerCredentialAuth"] | components["schemas"]["BasicCredentialAuth"] | components["schemas"]["ApiKeyCredentialAuth"] | components["schemas"]["CustomHeadersCredentialAuth"] | components["schemas"]["PassthroughCredentialAuth"];
         BearerCredentialAuth: {

@@ -52,8 +52,10 @@ At a high level:
 3. The sandbox process runs with fake or empty credential environment variables.
 4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar
    inspects the request metadata.
-5. If exactly one binding matches the request scheme, host, port, method, and
-   path, the sidecar injects the configured auth header and scoped placeholder
+5. The sidecar first finds bindings matching the request scheme, host, port,
+   method, and path. If those bindings declare `match.requestHeaders`, it uses
+   their header predicates to select one binding at the highest host
+   precedence, then injects the configured auth header and scoped placeholder
    substitutions.
 6. Secret values are redacted from vault responses and response headers.
 
@@ -81,6 +83,59 @@ receives a different tag and cannot reuse plaintext from the deleted snapshot.
 A `404 Not Found` from the private endpoint is the normal "no active vault"
 result: the MITM process clears its cached snapshot and continues without
 credential injection.
+
+### Request header selectors
+
+Bindings may include one to four `match.requestHeaders` predicates. Predicates
+are AND-combined and are intended to route requests that share the same host,
+method, and path scope to different bindings:
+
+```json
+{
+  "match": {
+    "hosts": ["api.example.com"],
+    "methods": ["POST"],
+    "paths": ["/v1/*"],
+    "requestHeaders": [{"name": "X-Tenant", "value": "tenant-a"}]
+  }
+}
+```
+
+Header names use ASCII case-insensitive matching and must be RFC 9110 field-name
+tokens. Names are not trimmed. Values are compared case-sensitively after the
+sidecar trims only outer spaces and horizontal tabs (`SP` and `HTAB`); internal
+whitespace is preserved. A selected field must appear exactly once. Missing or
+repeated field lines do not match, while a single comma-containing field is
+compared as one complete value. `Authorization` and `Content-Type` are allowed.
+Selectors reject `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`,
+`Upgrade`, `TE`, `Trailer`, `Cookie`, `Proxy-Authorization`,
+`Proxy-Authenticate`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, and
+`X-Forwarded-Proto`.
+
+The selector header remains on the upstream request by default. If the selected
+binding also injects the same header name, Credential Vault replaces the
+incoming field with the configured credential; a configured header
+substitution may also rewrite it. Treat routing headers such as `X-Tenant` as
+ordinary upstream input and avoid sending them when the upstream does not need
+them.
+
+The sidecar first determines the highest matching host precedence. Selectors are
+evaluated only among bindings at that precedence, so a selector mismatch is
+rejected and never falls back to a lower-precedence wildcard binding. Buffered
+requests receive `403`; requests that may already be streaming are terminated
+under the proxy's existing fail-closed rules. More than one eligible binding is
+also rejected. At configuration time, overlapping base
+scopes at the same host precedence are accepted only when both bindings declare
+selectors with at least one shared header name and different canonical values;
+generic/selector overlap, equal values, and predicates on unrelated names remain
+invalid. Exact-host bindings can still take precedence over wildcard-host
+bindings.
+
+Selectors are routing conditions only. They do not identify or authorize the
+process or user that sent the request. Public binding state returns selector
+names but never their configured values. As a result, GET/list metadata cannot
+be replayed directly as a create or replace binding: restore each selector
+value from the trusted configuration source first.
 
 ::: warning Runtime availability dependency
 The private active-vault socket is a hard availability dependency for all

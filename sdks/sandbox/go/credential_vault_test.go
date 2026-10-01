@@ -343,7 +343,7 @@ func TestCredentialVaultStateDoesNotRetainPlaintextSecretFields(t *testing.T) {
 			{
 				"name": "api-binding",
 				"revision": 3,
-				"match": {"hosts": ["api.example.com"]},
+				"match": {"hosts": ["api.example.com"], "requestHeaders": [{"name": "X-Tenant"}]},
 				"auth": {
 					"type": "bearer",
 					"name": "Authorization",
@@ -370,6 +370,32 @@ func TestCredentialVaultStateDoesNotRetainPlaintextSecretFields(t *testing.T) {
 		if strings.Contains(encoded, forbidden) {
 			t.Fatalf("sanitized state retained forbidden field/value %q in %s", forbidden, encoded)
 		}
+	}
+	if !strings.Contains(encoded, `"name":"X-Tenant"`) {
+		t.Fatal("sanitized state did not retain the selector name")
+	}
+}
+
+func TestCredentialRequestHeaderSelectorWireAndMetadataPrivacy(t *testing.T) {
+	match := CredentialMatch{
+		Hosts: []string{"api.example.com"},
+		RequestHeaders: []CredentialRequestHeaderSelector{{
+			Name:  "X-Tenant",
+			Value: "selector-private-marker",
+		}},
+	}
+	writePayload, err := json.Marshal(match)
+	require.NoError(t, err)
+	if !strings.Contains(string(writePayload), `"requestHeaders":[{"name":"X-Tenant","value":"selector-private-marker"}]`) {
+		t.Fatal("request payload did not preserve the selector predicate")
+	}
+
+	var metadata CredentialMatch
+	require.NoError(t, json.Unmarshal([]byte(`{"hosts":["api.example.com"],"requestHeaders":[{"name":"X-Tenant"}]}`), &metadata))
+	metadataPayload, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	if !strings.Contains(string(metadataPayload), `"name":"X-Tenant"`) || strings.Contains(string(metadataPayload), `"value"`) {
+		t.Fatal("binding metadata must retain selector names without values")
 	}
 }
 

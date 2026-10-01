@@ -106,6 +106,22 @@ ACTIVE_VAULT_HEADER_RESERVED_NAMES = {
     "x-forwarded-host",
     "x-forwarded-proto",
 }
+REQUEST_HEADER_SELECTOR_RESERVED_NAMES = {
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+    "cookie",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+}
 _ACTIVE_VAULT_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _ACTIVE_VAULT_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
@@ -453,6 +469,48 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
             raise ActiveVaultLookupError(
                 f"active vault binding {index} match.paths must start with /"
             )
+        raw_selectors = match.get("requestHeaders")
+        if raw_selectors is None:
+            raw_selectors = []
+        if (
+            "requestHeaders" in match
+            and isinstance(raw_selectors, list)
+            and not raw_selectors
+        ) or not isinstance(raw_selectors, list) or len(raw_selectors) > 4 or any(
+            not isinstance(selector, dict) for selector in raw_selectors
+        ):
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} match.requestHeaders must be a list of at most four objects"
+            )
+        normalized_selectors: list[dict[str, str]] = []
+        seen_selector_names: set[str] = set()
+        for selector_index, selector in enumerate(raw_selectors):
+            selector_name = selector.get("name")
+            selector_value = selector.get("value")
+            if not isinstance(selector_name, str) or _ACTIVE_VAULT_HEADER_NAME_RE.fullmatch(selector_name) is None:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} request header selector {selector_index} has an invalid field name"
+                )
+            selector_key = selector_name.lower()
+            if selector_key in REQUEST_HEADER_SELECTOR_RESERVED_NAMES:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} request header selector {selector_index} uses a reserved field name"
+                )
+            if selector_key in seen_selector_names:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} request header selectors contain duplicate field names"
+                )
+            seen_selector_names.add(selector_key)
+            if not isinstance(selector_value, str):
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} request header selector {selector_index} value must be a string"
+                )
+            canonical_value = selector_value.strip(" \t")
+            if not canonical_value or canonical_value != selector_value:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} request header selector {selector_index} has a non-canonical value"
+                )
+            normalized_selectors.append({"name": selector_name, "value": canonical_value})
 
         raw_headers = binding.get("headers")
         if raw_headers is None:
@@ -548,15 +606,18 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
                 {"placeholder": placeholder, "value": value, "in": surfaces}
             )
 
+        normalized_match = {
+            "schemes": schemes,
+            "hosts": hosts,
+            "methods": methods,
+            "paths": paths,
+        }
+        if normalized_selectors:
+            normalized_match["requestHeaders"] = normalized_selectors
         normalized_bindings.append(
             {
                 "name": name.strip(),
-                "match": {
-                    "schemes": schemes,
-                    "hosts": hosts,
-                    "methods": methods,
-                    "paths": paths,
-                },
+                "match": normalized_match,
                 "headers": normalized_headers,
                 "substitutions": normalized_substitutions,
             }
@@ -747,39 +808,23 @@ def _path_encoded_slash_changes_binding(
     if _DOT_SEGMENT_RE.search(decoded_path):
         return True
 
-    scheme = (flow.request.scheme or "").lower()
-    host = _request_host(flow)
-    port = _request_port(flow)
-    method = (flow.request.method or "").upper()
-
-    def _non_path_matches(binding: dict[str, Any]) -> bool:
-        match = binding.get("match") or {}
-        schemes = match.get("schemes") or ["https"]
-        if scheme not in schemes:
-            return False
-        canonical_port = 443 if scheme == "https" else 80
-        if port != canonical_port:
-            return False
-        methods = [m.upper() for m in (match.get("methods") or ["GET", "POST", "PUT", "PATCH", "DELETE"])]
-        if method not in methods:
-            return False
-        for pattern in match.get("hosts") or []:
-            ok, _ = _host_matches(host, pattern)
-            if ok:
-                return True
-        return False
-
-    def _matches_with_path(path: str) -> set[int]:
-        matched: set[int] = set()
+    def _selector_eligible_outcome(path: str) -> tuple[int, tuple[int, ...]]:
+        matched: list[tuple[int, int, dict[str, Any]]] = []
         for idx, binding in enumerate(vault.bindings):
-            if not _non_path_matches(binding):
-                continue
-            paths = (binding.get("match") or {}).get("paths") or ["/*"]
-            if any(_path_matches(path, p) for p in paths):
-                matched.add(idx)
-        return matched
+            ok, precedence = _binding_matches(flow, binding, path)
+            if ok:
+                matched.append((idx, precedence, binding))
+        if not matched:
+            return 0, ()
+        highest = max(precedence for _, precedence, _ in matched)
+        eligible = tuple(
+            idx
+            for idx, precedence, binding in matched
+            if precedence == highest and _request_header_selectors_match(flow, binding)
+        )
+        return highest, eligible
 
-    return _matches_with_path(raw_path) != _matches_with_path(decoded_path)
+    return _selector_eligible_outcome(raw_path) != _selector_eligible_outcome(decoded_path)
 
 
 def _host_matches(host: str, pattern: str) -> tuple[bool, int]:
@@ -797,13 +842,15 @@ def _path_matches(path: str, pattern: str) -> bool:
     return path == pattern
 
 
-def _binding_matches(flow: http.HTTPFlow, binding: dict[str, Any]) -> tuple[bool, int]:
+def _binding_matches(
+    flow: http.HTTPFlow, binding: dict[str, Any], path: str | None = None
+) -> tuple[bool, int]:
     match = binding.get("match") or {}
     scheme = (flow.request.scheme or "").lower()
     host = _request_host(flow)
     port = _request_port(flow)
     method = (flow.request.method or "").upper()
-    path = _request_path(flow)
+    path = _request_path(flow) if path is None else path
 
     schemes = match.get("schemes") or ["https"]
     if scheme not in schemes:
@@ -822,6 +869,22 @@ def _binding_matches(flow: http.HTTPFlow, binding: dict[str, Any]) -> tuple[bool
         if ok and precedence > best_precedence:
             best_precedence = precedence
     return best_precedence > 0, best_precedence
+
+
+def _request_header_selectors_match(flow: http.HTTPFlow, binding: dict[str, Any]) -> bool:
+    selectors = (binding.get("match") or {}).get("requestHeaders") or []
+    headers = flow.request.headers
+    get_all = getattr(headers, "get_all", None)
+    for selector in selectors:
+        name = selector["name"]
+        if callable(get_all):
+            values = get_all(name)
+        else:
+            value = headers.get(name, "")
+            values = [value] if value != "" else []
+        if len(values) != 1 or values[0].strip(" \t") != selector["value"]:
+            return False
+    return True
 
 
 def _request_may_be_streamed(flow: http.HTTPFlow) -> bool:
@@ -882,7 +945,15 @@ def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] |
         return None
 
     highest = max(precedence for precedence, _ in matches)
-    selected = [binding for precedence, binding in matches if precedence == highest]
+    selected = [
+        binding
+        for precedence, binding in matches
+        if precedence == highest and _request_header_selectors_match(flow, binding)
+    ]
+    if not selected:
+        _reject_request(flow, b"credential binding selector mismatch\n")
+        ctx.log.warn("credential proxy: request header selector mismatch")
+        return None
     if len(selected) != 1:
         _reject_request(flow, b"credential binding ambiguous\n")
         ctx.log.warn(

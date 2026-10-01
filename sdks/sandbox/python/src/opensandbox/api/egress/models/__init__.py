@@ -33,6 +33,7 @@ from .credential_match import CredentialMatch
 from .credential_match_schemes_item import CredentialMatchSchemesItem
 from .credential_metadata import CredentialMetadata
 from .credential_mutation_set import CredentialMutationSet
+from .credential_request_header_selector import CredentialRequestHeaderSelector
 from .credential_substitution import CredentialSubstitution
 from .credential_substitution_in_item import CredentialSubstitutionInItem
 from .credential_vault_create_request import CredentialVaultCreateRequest
@@ -69,6 +70,7 @@ __all__ = (
     "CredentialMatchSchemesItem",
     "CredentialMetadata",
     "CredentialMutationSet",
+    "CredentialRequestHeaderSelector",
     "CredentialSubstitution",
     "CredentialSubstitutionInItem",
     "CredentialVaultCreateRequest",

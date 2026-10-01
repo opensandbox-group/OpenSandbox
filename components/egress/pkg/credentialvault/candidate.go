@@ -289,10 +289,14 @@ func sanitizedState(revision int64, credentials map[string]record, bindings map[
 		})
 	}
 	for _, binding := range bindings {
+		match := cloneMatch(binding.Match)
+		for i := range match.RequestHeaders {
+			match.RequestHeaders[i].Value = ""
+		}
 		state.Bindings = append(state.Bindings, BindingMetadata{
 			Name:     binding.Name,
 			Revision: revision,
-			Match:    cloneMatch(binding.Match),
+			Match:    match,
 			Auth:     sanitizeAuth(binding.Auth),
 		})
 	}
@@ -377,13 +381,18 @@ func cloneActiveSnapshot(snapshot ActiveSnapshot) ActiveSnapshot {
 }
 
 func cloneMatch(match Match) Match {
-	return Match{
+	clone := Match{
 		Schemes: append([]string(nil), match.Schemes...),
 		Ports:   append([]int(nil), match.Ports...),
 		Hosts:   append([]string(nil), match.Hosts...),
 		Methods: append([]string(nil), match.Methods...),
 		Paths:   append([]string(nil), match.Paths...),
 	}
+	if match.RequestHeaders != nil {
+		clone.RequestHeaders = make([]RequestHeaderSelector, len(match.RequestHeaders))
+		copy(clone.RequestHeaders, match.RequestHeaders)
+	}
+	return clone
 }
 
 func cloneBinding(binding Binding) Binding {

@@ -17,12 +17,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
 from ..models.credential_match_schemes_item import CredentialMatchSchemesItem
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.credential_request_header_selector import CredentialRequestHeaderSelector
+
 
 T = TypeVar("T", bound="CredentialMatch")
 
@@ -37,6 +41,13 @@ class CredentialMatch:
             443 are rejected with a validation error. Standard values (80/443) are accepted but ignored.
         methods (list[str] | Unset):
         paths (list[str] | Unset):
+        request_headers (list[CredentialRequestHeaderSelector] | Unset): Optional routing selectors. Every predicate
+            must match. Header names are ASCII case-insensitive RFC 9110 field-name tokens and are not trimmed. Values are
+            compared case-sensitively after trimming only outer SP and HTAB. Authorization and Content-Type are allowed;
+            Host, Content-Length, Transfer-Encoding, Connection, Upgrade, TE, Trailer, Cookie, Proxy-Authorization, Proxy-
+            Authenticate, Forwarded, X-Forwarded-For, X-Forwarded-Host, and X-Forwarded-Proto are rejected. A selected
+            header must occur exactly once; missing or repeated field lines do not match. A comma-containing single field is
+            compared as one value. Selectors route requests and do not authorize users or processes.
     """
 
     hosts: list[str]
@@ -44,6 +55,7 @@ class CredentialMatch:
     ports: list[int] | Unset = UNSET
     methods: list[str] | Unset = UNSET
     paths: list[str] | Unset = UNSET
+    request_headers: list[CredentialRequestHeaderSelector] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         hosts = self.hosts
@@ -67,6 +79,13 @@ class CredentialMatch:
         if not isinstance(self.paths, Unset):
             paths = self.paths
 
+        request_headers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.request_headers, Unset):
+            request_headers = []
+            for request_headers_item_data in self.request_headers:
+                request_headers_item = request_headers_item_data.to_dict()
+                request_headers.append(request_headers_item)
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -82,11 +101,15 @@ class CredentialMatch:
             field_dict["methods"] = methods
         if paths is not UNSET:
             field_dict["paths"] = paths
+        if request_headers is not UNSET:
+            field_dict["requestHeaders"] = request_headers
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.credential_request_header_selector import CredentialRequestHeaderSelector
+
         d = dict(src_dict)
         hosts = cast(list[str], d.pop("hosts"))
 
@@ -105,12 +128,22 @@ class CredentialMatch:
 
         paths = cast(list[str], d.pop("paths", UNSET))
 
+        _request_headers = d.pop("requestHeaders", UNSET)
+        request_headers: list[CredentialRequestHeaderSelector] | Unset = UNSET
+        if _request_headers is not UNSET:
+            request_headers = []
+            for request_headers_item_data in _request_headers:
+                request_headers_item = CredentialRequestHeaderSelector.from_dict(request_headers_item_data)
+
+                request_headers.append(request_headers_item)
+
         credential_match = cls(
             hosts=hosts,
             schemes=schemes,
             ports=ports,
             methods=methods,
             paths=paths,
+            request_headers=request_headers,
         )
 
         return credential_match

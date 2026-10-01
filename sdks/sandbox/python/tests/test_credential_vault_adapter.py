@@ -47,7 +47,10 @@ class _CredentialVaultAsyncTransport(httpx.AsyncBaseTransport):
                             "name": "gitlab-api",
                             "revision": 1,
                             "auth": {"type": "apiKey", "name": "PRIVATE-TOKEN"},
-                            "match": {"hosts": ["code.example.com"]},
+                            "match": {
+                                "hosts": ["code.example.com"],
+                                "requestHeaders": [{"name": "X-Tenant"}],
+                            },
                         }
                     ],
                 },
@@ -108,7 +111,10 @@ async def test_async_credential_vault_create_patch_and_list_bindings() -> None:
         bindings=[
             {
                 "name": "gitlab-api",
-                "match": {"hosts": ["code.example.com"]},
+                "match": {
+                    "hosts": ["code.example.com"],
+                    "requestHeaders": [{"name": "X-Tenant", "value": "selector-private-marker"}],
+                },
                 "auth": {
                     "type": "apiKey",
                     "name": "PRIVATE-TOKEN",
@@ -119,6 +125,9 @@ async def test_async_credential_vault_create_patch_and_list_bindings() -> None:
     )
     assert state.revision == 1
     assert state.credentials[0].source_type == "inline"
+    assert state.bindings[0].match is not None
+    assert state.bindings[0].match.request_headers is not None
+    assert state.bindings[0].match.request_headers[0].value is None
 
     post_body = json.loads(transport.requests[0].content)
     assert post_body["credentials"][0]["source"] == {
@@ -126,6 +135,10 @@ async def test_async_credential_vault_create_patch_and_list_bindings() -> None:
         "value": "secret-token",
     }
     assert post_body["bindings"][0]["auth"]["type"] == "apiKey"
+    selector_payload = post_body["bindings"][0]["match"]["requestHeaders"]
+    assert selector_payload == [
+        {"name": "X-Tenant", "value": "selector-private-marker"}
+    ]
     assert transport.requests[0].headers["X-Egress"] == "1"
 
     patched = await adapter.patch(

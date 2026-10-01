@@ -65,6 +65,12 @@ var (
 		"x-forwarded-host":    {},
 		"x-forwarded-proto":   {},
 	}
+	reservedRequestSelectorNames = map[string]struct{}{
+		"host": {}, "content-length": {}, "transfer-encoding": {}, "connection": {},
+		"upgrade": {}, "te": {}, "trailer": {}, "cookie": {},
+		"proxy-authorization": {}, "proxy-authenticate": {}, "forwarded": {},
+		"x-forwarded-for": {}, "x-forwarded-host": {}, "x-forwarded-proto": {},
+	}
 )
 
 var activeSnapshotTagFallback atomic.Uint64
@@ -126,11 +132,17 @@ type Binding struct {
 }
 
 type Match struct {
-	Schemes []string `json:"schemes,omitempty"`
-	Ports   []int    `json:"ports,omitempty"` // Deprecated: ignored, port is derived from scheme.
-	Hosts   []string `json:"hosts"`
-	Methods []string `json:"methods,omitempty"`
-	Paths   []string `json:"paths,omitempty"`
+	Schemes        []string                `json:"schemes,omitempty"`
+	Ports          []int                   `json:"ports,omitempty"` // Deprecated: ignored, port is derived from scheme.
+	Hosts          []string                `json:"hosts"`
+	Methods        []string                `json:"methods,omitempty"`
+	Paths          []string                `json:"paths,omitempty"`
+	RequestHeaders []RequestHeaderSelector `json:"requestHeaders,omitempty"`
+}
+
+type RequestHeaderSelector struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
 }
 
 type Auth struct {
@@ -501,6 +513,31 @@ func normalizeMatch(m *Match) error {
 	dedupeStringsInPlace(&m.Hosts)
 	dedupeStringsInPlace(&m.Methods)
 	dedupeStringsInPlace(&m.Paths)
+	if m.RequestHeaders != nil && len(m.RequestHeaders) == 0 {
+		return fmt.Errorf("match.requestHeaders must not be empty when specified")
+	}
+	if len(m.RequestHeaders) > 4 {
+		return fmt.Errorf("match.requestHeaders must contain between 1 and 4 selectors")
+	}
+	seenRequestHeaders := make(map[string]struct{}, len(m.RequestHeaders))
+	for i := range m.RequestHeaders {
+		header := &m.RequestHeaders[i]
+		if header.Name == "" || !headerFieldNamePattern.MatchString(header.Name) {
+			return fmt.Errorf("match.requestHeaders contains an invalid HTTP field name")
+		}
+		key := strings.ToLower(header.Name)
+		if _, denied := reservedRequestSelectorNames[key]; denied {
+			return fmt.Errorf("match.requestHeaders contains a reserved HTTP field name")
+		}
+		if _, duplicate := seenRequestHeaders[key]; duplicate {
+			return fmt.Errorf("match.requestHeaders contains duplicate HTTP field names")
+		}
+		seenRequestHeaders[key] = struct{}{}
+		header.Value = strings.Trim(header.Value, " \t")
+		if header.Value == "" {
+			return fmt.Errorf("match.requestHeaders selector values cannot be blank")
+		}
+	}
 	return nil
 }
 
@@ -1094,12 +1131,26 @@ func validateBindingAmbiguity(bindings map[string]Binding) error {
 	}
 	for i := 0; i < len(list); i++ {
 		for j := i + 1; j < len(list); j++ {
-			if bindingsAmbiguous(list[i], list[j]) {
+			if bindingsAmbiguous(list[i], list[j]) && !requestHeaderSelectorsDisambiguate(list[i].Match.RequestHeaders, list[j].Match.RequestHeaders) {
 				return fmt.Errorf("bindings %q and %q can match the same request", list[i].Name, list[j].Name)
 			}
 		}
 	}
 	return nil
+}
+
+func requestHeaderSelectorsDisambiguate(a, b []RequestHeaderSelector) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	for _, left := range a {
+		for _, right := range b {
+			if strings.EqualFold(left.Name, right.Name) && left.Value != right.Value {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func bindingsAmbiguous(a, b Binding) bool {

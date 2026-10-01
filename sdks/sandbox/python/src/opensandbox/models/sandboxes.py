@@ -269,6 +269,13 @@ class Credential(BaseModel):
         return self
 
 
+class CredentialRequestHeaderSelector(BaseModel):
+    """Request header routing predicate; metadata omits the write-only value."""
+
+    name: str
+    value: str | None = None
+
+
 class CredentialMatch(BaseModel):
     """Request match for a Credential Vault binding."""
 
@@ -277,6 +284,11 @@ class CredentialMatch(BaseModel):
     hosts: list[str] = Field(description="Exact FQDNs or leftmost-label wildcards.")
     methods: list[str] | None = Field(default=None)
     paths: list[str] | None = Field(default=None)
+    request_headers: list[CredentialRequestHeaderSelector] | None = Field(
+        default=None, alias="requestHeaders"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
 
     @field_validator("hosts")
     @classmethod

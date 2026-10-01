@@ -30,6 +30,7 @@ const binding = {
     hosts: ["api.example.com"],
     methods: ["GET", "POST"],
     paths: ["/v1/*"],
+    requestHeaders: [{ name: "X-Tenant", value: "selector-private-marker" }],
   },
   auth: {
     type: "apiKey",
@@ -52,6 +53,7 @@ const sanitizedBinding = {
     hosts: ["api.example.com"],
     methods: ["GET", "POST"],
     paths: ["/v1/*"],
+    requestHeaders: [{ name: "X-Tenant" }],
   },
   auth: {
     type: "apiKey",
