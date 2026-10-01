@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pyright: reportAttributeAccessIssue=false
+# protobuf-generated modules expose dynamic attributes.
+
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -20,6 +23,7 @@ from datetime import datetime, timezone
 import os
 from threading import Barrier, Lock
 import time
+from typing import cast
 
 from kubernetes.client import ApiException
 import psycopg
@@ -35,7 +39,13 @@ from opensandbox_server.config import (
     StoreConfig,
 )
 from opensandbox_server.repositories.snapshots.postgresql import PostgreSQLSnapshotRepository
-from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
+from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fast_sandbox.snapshot_runtime import FastSandboxSnapshotRuntime
+from opensandbox_server.services.fast_sandbox.fastpath_client import FastPathClient
+from opensandbox_server.services.k8s.snapshot_runtime import (
+    KubernetesSnapshotRuntime,
+    build_public_snapshot_name,
+)
 from opensandbox_server.services.snapshot_models import (
     SnapshotRecord,
     SnapshotRestoreConfig,
@@ -43,7 +53,10 @@ from opensandbox_server.services.snapshot_models import (
     SnapshotStatusRecord,
 )
 from opensandbox_server.services.snapshot_runtime import SnapshotRuntimeStatus
-from opensandbox_server.services.snapshot_runtime_factory import create_snapshot_runtime
+from opensandbox_server.services.snapshot_runtime_factory import (
+    CompositeSnapshotRuntime,
+    create_snapshot_runtime,
+)
 from opensandbox_server.services.snapshot_repository import (
     SnapshotListQuery,
     SnapshotListResult,
@@ -51,11 +64,13 @@ from opensandbox_server.services.snapshot_repository import (
 from opensandbox_server.services.snapshot_service import (
     PostgreSQLKubernetesSnapshotService,
 )
+from tests.test_fsb_snapshot_runtime import FakeFastPathClient
 
 
 TEST_POSTGRESQL_DSN_ENV_VAR = "OPENSANDBOX_TEST_POSTGRESQL_DSN"
 SNAPSHOT_ID = "11111111-2222-4333-8444-555555555555"
 SANDBOX_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+FSB_SANDBOX_ID = "fsb-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 
 @pytest.fixture(scope="module")
@@ -347,6 +362,8 @@ def test_active_peer_periodically_recovers_after_creator_crash(
             recovery_interval_seconds=60,
             snapshot_executor=creator_executor,
         )
+        creator._recovery_stop.set()
+        creator._recovery_thread.join()
         peer = PostgreSQLKubernetesSnapshotService(
             repositories[1],
             _SandboxService(),
@@ -358,11 +375,13 @@ def test_active_peer_periodically_recovers_after_creator_crash(
             snapshot_executor=_ImmediateExecutor(),
         )
 
+        # The CR is created synchronously in the request path.
         created = creator.create_snapshot(
             SANDBOX_ID,
             CreateSnapshotRequest(name="creator-crash"),
         )
-        assert len(creator_executor.submitted) == 1
+        assert creator_executor.submitted == []
+        assert k8s_client.successful_creates == 1
 
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -391,6 +410,115 @@ def test_active_peer_periodically_recovers_after_creator_crash(
         time.sleep(0.1)
         restarted_peer.close()
         assert k8s_client.successful_creates == 1
+    finally:
+        if peer is not None:
+            peer.close()
+        if creator is not None:
+            creator.close()
+        for repository in repositories:
+            repository.close()
+
+
+class _FsbSnapshotInfo:
+    def __init__(self, phase, template_name: str = "") -> None:
+        self.phase = phase
+        self.message = ""
+        self.template_name = template_name
+
+
+class _FsbSnapshotResponse:
+    def __init__(self, info: _FsbSnapshotInfo) -> None:
+        self.snapshot = info
+
+
+def test_fsb_snapshot_row_is_recovered_by_peer_replica(postgresql_dsn: str) -> None:
+    """HA recovery with fsb: a peer replica resubmits the idempotent intent
+    and never maps the row to Failed."""
+    repositories = [_repository(postgresql_dsn), _repository(postgresql_dsn)]
+    creator = None
+    peer = None
+    try:
+        _truncate(postgresql_dsn)
+        k8s_client = _SharedK8sClient()
+        fastpath = FakeFastPathClient()
+
+        def _runtime() -> CompositeSnapshotRuntime:
+            return CompositeSnapshotRuntime(
+                KubernetesSnapshotRuntime(
+                    k8s_client,
+                    namespace="default",
+                    postgresql_ha_enabled=True,
+                ),
+                FastSandboxSnapshotRuntime(
+                    cast(FastPathClient, fastpath),
+                    k8s_client,
+                    namespace="default",
+                ),
+            )
+
+        creator_executor = _CapturingExecutor()
+        creator = PostgreSQLKubernetesSnapshotService(
+            repositories[0],
+            _SandboxService(),
+            snapshot_runtime=_runtime(),
+            recovery_interval_seconds=60,
+            snapshot_executor=creator_executor,
+        )
+        creator._recovery_stop.set()
+        creator._recovery_thread.join()
+
+        created = creator.create_snapshot(
+            FSB_SANDBOX_ID,
+            CreateSnapshotRequest(name="fsb-ha"),
+        )
+        assert creator_executor.submitted == []
+        assert len(fastpath.create_requests) == 1
+        created_row = repositories[0].get(created.id)
+        assert created_row is not None
+        assert created_row.status.state == SnapshotState.CREATING
+
+        # Seed before the peer starts; its constructor-spawned loop must not
+        # observe a gap.
+        snapshot_name = build_public_snapshot_name(created.id)
+        fastpath.get_by_name[("default", snapshot_name)] = _FsbSnapshotResponse(
+            _FsbSnapshotInfo(pb2.SNAPSHOT_PHASE_CREATING)
+        )
+        peer_executor = _CapturingExecutor()
+        peer = PostgreSQLKubernetesSnapshotService(
+            repositories[1],
+            _SandboxService(),
+            snapshot_runtime=_runtime(),
+            recovery_interval_seconds=60,
+            snapshot_executor=peer_executor,
+        )
+        peer._recovery_stop.set()
+        peer._recovery_thread.join()
+
+        requests_before = len(fastpath.create_requests)
+        peer.recover_unfinished_snapshots()
+
+        stored = repositories[0].get(created.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.CREATING
+        assert peer_executor.submitted == []
+        assert len(fastpath.create_requests) == requests_before + 1
+        assert (
+            fastpath.create_requests[-1].request_id
+            == fastpath.create_requests[0].request_id
+        )
+
+        fastpath.get_by_name[("default", snapshot_name)] = _FsbSnapshotResponse(
+            _FsbSnapshotInfo(
+                pb2.SNAPSHOT_PHASE_SUCCEEDED,
+                template_name=snapshot_name,
+            )
+        )
+        peer.recover_unfinished_snapshots()
+
+        stored = repositories[0].get(created.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.READY
+        assert stored.restore_config.image == snapshot_name
     finally:
         if peer is not None:
             peer.close()

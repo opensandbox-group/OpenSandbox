@@ -65,6 +65,11 @@ class CompositeSnapshotRuntime:
             self._fsb is not None and self._fsb.supports_create_snapshot()
         )
 
+    def supports_synchronous_create(self) -> bool:
+        if not self._default.supports_synchronous_create():
+            return False
+        return self._fsb is None or self._fsb.supports_synchronous_create()
+
     def create_snapshot_unsupported_message(self) -> str:
         return self._default.create_snapshot_unsupported_message()
 

@@ -182,6 +182,13 @@ def test_preflight_rejects_gvisor_runtimeclass_before_snapshot_cr_creation() -> 
     assert k8s_client.created == []
 
 
+def test_supports_synchronous_create() -> None:
+    runtime = KubernetesSnapshotRuntime(FakeK8sClient(), namespace="default")
+
+    assert runtime.supports_create_snapshot() is True
+    assert runtime.supports_synchronous_create() is True
+
+
 def test_preflight_allows_non_gvisor_runtimeclass() -> None:
     k8s_client = FakeK8sClient()
     k8s_client.workloads[SANDBOX_ID] = {

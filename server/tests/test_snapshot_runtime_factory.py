@@ -89,7 +89,7 @@ def test_create_snapshot_runtime_requires_docker_client_for_docker() -> None:
 
 
 class _DispatchStubRuntime:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, synchronous: bool = True) -> None:
         self.name = name
         self.preflight: list[str] = []
         self.created: list[tuple[str, str, str | None]] = []
@@ -97,9 +97,13 @@ class _DispatchStubRuntime:
         self.deleted: list[str] = []
         self.watch_started = False
         self.closed = False
+        self._synchronous = synchronous
 
     def supports_create_snapshot(self) -> bool:
         return True
+
+    def supports_synchronous_create(self) -> bool:
+        return self._synchronous
 
     def create_snapshot_unsupported_message(self) -> str:
         return ""
@@ -196,3 +200,32 @@ def test_composite_runtime_defaults_without_fsb_runtime() -> None:
 
     assert default.preflight == ["fsb-001"]
     assert default.inspected == ["snap-1"]
+
+
+def test_composite_supports_synchronous_create_only_when_all_backends_do() -> None:
+    composite = _composite(_DispatchStubRuntime("k8s"), _DispatchStubRuntime("fsb"))
+    assert composite.supports_synchronous_create() is True
+
+    mixed = _composite(
+        _DispatchStubRuntime("k8s"),
+        _DispatchStubRuntime("fsb", synchronous=False),
+    )
+    assert mixed.supports_synchronous_create() is False
+
+    solo = _composite(_DispatchStubRuntime("k8s"))
+    assert solo.supports_synchronous_create() is True
+
+
+def test_created_runtimes_declare_synchronous_create_capability() -> None:
+    docker_config = AppConfig(
+        runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:test")
+    )
+    docker_runtime = create_snapshot_runtime(docker_config, docker_client=object())
+    assert docker_runtime.supports_synchronous_create() is False
+
+    k8s_config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(namespace="default"),
+    )
+    k8s_runtime = create_snapshot_runtime(k8s_config, k8s_client=object())
+    assert k8s_runtime.supports_synchronous_create() is True

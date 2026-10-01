@@ -25,6 +25,13 @@ from opensandbox_server.services.docker.snapshot_runtime import (
 from opensandbox_server.services.snapshot_models import SnapshotState
 
 
+def test_supports_synchronous_create_is_false_for_docker() -> None:
+    runtime = DockerSnapshotRuntime(SimpleNamespace())
+
+    assert runtime.supports_create_snapshot() is True
+    assert runtime.supports_synchronous_create() is False
+
+
 def test_create_snapshot_commits_container_and_marks_ready() -> None:
     container = SimpleNamespace()
     commits: list[tuple[str, str]] = []

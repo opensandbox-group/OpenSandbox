@@ -42,9 +42,9 @@ Only a Ready runtime may pause; UID mismatches and missing checkpoints surface a
 
 A snapshot turns a running sandbox's state into a durable, reusable artifact set — published under the same content-addressed layout as template golden images, so a restored snapshot and a native template behave identically at create time.
 
-1. `POST /sandboxes/{id}/snapshots` accepts only a Running source, persists a `CREATING` row, and creates a `SandboxSnapshot` record with a deterministic name and a `sandboxRef.uid` fence.
+1. `POST /sandboxes/{id}/snapshots` accepts only a Running source, creates the `SandboxSnapshot` record with a deterministic name and a `sandboxRef.uid` fence, and then persists the `CREATING` row — the runtime intent always exists behind a readable row, on every replica.
 2. The platform drives the record through `Pending → Creating → Publishing → Succeeded/Failed`. Creation may briefly pause the sandbox while state is captured; publishing writes the artifact set plus an index entry keyed by the snapshot's template name.
-3. The server converges the row by watching the record, re-checking on read, and CAS-writing the terminal state — a crashed worker leaves the row recoverable, not stuck.
+3. The server converges the row by watching the record, re-checking on read, and CAS-writing the terminal state; recovery resubmits the same idempotent intent, so a crashed server leaves the row recoverable, not stuck.
 4. `POST /sandboxes {"snapshotId": ...}` restores from a `READY` snapshot: the index entry resolves like a template, and creation routes to Fast Sandbox. The sandbox ID is new; the snapshot is a starting point, not a continuation.
 
 Snapshot names are cluster-wide index keys with last-writer-wins semantics, so FastPath rejects a non-terminal holder of a name before accepting a new one. Deleting a snapshot record does not delete the pushed artifacts — store retention is operator policy (see [Storage](/architecture/fast-sandbox/storage)).

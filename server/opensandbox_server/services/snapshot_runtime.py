@@ -53,6 +53,12 @@ class SnapshotRuntime(Protocol):
         Whether this runtime supports creating snapshots.
         """
 
+    def supports_synchronous_create(self) -> bool:
+        """
+        Whether ``create_snapshot`` is a fast, idempotent submit that can run
+        inline before the snapshot row is persisted.
+        """
+
     def create_snapshot_unsupported_message(self) -> str:
         """
         Human-readable message used when snapshot creation is unsupported.
@@ -116,6 +122,9 @@ class NoopSnapshotRuntime:
     """
 
     def supports_create_snapshot(self) -> bool:
+        return False
+
+    def supports_synchronous_create(self) -> bool:
         return False
 
     def create_snapshot_unsupported_message(self) -> str:

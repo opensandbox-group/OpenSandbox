@@ -135,6 +135,11 @@ def test_supports_create_snapshot() -> None:
     assert runtime.supports_create_snapshot() is True
 
 
+def test_supports_synchronous_create() -> None:
+    runtime, _, _ = _runtime()
+    assert runtime.supports_synchronous_create() is True
+
+
 def test_preflight_raises_when_source_sandbox_is_missing() -> None:
     fastpath = FakeFastPathClient()
     fastpath.get_sandbox_error = FastPathNotFound("NOT_FOUND", "no sandbox")

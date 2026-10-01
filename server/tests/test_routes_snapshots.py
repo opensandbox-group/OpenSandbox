@@ -222,6 +222,10 @@ def test_snapshot_routes_can_use_persisted_service(
             return True
 
         @staticmethod
+        def supports_synchronous_create() -> bool:
+            return False
+
+        @staticmethod
         def create_snapshot_unsupported_message() -> str:
             return ""
 

@@ -49,6 +49,9 @@ class DockerSnapshotRuntime:
     def supports_create_snapshot(self) -> bool:
         return True
 
+    def supports_synchronous_create(self) -> bool:
+        return False
+
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 

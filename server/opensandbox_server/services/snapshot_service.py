@@ -15,7 +15,10 @@
 """
 Snapshot service orchestration for server-managed snapshot resources.
 
-The service persists the snapshot record and submits creation to the runtime.
+Fast, idempotent-submit runtimes (Kubernetes CR create, fsb submit) create
+the runtime object before the snapshot row is persisted; slow runtimes
+(Docker commit) persist first and create via the async worker pool.
+
 Status converges asynchronously, mirroring the template catalog pattern:
 a runtime status watch (when available) reacts to terminal transitions and
 updates rows directly, and every read re-checks non-terminal rows against the
@@ -187,9 +190,75 @@ class PersistedSnapshotService(SnapshotService):
             created_at=now,
             updated_at=now,
         )
+        if self._snapshot_runtime.supports_synchronous_create():
+            self._create_snapshot_synchronously(record)
+            return self._to_snapshot_response(record)
+
         self._snapshot_repository.create(record)
         self._submit_snapshot_worker(record)
         return self._to_snapshot_response(record)
+
+    def _create_snapshot_synchronously(self, record: SnapshotRecord) -> None:
+        """Create the runtime object first, then persist the row."""
+        try:
+            runtime_status = self._snapshot_runtime.create_snapshot(
+                record.id,
+                record.source_sandbox_id,
+                namespace=record.namespace,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the caller
+            logger.exception(
+                f"Failed to create snapshot {record.id} from sandbox "
+                f"{record.source_sandbox_id}: {exc}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SnapshotErrorCodes.RUNTIME_CREATE_FAILED,
+                    "message": f"Failed to create snapshot runtime object: {exc}",
+                },
+            ) from exc
+
+        if runtime_status is None or runtime_status.state == SnapshotState.FAILED:
+            reason = runtime_status.reason if runtime_status is not None else None
+            message = (
+                runtime_status.message
+                if runtime_status is not None
+                else "Snapshot runtime did not accept the creation."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SnapshotErrorCodes.RUNTIME_CREATE_FAILED,
+                    "message": (
+                        f"Snapshot runtime rejected creation ({reason}): {message}"
+                        if reason
+                        else f"Snapshot runtime rejected creation: {message}"
+                    ),
+                },
+            )
+
+        try:
+            self._snapshot_repository.create(record)
+        except Exception as exc:
+            logger.warning(
+                f"Failed to persist snapshot {record.id} after runtime creation: {exc}",
+                exc_info=True,
+            )
+            try:
+                self._snapshot_runtime.delete_snapshot(
+                    record.id,
+                    image=None,
+                    namespace=record.namespace,
+                    source_sandbox_id=record.source_sandbox_id,
+                )
+            except Exception as cleanup_exc:  # noqa: BLE001 - best effort
+                logger.warning(
+                    f"Failed to clean up orphaned runtime snapshot {record.id} "
+                    f"after persist failure: {cleanup_exc}",
+                    exc_info=True,
+                )
+            raise
 
     def list_snapshots(self, request: ListSnapshotsRequest) -> ListSnapshotsResponse:
         pagination = request.pagination or self._default_pagination()
@@ -330,19 +399,12 @@ class PersistedSnapshotService(SnapshotService):
         self._converge_from_runtime(record)
 
     def _worker_in_flight(self, snapshot_id: str) -> bool:
-        """Whether this process has a create worker queued or running for the row.
-
-        Until the worker returns, the runtime snapshot may not exist yet, so a
-        "not found" from the runtime is expected rather than a failure. Readers
-        leave such rows to the worker and converge them once it is done.
-        """
+        """Whether this process has an async (Docker) create worker queued or running."""
         with self._inflight_lock:
             return snapshot_id in self._inflight_snapshot_ids
 
     def _converge_from_runtime(self, record: SnapshotRecord) -> bool:
         """One runtime observation; CAS-complete the row when terminal."""
-        if self._worker_in_flight(record.id):
-            return False
         runtime_status = self._observe_runtime(record)
         if runtime_status is None or runtime_status.state not in (
             SnapshotState.READY,
@@ -599,7 +661,7 @@ class PersistedSnapshotService(SnapshotService):
                 source_sandbox_id=record.source_sandbox_id,
             )
             if runtime_status.state == SnapshotState.CREATING:
-                self._submit_snapshot_worker(record)
+                self._resubmit_snapshot_creation(record)
                 return False
             self._complete_snapshot(record, runtime_status)
             return True
@@ -623,6 +685,19 @@ class PersistedSnapshotService(SnapshotService):
             return True
 
         return False
+
+    def _resubmit_snapshot_creation(self, record: SnapshotRecord) -> None:
+        """Retry creation inline for sync runtimes; Docker goes back through the pool."""
+        if self._snapshot_runtime.supports_synchronous_create():
+            try:
+                self._create_snapshot_worker(record)
+            except Exception as exc:  # noqa: BLE001 - retried on the next pass
+                logger.warning(
+                    f"Inline snapshot create retry failed for {record.id}: {exc}",
+                    exc_info=True,
+                )
+            return
+        self._submit_snapshot_worker(record)
 
     def _build_runtime_status_record(
         self,

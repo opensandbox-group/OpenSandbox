@@ -97,6 +97,9 @@ class StubSnapshotRuntime:
     def supports_create_snapshot(self) -> bool:
         return True
 
+    def supports_synchronous_create(self) -> bool:
+        return False
+
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 
@@ -345,6 +348,20 @@ class WatchableStubSnapshotRuntime(StubSnapshotRuntime):
         self.closed = True
 
 
+class SynchronousStubSnapshotRuntime(WatchableStubSnapshotRuntime):
+    """k8s/fsb-like stub: a fast, idempotent submit with a change stream."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_result = SnapshotRuntimeStatus(
+            state=SnapshotState.CREATING,
+            reason="snapshot_runtime_submitted",
+        )
+
+    def supports_synchronous_create(self) -> bool:
+        return True
+
+
 def test_get_snapshot_converges_creating_row_from_runtime(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = WatchableStubSnapshotRuntime()
@@ -399,9 +416,9 @@ def test_list_snapshots_converges_creating_rows_from_runtime(tmp_path) -> None:
     assert stored.status.state == SnapshotState.FAILED
 
 
-def test_read_time_sync_waits_for_pending_worker(tmp_path) -> None:
+def test_synchronous_create_submits_runtime_before_persisting(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
-    runtime = WatchableStubSnapshotRuntime()
+    runtime = SynchronousStubSnapshotRuntime()
     executor = CapturingExecutor()
     service = PersistedSnapshotService(
         repo,
@@ -410,29 +427,94 @@ def test_read_time_sync_waits_for_pending_worker(tmp_path) -> None:
         snapshot_executor=executor,
         recover_unfinished_snapshots=False,
     )
-    # The worker is queued but has not run, so the runtime has no snapshot
-    # yet and inspect_snapshot reports it as missing (FAILED).
-    created = service.create_snapshot("sbx-001", CreateSnapshotRequest(name="early-read"))
+    rows_seen_by_runtime: list[object] = []
 
-    assert service.get_snapshot(created.id).status.state == "Creating"
-    listed = service.list_snapshots(ListSnapshotsRequest(filter=SnapshotFilter(), pagination=None))
-    assert listed.items[0].status.state == "Creating"
-    service.start_background_sync()
-    runtime.watch_callbacks[0](created.id, "default")
+    def create_snapshot(snapshot_id: str, sandbox_id: str, **kwargs):
+        rows_seen_by_runtime.append(repo.get(snapshot_id))
+        runtime.calls.append((snapshot_id, sandbox_id))
+        return runtime.create_result
+
+    runtime.create_snapshot = create_snapshot
+
+    created = service.create_snapshot("sbx-001", CreateSnapshotRequest(name="sync-submit"))
+
+    assert rows_seen_by_runtime == [None]
+    assert executor.submitted == []
     stored = repo.get(created.id)
     assert stored is not None
     assert stored.status.state == SnapshotState.CREATING
+    assert created.status.reason == "snapshot_accepted"
 
-    # Once the worker has submitted the snapshot, reads converge again.
-    worker, args, kwargs = executor.submitted[0]
-    runtime.create_result = SnapshotRuntimeStatus(state=SnapshotState.CREATING)
-    worker(*args, **kwargs)
+    runtime.inspect_status_by_snapshot_id[created.id] = SnapshotRuntimeStatus(
+        state=SnapshotState.CREATING,
+        reason="snapshot_runtime_in_progress",
+    )
+    assert service.get_snapshot(created.id).status.state == "Creating"
+
     runtime.inspect_status_by_snapshot_id[created.id] = SnapshotRuntimeStatus(
         state=SnapshotState.READY,
         image="registry/sandbox:snap",
     )
-
     assert service.get_snapshot(created.id).status.state == "Ready"
+
+
+def test_synchronous_create_failure_returns_error_without_persisting(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = SynchronousStubSnapshotRuntime()
+    executor = CapturingExecutor()
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=executor,
+        recover_unfinished_snapshots=False,
+    )
+
+    def create_snapshot(snapshot_id: str, sandbox_id: str, **kwargs):
+        runtime.calls.append((snapshot_id, sandbox_id))
+        return SnapshotRuntimeStatus(
+            state=SnapshotState.FAILED,
+            reason="snapshot_runtime_create_failed",
+            message="Failed to create fsb snapshot.",
+        )
+
+    runtime.create_snapshot = create_snapshot
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.create_snapshot("sbx-001", CreateSnapshotRequest(name="sync-fail"))
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail["code"] == "SNAPSHOT::RUNTIME_CREATE_FAILED"
+    assert service.list_snapshots(ListSnapshotsRequest()).pagination.total_items == 0
+    assert runtime.delete_calls == []
+    assert executor.submitted == []
+
+
+def test_synchronous_create_cleans_up_runtime_object_when_persist_fails(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = SynchronousStubSnapshotRuntime()
+    executor = CapturingExecutor()
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=executor,
+        recover_unfinished_snapshots=False,
+    )
+
+    def crash_create(record: SnapshotRecord):
+        raise RuntimeError("simulated metadata persist crash")
+
+    repo.create = crash_create
+
+    with pytest.raises(RuntimeError, match="simulated metadata persist crash"):
+        service.create_snapshot("sbx-001", CreateSnapshotRequest(name="orphan-cleanup"))
+
+    assert len(runtime.calls) == 1
+    assert [delete_call[0] for delete_call in runtime.delete_calls] == [
+        runtime.calls[0][0],
+    ]
+    assert executor.submitted == []
 
 
 def test_background_sync_converges_creating_row_on_runtime_event(tmp_path) -> None:
@@ -987,7 +1069,7 @@ def test_postgresql_kubernetes_recovery_waits_for_pending_worker(tmp_path) -> No
     service._recovery_thread.join()
     try:
         # The worker is queued but has not run, so the runtime has no snapshot
-        # yet and reports it as missing (FAILED), as fsb does.
+        # yet and reports it as missing (FAILED), as Docker does.
         created = service.create_snapshot("sbx-001", CreateSnapshotRequest(name="queued"))
 
         service.recover_unfinished_snapshots()
@@ -1013,6 +1095,94 @@ def test_postgresql_kubernetes_recovery_waits_for_pending_worker(tmp_path) -> No
         assert stored.status.state == SnapshotState.READY
     finally:
         service.close()
+
+
+def test_recovery_retries_synchronous_create_inline_without_worker(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    record = _snapshot_record("snap-sync-retry", SnapshotState.CREATING)
+    repo.create(record)
+    runtime = SynchronousStubSnapshotRuntime()
+    executor = CapturingExecutor()
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=executor,
+        recover_unfinished_snapshots=False,
+    )
+    runtime.inspect_status_by_snapshot_id[record.id] = SnapshotRuntimeStatus(
+        state=SnapshotState.CREATING,
+        reason="snapshot_runtime_in_progress",
+    )
+
+    progressed = service._recover_unfinished_snapshot(record)
+
+    assert progressed is False
+    stored = repo.get(record.id)
+    assert stored is not None
+    assert stored.status.state == SnapshotState.CREATING
+    assert executor.submitted == []
+    assert runtime.calls == [(record.id, "sbx-001")]
+
+
+def test_ha_recovery_converges_fsb_snapshot_without_failed_mapping(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = SynchronousStubSnapshotRuntime()
+    creator = PostgreSQLKubernetesSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        recovery_interval_seconds=60,
+        snapshot_executor=CapturingExecutor(),
+    )
+    creator._recovery_stop.set()
+    creator._recovery_thread.join()
+    try:
+        created = creator.create_snapshot("fsb-001", CreateSnapshotRequest(name="fsb-ha"))
+        assert created.status.state == "Creating"
+    finally:
+        creator.close()
+
+    # The intent already exists behind the readable row, so a peer replica
+    # recovers the row without mapping it to Failed.
+    runtime.inspect_status_by_snapshot_id[created.id] = SnapshotRuntimeStatus(
+        state=SnapshotState.CREATING,
+        reason="snapshot_runtime_in_progress",
+    )
+    peer_executor = CapturingExecutor()
+    peer = PostgreSQLKubernetesSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        recovery_interval_seconds=60,
+        snapshot_executor=peer_executor,
+    )
+    peer._recovery_stop.set()
+    peer._recovery_thread.join()
+    try:
+        calls_before_peer_recovery = len(runtime.calls)
+        peer.recover_unfinished_snapshots()
+
+        stored = repo.get(created.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.CREATING
+        assert peer_executor.submitted == []
+        # The peer resubmitted the idempotent intent inline.
+        assert runtime.calls[calls_before_peer_recovery] == (created.id, "fsb-001")
+
+        runtime.inspect_status_by_snapshot_id[created.id] = SnapshotRuntimeStatus(
+            state=SnapshotState.READY,
+            image="fsb-osb-snap-target",
+            backend="fsb",
+        )
+        peer.recover_unfinished_snapshots()
+
+        stored = repo.get(created.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.READY
+        assert stored.restore_config.image == "fsb-osb-snap-target"
+    finally:
+        peer.close()
 
 
 @pytest.mark.parametrize(
@@ -1126,14 +1296,11 @@ def test_snapshot_service_recovers_deleting_snapshot(tmp_path) -> None:
 
 def test_snapshot_service_accepts_fsb_source_sandbox(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
-    runtime = StubSnapshotRuntime()
+    runtime = SynchronousStubSnapshotRuntime()
+    executor = CapturingExecutor()
     service = PersistedSnapshotService(
-        repo, StubSandboxService(), snapshot_runtime=runtime, snapshot_executor=ImmediateExecutor()
-    )
-    runtime.create_result = SnapshotRuntimeStatus(
-        state=SnapshotState.CREATING,
-        reason="snapshot_runtime_submitted",
-        backend="fsb",
+        repo, StubSandboxService(), snapshot_runtime=runtime, snapshot_executor=executor,
+        recover_unfinished_snapshots=False,
     )
 
     created = service.create_snapshot("fsb-001", CreateSnapshotRequest(name="fsb-checkpoint"))
@@ -1144,6 +1311,7 @@ def test_snapshot_service_accepts_fsb_source_sandbox(tmp_path) -> None:
     assert stored.status.state == SnapshotState.CREATING
     assert stored.source_sandbox_id == "fsb-001"
     assert runtime.calls == [(created.id, "fsb-001")]
+    assert executor.submitted == []
 
 
 def test_list_snapshots_reapplies_state_filter_after_convergence(tmp_path) -> None:
