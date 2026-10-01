@@ -824,6 +824,51 @@ def _binding_matches(flow: http.HTTPFlow, binding: dict[str, Any]) -> tuple[bool
     return best_precedence > 0, best_precedence
 
 
+def _flow_sni(flow: http.HTTPFlow) -> str | None:
+    """Normalized ClientHello SNI of the intercepted connection, or None.
+
+    Read from the client connection rather than the server connection: at
+    ``requestheaders`` time the upstream connection is not established yet, and
+    mitmproxy carries the client SNI into the upstream handshake, where it
+    becomes the hostname the upstream certificate is verified against.
+    """
+    sni = getattr(getattr(flow, "client_conn", None), "sni", None)
+    if not isinstance(sni, str) or not sni:
+        return None
+    return sni.rstrip(".").lower()
+
+
+def _sni_outside_binding_scope(flow: http.HTTPFlow, binding: dict[str, Any]) -> bool:
+    """True when the TLS endpoint identity falls outside the binding host scope.
+
+    A binding match alone is not enough to release a credential:
+    :func:`_binding_matches` runs on ``request.pretty_host``, which is the Host
+    (or HTTP/2 ``:authority``) header — unauthenticated client input. A sandbox
+    can open a TLS session to any reachable host and still send
+    ``Host: api.github.com``, which would hand that binding's credential to a
+    peer of its choosing. The SNI is the name mitmproxy verifies the upstream
+    certificate against, so requiring it to match ``match.hosts`` as well binds
+    the injection decision to an identity the peer had to prove with a
+    certificate.
+
+    When no SNI is available the outcome depends on the scheme. Plaintext HTTP
+    carries no SNI by design, so it returns False and the egress allow rules
+    stay the only control. No-SNI HTTPS, however, still reaches this hook when
+    ``ssl_insecure`` is enabled (:func:`tls_clienthello` only passes it through
+    otherwise); such a session has no endpoint identity at all, so it is
+    treated as outside every scope (fail closed) instead of falling back to the
+    spoofable Host header.
+    """
+    sni = _flow_sni(flow)
+    if sni is None:
+        # Fail closed for TLS without SNI: in transparent mode mitmproxy sets
+        # the request scheme to "https" exactly when the client connection is
+        # TLS, and that is the same field binding matching already keys on.
+        return (flow.request.scheme or "").lower() == "https"
+    patterns = (binding.get("match") or {}).get("hosts") or []
+    return not any(_host_matches(sni, pattern)[0] for pattern in patterns)
+
+
 def _request_may_be_streamed(flow: http.HTTPFlow) -> bool:
     """True if mitmproxy may enable request-body streaming for this flow.
 
@@ -1160,6 +1205,20 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     # for credential injection, because no secret is at risk.
     binding = _select_binding(flow, vault)
     if not binding:
+        return
+
+    # A matched binding is not sufficient: the match ran on the Host header,
+    # which the sandbox controls. Release the credential only onto a TLS
+    # session whose peer had to prove a name the binding trusts.
+    if _sni_outside_binding_scope(flow, binding):
+        _reject_request(
+            flow, b"request endpoint identity does not match credential binding\n"
+        )
+        ctx.log.warn(
+            "credential proxy: rejected request whose TLS endpoint identity is "
+            f"outside binding={binding.get('name')} scope: sni={_flow_sni(flow)} "
+            f"host={_request_host(flow)}"
+        )
         return
 
     # Reject ambiguous paths only for requests that would receive credentials:
