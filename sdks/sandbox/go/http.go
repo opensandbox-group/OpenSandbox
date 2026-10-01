@@ -57,6 +57,18 @@ type Client struct {
 	streamOnce   sync.Once
 }
 
+func (c *Client) cloneWithBaseURL(baseURL string) *Client {
+	cloned := *c
+	cloned.baseURL = baseURL
+	if c.headers != nil {
+		cloned.headers = make(map[string]string, len(c.headers))
+		for k, v := range c.headers {
+			cloned.headers[k] = v
+		}
+	}
+	return &cloned
+}
+
 // streamHTTPClient returns a dedicated HTTP client for SSE streaming.
 //
 // Streaming differs from normal requests in two ways that make the shared
