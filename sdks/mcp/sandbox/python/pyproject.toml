@@ -48,7 +48,7 @@ dependencies = [
     "python-multipart>=0.0.31",
     "cryptography>=50.0.0",
     "pydantic-settings>=2.14.2",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.14.0",
 ]
 
 [project.urls]
@@ -147,7 +147,7 @@ constraint-dependencies = [
     "python-multipart>=0.0.31",
     "cryptography>=50.0.0",
     "pydantic-settings>=2.14.2",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.14.0",
 ]
 
 [tool.uv.sources]

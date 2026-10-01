@@ -44,7 +44,7 @@ dev = [
 # This is a test runner project (no importable package); don't try to build/install it.
 package = false
 constraint-dependencies = [
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.14.0",
 ]
 
 [tool.uv.sources]
