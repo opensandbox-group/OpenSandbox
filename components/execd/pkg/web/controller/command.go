@@ -100,7 +100,7 @@ func (c *CodeInterpretingController) RunCommand() {
 	// SSE headers are committed lazily on the first event write
 	// (see writeSingleEvent), so a synchronous error from Execute below can
 	// still be surfaced as a structured JSON error response.
-	err = codeRunner.Execute(runCodeRequest)
+	err = codeRunner.Execute(ctx, runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
 		c.RespondError(

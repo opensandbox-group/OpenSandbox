@@ -53,14 +53,14 @@ Commands can be submitted in two forms:
 
 Execution modes:
 
-- **Foreground** returns the output as a live Server-Sent-Events stream while the command runs.
+- **Foreground** returns the output as a live Server-Sent-Events stream while the command runs. If the client disconnects, the command is stopped; use background mode for work that should outlive the connection.
 - **Background** returns immediately; you poll status and retrieve incremental logs. Completed background output stays retrievable for 24 hours, and running commands are never cleaned up.
 
 Sessions use Bash when the image provides it and fall back to POSIX `sh` on minimal images — commands sent to a fallback session must be `sh`-compatible. Windows sandboxes are supported (environment names are case-insensitive; batch files require shell syntax).
 
 ## Code execution
 
-Code contexts are persistent Jupyter kernels managed by execd. You execute code in a context and receive streamed results — standard output, execution results, and errors — across multiple calls that share state, exactly like a notebook.
+Code contexts are persistent Jupyter kernels managed by execd. You execute code in a context and receive streamed results — standard output, execution results, and errors — across multiple calls that share state, exactly like a notebook. If the client disconnects while code is running, execd interrupts the kernel; the context and its state are kept.
 
 The official [code-interpreter image](https://github.com/opensandbox-group/sandbox-images) ships Python, Java, Node.js, and Go runtimes with matching Jupyter kernels — see the [Code Interpreter example](/examples/code-interpreter). Code execution is available through the plain sandbox SDKs and the raw API.
 

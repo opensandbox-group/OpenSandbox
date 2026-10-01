@@ -41,7 +41,7 @@ func (f *fakeCodeRunner) CreateContext(_ *runtime.CreateContextRequest) (string,
 	return "", nil
 }
 
-func (f *fakeCodeRunner) Execute(request *runtime.ExecuteCodeRequest) error {
+func (f *fakeCodeRunner) Execute(_ context.Context, request *runtime.ExecuteCodeRequest) error {
 	if f.execute != nil {
 		return f.execute(request)
 	}

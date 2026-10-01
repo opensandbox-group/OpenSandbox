@@ -46,7 +46,7 @@ type CodeInterpretingController struct {
 
 type codeExecutionRunner interface {
 	CreateContext(req *runtime.CreateContextRequest) (string, error)
-	Execute(request *runtime.ExecuteCodeRequest) error
+	Execute(ctx context.Context, request *runtime.ExecuteCodeRequest) error
 	GetContext(session string) (runtime.CodeContext, error)
 	GetCommandStatus(session string) (*runtime.CommandStatus, error)
 	ListContext(language string) ([]runtime.CodeContext, error)
@@ -170,7 +170,7 @@ func (c *CodeInterpretingController) RunCode() {
 	// SSE headers are committed lazily on the first event write
 	// (see writeSingleEvent), so a synchronous error from Execute below can
 	// still be surfaced as a structured JSON error response.
-	err = codeRunner.Execute(runCodeRequest)
+	err = codeRunner.Execute(ctx, runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
 		c.RespondError(

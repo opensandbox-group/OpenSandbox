@@ -15,11 +15,16 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -89,4 +94,74 @@ func TestGetBackgroundCommandOutput_MissingID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, model.ErrorCodeMissingQuery, resp.Code)
 	require.Equal(t, "missing command execution id", resp.Message)
+}
+
+// runCommandWithRequestContext runs RunCommand for body on a request whose
+// context the caller cancels, and returns a channel closed when it returns.
+func runCommandWithRequestContext(t *testing.T, reqCtx context.Context, body string) <-chan struct{} {
+	t.Helper()
+	previousRunner := codeRunner
+	codeRunner = runtime.NewController("", "")
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	ctx, _ := newTestContext(http.MethodPost, "/command", []byte(body))
+	ctx.Request = ctx.Request.WithContext(reqCtx)
+	ctrl := NewCodeInterpretingController(ctx)
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		ctrl.RunCommand()
+	}()
+	return returned
+}
+
+func TestRunCommand_ClientDisconnectKillsForegroundCommand(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	marker := filepath.Join(dir, "done")
+
+	reqCtx, disconnect := context.WithCancel(context.Background())
+	defer disconnect()
+	body := fmt.Sprintf(`{"command":"touch '%s'; sleep 2; touch '%s'"}`, started, marker)
+	returned := runCommandWithRequestContext(t, reqCtx, body)
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "command did not start")
+	disconnect()
+
+	select {
+	case <-returned:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("RunCommand did not return after the client disconnected")
+	}
+	// Give a surviving command time to write the marker.
+	time.Sleep(2500 * time.Millisecond)
+	_, err := os.Stat(marker)
+	require.True(t, os.IsNotExist(err), "command kept running after the client disconnected")
+}
+
+func TestRunCommand_BackgroundCommandOutlivesRequest(t *testing.T) {
+	requireBash(t)
+	marker := filepath.Join(t.TempDir(), "done")
+
+	reqCtx, disconnect := context.WithCancel(context.Background())
+	defer disconnect()
+	body := fmt.Sprintf(`{"command":"sleep 1; touch '%s'","background":true}`, marker)
+	returned := runCommandWithRequestContext(t, reqCtx, body)
+
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunCommand did not return for a background command")
+	}
+	disconnect()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond, "background command was killed with the request")
 }

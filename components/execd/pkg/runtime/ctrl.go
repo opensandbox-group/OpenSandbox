@@ -75,14 +75,18 @@ func NewController(baseURL, token string) *Controller {
 	}
 }
 
-// Execute dispatches a request to the correct backend.
-func (c *Controller) Execute(request *ExecuteCodeRequest) error {
+// Execute dispatches a request to the correct backend. Cancelling ctx (for
+// example when the HTTP client disconnects) cancels a foreground run.
+// Background commands outlive the request, so they do not inherit ctx.
+func (c *Controller) Execute(ctx context.Context, request *ExecuteCodeRequest) error {
+	if request.Language == BackgroundCommand {
+		ctx = context.Background()
+	}
 	var cancel context.CancelFunc
-	var ctx context.Context
 	if request.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), request.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, request.Timeout)
 	} else {
-		ctx, cancel = context.WithCancel(context.Background())
+		ctx, cancel = context.WithCancel(ctx)
 	}
 
 	switch request.Language {
