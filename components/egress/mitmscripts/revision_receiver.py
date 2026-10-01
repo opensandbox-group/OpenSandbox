@@ -121,6 +121,33 @@ class Receiver:
         self._highest_epoch = 0
         self._serial = 0
         self._closed = False
+        self._publication_owned = False
+
+    def _check_standalone(self) -> None:
+        if self._publication_owned:
+            raise RevisionError("receiver has a joint publication owner")
+
+    def _snapshot(self, revision: Revision, payload: bytes) -> Snapshot:
+        """Check bounded immutable bytes after checking the revision identity."""
+        if type(payload) is not bytes or len(payload) > self._limit:
+            raise RevisionError("invalid snapshot byte budget or type")
+        if hashlib.sha256(payload).hexdigest() != revision.digest:
+            raise RevisionError("snapshot digest mismatch")
+        return Snapshot(revision, payload)
+
+    def _stage_check(self, snapshot: Snapshot, serial: int) -> bool:
+        """Recheck outside-lock validation with the state lock held."""
+        if self._prepare_check(snapshot):
+            return True
+        if self._serial != serial:
+            raise RevisionError("receiver changed during validation")
+        return False
+
+    def _stage(self, snapshot: Snapshot) -> None:
+        serial = self._serial + 1
+        self._pending = snapshot
+        self._highest_epoch = snapshot.revision.decision_epoch
+        self._serial = serial
 
     def _check_open(self) -> None:
         if self._closed:
@@ -150,12 +177,9 @@ class Receiver:
     def prepare(self, revision: Revision, payload: bytes) -> Revision:
         """Validate an immutable candidate without changing active request state."""
         with self._lock:
+            self._check_standalone()
             self._check(revision)
-        if type(payload) is not bytes or len(payload) > self._limit:
-            raise RevisionError("invalid snapshot byte budget or type")
-        if hashlib.sha256(payload).hexdigest() != revision.digest:
-            raise RevisionError("snapshot digest mismatch")
-        snapshot = Snapshot(revision, payload)
+        snapshot = self._snapshot(revision, payload)
         with self._lock:
             if self._prepare_check(snapshot):
                 return revision
@@ -172,18 +196,15 @@ class Receiver:
             raise RevisionError("snapshot validation failed")
 
         with self._lock:
-            if self._prepare_check(snapshot):
+            if self._stage_check(snapshot, serial):
                 return revision
-            if self._serial != serial:
-                raise RevisionError("receiver changed during validation")
-            self._pending = snapshot
-            self._highest_epoch = revision.decision_epoch
-            self._serial += 1
+            self._stage(snapshot)
         return revision
 
     def commit(self, revision: Revision) -> Revision:
         """Atomically activate a prepared snapshot; exact retries acknowledge it."""
         with self._lock:
+            self._check_standalone()
             self._check(revision)
             if self._active is not None and self._active.revision == revision:
                 return revision
@@ -201,31 +222,41 @@ class Receiver:
         retired/staged identities, not an instruction to roll back older work.
         """
         with self._lock:
-            self._check(revision)
-            if self._active is not None and self._active.revision == revision:
-                raise RevisionError("revision already committed")
-            retired = self._aborted.get(revision.decision_epoch)
-            if retired == revision:
-                return revision
-            pending_matches = (
-                self._pending is not None and self._pending.revision == revision
-            )
-            if retired is not None or (
-                not pending_matches and revision.decision_epoch <= self._highest_epoch
-            ):
-                raise RevisionError("stale or conflicting revision")
-            # A prepared candidate must always retain room for its own abort.
-            reserved = int(self._pending is not None and not pending_matches)
-            if len(self._aborted) + 1 + reserved > self._abort_limit:
-                raise RevisionError("abort history capacity exhausted")
-            if pending_matches:
-                self._pending = None
-            # Abort may overtake prepare or arrive while validation is running.
-            # Retire that epoch so delayed work cannot stage it afterwards.
-            self._highest_epoch = max(self._highest_epoch, revision.decision_epoch)
-            self._aborted[revision.decision_epoch] = revision
-            self._serial += 1
+            self._check_standalone()
+            return self._abort(revision)
+
+    def _abort(self, revision: Revision) -> Revision:
+        """Retire an identity with the state lock held."""
+        self._check(revision)
+        if self._active is not None and self._active.revision == revision:
+            raise RevisionError("revision already committed")
+        retired = self._aborted.get(revision.decision_epoch)
+        if retired == revision:
             return revision
+        pending_matches = (
+            self._pending is not None and self._pending.revision == revision
+        )
+        if retired is not None or (
+            not pending_matches and revision.decision_epoch <= self._highest_epoch
+        ):
+            raise RevisionError("stale or conflicting revision")
+        # A prepared candidate must always retain room for its own abort.
+        reserved = int(self._pending is not None and not pending_matches)
+        if len(self._aborted) + 1 + reserved > self._abort_limit:
+            raise RevisionError("abort history capacity exhausted")
+        # Prepare allocations before discarding a staged candidate.
+        aborted = self._aborted.copy()
+        aborted[revision.decision_epoch] = revision
+        highest_epoch = max(self._highest_epoch, revision.decision_epoch)
+        serial = self._serial + 1
+        if pending_matches:
+            self._pending = None
+        # Abort may overtake prepare or arrive while validation is running.
+        # Retire that epoch so delayed work cannot stage it afterwards.
+        self._highest_epoch = highest_epoch
+        self._aborted = aborted
+        self._serial = serial
+        return revision
 
     def readback(self) -> Revision | None:
         """Return metadata only for reconciliation, never snapshot payload bytes."""
@@ -242,7 +273,13 @@ class Receiver:
     def close(self) -> None:
         """Permanently fence this receiver, including validation still in progress."""
         with self._lock:
-            self._closed = True
-            self._active = self._pending = None
-            self._aborted.clear()
-            self._serial += 1
+            self._check_standalone()
+            self._close()
+
+    def _close(self) -> None:
+        """Fence this generation with the state lock held."""
+        serial = self._serial + 1
+        self._closed = True
+        self._active = self._pending = None
+        self._aborted.clear()
+        self._serial = serial

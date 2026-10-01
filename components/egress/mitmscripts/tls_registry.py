@@ -14,9 +14,9 @@
 
 """Unused sidecar-only admission foundation for credential-bound TLS.
 
-The future addon integration must publish the receiver's confirmed view under
-the same mutation barrier that installs request fences. Publishing a view here
-alone neither closes old connections nor authorizes a public mutation ACK.
+RevisionPublisher provides optional internal joint Receiver publication. The
+standalone activate API still publishes only this registry. Neither path closes
+old connections nor authorizes a public mutation ACK.
 """
 
 from __future__ import annotations
@@ -98,6 +98,16 @@ class RequestAdmission:
     handle: RequestHandle | None = field(default=None, repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class _Activation:
+    view: TLSSelectorView
+    generation: Generation
+    uncovered: tuple[AdmissionToken, ...]
+    fenced: set[int]
+    connection_deadlines: dict[int, float]
+    request_deadlines: dict[int, float]
+
+
 class BoundConnectionRegistry:
     """Atomically classify and admit only bound sidecar TLS connections.
 
@@ -130,6 +140,7 @@ class BoundConnectionRegistry:
         self._view: TLSSelectorView | None = None
         self._generation: Generation | None = None
         self._closed = False
+        self._publication_owned = False
         self._entries: dict[int, AdmissionToken] = {}
         self._request_fenced: set[int] = set()
         self._next_serial = 0
@@ -157,6 +168,7 @@ class BoundConnectionRegistry:
         The result still identifies transports for a future owner to drain;
         this method neither closes them nor authorizes a mutation ACK.
         """
+        self._check_standalone()
         if (
             type(snapshot) is not Snapshot
             or type(snapshot.revision) is not Revision
@@ -171,39 +183,55 @@ class BoundConnectionRegistry:
         if not valid:
             raise RegistryError("invalid TLS registry activation")
         with self._lock:
-            previous = self._view
-            newly_uncovered: tuple[AdmissionToken, ...] = ()
-            new = view.revision
-            new_generation = (new.control_generation, new.subject_generation)
-            if self._closed or self._generation not in (None, new_generation):
+            activation = self._plan_activation(view)
+            self._publish_activation(activation)
+            return activation.uncovered
+
+    def _check_standalone(self) -> None:
+        if self._publication_owned:
+            raise RegistryError("registry has a joint publication owner")
+
+    def _plan_activation(self, view: TLSSelectorView) -> _Activation:
+        """Allocate the complete cutover before any mutation, under our lock."""
+        previous = self._view
+        newly_uncovered: tuple[AdmissionToken, ...] = ()
+        new = view.revision
+        new_generation = (new.control_generation, new.subject_generation)
+        if self._closed or self._generation not in (None, new_generation):
+            raise RegistryError("invalid TLS registry activation")
+        if previous is not None:
+            old = previous.revision
+            if new.decision_epoch < old.decision_epoch or (
+                new.decision_epoch == old.decision_epoch and view != previous
+            ):
                 raise RegistryError("invalid TLS registry activation")
-            if previous is not None:
-                old = previous.revision
-                if new.decision_epoch < old.decision_epoch or (
-                    new.decision_epoch == old.decision_epoch and view != previous
-                ):
-                    raise RegistryError("invalid TLS registry activation")
-                newly_uncovered = tuple(
-                    token for token in self._entries.values()
-                    if any(selector.matches(token.sni) for selector in previous.selectors)
-                    and not any(selector.matches(token.sni) for selector in view.selectors)
-                )
-            fenced = self._request_fenced.union(token.serial for token in newly_uncovered)
-            connection_deadlines = self._connection_deadlines.copy()
-            request_deadlines = self._request_deadlines.copy()
-            if previous is not None and new != previous.revision:
-                deadline = time.monotonic() + self._drain_timeout
-                for token in newly_uncovered:
-                    connection_deadlines.setdefault(token.serial, deadline)
-                for serial, handle in self._requests.items():
-                    if handle.revision != new:
-                        request_deadlines.setdefault(serial, deadline)
-            self._view = view
-            self._generation = new_generation
-            self._request_fenced = fenced
-            self._connection_deadlines = connection_deadlines
-            self._request_deadlines = request_deadlines
-            return newly_uncovered
+            newly_uncovered = tuple(
+                token for token in self._entries.values()
+                if any(selector.matches(token.sni) for selector in previous.selectors)
+                and not any(selector.matches(token.sni) for selector in view.selectors)
+            )
+        fenced = self._request_fenced.union(token.serial for token in newly_uncovered)
+        connection_deadlines = self._connection_deadlines.copy()
+        request_deadlines = self._request_deadlines.copy()
+        if previous is not None and new != previous.revision:
+            deadline = time.monotonic() + self._drain_timeout
+            for token in newly_uncovered:
+                connection_deadlines.setdefault(token.serial, deadline)
+            for serial, handle in self._requests.items():
+                if handle.revision != new:
+                    request_deadlines.setdefault(serial, deadline)
+        return _Activation(
+            view, new_generation, newly_uncovered, fenced,
+            connection_deadlines, request_deadlines,
+        )
+
+    def _publish_activation(self, activation: _Activation) -> None:
+        """Only field swaps; the caller retains the admission lock throughout."""
+        self._view = activation.view
+        self._generation = activation.generation
+        self._request_fenced = activation.fenced
+        self._connection_deadlines = activation.connection_deadlines
+        self._request_deadlines = activation.request_deadlines
 
     def deactivate(self) -> tuple[AdmissionToken, ...]:
         """Fence future decisions and hand existing memberships to the owner.
@@ -213,9 +241,11 @@ class BoundConnectionRegistry:
         preserves existing deadlines but starts no new grace period for shutdown.
         """
         with self._lock:
+            self._check_standalone()
+            tokens = tuple(self._entries.values())
             self._closed = True
             self._view = None
-            return tuple(self._entries.values())
+            return tokens
 
     def admit(
         self,
@@ -263,8 +293,9 @@ class BoundConnectionRegistry:
         path. Terminal connection release also removes its request records, but
         does not revoke external handles or cancel work still using them.
 
-        Independent Receiver/Registry publications may temporarily deny requests;
-        this primitive is not their joint commit or a transport drain owner.
+        Standalone Receiver/Registry publications may temporarily deny requests.
+        RevisionPublisher publishes its owned pair jointly; neither path owns
+        transport drain or authorizes public mutation acknowledgements.
         """
         with self._lock:
             if not self._owns_connection(token):
