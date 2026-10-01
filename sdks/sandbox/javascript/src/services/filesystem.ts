@@ -31,6 +31,7 @@ import type {
  * it offers common operations (read/write/search/move/delete) and supports streaming I/O for large files.
  */
 export interface SandboxFiles {
+  withIdentity?(uid: number, gid: number): SandboxFiles;
   getFileInfo(paths: string[]): Promise<Record<string, FileInfo>>;
   search(entry: SearchEntry): Promise<SearchFilesResponse>;
   listDirectory(entry: DirectoryListEntry): Promise<FileInfo[]>;

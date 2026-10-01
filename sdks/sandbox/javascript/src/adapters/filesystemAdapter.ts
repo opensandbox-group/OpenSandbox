@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import type { ExecdClient } from "../openapi/execdClient.js";
+import { createExecdClient, type ExecdClient } from "../openapi/execdClient.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 import type { SandboxFiles } from "../services/filesystem.js";
 import type { paths as ExecdPaths } from "../api/execd.js";
@@ -223,6 +223,14 @@ function toPermission(e: {
  * - Implements streaming upload/download helpers
  */
 export class FilesystemAdapter implements SandboxFiles {
+  private static readonly identityInfoPath: keyof ExecdPaths =
+    "/v1/filesystem/{uid}/{gid}/files/info";
+  private static identityPath(uid: number, gid: number): string {
+    return FilesystemAdapter.identityInfoPath
+      .replace("{uid}", String(uid))
+      .replace("{gid}", String(gid))
+      .replace("/files/info", "");
+  }
   private readonly fetch: typeof fetch;
 
   private static readonly Api = {
@@ -247,9 +255,24 @@ export class FilesystemAdapter implements SandboxFiles {
 
   constructor(
     private readonly client: ExecdClient,
-    private readonly opts: FilesystemAdapterOptions
+    private readonly opts: FilesystemAdapterOptions,
+    private readonly identityBaseUrl: string = opts.baseUrl
   ) {
     this.fetch = opts.fetch ?? fetch;
+  }
+
+  withIdentity(uid: number, gid: number): SandboxFiles {
+    for (const [name, value] of [["uid", uid], ["gid", gid]] as const) {
+      if (!Number.isInteger(value) || value < 0 || value > 4294967294) {
+        throw new RangeError(name + " must be an integer between 0 and 4294967294");
+      }
+    }
+    const opts = {
+      ...this.opts,
+      baseUrl: this.identityBaseUrl.replace(/\/+$/, "") +
+        FilesystemAdapter.identityPath(uid, gid),
+    };
+    return new FilesystemAdapter(createExecdClient(opts), opts, this.identityBaseUrl);
   }
 
   private parseIsoDate(field: string, v: unknown): Date {
@@ -390,6 +413,7 @@ export class FilesystemAdapter implements SandboxFiles {
       req as unknown as typeof FilesystemAdapter.Api.ReplaceContentsRequest;
     const { error, response } = await this.client.POST("/files/replace", {
       body,
+      parseAs: "text",
     });
     throwOnOpenApiFetchError({ error, response }, "Replace contents failed");
   }
@@ -404,10 +428,13 @@ export class FilesystemAdapter implements SandboxFiles {
     const { data, error, response } = await this.client.POST("/files/replace", {
       params: { query: { verbose: true } },
       body,
+      parseAs: "text",
     });
     throwOnOpenApiFetchError({ error, response }, "Replace contents failed");
 
-    const ok = data as typeof FilesystemAdapter.Api.ReplaceContentsOk | undefined;
+    const ok = data?.trim()
+      ? JSON.parse(data) as typeof FilesystemAdapter.Api.ReplaceContentsOk
+      : undefined;
     if (!ok) return [];
     return Object.entries(ok).map(([path, result]) => ({
       path,

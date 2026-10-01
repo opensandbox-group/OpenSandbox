@@ -540,6 +540,300 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/filesystem/{uid}/{gid}/files/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get file metadata
+         * @description Retrieves detailed metadata for one or multiple files including permissions, owner,
+         *     group, size, and modification time. Returns a map of file paths to their corresponding
+         *     FileInfo objects.
+         */
+        get: operations["identityGetFilesInfo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete files
+         * @description Deletes one or multiple files from the sandbox. Only removes files, not directories.
+         *     Use RemoveDirs for directory removal.
+         */
+        delete: operations["identityRemoveFiles"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/files/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Change file permissions
+         * @description Changes permissions (mode), owner, and group for one or multiple files.
+         *     Accepts a map of file paths to permission settings including octal mode,
+         *     owner username, and group name.
+         */
+        post: operations["identityChmodFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/files/mv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rename or move files
+         * @description Renames or moves one or multiple files to new paths. Can be used for both
+         *     renaming within the same directory and moving to different directories.
+         *     Target directory must exist.
+         */
+        post: operations["identityRenameFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/files/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Search for files
+         * @description Searches for files matching a glob pattern within a specified directory and
+         *     its subdirectories. Returns file metadata including path, permissions, owner,
+         *     and group. Supports glob patterns like **, *.txt, etc. Default pattern is ** (all files).
+         */
+        get: operations["identitySearchFiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/files/replace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Replace file content
+         * @description Performs text replacement in one or multiple files. Replaces all occurrences
+         *     of the old string with the new string (similar to strings.ReplaceAll).
+         *     Preserves file permissions. Useful for batch text substitution across files.
+         *
+         *     When `verbose=true` is set, the response includes per-file replacement counts.
+         *     Without this parameter, the response body is empty (backward-compatible behavior).
+         */
+        post: operations["identityReplaceContent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/files/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload files to sandbox
+         * @description Uploads one or multiple files to specified paths within the sandbox.
+         *     Reads metadata and file content from multipart form parts in sequence.
+         *     Each file upload consists of two parts: a metadata part (JSON) followed
+         *     by the actual file part.
+         */
+        post: operations["identityUploadFile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/files/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Download file from sandbox
+         * @description Downloads a file from the specified path within the sandbox. Supports HTTP
+         *     range requests for resumable downloads and partial content retrieval.
+         *     Returns file as octet-stream with appropriate headers.
+         *
+         *     When offset/limit query parameters are provided, the endpoint performs
+         *     line-based reading and returns text/plain content instead. Line-based
+         *     parameters are mutually exclusive with the Range header.
+         */
+        get: operations["identityDownloadFile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/directories/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List directory contents
+         * @description Lists entries under a directory with optional depth control. By default,
+         *     only immediate children are returned (`depth=1`). Set `depth` to a larger
+         *     value to include descendants up to that many levels below `path`. The
+         *     root directory itself is not included in the response.
+         *
+         *     Symbolic links are reported with `type=symlink` and are not traversed:
+         *     the listing never descends into a link target, even when `depth` would
+         *     otherwise allow it. For the same reason, when `path` itself resolves to
+         *     a symbolic link the request is rejected with `400`; callers must pass
+         *     the real directory path they want listed.
+         *
+         *     Entries are returned in lexical order by entry name within each
+         *     directory. Descendants reported via `depth>1` follow their parent in
+         *     the same lexical order, so a depth-2 listing yields stable, predictable
+         *     output for file-browser style clients.
+         */
+        get: operations["identityListDirectory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/filesystem/{uid}/{gid}/directories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create directories
+         * @description Creates one or multiple directories with specified permissions. Creates parent
+         *     directories as needed (similar to mkdir -p). Accepts a map of directory paths
+         *     to permission objects.
+         */
+        post: operations["identityMakeDirs"];
+        /**
+         * Delete directories
+         * @description Recursively deletes one or multiple directories and all their contents.
+         *     Similar to rm -rf. Use with caution as this operation cannot be undone.
+         */
+        delete: operations["identityRemoveDirs"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics": {
         parameters: {
             query?: never;
@@ -1630,7 +1924,12 @@ export interface components {
             };
         };
     };
-    parameters: never;
+    parameters: {
+        /** @description Linux UID performing the operation, separate from target-file ownership. */
+        FilesystemUid: number;
+        /** @description Primary Linux GID performing the operation. */
+        FilesystemGid: number;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -2506,6 +2805,670 @@ export interface operations {
                 content?: never;
             };
             500: components["responses"]["InternalServerError"];
+        };
+    };
+    identityGetFilesInfo: {
+        parameters: {
+            query: {
+                /** @description File path(s) to get info for (can be specified multiple times) */
+                path: string[];
+            };
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Map of file paths to FileInfo objects */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: components["schemas"]["FileInfo"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityRemoveFiles: {
+        parameters: {
+            query: {
+                /**
+                 * @description File path(s) to delete (can be specified multiple times)
+                 * @example [
+                 *       "/workspace/temp.txt"
+                 *     ]
+                 */
+                path: string[];
+            };
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Files deleted successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityChmodFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "/workspace/script.sh": {
+                 *         "owner": "admin",
+                 *         "group": "admin",
+                 *         "mode": 755
+                 *       },
+                 *       "/workspace/config.json": {
+                 *         "owner": "admin",
+                 *         "group": "admin",
+                 *         "mode": 755
+                 *       }
+                 *     }
+                 */
+                "application/json": {
+                    [key: string]: components["schemas"]["Permission"];
+                };
+            };
+        };
+        responses: {
+            /** @description Permissions changed successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityRenameFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example [
+                 *       {
+                 *         "src": "/workspace/old_name.txt",
+                 *         "dest": "/workspace/new_name.txt"
+                 *       },
+                 *       {
+                 *         "src": "/workspace/file.py",
+                 *         "dest": "/archive/file.py"
+                 *       }
+                 *     ]
+                 */
+                "application/json": components["schemas"]["RenameFileItem"][];
+            };
+        };
+        responses: {
+            /** @description Files renamed/moved successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identitySearchFiles: {
+        parameters: {
+            query: {
+                /** @description Root directory path to search in */
+                path: string;
+                /** @description Glob pattern to match files (default is **) */
+                pattern?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of matching files with metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileInfo"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityReplaceContent: {
+        parameters: {
+            query?: {
+                /** @description When true, return per-file replacement counts in the response body. */
+                verbose?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "/workspace/config.yaml": {
+                 *         "old": "localhost:8080",
+                 *         "new": "0.0.0.0:9090"
+                 *       },
+                 *       "/workspace/app.py": {
+                 *         "old": "DEBUG = True",
+                 *         "new": "DEBUG = False"
+                 *       }
+                 *     }
+                 */
+                "application/json": {
+                    [key: string]: components["schemas"]["ReplaceFileContentItem"];
+                };
+            };
+        };
+        responses: {
+            /**
+             * @description Content replaced successfully. When `verbose=true`, returns per-file
+             *     replacement counts. Otherwise, the response body is empty.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "/workspace/config.yaml": {
+                     *         "replacedCount": 1
+                     *       },
+                     *       "/workspace/app.py": {
+                     *         "replacedCount": 0
+                     *       }
+                     *     }
+                     */
+                    "application/json": {
+                        [key: string]: components["schemas"]["ReplaceFileContentResult"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityUploadFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * @description JSON-encoded file metadata (FileMetadata object)
+                     * @example {"path":"/workspace/file.txt","owner":"admin","group":"admin","mode":755}
+                     */
+                    metadata?: string;
+                    /**
+                     * Format: binary
+                     * @description File to upload
+                     */
+                    file?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Files uploaded successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityDownloadFile: {
+        parameters: {
+            query: {
+                /**
+                 * @description Absolute or relative path of the file to download
+                 * @example /workspace/data.csv
+                 */
+                path: string;
+                /**
+                 * @description Starting line number (1-based) for line-based reading. Mutually exclusive with the Range header.
+                 * @example 100
+                 */
+                offset?: number;
+                /**
+                 * @description Number of lines to return for line-based reading. Mutually exclusive with the Range header.
+                 * @example 20
+                 */
+                limit?: number;
+            };
+            header?: {
+                /**
+                 * @description HTTP Range header for partial content requests. Mutually exclusive with offset/limit.
+                 * @example bytes=0-1023
+                 */
+                Range?: string;
+            };
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description File content. Returns application/octet-stream for full or byte-range
+             *     downloads, or text/plain for line-based reads (when offset/limit are provided).
+             */
+            200: {
+                headers: {
+                    /** @description Attachment header with filename (byte-range mode only) */
+                    "Content-Disposition"?: string;
+                    /** @description File size in bytes (byte-range mode only) */
+                    "Content-Length"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                    "text/plain": string;
+                };
+            };
+            /** @description Partial file content (when Range header is provided) */
+            206: {
+                headers: {
+                    /** @description Range of bytes being returned */
+                    "Content-Range"?: string;
+                    /** @description Length of the returned range */
+                    "Content-Length"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            /** @description Requested range not satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityListDirectory: {
+        parameters: {
+            query: {
+                /**
+                 * @description Directory path to list
+                 * @example /workspace/project
+                 */
+                path: string;
+                /**
+                 * @description Maximum child depth to include. `1` lists immediate children only.
+                 * @example 2
+                 */
+                depth?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of directory entries with metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example [
+                     *       {
+                     *         "path": "/workspace/project/src",
+                     *         "type": "directory",
+                     *         "size": 0,
+                     *         "modified_at": "2025-11-16T14:30:45Z",
+                     *         "created_at": "2025-11-16T14:30:45Z",
+                     *         "owner": "admin",
+                     *         "group": "admin",
+                     *         "mode": 755
+                     *       },
+                     *       {
+                     *         "path": "/workspace/project/README.md",
+                     *         "type": "file",
+                     *         "size": 2048,
+                     *         "modified_at": "2025-11-16T14:30:45Z",
+                     *         "created_at": "2025-11-16T14:30:45Z",
+                     *         "owner": "admin",
+                     *         "group": "admin",
+                     *         "mode": 644
+                     *       }
+                     *     ]
+                     */
+                    "application/json": components["schemas"]["FileInfo"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityMakeDirs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "/workspace/project": {
+                 *         "owner": "admin",
+                 *         "group": "admin",
+                 *         "mode": 755
+                 *       },
+                 *       "/workspace/logs": {
+                 *         "owner": "admin",
+                 *         "group": "admin",
+                 *         "mode": 755
+                 *       }
+                 *     }
+                 */
+                "application/json": {
+                    [key: string]: components["schemas"]["Permission"];
+                };
+            };
+        };
+        responses: {
+            /** @description Directories created successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    identityRemoveDirs: {
+        parameters: {
+            query: {
+                /**
+                 * @description Directory path(s) to delete (can be specified multiple times)
+                 * @example [
+                 *       "/workspace/temp"
+                 *     ]
+                 */
+                path: string[];
+            };
+            header?: never;
+            path: {
+                /** @description Linux UID performing the operation, separate from target-file ownership. */
+                uid: components["parameters"]["FilesystemUid"];
+                /** @description Primary Linux GID performing the operation. */
+                gid: components["parameters"]["FilesystemGid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Directories deleted successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            /** @description Filesystem execution identity requires Linux. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested identity could not be established or the worker failed; no fallback to Execd identity occurs. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     getMetrics: {
