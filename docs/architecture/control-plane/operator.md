@@ -114,9 +114,11 @@ The phase reports sandbox runtime health; the conditions explain it. Both are Ku
 | `Pending` | No running, ready sandbox pod observed yet |
 | `Succeed` | At least one sandbox pod is running and ready — the steady state, **not** task completion |
 | `Pausing` / `Paused` / `Resuming` | Pause/resume transitions |
-| `Failed` | Terminal runtime failure — inspect conditions and pod events |
+| `Failed` | Runtime failure — inspect conditions and pod events; same-Pod recovery may be possible |
 
 Conditions (`Ready`, `Progressing`, `Paused`, `PauseFailed`, `ResumeFailed`, `PodFailed`, `PoolAllocationPending`) carry reasons and messages; count a condition only when it exists with status `True`, and check `status.observedGeneration` against `metadata.generation` before trusting post-update status.
+
+For Pod failures, `status.failedPodUIDs` records the identities of the failed pods. The controller clears this field and the `PodFailed` condition and recomputes the phase only after every recorded Pod UID is observed running and Ready, with its main container (the first regular container in the Pod spec) running. A replacement pod with the same name cannot establish recovery. Resume failures and older failures without recorded Pod UIDs remain terminal.
 
 ## Performance
 
