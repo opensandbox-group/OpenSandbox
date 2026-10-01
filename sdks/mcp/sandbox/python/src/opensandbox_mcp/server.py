@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.execd import Execution, RunCommandOpts
@@ -139,7 +140,7 @@ def register_tools(
             task = state.connecting.get(sandbox_id)
             if task is None:
                 if not connect_if_missing:
-                    raise ValueError(
+                    raise ToolError(
                         "Sandbox not found in local registry. Call sandbox_connect or "
                         "set connect_if_missing=True with connection parameters."
                     )
@@ -220,7 +221,9 @@ def register_tools(
         image_auth = None
         if auth_username or auth_password:
             if not auth_username or not auth_password:
-                raise ValueError("auth_username and auth_password must be provided together")
+                raise ToolError(
+                    "auth_username and auth_password must be provided together"
+                )
             image_auth = SandboxImageAuth(
                 username=auth_username,
                 password=auth_password,
