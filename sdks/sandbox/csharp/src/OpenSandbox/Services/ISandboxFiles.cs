@@ -191,3 +191,9 @@ public interface ISandboxFiles
         IEnumerable<SetPermissionEntry> entries,
         CancellationToken cancellationToken = default);
 }
+
+/// <summary>Filesystem capability for explicit execution identities.</summary>
+public interface IIdentitySandboxFiles : ISandboxFiles
+{
+    ISandboxFiles WithIdentity(uint uid, uint gid);
+}

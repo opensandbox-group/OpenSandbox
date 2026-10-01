@@ -57,6 +57,17 @@ public sealed class Sandbox : IAsyncDisposable
     public ISandboxFiles Files { get; }
 
     /// <summary>
+    /// Returns an independent filesystem client using explicit Linux credentials.
+    /// Unsupported servers fail without falling back to the default identity.
+    /// </summary>
+    public ISandboxFiles FilesWithIdentity(uint uid, uint gid)
+    {
+        if (Files is not IIdentitySandboxFiles adapter)
+            throw new NotSupportedException("The selected filesystem adapter does not support execution identity.");
+        return adapter.WithIdentity(uid, gid);
+    }
+
+    /// <summary>
     /// Gets the health check service.
     /// </summary>
     public IExecdHealth Health { get; }

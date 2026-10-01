@@ -26,8 +26,9 @@ namespace OpenSandbox.Adapters;
 /// <summary>
 /// Adapter for the execd filesystem service.
 /// </summary>
-internal sealed class FilesystemAdapter : ISandboxFiles
+internal sealed class FilesystemAdapter : IIdentitySandboxFiles
 {
+    internal const uint MaxIdentityId = uint.MaxValue - 1;
     private readonly HttpClientWrapper _client;
     private readonly HttpClient _httpClient;
     private readonly string _baseUrl;
@@ -50,6 +51,17 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _baseUrl = baseUrl?.TrimEnd('/') ?? throw new ArgumentNullException(nameof(baseUrl));
         _headers = headers ?? new Dictionary<string, string>();
+    }
+
+    internal ISandboxFiles WithIdentity(uint uid, uint gid)
+    {
+        if (uid > MaxIdentityId)
+            throw new ArgumentOutOfRangeException(nameof(uid), $"UID must be between 0 and {MaxIdentityId}.");
+        if (gid > MaxIdentityId)
+            throw new ArgumentOutOfRangeException(nameof(gid), $"GID must be between 0 and {MaxIdentityId}.");
+        var unscopedBaseUrl = _baseUrl.Split("/v1/filesystem/", 2)[0].TrimEnd('/');
+        var baseUrl = unscopedBaseUrl + FormattableString.Invariant($"/v1/filesystem/{uid}/{gid}");
+        return new FilesystemAdapter(_client.WithBaseUrl(baseUrl), _httpClient, baseUrl, _headers);
     }
 
     public async Task<IReadOnlyDictionary<string, SandboxFileInfo>> GetFileInfoAsync(

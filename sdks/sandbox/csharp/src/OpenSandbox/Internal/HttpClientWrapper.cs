@@ -53,6 +53,9 @@ internal sealed class HttpClientWrapper
 
     public string BaseUrl => _baseUrl;
 
+    public HttpClientWrapper WithBaseUrl(string baseUrl) =>
+        new(_httpClient, baseUrl, _defaultHeaders, _logger);
+
     public async Task<T> GetAsync<T>(
         string path,
         Dictionary<string, string?>? queryParams = null,
