@@ -150,6 +150,7 @@ Only suggest interruption when the user explicitly wants to stop work or the pro
 - foreground `osb command run` streams output directly and requires `-o raw`
 - background `osb command run --background` returns tracked execution metadata and supports structured output
 - foreground `command run` and `session run` exit non-zero on an execution error, or when the output stream ends before the command finishes
+- background `command run` exits non-zero without success metadata on an execution error or when the output stream ends before startup confirmation
 - tracked background commands should be checked with `status` and `logs`
 - if the command failure is caused by an unhealthy sandbox rather than the command itself, switch to `sandbox-troubleshooting`
 

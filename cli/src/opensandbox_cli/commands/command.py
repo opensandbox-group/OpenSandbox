@@ -22,7 +22,7 @@ from collections.abc import Callable
 from datetime import timedelta
 
 import click
-from opensandbox.models.execd import OutputMessage, RunCommandOpts
+from opensandbox.models.execd import Execution, OutputMessage, RunCommandOpts
 from opensandbox.models.execd_sync import ExecutionHandlersSync
 
 from opensandbox_cli.client import ClientContext
@@ -102,6 +102,7 @@ def _run_command(
 
         if background:
             execution = sandbox.commands.run(payload, opts=opts)
+            _handle_execution_error(obj, execution, background=True)
             obj.output.success_panel(
                 {
                     "execution_id": execution.id,
@@ -120,8 +121,10 @@ def _run_command(
         sandbox.close()
 
 
-def _handle_execution_error(obj: ClientContext, execution) -> None:
-    """Exit non-zero if the execution failed or its stream ended before it finished."""
+def _handle_execution_error(
+    obj: ClientContext, execution: Execution, *, background: bool = False
+) -> None:
+    """Exit non-zero on execution errors or missing completion/startup confirmation."""
     if execution.error:
         obj.output.error_panel(
             f"{execution.error.name}: {execution.error.value}",
@@ -129,8 +132,11 @@ def _handle_execution_error(obj: ClientContext, execution) -> None:
         )
         sys.exit(1)
     if execution.complete is None:
+        confirmation = (
+            "background command startup was confirmed" if background else "the command finished"
+        )
         obj.output.error_panel(
-            "The output stream ended before the command finished, so its result is unknown.",
+            f"The output stream ended before {confirmation}, so its result is unknown.",
             title="Execution Incomplete",
         )
         sys.exit(1)

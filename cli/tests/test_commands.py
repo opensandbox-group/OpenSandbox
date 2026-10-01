@@ -31,6 +31,7 @@ import pytest
 from click.testing import CliRunner
 from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.execd import Execution, ExecutionComplete, ExecutionError
 from opensandbox.models.sandboxes import (
     PagedSnapshotInfos,
     PaginationInfo,
@@ -2055,28 +2056,41 @@ bindings: []
 
 
 class TestCommandRun:
-    def test_background_run(self, runner: CliRunner) -> None:
+    @pytest.mark.parametrize("output_format", ["table", "json", "yaml"])
+    def test_background_run(self, runner: CliRunner, output_format: str) -> None:
         mock_sb = MagicMock()
-        mock_execution = MagicMock()
-        mock_execution.id = "exec-123"
+        mock_execution = Execution(
+            id="exec-123",
+            complete=ExecutionComplete(timestamp=1, execution_time_in_millis=2),
+        )
         mock_sb.commands.run.return_value = mock_execution
 
         result = _invoke(
             runner,
-            ["command", "run", "sb-1", "-d", "echo", "hello", "-o", "json"],
+            ["command", "run", "sb-1", "-d", "-o", output_format, "--", "echo", "hello"],
             sandbox=mock_sb,
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert data["execution_id"] == "exec-123"
-        assert data["mode"] == "background"
+        if output_format == "json":
+            data = json.loads(result.stdout)
+            assert data["execution_id"] == "exec-123"
+            assert data["mode"] == "background"
+        else:
+            assert "exec-123" in result.stdout
+            assert "background" in result.stdout
+        assert not result.stderr
         mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == "echo hello"
+        assert mock_sb.commands.run.call_args.kwargs["opts"].background is True
+        mock_sb.commands.get_command_status.assert_not_called()
+        mock_sb.close.assert_called_once()
 
     def test_background_run_argv_flag_passes_native_argv(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
-        mock_execution = MagicMock()
-        mock_execution.id = "exec-123"
+        mock_execution = Execution(
+            id="exec-123",
+            complete=ExecutionComplete(timestamp=1, execution_time_in_millis=2),
+        )
         mock_sb.commands.run.return_value = mock_execution
 
         result = _invoke(
@@ -2090,6 +2104,48 @@ class TestCommandRun:
         assert data["mode"] == "background"
         mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == ["echo", "hello"]
+
+    @pytest.mark.parametrize("output_format", ["table", "json", "yaml"])
+    def test_background_run_exits_nonzero_on_execution_error(
+        self, runner: CliRunner, output_format: str
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.run.return_value = Execution(
+            id="exec-123",
+            error=ExecutionError(
+                name="CommandExecError", value="cannot start command", timestamp=1
+            ),
+        )
+
+        result = _invoke(
+            runner,
+            ["command", "run", "sb-1", "--background", "-o", output_format, "--", "echo", "hello"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 1
+        assert "CommandExecError: cannot start command" in result.stderr
+        assert not result.stdout
+        mock_sb.close.assert_called_once()
+
+    @pytest.mark.parametrize("output_format", ["table", "json", "yaml"])
+    @pytest.mark.parametrize("execution_id", [None, "exec-123"])
+    def test_background_run_exits_nonzero_when_startup_is_unconfirmed(
+        self, runner: CliRunner, output_format: str, execution_id: str | None
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.run.return_value = Execution(id=execution_id)
+
+        result = _invoke(
+            runner,
+            ["command", "run", "sb-1", "--background", "-o", output_format, "--", "echo", "hello"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 1
+        assert "before background command startup was confirmed" in result.stderr
+        assert not result.stdout
+        mock_sb.close.assert_called_once()
 
     def test_foreground_run_rejects_json_output(self, runner: CliRunner) -> None:
         result = _invoke(
