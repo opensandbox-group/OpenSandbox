@@ -56,6 +56,50 @@ class FilesystemAdapterTest {
         filesystemAdapter = FilesystemAdapter(httpClientProvider, endpoint)
     }
 
+    @Test
+    fun identityClientPreservesProxyPathHeadersAndOriginalClient() {
+        val endpoint =
+            SandboxEndpoint(
+                mockWebServer.hostName + ":" + mockWebServer.port + "/proxy-prefix",
+                headers = mapOf("X-EXECD-ACCESS-TOKEN" to "secret"),
+            )
+        val original = FilesystemAdapter(httpClientProvider, endpoint)
+        val scoped = original.withIdentity(1001, 2000)
+        mockWebServer.enqueue(MockResponse().setBody("scoped"))
+        mockWebServer.enqueue(MockResponse().setBody("original"))
+
+        assertEquals("scoped", scoped.readFile("/file", "UTF-8", null))
+        val scopedRequest = mockWebServer.takeRequest()
+        assertEquals(
+            "/proxy-prefix/v1/filesystem/1001/2000/files/download",
+            scopedRequest.requestUrl?.encodedPath,
+        )
+        assertEquals("secret", scopedRequest.getHeader("X-EXECD-ACCESS-TOKEN"))
+
+        assertEquals("original", original.readFile("/file", "UTF-8", null))
+        assertEquals("/proxy-prefix/files/download", mockWebServer.takeRequest().requestUrl?.encodedPath)
+
+        mockWebServer.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("{}"))
+        assertTrue(scoped.readFileInfo(listOf("/file")).isEmpty())
+        val infoRequest = mockWebServer.takeRequest()
+        assertEquals("/proxy-prefix/v1/filesystem/1001/2000/files/info", infoRequest.requestUrl?.encodedPath)
+        assertEquals("secret", infoRequest.getHeader("X-EXECD-ACCESS-TOKEN"))
+    }
+
+    @Test
+    fun identityClientNeverFallsBackToDefaultIdentity() {
+        mockWebServer.enqueue(MockResponse().setResponseCode(404).setBody("unsupported"))
+        val scoped = filesystemAdapter.withIdentity(1001, 2000)
+        assertThrows<SandboxApiException> { scoped.readFile("/file", "UTF-8", null) }
+        assertEquals(1, mockWebServer.requestCount)
+        assertEquals(
+            "/v1/filesystem/1001/2000/files/download",
+            mockWebServer.takeRequest().requestUrl?.encodedPath,
+        )
+        assertThrows<IllegalArgumentException> { filesystemAdapter.withIdentity(-1, 0) }
+        assertThrows<IllegalArgumentException> { filesystemAdapter.withIdentity(0, 4294967295L) }
+    }
+
     @AfterEach
     fun tearDown() {
         mockWebServer.shutdown()

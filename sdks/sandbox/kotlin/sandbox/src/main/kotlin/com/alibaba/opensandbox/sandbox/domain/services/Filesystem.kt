@@ -282,3 +282,8 @@ interface Filesystem {
      */
     fun readFileInfo(paths: List<String>): Map<String, EntryInfo>
 }
+
+/** Filesystem capability for requests scoped to an explicit Linux identity. */
+interface IdentityFilesystem : Filesystem {
+    fun withIdentity(uid: Long, gid: Long): Filesystem
+}

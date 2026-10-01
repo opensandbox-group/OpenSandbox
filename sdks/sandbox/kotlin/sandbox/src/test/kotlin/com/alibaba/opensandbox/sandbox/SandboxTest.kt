@@ -119,6 +119,11 @@ class SandboxTest {
     }
 
     @Test
+    fun `filesWithIdentity rejects adapters without identity capability`() {
+        assertThrows<UnsupportedOperationException> { sandbox.filesWithIdentity(1, 2) }
+    }
+
+    @Test
     fun `commands should return command service`() {
         assertSame(commandService, sandbox.commands())
     }
