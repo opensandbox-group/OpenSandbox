@@ -36,6 +36,7 @@ from opensandbox_server.services.diagnostics import (
     limit_diagnostic_lines,
     unsupported_scope_error,
 )
+from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
 
 _SUPPORTED_LOG_SCOPES = ("container", "all")
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
@@ -130,23 +131,32 @@ class K8sDiagnosticsMixin:
         )
 
     def _find_pod_for_sandbox(self, sandbox_id: str):
+        namespace = self._resolve_namespace()
+        workload = None
         workload_provider = getattr(self, "workload_provider", None)
         if workload_provider is not None:
             from opensandbox_server.services.k8s.workload_access import (
                 _get_owned_workload_or_404,
             )
 
-            _get_owned_workload_or_404(
+            workload = _get_owned_workload_or_404(
                 workload_provider,
-                self._resolve_namespace(),
+                namespace,
                 sandbox_id,
             )
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
             pods = self.k8s_client.list_pods(
-                namespace=self._resolve_namespace(),
+                namespace=namespace,
                 label_selector=label_selector,
             )
+            if not pods:
+                # Pool-allocated pods don't carry the sandbox ID label.
+                pods = [
+                    pod
+                    for name in allocated_pod_names(workload)
+                    if (pod := self.k8s_client.read_pod(namespace, name)) is not None
+                ]
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

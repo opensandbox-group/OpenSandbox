@@ -224,6 +224,31 @@ def test_preflight_uses_allocated_pool_pod_runtimeclass() -> None:
     assert k8s_client.created == []
 
 
+def test_preflight_skips_pool_pod_released_back_to_the_pool() -> None:
+    k8s_client = FakeK8sClient()
+    k8s_client.workloads[SANDBOX_ID] = {
+        "metadata": {
+            "annotations": {
+                "sandbox.opensandbox.io/alloc-status": (
+                    '{"pods":["pool-pod-1","pool-pod-2"],"poolRef":"pool-a"}'
+                ),
+                "sandbox.opensandbox.io/alloc-release": '{"pods":["pool-pod-1"]}',
+            },
+        },
+        "spec": {"poolRef": "pool-a"},
+    }
+    # The released pod may already serve another sandbox; it must not be used.
+    k8s_client.pods["pool-pod-1"] = {
+        "spec": {"runtimeClassName": "sandboxed"},
+        "status": {"phase": "Running"},
+    }
+    k8s_client.pods["pool-pod-2"] = {"spec": {}, "status": {"phase": "Running"}}
+    k8s_client.runtime_classes["sandboxed"] = {"handler": "runsc"}
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    runtime.preflight_create_snapshot(SANDBOX_ID)
+
+
 def test_create_snapshot_creates_cr_and_maps_succeed_to_ready() -> None:
     k8s_client = FakeK8sClient()
     snapshot_name = build_public_snapshot_name(SNAPSHOT_ID)

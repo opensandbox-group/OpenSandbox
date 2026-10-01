@@ -19,7 +19,6 @@ Kubernetes-backed public snapshot runtime.
 from __future__ import annotations
 
 from hashlib import sha256
-import json
 import logging
 from threading import Lock
 from typing import Callable, Iterable, Optional
@@ -27,6 +26,7 @@ from uuid import UUID
 
 from kubernetes.client import ApiException
 
+from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
     SnapshotRuntimePreflightError,
@@ -40,7 +40,6 @@ _GROUP = "sandbox.opensandbox.io"
 _VERSION = "v1alpha1"
 _PLURAL = "sandboxsnapshots"
 _BATCHSANDBOX_PLURAL = "batchsandboxes"
-_POOL_ALLOCATION_ANNOTATION = "sandbox.opensandbox.io/alloc-status"
 _BATCHSANDBOX_NAME_LABEL = "batch-sandbox.sandbox.opensandbox.io/name"
 
 PUBLIC_SNAPSHOT_NAME_PREFIX = "osb-snap-"
@@ -443,7 +442,7 @@ class KubernetesSnapshotRuntime:
         sandbox_id: str,
         namespace: str,
     ):
-        for pod_name in self._allocated_pod_names(workload):
+        for pod_name in allocated_pod_names(workload):
             pod = self._k8s_client.read_pod(namespace, pod_name)
             if self._pod_is_running(pod):
                 return pod
@@ -464,23 +463,6 @@ class KubernetesSnapshotRuntime:
             f"Cannot verify snapshot runtime for sandbox {sandbox_id}: "
             "no running source Pod was found."
         )
-
-    @staticmethod
-    def _allocated_pod_names(workload: dict) -> list[str]:
-        annotations = (workload.get("metadata") or {}).get("annotations") or {}
-        raw_allocation = annotations.get(_POOL_ALLOCATION_ANNOTATION)
-        if not isinstance(raw_allocation, str):
-            return []
-        try:
-            allocation = json.loads(raw_allocation)
-        except (TypeError, ValueError):
-            return []
-        if not isinstance(allocation, dict):
-            return []
-        pod_names = allocation.get("pods")
-        if not isinstance(pod_names, list):
-            return []
-        return [name for name in pod_names if isinstance(name, str) and name]
 
     @classmethod
     def _pod_is_running(cls, pod) -> bool:

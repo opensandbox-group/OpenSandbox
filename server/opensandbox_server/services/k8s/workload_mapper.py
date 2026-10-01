@@ -335,3 +335,46 @@ def _extract_platform_value_from_affinity(
         elif inferred != term_value:
             return None
     return inferred
+
+
+def allocated_pod_names(workload: Any) -> list[str]:
+    """Pods currently allocated to a pooled BatchSandbox.
+
+    Pool pods come from the Pool's template, so they don't carry the sandbox
+    ID label; the alloc-status annotation is the only link from the sandbox to
+    them. Pods being released or already released go back to the pool and may
+    belong to another sandbox, so they are left out, as the operator does.
+    """
+    if not isinstance(workload, dict):
+        return []
+    annotations = (workload.get("metadata") or {}).get("annotations") or {}
+    allocated = _annotation_pod_names(annotations, "sandbox.opensandbox.io/alloc-status")
+    if allocated is None:
+        return []
+    released: set[str] = set()
+    for key in _ALLOCATION_RELEASE_ANNOTATION_KEYS:
+        pods = _annotation_pod_names(annotations, key)
+        if pods is None:
+            # Without a readable release list we can't tell which pods are
+            # still ours, so report none rather than risk another sandbox's.
+            return []
+        released.update(pods)
+    return [name for name in allocated if name not in released]
+
+
+def _annotation_pod_names(annotations: Any, key: str) -> Optional[list[str]]:
+    """Pod names from an allocation annotation: [] if absent, None if malformed."""
+    raw = annotations.get(key) if isinstance(annotations, dict) else None
+    if raw is None or raw == "":
+        # The operator treats an empty annotation as absent too.
+        return []
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    pod_names = value.get("pods", []) if isinstance(value, dict) else None
+    if not isinstance(pod_names, list):
+        return None
+    return [name for name in pod_names if isinstance(name, str) and name]
