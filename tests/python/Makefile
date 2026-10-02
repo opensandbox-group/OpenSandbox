@@ -36,7 +36,7 @@ test-fsb:
 	uv run pytest tests/test_fsb_e2e.py
 
 lint:
-	uv run ruff check tests
+	uv run ruff check tests benchmarks
 
 fmt:
-	uv run ruff format tests
+	uv run ruff format tests benchmarks

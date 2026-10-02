@@ -648,3 +648,9 @@ kubectl logs -n opensandbox-system deployment/opensandbox-controller-manager
 - **Documentation**: [OpenSandbox GitHub](https://github.com/opensandbox-group/OpenSandbox)
 - **Issues**: [GitHub Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
 - **Kubernetes controller**: [Kubernetes Overview](/architecture/control-plane/operator)
+
+## Measure resume latency
+
+See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an
+opt-in rootfs benchmark with raw samples, P50/P95, failure reporting, and explicit
+cache conditions.

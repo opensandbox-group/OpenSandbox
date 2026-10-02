@@ -147,3 +147,14 @@ make test-pool
 make lint
 make fmt
 ```
+
+### Kubernetes resume benchmark
+
+For the opt-in standalone rootfs resume runner, setup, measurement boundaries,
+cache preparation, and result interpretation, see the
+[Kubernetes Resume Benchmark guide](../../docs/guides/kubernetes-resume-benchmark.md).
+The offline runner tests need no Kubernetes cluster:
+
+```bash
+uv run pytest tests/test_kubernetes_resume_benchmark.py
+```
