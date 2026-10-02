@@ -100,6 +100,9 @@ from opensandbox_server.middleware.auth import AuthMiddleware  # noqa: E402
 from opensandbox_server.middleware.date_header import DateHeaderMiddleware  # noqa: E402
 from opensandbox_server.middleware.http_metrics import HttpMetricsMiddleware  # noqa: E402
 from opensandbox_server.middleware.request_id import RequestIdMiddleware  # noqa: E402
+from opensandbox_server.repositories.lifecycle_audit.factory import (  # noqa: E402
+    close_lifecycle_audit_repository,
+)
 from opensandbox_server.repositories.snapshots.factory import close_snapshot_repository  # noqa: E402
 from opensandbox_server.services.constants import OPEN_SANDBOX_ORIGIN_HEADER  # noqa: E402
 from opensandbox_server.services.extension_service import require_extension_service  # noqa: E402
@@ -204,6 +207,7 @@ async def lifespan(app: FastAPI):
     sandbox_service.close()
     snapshot_service.close()
     close_snapshot_repository()
+    close_lifecycle_audit_repository()
     from opensandbox_server.api.templates import close_template_service  # noqa: E402
 
     close_template_service()

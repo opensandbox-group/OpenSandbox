@@ -1,0 +1,457 @@
+/*
+Copyright 2026 The OpenSandbox Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+.overview-page {
+  --overview-card-radius: 12px;
+  --overview-muted: rgba(0, 0, 0, 0.45);
+  --overview-border: #f0f0f0;
+}
+
+.overview-quick-nav {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 768px) {
+  .overview-quick-nav {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.overview-quick-nav a {
+  display: block;
+}
+
+.overview-quick-nav .overview-quick-nav-btn {
+  height: 40px;
+  font-weight: 500;
+  font-size: 14px;
+  border-radius: var(--overview-card-radius);
+  color: rgba(0, 0, 0, 0.75);
+  border-color: var(--overview-border);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition:
+    background 0.2s,
+    border-color 0.2s,
+    color 0.2s,
+    box-shadow 0.2s;
+}
+
+.overview-quick-nav .overview-quick-nav-btn:not(:disabled):hover {
+  color: #1677ff !important;
+  border-color: #d9d9d9 !important;
+  background: #fafafa !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.overview-section-title {
+  margin: 0 0 12px !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+}
+
+.overview-live-card {
+  border-radius: var(--overview-card-radius);
+  margin-bottom: 24px;
+  border: 1px solid var(--overview-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.overview-live-card .ant-card-body {
+  padding: 0;
+}
+
+.overview-live-stats {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: stretch;
+}
+
+@media (max-width: 576px) {
+  .overview-live-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-live-stat-divider {
+    height: 1px !important;
+    width: auto !important;
+    margin: 0 20px;
+  }
+}
+
+.overview-live-stat {
+  padding: 20px 28px 18px;
+  min-width: 0;
+  border-left: 3px solid transparent;
+}
+
+.overview-live-stat--total {
+  border-left-color: #1677ff;
+}
+
+.overview-live-stat--running-active {
+  border-left-color: #52c41a;
+}
+
+.overview-live-stat--running:not(.overview-live-stat--running-active) {
+  border-left-color: #d9d9d9;
+}
+
+.overview-live-stat-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.overview-live-stat-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.overview-live-stat-icon--blue {
+  background: #e6f4ff;
+  color: #1677ff;
+}
+
+.overview-live-stat-icon--green {
+  background: #f6ffed;
+  color: #52c41a;
+}
+
+.overview-live-stat-icon--muted {
+  background: #f5f5f5;
+  color: rgba(0, 0, 0, 0.35);
+}
+
+.overview-live-stat-label {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 0;
+}
+
+.overview-live-stat-label-row {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+}
+
+.overview-live-stat-label-row .ant-tag {
+  margin-inline-end: 0;
+}
+
+.overview-live-stat-value {
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1;
+  color: rgba(0, 0, 0, 0.88);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 8px;
+}
+
+.overview-live-stat-value--blue {
+  color: #1677ff;
+}
+
+.overview-live-stat-value--green {
+  color: #389e0d;
+}
+
+.overview-live-stat-value--muted {
+  color: rgba(0, 0, 0, 0.35);
+}
+
+.overview-live-stat-foot {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.overview-live-stat-divider {
+  width: 1px;
+  background: var(--overview-border);
+  margin: 16px 0;
+}
+
+.overview-live-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 12px 20px;
+  background: #fafafa;
+  border-top: 1px solid var(--overview-border);
+  border-radius: 0 0 var(--overview-card-radius) var(--overview-card-radius);
+}
+
+.overview-live-hint .ant-typography {
+  flex: 1;
+  min-width: 200px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 0 !important;
+}
+
+.overview-live-hint-link {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.overview-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+@media (max-width: 992px) {
+  .overview-kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .overview-kpi-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.overview-kpi-card {
+  border-radius: var(--overview-card-radius);
+  border: 1px solid var(--overview-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.overview-kpi-card .ant-card-body {
+  padding: 16px 18px 14px;
+  min-height: 132px;
+  display: flex;
+  flex-direction: column;
+}
+
+.overview-kpi-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.overview-kpi-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+}
+
+.overview-kpi-icon.blue {
+  background: #e6f4ff;
+  color: #1677ff;
+}
+
+.overview-kpi-icon.purple {
+  background: #f9f0ff;
+  color: #722ed1;
+}
+
+.overview-kpi-icon.cyan {
+  background: #e6fffb;
+  color: #13c2c2;
+}
+
+.overview-kpi-icon.orange {
+  background: #fff7e6;
+  color: #fa8c16;
+}
+
+.overview-kpi-delta {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.overview-kpi-delta.up {
+  color: #52c41a;
+}
+
+.overview-kpi-delta.down {
+  color: #ff4d4f;
+}
+
+.overview-kpi-delta.flat {
+  color: var(--overview-muted);
+}
+
+.overview-kpi-title {
+  font-size: 13px;
+  color: var(--overview-muted);
+  margin-bottom: 4px;
+}
+
+.overview-kpi-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.88);
+  line-height: 1.3;
+  flex: 1;
+}
+
+.overview-kpi-value-link {
+  font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
+}
+
+.overview-kpi-value-link:hover {
+  color: #1677ff;
+}
+
+.overview-kpi-spark {
+  margin-top: 8px;
+  opacity: 0.85;
+}
+
+.overview-history-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-top: 12px;
+}
+
+@media (max-width: 768px) {
+  .overview-history-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.overview-history-card {
+  border-radius: var(--overview-card-radius);
+  border: 1px solid var(--overview-border);
+}
+
+.overview-history-card .ant-card-body {
+  padding: 16px;
+}
+
+.overview-tenant-card {
+  margin-bottom: 28px;
+  border-radius: var(--overview-card-radius);
+  border: 1px solid var(--overview-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 48%);
+  overflow: hidden;
+}
+
+.overview-tenant-card .ant-card-body {
+  padding: 0;
+}
+
+.overview-tenant-table .ant-table {
+  border-radius: 0;
+  background: transparent;
+}
+
+.overview-tenant-table .ant-table-thead > tr > th {
+  background: #eef3f9 !important;
+  color: rgba(0, 0, 0, 0.65);
+  font-weight: 600;
+  border-bottom: 1px solid #dbe4ef !important;
+}
+
+.overview-tenant-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #f0f3f7;
+}
+
+.overview-tenant-table .overview-tenant-row-even > td {
+  background: #f6f9fc;
+}
+
+.overview-tenant-table .overview-tenant-row-odd > td {
+  background: #ffffff;
+}
+
+.overview-tenant-table .ant-table-tbody > tr:hover > td {
+  background: #e6f4ff !important;
+}
+
+.overview-tenant-tag {
+  margin-inline-end: 0;
+  font-weight: 500;
+}
+
+.overview-tenant-metric {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.overview-tenant-metric--count {
+  color: #1677ff;
+}
+
+.overview-tenant-metric--time {
+  color: #722ed1;
+}
+
+.overview-tenant-metric--cpu {
+  color: #13c2c2;
+}
+
+.overview-tenant-metric--mem {
+  color: #fa8c16;
+}
+
+.overview-tenant-share {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.overview-tenant-share .ant-progress {
+  flex: 1;
+  margin: 0;
+  min-width: 48px;
+}
+
+.overview-tenant-share-pct {
+  flex-shrink: 0;
+  min-width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: rgba(0, 0, 0, 0.75);
+}
+
+.overview-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.overview-section-head a {
+  font-size: 14px;
+}

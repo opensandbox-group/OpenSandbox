@@ -1,0 +1,82 @@
+# 示例 Deployment：与 opensandbox-server 同 namespace，Lifecycle 走集群内 Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-console-bff
+  namespace: opensandbox-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensandbox-console-bff
+  template:
+    metadata:
+      labels:
+        app: opensandbox-console-bff
+    spec:
+      serviceAccountName: opensandbox-console-bff
+      containers:
+        - name: bff
+          image: YOUR_REGISTRY/opensandbox-console-bff:0.1.0
+          ports:
+            - containerPort: 8091
+          env:
+            - name: LIFECYCLE_API_BASE
+              value: "http://opensandbox-server:8090/v1"
+            - name: TENANTS_TOML_PATH
+              value: "/etc/opensandbox/tenants.toml"
+            - name: BFF_COOKIE_SECURE
+              value: "true"
+            - name: BFF_CORS_ORIGINS
+              value: "https://console.example.com"
+            # 可选：探测 node-agent（需 console-bff-rbac.example.yaml）
+            - name: BFF_K8S_PROBE_ENABLED
+              value: "true"
+            # 仅当 in-cluster apiserver TLS 与 SA CA 不匹配时启用（与 Server config.toml 无关）
+            # - name: BFF_K8S_INSECURE_SKIP_TLS_VERIFY
+            #   value: "true"
+            - name: BFF_K8S_CONTROLLER_DEPLOYMENT
+              value: "opensandbox-controller-manager"
+            - name: BFF_K8S_INGRESS_DEPLOYMENT
+              value: "opensandbox-ingress-gateway"
+            # 可选：从 OSS 读 node-agent 归档日志（与 node-agent sink.oss 同源，只读 AK）
+            # - name: BFF_NODEAGENT_ARCHIVE_ENABLED
+            #   value: "true"
+            # - name: BFF_NODEAGENT_CLUSTER_ID
+            #   value: "prod-cluster"
+            # - name: BFF_NODEAGENT_OSS_ENDPOINT
+            #   value: "https://oss-cn-xxx.aliyuncs.com"
+            # - name: BFF_NODEAGENT_OSS_BUCKET
+            #   value: "your-bucket"
+            # - name: BFF_NODEAGENT_OSS_KEY_PREFIX
+            #   value: "logs"
+          envFrom:
+            - secretRef:
+                name: opensandbox-console-bff
+          volumeMounts:
+            - name: tenants
+              mountPath: /etc/opensandbox/tenants.toml
+              subPath: tenants.toml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8091
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: tenants
+          configMap:
+            name: opensandbox-tenants
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-console-bff
+  namespace: opensandbox-system
+spec:
+  selector:
+    app: opensandbox-console-bff
+  ports:
+    - port: 8091
+      targetPort: 8091

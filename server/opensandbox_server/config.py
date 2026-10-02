@@ -1383,6 +1383,16 @@ class PostgreSQLStoreConfig(BaseModel):
         return self
 
 
+class LifecycleAuditConfig(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "When true with store.type=postgresql, persist sandbox create/delete to "
+            "sandbox_lifecycle_history for Console history (async, best-effort)."
+        ),
+    )
+
+
 class StoreConfig(BaseModel):
     type: Literal["sqlite", "postgresql"] = Field(
         default="sqlite",
@@ -1399,6 +1409,10 @@ class StoreConfig(BaseModel):
     postgresql: PostgreSQLStoreConfig = Field(
         default_factory=PostgreSQLStoreConfig,
         description="PostgreSQL settings used when store.type is 'postgresql'.",
+    )
+    lifecycle_audit: LifecycleAuditConfig = Field(
+        default_factory=LifecycleAuditConfig,
+        description="Optional sandbox lifecycle audit rows (PostgreSQL only).",
     )
 
     @model_validator(mode="after")
