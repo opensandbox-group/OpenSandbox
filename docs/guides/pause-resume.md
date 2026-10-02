@@ -89,6 +89,33 @@ Pause/resume is currently single-replica only. The internal pause snapshot recor
 See [Credential Vault](/guides/credential-vault#persistence-across-pause-and-resume)
 for the required post-resume credential re-injection procedure.
 
+### Durability and abnormal termination
+
+The root filesystem is durable only after the snapshot reaches `Succeed` and the
+OCI image has been pushed to the configured registry. A pause request being
+accepted, or a snapshot being in `Pending` or `Committing`, does not provide a
+durability guarantee.
+
+Changes made after the last successful snapshot remain in the container's
+writable layer. They are not automatically snapshotted when the process exits,
+the container is OOM-killed, the Pod enters `Failed`, the Pod is evicted, or the
+node becomes unavailable. The lifecycle API does not currently expose a
+post-failure snapshot or recovery operation, and a new container created by a
+Kubernetes restart does not inherit the old writable layer.
+
+The image-committer can sometimes read a stopped container directly from
+containerd while its metadata and writable snapshot still exist on the source
+node. This is a best-effort operator recovery path, not a supported durability
+contract: the normal snapshot API requires a `Running` sandbox, and containerd
+or kubelet garbage collection, Pod replacement, node loss, or a reused
+container identity can make the old layer unavailable or ambiguous.
+
+For data that must survive an unexpected termination, store it in a persistent
+volume or an external service and take explicit root filesystem snapshots for
+reproducible environment state. Files in mounted volumes follow the persistence
+and backup behavior of that volume; they are not included in the OCI rootfs
+snapshot.
+
 ---
 
 ## Architecture
