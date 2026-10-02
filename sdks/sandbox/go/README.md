@@ -251,6 +251,139 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
 binding guidance, and Git/curl examples.
 
+### Work with files
+
+File helpers live on `Sandbox` (they wrap the `ExecdClient` file operations
+with the sandbox's own access token):
+
+```go
+// The examples below need a live handle; the quick start above left `sbx`
+// as a *SandboxInfo, which has no file methods.
+sbx, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
+    Image: "python:3.11",
+})
+
+// Upload (single or multipart-batch). Metadata.Path is the destination and
+// is required — FileName alone is just the multipart filename.
+err = sbx.UploadFile(ctx, bytes.NewReader(data), opensandbox.UploadFileOptions{
+    FileName: "app.py",
+    Metadata: opensandbox.FileMetadata{Path: "/workspace/app.py"},
+})
+err = sbx.UploadFiles(ctx, []opensandbox.UploadFileEntry{
+    {File: f1, Options: opensandbox.UploadFileOptions{
+        FileName: "a.txt", Metadata: opensandbox.FileMetadata{Path: "/workspace/a.txt"},
+    }},
+    {File: f2, Options: opensandbox.UploadFileOptions{
+        FileName: "b.txt", Metadata: opensandbox.FileMetadata{Path: "/workspace/b.txt"},
+    }},
+})
+
+// Download: full file, byte-range, or line-based. Each call returns its
+// own reader — close each one (a single shared defer would leak the first two).
+full, err := sbx.DownloadFile(ctx, "/var/log/app.log", "") // full
+defer full.Close()
+partial, err := sbx.DownloadFile(ctx, "/var/log/app.log", "bytes=0-1023") // partial
+defer partial.Close()
+lines, err := sbx.DownloadFile(ctx, "/var/log/app.log", "",
+    opensandbox.DownloadFileOptions{Offset: 10, Limit: 50}) // lines 10-59
+defer lines.Close()
+
+// List, inspect, search
+entries, err := sbx.ListDirectory(ctx, "/workspace")
+deep, err := sbx.ListDirectoryWithDepth(ctx, "/workspace", 3) // 0 returns empty
+hits, err := sbx.SearchFiles(ctx, "/workspace", "*.json")
+info, err := sbx.GetFileInfo(ctx, "/workspace/app.py")
+
+// Directories, moves, permissions
+// mode is octal digits packed into a decimal int: pass 755, or
+// opensandbox.OctalMode(0o755) when starting from a Go FileMode.
+err = sbx.CreateDirectory(ctx, "/workspace/out", 755)
+err = sbx.MoveFiles(ctx, opensandbox.MoveRequest{...})
+err = sbx.SetPermissions(ctx, opensandbox.PermissionsRequest{...})
+err = sbx.DeleteFiles(ctx, []string{"/workspace/tmp.log"})
+err = sbx.DeleteDirectory(ctx, "/workspace/out")
+
+// Text replacement across files
+replaceReq := opensandbox.ReplaceRequest{
+    "/workspace/config.yaml": {Old: "debug: true", New: "debug: false"},
+}
+err = sbx.ReplaceInFiles(ctx, replaceReq)
+detailed, err := sbx.ReplaceInFilesDetailed(ctx, replaceReq) // per-file ReplacedCount
+```
+
+### Mount volumes into a sandbox
+
+`Volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must
+specify exactly one backend:
+
+```go
+sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
+    Image: "ubuntu",
+    Volumes: []opensandbox.Volume{
+        {
+            Name:     "oss-data",
+            OSSFS: &opensandbox.OSSFS{
+                Bucket:          "bucket-a",
+                Endpoint:        "oss-cn-hangzhou.aliyuncs.com",
+                AccessKeyID:     os.Getenv("OSS_ACCESS_KEY_ID"),
+                AccessKeySecret: os.Getenv("OSS_ACCESS_KEY_SECRET"),
+            },
+            MountPath: "/mnt/oss",
+        },
+    },
+})
+```
+
+### Build reusable base images with templates
+
+`SandboxManager` builds golden images ("templates") from an OCI image and
+publishes them to an S3-compatible target; sandboxes then boot from a
+`TemplateID` instead of a plain image:
+
+```go
+mgr := opensandbox.NewSandboxManager(config)
+
+tpl, err := mgr.CreateTemplate(ctx, opensandbox.CreateTemplateRequest{
+    Image:   "python:3.11",
+    Publish: "s3://bucket/templates/py311",
+    ResourceLimits: map[string]string{
+        "cpu": "1", "memory": "512Mi", "disk": "2Gi",
+    },
+})
+// Poll GetTemplate until the build finishes. Status is a TemplateStatus
+// struct — compare its Phase field, not a string (bound the loop in real
+// code; a failed build never reaches Succeeded):
+for tpl.Status.Phase != opensandbox.TemplatePhaseSucceeded {
+    time.Sleep(10 * time.Second)
+    tpl, err = mgr.GetTemplate(ctx, tpl.TemplateID)
+}
+
+// Boot from the template: template-based creation requires an explicit
+// timeout — the server rejects creation without one.
+sandbox, err := opensandbox.CreateSandboxFromTemplate(ctx, config, tpl.TemplateID,
+    opensandbox.SandboxFromTemplateOptions{TimeoutSeconds: 3600})
+
+list, err := mgr.ListTemplates(ctx, opensandbox.ListTemplatesOptions{})
+err = mgr.DeleteTemplate(ctx, tpl.TemplateID)
+```
+
+### Wait for readiness with a custom health check
+
+`WaitUntilReady` polls until the sandbox is ready — by default the execd
+`/ping`; a custom `HealthCheck` replaces that (the JS SDK's custom health
+check equivalent):
+
+```go
+err := sbx.WaitUntilReady(ctx, opensandbox.ReadyOptions{
+    Timeout:         60 * time.Second,
+    PollingInterval: 2 * time.Second,
+    HealthCheck: func(ctx context.Context, sb *opensandbox.Sandbox) (bool, error) {
+        out, err := sb.RunCommand(ctx, "curl -fsS http://localhost:8080/healthz", nil)
+        return err == nil && out.ExitCode != nil && *out.ExitCode == 0, nil
+    },
+})
+```
+
 ### Release idle pool sandboxes
 
 `ReleaseAllIdle(ctx)` preserves the original fire-and-forget behavior: it drains
@@ -295,7 +428,38 @@ Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 Created with `NewSandboxManager(config ConnectionConfig)`. Administrative
 operations on sandboxes without connecting to a specific one; every method is a
 thin wrapper over the corresponding `LifecycleClient` call (see table above),
-plus `Close()`.
+plus `Close()` (a no-op kept for symmetry — it does not terminate
+sandboxes). Manager operations act across sandboxes by ID (the quick-start
+snapshot example is one of these).
+
+**Snapshots:**
+| Method | Description |
+|--------|-------------|
+| `CreateSnapshot(ctx, sandboxID, req)` | Create a snapshot from a running sandbox |
+| `GetSnapshot(ctx, snapshotID)` | Get snapshot details (poll `Status.State` for `Ready`) |
+| `ListSnapshots(ctx, filter)` | List snapshots with filtering |
+| `DeleteSnapshot(ctx, snapshotID)` | Delete a snapshot |
+
+**Templates (golden images):**
+| Method | Description |
+|--------|-------------|
+| `CreateTemplate(ctx, req)` | Build a reusable golden image from an OCI image and publish it |
+| `GetTemplate(ctx, templateID)` | Get template details and build status |
+| `ListTemplates(ctx, opts)` | List templates |
+| `DeleteTemplate(ctx, templateID)` | Delete a template |
+
+**Sandbox administration:**
+| Method | Description |
+|--------|-------------|
+| `ListSandboxInfos(ctx, filter)` | List sandboxes with filtering and pagination |
+| `GetSandboxInfo(ctx, sandboxID)` | Get sandbox details by ID |
+| `PatchSandboxMetadata(ctx, sandboxID, patch)` | Patch sandbox metadata |
+| `PauseSandbox(ctx, sandboxID)` | Pause a running sandbox |
+| `ResumeSandbox(ctx, sandboxID)` | Resume a paused sandbox |
+| `KillSandbox(ctx, sandboxID)` | Force-terminate a sandbox |
+| `RenewSandbox(ctx, sandboxID, duration)` | Extend a sandbox's expiration |
+| `Close()` | No-op; does not terminate sandboxes |
+
 
 ### ExecdClient
 
@@ -372,6 +536,46 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 | `GetCredentialVaultCredential(ctx, name)` | Get sanitized metadata for one credential |
 | `ListCredentialVaultBindings(ctx)` | List sanitized binding metadata |
 | `GetCredentialVaultBinding(ctx, name)` | Get sanitized metadata for one binding |
+
+### Sandbox helpers
+
+Convenience methods on `*Sandbox` (the object `CreateSandbox` returns) — they
+wrap the underlying clients with the sandbox's own credentials:
+
+| Method | Description |
+|--------|-------------|
+| `ID()` | The sandbox ID |
+| `Origin()` | Origin reported by the server: `SandboxOriginTemplate`, or `SandboxOriginUnknown` |
+| `GetInfo(ctx)` | Fetch the current `SandboxInfo` |
+| `WaitUntilReady(ctx, opts)` | Poll until ready (execd `/ping` by default; custom `ReadyOptions.HealthCheck` replaces it) |
+| `IsHealthy(ctx)` | One-shot health check |
+| `Ping(ctx)` | Ping execd |
+| `GetEndpoint(ctx, port)` | Get a public endpoint for a sandbox port |
+| `GetSignedEndpoint(ctx, port, expires)` | Get a signed endpoint URL with OSEP-0011 route token |
+| `Pause(ctx)` | Pause this sandbox |
+| `Resume(ctx)` | Resume and return a newly connected handle (not in-place) |
+| `Renew(ctx, duration)` | Extend expiration |
+| `PatchMetadata(ctx, patch)` | Patch metadata |
+| `SetEnv(ctx, key, value)` | Set an environment variable inside the sandbox |
+| `Kill(ctx)` | Force-terminate |
+| `Close()` | No-op; does not terminate the sandbox |
+| `CreateSnapshot(ctx, req)` | Create a snapshot of this sandbox |
+
+File operations, command execution, code execution, and isolated sessions are
+also reachable as `Sandbox` helpers — see the file and isolated-session
+examples above, and the `ExecdClient` tables for the full list.
+
+### CodeInterpreter
+
+`CreateCodeInterpreter(ctx, config, opts)` creates a sandbox from the
+code-interpreter image and returns a `*CodeInterpreter` that embeds
+`*Sandbox` (all sandbox helpers above work on it):
+
+| Method | Description |
+|--------|-------------|
+| `Execute(ctx, language, code, handlers)` | Execute code with SSE streaming |
+| `ExecuteInContext(ctx, contextID, language, code, handlers)` | Execute code in an existing context |
+| `IsHealthy(ctx)` | Report interpreter health |
 
 ## SSE Streaming
 
