@@ -49,6 +49,15 @@ class DockerSnapshotRuntime:
     def supports_create_snapshot(self) -> bool:
         return True
 
+    def supports_snapshot_source_state(
+        self,
+        sandbox_id: str,
+        state: str,
+        *,
+        namespace: str | None = None,
+    ) -> bool:
+        return state in {"Running", "Paused"}
+
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 

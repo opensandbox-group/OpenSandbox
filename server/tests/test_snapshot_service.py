@@ -93,9 +93,21 @@ class StubSnapshotRuntime:
         self.delete_calls: list[tuple[str, str | None]] = []
         self.inspect_status_by_snapshot_id: dict[str, SnapshotRuntimeStatus] = {}
         self.create_result: SnapshotRuntimeStatus | None = None
+        self.supported_source_states = {"Running"}
+        self.source_state_checks: list[tuple[str, str, str | None]] = []
 
     def supports_create_snapshot(self) -> bool:
         return True
+
+    def supports_snapshot_source_state(
+        self,
+        sandbox_id: str,
+        state: str,
+        *,
+        namespace: str | None = None,
+    ) -> bool:
+        self.source_state_checks.append((sandbox_id, state, namespace))
+        return state in self.supported_source_states
 
     def create_snapshot_unsupported_message(self) -> str:
         return ""
@@ -194,6 +206,33 @@ def test_snapshot_service_rejects_create_when_source_sandbox_not_running(tmp_pat
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["code"] == "SNAPSHOT::INVALID_SOURCE_STATE"
     assert runtime.calls == []
+
+
+def test_snapshot_service_accepts_paused_source_when_runtime_supports_it(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    runtime.supported_source_states.add("Paused")
+    sandbox_service = SimpleNamespace(
+        get_sandbox=lambda sandbox_id: SimpleNamespace(
+            id=sandbox_id,
+            status=SimpleNamespace(state="Paused"),
+        )
+    )
+    service = PersistedSnapshotService(
+        repo,
+        sandbox_service,
+        snapshot_runtime=runtime,
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    created = service.create_snapshot(
+        "sbx-001",
+        CreateSnapshotRequest(name="paused-checkpoint"),
+    )
+
+    assert created.status.state == "Creating"
+    assert runtime.source_state_checks == [("sbx-001", "Paused", None)]
+    assert runtime.calls == [(created.id, "sbx-001")]
 
 
 def test_snapshot_service_rejects_unsupported_runtime_before_persisting(tmp_path) -> None:
