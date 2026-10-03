@@ -334,6 +334,10 @@ jobs:
           go test -v -race -coverprofile=reports/coverage.out ./...
           go tool cover -func=reports/coverage.out
 
+      - name: Type-check the client-pool-resize example
+        working-directory: examples/client-pool-resize
+        run: go vet ./...
+
       - name: Upload Go reports
         if: always()
         uses: actions/upload-artifact@v4
