@@ -291,6 +291,7 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: "Code Interpreter", link: "/examples/code-interpreter" },
+            { text: "Scheduled Client Pool", link: "/examples/client-pool-schedule" },
             { text: "AIO Sandbox", link: "/examples/aio-sandbox" },
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
             { text: "Windows", link: "/examples/windows" },

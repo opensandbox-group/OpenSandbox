@@ -48,6 +48,7 @@ Fundamental sandbox operations and SDK workflows.
 | Example | Description |
 |---------|-------------|
 | [Code Interpreter](/examples/code-interpreter) | End-to-end Code Interpreter SDK workflow |
+| [Scheduled Client Pool](/examples/client-pool-schedule) | Adjust idle capacity by business hours using Go's pool Resize API |
 | [AIO Sandbox](/examples/aio-sandbox) | All-in-One sandbox setup |
 | [Agent Sandbox](/examples/agent-sandbox) | Kubernetes agent-sandbox integration |
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |
@@ -74,5 +75,5 @@ Persistent and shared storage patterns for sandboxes.
 4. Navigate to the example directory and run: `python main.py`
 
 ::: tip
-Each example includes a `main.py` entry point. Some also include a `Dockerfile` for containerized execution.
+Most examples include a `main.py` entry point. Follow each example's run instructions for other languages. Some also include a `Dockerfile` for containerized execution.
 :::

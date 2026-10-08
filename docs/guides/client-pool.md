@@ -455,6 +455,8 @@ Each pool SDK exposes these operations (names follow language conventions):
   consecutive failures, last error).
 - `snapshot_idle_entries()` — the current idle sandbox IDs with expiry timestamps.
 - `resize(max_idle)` — change the target buffer size at runtime.
+  For business-hours sizing, see the [scheduled client pool example](/examples/client-pool-schedule),
+  which calls `Resize` from an application-level controller.
 - `release_all_idle()` — drain the currently visible idle buffer and best-effort kill
   each entry, without stopping the pool. Useful to force a fresh set of warmups after a
   transient upstream problem. It does **not** change `max_idle`, does **not** fence
