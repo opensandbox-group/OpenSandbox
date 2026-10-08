@@ -73,6 +73,9 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 		batchSbx *sandboxv1alpha1.BatchSandbox
 		idx      int
 	}
+	baseTimeout := int64(30)
+	patchedTimeout := int64(600)
+
 	tests := []struct {
 		name    string
 		args    args
@@ -134,6 +137,39 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 				Name: "test-bs-0",
 				Process: &api.Process{
 					Command: []string{"echo", "world"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "shard patch timeout overrides template timeout",
+			args: args{
+				batchSbx: &sandboxv1alpha1.BatchSandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-bs",
+						Namespace: "default",
+					},
+					Spec: sandboxv1alpha1.BatchSandboxSpec{
+						TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{
+							Spec: sandboxv1alpha1.TaskSpec{
+								Process: &sandboxv1alpha1.ProcessTask{
+									Command: []string{"echo", "hello"},
+								},
+								TimeoutSeconds: &baseTimeout,
+							},
+						},
+						ShardTaskPatches: []sandboxv1alpha1.TaskTemplatePatch{
+							shardTaskPatch(`{"spec":{"timeoutSeconds":600}}`),
+						},
+					},
+				},
+				idx: 0,
+			},
+			want: &api.Task{
+				Name: "test-bs-0",
+				Process: &api.Process{
+					Command:        []string{"echo", "hello"},
+					TimeoutSeconds: &patchedTimeout,
 				},
 			},
 			wantErr: false,

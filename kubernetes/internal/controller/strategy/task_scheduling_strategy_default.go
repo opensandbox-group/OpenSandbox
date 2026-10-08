@@ -75,7 +75,7 @@ func (s *defaultTaskSchedulingStrategy) getTaskSpec(idx int) (*api.Task, error) 
 		if err = json.Unmarshal(modified, newTaskTemplate); err != nil {
 			return nil, fmt.Errorf("batchsandbox: failed to unmarshal %s to TaskTemplateSpec, idx %d, err %w", modified, idx, err)
 		}
-		task.Process = convertProcessSpec(newTaskTemplate.Spec.Process, s.Spec.TaskTemplate.Spec.TimeoutSeconds)
+		task.Process = convertProcessSpec(newTaskTemplate.Spec.Process, newTaskTemplate.Spec.TimeoutSeconds)
 	} else if s.Spec.TaskTemplate != nil && s.Spec.TaskTemplate.Spec.Process != nil {
 		task.Process = convertProcessSpec(s.Spec.TaskTemplate.Spec.Process, s.Spec.TaskTemplate.Spec.TimeoutSeconds)
 	}
