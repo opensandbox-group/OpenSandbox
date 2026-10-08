@@ -670,9 +670,9 @@ func (s *ossSink) validateResource(streamRef api.StreamRef, resource api.Resourc
 	if err := streamMetadata.Validate(); err != nil {
 		return api.Permanent(fmt.Errorf("invalid stream metadata: %w", err))
 	}
-	family, err := streamformat.ResolveFamily(format, s.cfg.Prefix, streamRef, resource, streamMetadata)
+	family, err := resolveFamily(format, s.cfg.Prefix, streamRef, resource, streamMetadata)
 	if err != nil {
-		return api.Permanent(fmt.Errorf("resolve OSS object family: %w", err))
+		return err
 	}
 	for _, field := range []struct{ name, value string }{
 		{name: "sandbox ID", value: resource.SandboxID},
