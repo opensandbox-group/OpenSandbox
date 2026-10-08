@@ -38,7 +38,7 @@ func TestEncodeMarkerIsDeterministic(t *testing.T) {
 	if !bytes.Equal(first, second) || bytes.HasSuffix(first, []byte("\n")) {
 		t.Fatalf("non-canonical output: %q", first)
 	}
-	if value.Status != "complete-with-drops" || value.FinalizedAt != "2026-07-23T10:05:00Z" {
+	if value.status != "complete-with-drops" || value.FinalizedAt != "2026-07-23T10:05:00Z" {
 		t.Fatalf("unexpected marker: %+v", value)
 	}
 	want := `{"schema_version":1,"target_id":"sha256:target","finalize_id":"sha256:final","revision":1,"stream_ref":"container-logs/u123/sandbox","resource":{"sandbox_id":"sb-abc","k8s.namespace.name":"team-a","k8s.pod.name":"pod","k8s.pod.uid":"u123","k8s.container.name":"sandbox","k8s.node.name":"node-1","k8s.cluster.name":"prod-a"},"coverage_started_at":"2026-07-23T09:58:00Z","status":"complete-with-drops","had_drops":true,"had_source_gaps":false,"loss_reasons":["a","z"],"finalized_at":"2026-07-23T10:05:00Z","objects":[{"key":"key","generation":0,"size":5,"crc64":"7"}]}`
@@ -48,7 +48,7 @@ func TestEncodeMarkerIsDeterministic(t *testing.T) {
 }
 
 func TestStatusPriority(t *testing.T) {
-	if got := Status(api.SourceOutcome{HadDrops: true, HadSourceGaps: true}); got != "incomplete" {
+	if got := status(api.SourceOutcome{HadDrops: true, HadSourceGaps: true}); got != "incomplete" {
 		t.Fatalf("status=%q", got)
 	}
 }

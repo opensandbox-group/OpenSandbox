@@ -30,8 +30,8 @@ func TestStoreFiltersAndRetainsIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.upsert(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{SandboxIDLabel: "sb-1"}}, Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: ContainerName}}}})
-	s.upsert(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "team-a", UID: types.UID("u2"), Labels: map[string]string{SandboxIDLabel: "sb-2", PoolNameLabel: "pool-a"}}, Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: ContainerName}}}})
+	s.upsert(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{sandboxIDLabel: "sb-1"}}, Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: containerName}}}})
+	s.upsert(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "team-a", UID: types.UID("u2"), Labels: map[string]string{sandboxIDLabel: "sb-2", poolNameLabel: "pool-a"}}, Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: containerName}}}})
 	got := view.List()
 	if len(got) != 1 || got[0].SandboxID != "sb-1" {
 		t.Fatalf("resources=%+v", got)
@@ -50,13 +50,13 @@ func TestStoreExposesSandboxContainerRuntimeIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.upsert(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{SandboxIDLabel: "sb-1"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{sandboxIDLabel: "sb-1"}},
 		Spec: corev1.PodSpec{
 			NodeName:   "node-1",
-			Containers: []corev1.Container{{Name: ContainerName}},
+			Containers: []corev1.Container{{Name: containerName}},
 		},
 		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-			Name:         ContainerName,
+			Name:         containerName,
 			ContainerID:  "containerd://0123456789abcdef",
 			RestartCount: 3,
 		}}},
@@ -92,7 +92,7 @@ func TestStoreForgetsOnlyTerminatedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{SandboxIDLabel: "sb-1"}}, Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: ContainerName}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{sandboxIDLabel: "sb-1"}}, Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: containerName}}}}
 	s.upsert(pod)
 	view.Forget("u1")
 	if _, found := view.GetByUID("u1"); !found {
@@ -116,8 +116,8 @@ func TestStoreBroadcastsChangesAndWaitsForEverySourceRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{SandboxIDLabel: "sb-1"}},
-		Spec:       corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: ContainerName}}},
+		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "team-a", UID: types.UID("u1"), Labels: map[string]string{sandboxIDLabel: "sb-1"}},
+		Spec:       corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: containerName}}},
 	}
 	s.upsert(pod)
 	for name, changes := range map[string]<-chan struct{}{"first": first.Changes(), "second": second.Changes()} {

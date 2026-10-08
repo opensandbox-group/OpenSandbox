@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package pipeline merges one Source's event stream into per-stream workers,
+// batches records, and drives Sink writes, acknowledgements, and finalization
+// to a durable commit point in the state DB.
 package pipeline
 
 import (
@@ -32,6 +35,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// finalizeStore is the Pipeline's view of the durable state DB. It is
+// satisfied by *state.DB.
 type finalizeStore interface {
 	BindStreamKind(api.StreamRef) error
 	GetFinalizeIntent(streamRef string, revision uint64) (state.FinalizeIntent, bool, error)
@@ -40,6 +45,9 @@ type finalizeStore interface {
 	GetSourceStream(streamRef string) (state.SourceStream, bool, error)
 }
 
+// Config bounds batching, retry, and memory behavior. DropPolicy is "block"
+// (apply backpressure to the Source) or "drop" (acknowledge records as
+// intentional drops).
 type Config struct {
 	BatchMaxItems        int
 	FlushInterval        time.Duration
@@ -52,8 +60,12 @@ type Config struct {
 	DropPolicy           string
 }
 
+// perStreamQueueSize keeps worker input channels effectively unbuffered so
+// the global admission budget in admit is the single backpressure point.
 const perStreamQueueSize = 1
 
+// Pipeline connects one Source to one Sink. Run consumes events until an
+// unrecoverable error or ctx cancellation; Close drains and releases workers.
 type Pipeline struct {
 	cfg      Config
 	source   api.Source
@@ -119,6 +131,9 @@ type pending struct {
 	sandboxID string
 }
 
+// retryOperation describes one retryable Pipeline step. timeout of zero means
+// the step inherits the caller's deadline. scope, when set, shares one retry
+// notification across a consume+acknowledge pair.
 type retryOperation struct {
 	call             func(context.Context) error
 	timeout          time.Duration
@@ -127,6 +142,8 @@ type retryOperation struct {
 	scope            *retryScope
 }
 
+// retryScope reports "a retry is active" to OnRetryStateChange exactly once
+// for the lifetime of the scope, no matter how many individual retries occur.
 type retryScope struct {
 	end func()
 }
@@ -144,6 +161,8 @@ func (s *retryScope) close() {
 	}
 }
 
+// New validates cfg, checks Source/Sink compatibility, and returns a stopped
+// Pipeline.
 func New(cfg Config, source api.Source, sink api.Sink, store finalizeStore, targetID string, log logger.Logger, onError func(error)) (*Pipeline, error) {
 	if cfg.BatchMaxItems <= 0 || cfg.FlushInterval <= 0 || cfg.SinkTimeout <= 0 || cfg.RetryMaxInterval <= 0 || cfg.MemoryBudgetBytes <= 0 || cfg.PerSandboxQueueBytes <= 0 {
 		return nil, errors.New("pipeline limits and durations must be positive")
@@ -166,6 +185,9 @@ func New(cfg Config, source api.Source, sink api.Sink, store finalizeStore, targ
 	return &Pipeline{cfg: cfg, source: source, sink: sink, state: store, targetID: targetID, log: log.Named("pipeline"), onError: onError, workers: make(map[string]*worker), handoffs: make(map[string]<-chan struct{}), workerCtx: workerCtx, cancelWorkers: cancelWorkers, workerErrors: make(chan error, 1), sandboxBytes: make(map[string]int64), budgetChanged: make(chan struct{}, 1), limiters: make(map[string]*rate.Limiter), limiterUsers: make(map[string]int), metrics: metrics}, nil
 }
 
+// Run first replays interrupted finalizations from the state DB, then routes
+// each event to its stream worker until ctx is canceled, the channel closes,
+// or a worker fails. It returns the first unrecoverable error.
 func (p *Pipeline) Run(ctx context.Context, events <-chan api.SourceEvent) error {
 	if err := p.reconcileFinalizeIntents(ctx); err != nil {
 		return err
@@ -272,25 +294,37 @@ func (p *Pipeline) reconcileFinalizeIntents(ctx context.Context) error {
 			continue
 		}
 
-		request := finalizeRequest(intent)
-		if !intent.SinkDone {
-			if err := p.finalizeSinkWithRetry(ctx, request); err != nil {
-				return err
-			}
-			intent.SinkDone = true
-			if err := p.state.PutFinalizeIntent(intent); err != nil {
-				return err
-			}
-		}
-		if err := p.acknowledgeEndWithRetry(ctx, cloneEndToken(*intent.EndToken)); err != nil {
-			return err
-		}
-		intent.SourceDone = true
-		if err := p.state.PutFinalizeIntent(intent); err != nil {
+		if _, err := p.completeFinalize(ctx, intent); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// completeFinalize drives one finalize intent to its terminal state: it
+// finalizes the Sink, then acknowledges the Source end, persisting each
+// transition so a crash between steps resumes at the next step instead of
+// repeating completed work.
+func (p *Pipeline) completeFinalize(ctx context.Context, intent state.FinalizeIntent) (state.FinalizeIntent, error) {
+	if !intent.SinkDone {
+		if err := p.finalizeSinkWithRetry(ctx, finalizeRequest(intent)); err != nil {
+			return intent, err
+		}
+		intent.SinkDone = true
+		if err := p.state.PutFinalizeIntent(intent); err != nil {
+			return intent, err
+		}
+	}
+	if !intent.SourceDone {
+		if err := p.acknowledgeEndWithRetry(ctx, intent.EndToken.Clone()); err != nil {
+			return intent, err
+		}
+		intent.SourceDone = true
+		if err := p.state.PutFinalizeIntent(intent); err != nil {
+			return intent, err
+		}
+	}
+	return intent, nil
 }
 
 func (p *Pipeline) getWorker(streamRef api.StreamRef, resource api.Resource, metadata api.StreamMetadata) (*worker, error) {
@@ -339,6 +373,9 @@ func (p *Pipeline) getWorker(streamRef api.StreamRef, resource api.Resource, met
 	return w, nil
 }
 
+// runWorker consumes one stream's admitted events in order. It flushes on
+// the flush timer, on a full batch, and on channel close; a stream End event
+// flushes the residue and finalizes the revision before the worker exits.
 func (p *Pipeline) runWorker(ctx context.Context, worker *worker) error {
 	var items []pending
 	defer func() {
@@ -491,32 +528,16 @@ func (p *Pipeline) finalize(ctx context.Context, worker *worker, end *api.Stream
 			return errors.New("stream end does not match persisted finalize intent")
 		}
 	}
-	request := finalizeRequest(intent)
-	if !intent.SinkDone {
-		if err := p.finalizeSinkWithRetry(ctx, request); err != nil {
-			return err
-		}
-		intent.SinkDone = true
-		if err := p.state.PutFinalizeIntent(intent); err != nil {
-			return err
-		}
-	}
-	if !intent.SourceDone {
-		if err := p.acknowledgeEndWithRetry(ctx, cloneEndToken(*intent.EndToken)); err != nil {
-			return err
-		}
-		intent.SourceDone = true
-		if err := p.state.PutFinalizeIntent(intent); err != nil {
-			return err
-		}
+	if _, err := p.completeFinalize(ctx, intent); err != nil {
+		return err
 	}
 	return nil
 }
 
 func newFinalizeIntent(finalizeID, targetID string, finalizedAt time.Time, end *api.StreamEnd, outcome api.SourceOutcome) state.FinalizeIntent {
 	resource := end.Resource
-	frozenOutcome := cloneSourceOutcome(outcome)
-	endToken := cloneEndToken(end.EndToken)
+	frozenOutcome := outcome.Clone()
+	endToken := end.EndToken.Clone()
 	return state.FinalizeIntent{
 		FinalizeID:        finalizeID,
 		TargetID:          targetID,
@@ -548,8 +569,8 @@ func finalizeIntentMatchesEvent(intent state.FinalizeIntent, end *api.StreamEnd,
 		intent.Revision == end.Revision &&
 		intent.Resource != nil && *intent.Resource == end.Resource &&
 		intent.Metadata.Equal(end.Metadata) &&
-		intent.Outcome != nil && equalSourceOutcome(*intent.Outcome, outcome) &&
-		intent.EndToken != nil && equalEndToken(*intent.EndToken, end.EndToken)
+		intent.Outcome != nil && intent.Outcome.Equal(outcome) &&
+		intent.EndToken != nil && intent.EndToken.Equal(end.EndToken)
 }
 
 func finalizeRequest(intent state.FinalizeIntent) api.FinalizeRequest {
@@ -561,35 +582,9 @@ func finalizeRequest(intent state.FinalizeIntent) api.FinalizeRequest {
 		CoverageStartedAt: intent.CoverageStartedAt,
 		Resource:          *intent.Resource,
 		Metadata:          intent.Metadata.Clone(),
-		Outcome:           cloneSourceOutcome(*intent.Outcome),
+		Outcome:           intent.Outcome.Clone(),
 		FinalizedAt:       intent.FinalizedAt,
 	}
-}
-
-func cloneSourceOutcome(outcome api.SourceOutcome) api.SourceOutcome {
-	outcome.LossReasons = append([]string(nil), outcome.LossReasons...)
-	return outcome
-}
-
-func cloneEndToken(token api.EndToken) api.EndToken {
-	token.Value = append([]byte(nil), token.Value...)
-	return token
-}
-
-func equalSourceOutcome(left, right api.SourceOutcome) bool {
-	if left.HadDrops != right.HadDrops || left.HadSourceGaps != right.HadSourceGaps || len(left.LossReasons) != len(right.LossReasons) {
-		return false
-	}
-	for index := range left.LossReasons {
-		if left.LossReasons[index] != right.LossReasons[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalEndToken(left, right api.EndToken) bool {
-	return left.ID == right.ID && left.Source == right.Source && left.StreamRef == right.StreamRef && string(left.Value) == string(right.Value)
 }
 
 func (p *Pipeline) acknowledgeEndWithRetry(ctx context.Context, token api.EndToken) error {
@@ -650,6 +645,10 @@ func (p *Pipeline) beginRetry() func() {
 	return func() { p.changeRetryCount(-1) }
 }
 
+// changeRetryCount moves the active-retry counter and forwards the transition
+// to OnRetryStateChange. retryNotifying serializes the callback outside the
+// lock so concurrent scope changes coalesce into one callback per transition
+// (drainRetryStateChanges re-reads state under the lock until it is stable).
 func (p *Pipeline) changeRetryCount(delta int) {
 	p.retryMu.Lock()
 	p.activeRetries += delta
@@ -685,6 +684,9 @@ func (p *Pipeline) drainRetryStateChanges() {
 	}
 }
 
+// retireWorker drops the End-carrying worker from the active map and records
+// a handoff so the next revision of the same stream ID waits for this worker
+// to finish flushing before its own records are consumed.
 func (p *Pipeline) retireWorker(worker *worker) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -706,6 +708,10 @@ func (p *Pipeline) clearHandoff(worker *worker) {
 	}
 }
 
+// Close marks the Pipeline closed, waits for in-flight admissions, closes
+// worker inputs, drains buffered events, and closes the Sink. If ctx expires
+// first, workers are canceled and their queued events are released; the
+// returned error joins the deadline and Sink close errors.
 func (p *Pipeline) Close(ctx context.Context) error {
 	p.mu.Lock()
 	shouldClose := false
@@ -767,6 +773,10 @@ func (p *Pipeline) fail(err error) {
 	}
 }
 
+// admit charges the event against the global and per-sandbox byte budgets
+// and applies the per-sandbox rate limit. Under the "drop" policy, rejected
+// events are acknowledged as intentional drops; under "block", admission
+// waits for budget release.
 func (p *Pipeline) admit(ctx context.Context, worker *worker, event api.SourceEvent) (*admittedEvent, error) {
 	if event.End != nil {
 		return &admittedEvent{event: event}, nil
@@ -820,7 +830,7 @@ func (p *Pipeline) drop(ctx context.Context, worker *worker, delivery *api.Deliv
 	}
 	worker.outcomeMu.Lock()
 	worker.dropOutcome.HadDrops = true
-	worker.dropOutcome.LossReasons = addReason(worker.dropOutcome.LossReasons, reason)
+	worker.dropOutcome.LossReasons = api.AddLossReason(worker.dropOutcome.LossReasons, reason)
 	worker.outcomeMu.Unlock()
 	p.metrics.drops.Add(context.Background(), 1)
 	return nil
@@ -861,6 +871,8 @@ func (p *Pipeline) releaseLimiter(sandboxID string) {
 	p.budgetMu.Unlock()
 }
 
+// release returns admitted bytes to the budgets and wakes a blocked
+// admission.
 func (p *Pipeline) release(bytes int64, sandboxID string) {
 	if bytes == 0 {
 		return
@@ -886,7 +898,7 @@ func (w *worker) mergeDropOutcome(outcome api.SourceOutcome) api.SourceOutcome {
 	if drops.HadDrops {
 		outcome.HadDrops = true
 		for _, reason := range drops.LossReasons {
-			outcome.LossReasons = addReason(outcome.LossReasons, reason)
+			outcome.LossReasons = api.AddLossReason(outcome.LossReasons, reason)
 		}
 	}
 	return outcome
@@ -901,15 +913,6 @@ func eventBytes(delivery *api.Delivery) int64 {
 		size += int64(len(key) + len(value))
 	}
 	return size
-}
-
-func addReason(reasons []string, reason string) []string {
-	for _, existing := range reasons {
-		if existing == reason {
-			return reasons
-		}
-	}
-	return append(reasons, reason)
 }
 
 func newPipelineMetrics() (pipelineMetrics, error) {

@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -245,7 +246,7 @@ func buildManifest(bucket *aliyunoss.Bucket, endpoint, bucketName, targetID, fam
 		return manifest{}, err
 	}
 	for key := range knownData {
-		if !containsKey(dataKeys, key) {
+		if !slices.Contains(dataKeys, key) {
 			return manifest{}, fmt.Errorf("finalized object %s is missing from object family listing", key)
 		}
 	}
@@ -337,15 +338,6 @@ func markerRevision(pattern *regexp.Regexp, key string) (uint64, error) {
 		return 0, fmt.Errorf("marker key %q has an invalid revision", key)
 	}
 	return revision, nil
-}
-
-func containsKey(keys []string, key string) bool {
-	for _, candidate := range keys {
-		if candidate == key {
-			return true
-		}
-	}
-	return false
 }
 
 func validateCumulative(previous, current marker.Marker) error {

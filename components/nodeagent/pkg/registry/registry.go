@@ -36,6 +36,8 @@ type SourceState interface {
 	Update(func(state.SourceStateWriter) error) error
 }
 
+// SourceDependencies carries everything a Source factory needs. SourceState
+// and Store are scoped to the Source being built.
 type SourceDependencies struct {
 	Config config.Config
 	// Store is an isolated view of the node-local sandbox Pod cache. A Source
@@ -47,6 +49,7 @@ type SourceDependencies struct {
 	OnError func(error)
 }
 
+// SinkDependencies carries everything a Sink factory needs.
 type SinkDependencies struct {
 	Config config.Config
 	State  *state.DB
@@ -66,6 +69,8 @@ var (
 	sinks   = make(map[string]sinkRegistration)
 )
 
+// RegisterSource adds a Source factory under name. It panics on invalid or
+// duplicate names so a wiring mistake fails at binary construction.
 func RegisterSource(name string, factory sourceFactory) {
 	if name == "" || strings.Contains(name, "/") || factory == nil {
 		panic("nodeagent: invalid Source factory registration")
@@ -76,6 +81,8 @@ func RegisterSource(name string, factory sourceFactory) {
 	sources[name] = factory
 }
 
+// RegisterSink adds a Sink factory with its target-identity function under
+// name. It panics on invalid or duplicate registrations.
 func RegisterSink(name string, targetID sinkTargetID, factory sinkFactory) {
 	if name == "" || targetID == nil || factory == nil {
 		panic("nodeagent: invalid Sink factory registration")
@@ -86,6 +93,7 @@ func RegisterSink(name string, targetID sinkTargetID, factory sinkFactory) {
 	sinks[name] = sinkRegistration{targetID: targetID, factory: factory}
 }
 
+// BuildSource constructs the registered Source under name.
 func BuildSource(name string, dependencies SourceDependencies) (api.Source, error) {
 	if dependencies.State == nil || dependencies.Store == nil || dependencies.Logger == nil {
 		return nil, errors.New("source dependencies require private State, Store, and Logger")
@@ -97,6 +105,8 @@ func BuildSource(name string, dependencies SourceDependencies) (api.Source, erro
 	return factory(dependencies)
 }
 
+// TargetID computes the durable state identity of the registered Sink under
+// name for cfg.
 func TargetID(name string, cfg config.Config) (string, error) {
 	registration, ok := sinks[name]
 	if !ok {
@@ -105,6 +115,7 @@ func TargetID(name string, cfg config.Config) (string, error) {
 	return registration.targetID(cfg)
 }
 
+// BuildSink constructs the registered Sink under name.
 func BuildSink(name string, dependencies SinkDependencies) (api.Sink, error) {
 	if dependencies.State == nil {
 		return nil, errors.New("sink dependencies require State")

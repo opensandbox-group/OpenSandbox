@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -271,13 +272,13 @@ func TestMergeRemainingDataKeysRequiresExplicitExtension(t *testing.T) {
 	if changed, err := mergeRemainingDataKeys(&plan, []string{lateKey}, false); err == nil || changed {
 		t.Fatalf("unplanned data changed manifest without consent: changed=%v err=%v", changed, err)
 	}
-	if containsKey(plan.DataKeys, lateKey) || plan.Phase != "markers-deleted" {
+	if slices.Contains(plan.DataKeys, lateKey) || plan.Phase != "markers-deleted" {
 		t.Fatalf("rejected extension mutated plan=%+v", plan)
 	}
 	if changed, err := mergeRemainingDataKeys(&plan, []string{lateKey, lateKey}, true); err != nil || !changed {
 		t.Fatalf("explicit extension changed=%v err=%v", changed, err)
 	}
-	if len(plan.DataKeys) != 2 || len(plan.UnmarkedDataKeys) != 1 || !containsKey(plan.DataKeys, lateKey) || !containsKey(plan.UnmarkedDataKeys, lateKey) {
+	if len(plan.DataKeys) != 2 || len(plan.UnmarkedDataKeys) != 1 || !slices.Contains(plan.DataKeys, lateKey) || !slices.Contains(plan.UnmarkedDataKeys, lateKey) {
 		t.Fatalf("explicit extension did not record unmarked data: %+v", plan)
 	}
 	if changed, err := mergeRemainingDataKeys(&plan, []string{lateKey}, false); err != nil || changed {

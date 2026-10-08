@@ -311,14 +311,14 @@ func (s *containerLogSource) Acknowledge(_ context.Context, results []api.AckRes
 			for _, index := range indices {
 				runtime.pending[index].complete = true
 				for _, reason := range value.DropReasons {
-					runtime.pending[index].dropReasons = addReason(runtime.pending[index].dropReasons, reason)
+					runtime.pending[index].dropReasons = api.AddLossReason(runtime.pending[index].dropReasons, reason)
 				}
 				if result.Disposition == api.AckIntentionalDrop {
 					reason := result.Reason
 					if reason == "" {
 						reason = "pipeline-policy-drop"
 					}
-					runtime.pending[index].dropReasons = addReason(runtime.pending[index].dropReasons, reason)
+					runtime.pending[index].dropReasons = api.AddLossReason(runtime.pending[index].dropReasons, reason)
 				}
 			}
 			if runtime.persisted.Guarantee == "" {
@@ -517,7 +517,7 @@ func (s *containerLogSource) commitCompletedLocked(runtime *streamRuntime) error
 		commit.lastSeq = sequence
 		for _, reason := range pending.dropReasons {
 			next.HadDrops = true
-			next.LossReasons = addReason(next.LossReasons, reason)
+			next.LossReasons = api.AddLossReason(next.LossReasons, reason)
 			next.Drops = appendDrop(next.Drops, state.SourceDropRecord{ID: spanResultID(runtime.persisted.StreamRef, pending.span, reason), FileID: pending.span.FileID, Path: pending.span.Path, FromOffset: pending.span.StartOffset, ToOffset: pending.span.EndOffset, Reason: reason})
 		}
 		if pending.span.RepairGapID != "" {
@@ -1592,7 +1592,7 @@ func (s *containerLogSource) emit(ctx context.Context, streamRef api.StreamRef, 
 	}
 	for _, reason := range record.dropReasons {
 		runtime.outcome.HadDrops = true
-		runtime.outcome.LossReasons = addReason(runtime.outcome.LossReasons, reason)
+		runtime.outcome.LossReasons = api.AddLossReason(runtime.outcome.LossReasons, reason)
 	}
 	resource := runtime.resource.Resource
 	metadata := streamMetadata(runtime.resource)
@@ -2578,13 +2578,4 @@ func fingerprintFile(f *os.File, requestedHashBytes int) (fileFingerprint, error
 	}
 	digest := sha256.Sum256(prefix[:n])
 	return fileFingerprint{Device: device, Inode: inode, PrefixHash: hex.EncodeToString(digest[:]), HashBytes: n}, nil
-}
-
-func addReason(reasons []string, reason string) []string {
-	for _, existing := range reasons {
-		if existing == reason {
-			return reasons
-		}
-	}
-	return append(reasons, reason)
 }

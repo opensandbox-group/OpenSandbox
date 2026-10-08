@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package config loads Node Agent configuration from environment variables.
+// Invalid values are collected and reported together by Load; defaults are
+// applied per field so callers can still start the health server when some
+// values are invalid.
 package config
 
 import (
@@ -30,10 +34,16 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/identity"
 )
 
+// Sink names supported by the compiled-in registrations.
 const (
 	SinkFile = "file"
 	SinkOSS  = "oss"
+)
 
+// Compile-time internal cadence and batch tuning. These are deliberately not
+// user-configurable; changing them changes runtime behavior, not the config
+// contract.
+const (
 	InternalReconcileInterval  = 30 * time.Second
 	InternalBatchMaxItems      = 256
 	InternalBatchFlushInterval = time.Second
@@ -41,6 +51,8 @@ const (
 
 var clusterIDPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
 
+// Config is the resolved Node Agent configuration. Field semantics mirror the
+// NODEAGENT_* environment variables documented in the Helm chart.
 type Config struct {
 	NodeName             string
 	ClusterID            string
@@ -79,6 +91,9 @@ type listenAddress struct {
 	port int
 }
 
+// Load reads environment variables into a Config. Invalid values are
+// collected and returned joined; fields with invalid input keep their
+// defaults so a partially valid config can still serve health endpoints.
 func Load() (Config, error) {
 	var errs []error
 	cfg := Config{
@@ -348,7 +363,11 @@ func parseInt64(key string, fallback int64, positive bool, errs *[]error) int64 
 	}
 	value, err := strconv.ParseUint(raw, 10, 63)
 	if err != nil || positive && value == 0 {
-		*errs = append(*errs, fmt.Errorf("%s must be an unsigned decimal%s", key, map[bool]string{true: " greater than zero"}[positive]))
+		if positive {
+			*errs = append(*errs, fmt.Errorf("%s must be an unsigned decimal greater than zero", key))
+		} else {
+			*errs = append(*errs, fmt.Errorf("%s must be an unsigned decimal", key))
+		}
 		return fallback
 	}
 	return int64(value)

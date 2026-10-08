@@ -28,6 +28,8 @@ type syscallFormat struct{}
 
 func init() { Register(syscallFormat{}) }
 
+// SyscallStreamID returns the stable Source-owned identity for one container
+// syscall stream below the syscalls namespace.
 func SyscallStreamID(podUID, container string) string {
 	return path.Join(api.SourceNameSyscalls, podUID, container)
 }

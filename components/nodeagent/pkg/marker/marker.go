@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package marker encodes and decodes the finalization marker published next
+// to a closed stream object family. The wire format is a compact JSON object
+// with a fixed member set, rejected on duplicates, unknown extras, nulls, and
+// non-canonical values.
 package marker
 
 import (
@@ -29,28 +33,36 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 )
 
-const SchemaVersion = 1
+const schemaVersion = 1
 
+// maxSafeJSONInteger is the largest integer every JSON consumer can represent
+// exactly (IEEE 754 double precision).
 const maxSafeJSONInteger = 1<<53 - 1
 
 const maxJSONNestingDepth = 64
 
+// Marker is the in-memory form of one finalization marker. Construct markers
+// with New; Encode and Decode own the on-disk JSON representation. The member
+// names are enumerated in Encode, requireMembers, and decodeExactMembers —
+// adding a member requires updating all three plus Validate.
 type Marker struct {
-	SchemaVersion     int                  `json:"schema_version"`
-	TargetID          string               `json:"target_id"`
-	FinalizeID        string               `json:"finalize_id"`
-	Revision          uint64               `json:"revision"`
-	StreamRef         string               `json:"stream_ref"`
-	Resource          api.Resource         `json:"resource"`
-	CoverageStartedAt string               `json:"coverage_started_at"`
-	Status            string               `json:"status"`
-	HadDrops          bool                 `json:"had_drops"`
-	HadSourceGaps     bool                 `json:"had_source_gaps"`
-	LossReasons       []string             `json:"loss_reasons"`
-	FinalizedAt       string               `json:"finalized_at"`
-	Objects           []state.ClosedObject `json:"objects"`
+	schemaVersion     int
+	TargetID          string
+	FinalizeID        string
+	Revision          uint64
+	StreamRef         string
+	Resource          api.Resource
+	CoverageStartedAt string
+	status            string
+	HadDrops          bool
+	HadSourceGaps     bool
+	LossReasons       []string
+	FinalizedAt       string
+	Objects           []state.ClosedObject
 }
 
+// New builds a validated marker from a finalize request, sorting and
+// deduplicating loss reasons and ordering objects by generation.
 func New(request api.FinalizeRequest, objects []state.ClosedObject) Marker {
 	reasons := append([]string(nil), request.Outcome.LossReasons...)
 	sort.Strings(reasons)
@@ -62,14 +74,14 @@ func New(request api.FinalizeRequest, objects []state.ClosedObject) Marker {
 		coverageStartedAt = request.CoverageStartedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return Marker{
-		SchemaVersion:     SchemaVersion,
+		schemaVersion:     schemaVersion,
 		TargetID:          request.TargetID,
 		FinalizeID:        request.FinalizeID,
 		Revision:          request.Revision,
 		StreamRef:         request.StreamRef.ID,
 		Resource:          request.Resource,
 		CoverageStartedAt: coverageStartedAt,
-		Status:            Status(request.Outcome),
+		status:            status(request.Outcome),
 		HadDrops:          request.Outcome.HadDrops,
 		HadSourceGaps:     request.Outcome.HadSourceGaps,
 		LossReasons:       reasons,
@@ -78,7 +90,8 @@ func New(request api.FinalizeRequest, objects []state.ClosedObject) Marker {
 	}
 }
 
-func Status(outcome api.SourceOutcome) string {
+// status derives the marker's status string from the stream outcome.
+func status(outcome api.SourceOutcome) string {
 	if outcome.HadSourceGaps {
 		return "incomplete"
 	}
@@ -88,13 +101,17 @@ func Status(outcome api.SourceOutcome) string {
 	return "complete"
 }
 
+// Encode serializes the marker as compact JSON with deterministic member
+// order. encoding/json is deliberately not used: the byte output is part of
+// the persisted object contract and must not change with struct tags or
+// encoding/library versions.
 func Encode(value Marker) ([]byte, error) {
-	if err := Validate(value); err != nil {
+	if err := validate(value); err != nil {
 		return nil, err
 	}
 	out := make([]byte, 0, 1024)
 	out = append(out, `{"schema_version":`...)
-	out = strconv.AppendInt(out, SchemaVersion, 10)
+	out = strconv.AppendInt(out, schemaVersion, 10)
 	out = append(out, `,"target_id":`...)
 	out = appendJSONString(out, value.TargetID)
 	out = append(out, `,"finalize_id":`...)
@@ -121,7 +138,7 @@ func Encode(value Marker) ([]byte, error) {
 	out = append(out, `},"coverage_started_at":`...)
 	out = appendJSONString(out, value.CoverageStartedAt)
 	out = append(out, `,"status":`...)
-	out = appendJSONString(out, value.Status)
+	out = appendJSONString(out, value.status)
 	out = append(out, `,"had_drops":`...)
 	out = strconv.AppendBool(out, value.HadDrops)
 	out = append(out, `,"had_source_gaps":`...)
@@ -154,6 +171,9 @@ func Encode(value Marker) ([]byte, error) {
 	return out, nil
 }
 
+// Decode parses and validates marker bytes. It rejects surrounding
+// whitespace, a BOM, invalid UTF-8, duplicate members, missing members, and
+// null members before unmarshaling into the fixed member set.
 func Decode(raw []byte) (Marker, error) {
 	if len(raw) == 0 || !bytes.Equal(raw, bytes.TrimSpace(raw)) || bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
 		return Marker{}, errors.New("marker must be compact UTF-8 JSON without BOM or surrounding whitespace")
@@ -171,7 +191,7 @@ func Decode(raw []byte) (Marker, error) {
 	if err != nil {
 		return Marker{}, err
 	}
-	if err := Validate(value); err != nil {
+	if err := validate(value); err != nil {
 		return Marker{}, err
 	}
 	return value, nil
@@ -187,13 +207,13 @@ func decodeExactMembers(raw []byte) (Marker, error) {
 		key         string
 		destination any
 	}{
-		{key: "schema_version", destination: &value.SchemaVersion},
+		{key: "schema_version", destination: &value.schemaVersion},
 		{key: "target_id", destination: &value.TargetID},
 		{key: "finalize_id", destination: &value.FinalizeID},
 		{key: "revision", destination: &value.Revision},
 		{key: "stream_ref", destination: &value.StreamRef},
 		{key: "coverage_started_at", destination: &value.CoverageStartedAt},
-		{key: "status", destination: &value.Status},
+		{key: "status", destination: &value.status},
 		{key: "had_drops", destination: &value.HadDrops},
 		{key: "had_source_gaps", destination: &value.HadSourceGaps},
 		{key: "loss_reasons", destination: &value.LossReasons},
@@ -248,9 +268,14 @@ func decodeExactMembers(raw []byte) (Marker, error) {
 	return value, nil
 }
 
-func Validate(value Marker) error {
-	if value.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("unsupported marker schema %d", value.SchemaVersion)
+// validate enforces the full marker invariant set: schema version, required
+// identity and resource fields, canonical UTC RFC3339 timestamps at second
+// precision with finalized_at not before coverage_started_at, status matching
+// the loss flags, and sorted unique loss reasons with continuous object
+// generations.
+func validate(value Marker) error {
+	if value.schemaVersion != schemaVersion {
+		return fmt.Errorf("unsupported marker schema %d", value.schemaVersion)
 	}
 	if value.TargetID == "" || value.FinalizeID == "" || value.StreamRef == "" || value.Revision == 0 {
 		return errors.New("marker identity fields are required")
@@ -262,12 +287,12 @@ func Validate(value Marker) error {
 	if resource.SandboxID == "" || resource.ClusterName == "" || resource.Namespace == "" || resource.PodName == "" || resource.PodUID == "" || resource.Container == "" || resource.NodeName == "" {
 		return errors.New("marker resource fields are required")
 	}
-	for _, text := range []string{value.TargetID, value.FinalizeID, value.StreamRef, resource.SandboxID, resource.ClusterName, resource.Namespace, resource.PodName, resource.PodUID, resource.Container, resource.NodeName, value.CoverageStartedAt, value.Status, value.FinalizedAt} {
+	for _, text := range []string{value.TargetID, value.FinalizeID, value.StreamRef, resource.SandboxID, resource.ClusterName, resource.Namespace, resource.PodName, resource.PodUID, resource.Container, resource.NodeName, value.CoverageStartedAt, value.status, value.FinalizedAt} {
 		if !utf8.ValidString(text) {
 			return errors.New("marker contains invalid UTF-8")
 		}
 	}
-	if value.Status != Status(api.SourceOutcome{HadDrops: value.HadDrops, HadSourceGaps: value.HadSourceGaps}) {
+	if value.status != status(api.SourceOutcome{HadDrops: value.HadDrops, HadSourceGaps: value.HadSourceGaps}) {
 		return errors.New("marker status does not match outcome")
 	}
 	if (value.HadDrops || value.HadSourceGaps) != (len(value.LossReasons) > 0) {

@@ -162,6 +162,8 @@ func (s *fileSink) Consume(_ context.Context, batch api.Batch) error {
 		return err
 	}
 	if w.stream.AppendIntent != nil {
+		// A retry: verify this append matches the persisted intent before
+		// rolling the file back to the persisted position.
 		intent := fileAppendIntent(w.stream, int64(len(data)), digest)
 		if *w.stream.AppendIntent != intent {
 			return api.Permanent(errors.New("file append retry does not match persisted intent"))
@@ -172,7 +174,9 @@ func (s *fileSink) Consume(_ context.Context, batch api.Batch) error {
 	}
 	requiresNextGeneration := w.stream.CurrentClosed ||
 		(w.stream.Position > 0 && w.stream.Position > s.cfg.MaxFileBytes-int64(len(data)))
-	if requiresNextGeneration && (s.cfg.MaxFiles <= 0 || w.stream.Generation >= uint64(s.cfg.MaxFiles-1)) {
+	// Reject before reserveCapacity so a doomed append never charges the
+	// capacity budget.
+	if requiresNextGeneration && s.generationLimitReached(w) {
 		return api.Permanent(errors.New("durable file generation limit reached"))
 	}
 	if err := s.reserveCapacity(int64(len(data))); err != nil {
@@ -188,6 +192,9 @@ func (s *fileSink) Consume(_ context.Context, batch api.Batch) error {
 		}
 	}
 	intent := fileAppendIntent(w.stream, int64(len(data)), digest)
+	// The intent survived recovery above, so re-verify it still matches after
+	// any generation transition; a mismatch means the retry is not the append
+	// the checkpoint recorded.
 	if w.stream.AppendIntent == nil {
 		w.stream.AppendIntent = &intent
 		if err := s.state.PutSinkStream(name, w.stream); err != nil {
@@ -767,8 +774,14 @@ func (s *fileSink) rollover(w *writer) error {
 	return s.startNextGeneration(w)
 }
 
+// generationLimitReached reports whether opening another generation would
+// exceed the configured generation (file-count) limit.
+func (s *fileSink) generationLimitReached(w *writer) bool {
+	return s.cfg.MaxFiles <= 0 || w.stream.Generation >= uint64(s.cfg.MaxFiles-1)
+}
+
 func (s *fileSink) startNextGeneration(w *writer) error {
-	if s.cfg.MaxFiles <= 0 || w.stream.Generation >= uint64(s.cfg.MaxFiles-1) {
+	if s.generationLimitReached(w) {
 		return api.Permanent(errors.New("durable file generation limit reached"))
 	}
 	nextGeneration := w.stream.Generation + 1

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,9 +38,11 @@ import (
 )
 
 const (
-	SchemaVersion = 1
-	// This is the on-disk checkpoint schema limit. Source fingerprint bounds
-	// must not exceed it, and lowering it would reject existing state.
+	// schemaVersion is the on-disk checkpoint schema version. Lowering it
+	// rejects existing state; raising it requires a migration story.
+	schemaVersion = 1
+	// maxCheckpointHashBytes is the on-disk checkpoint schema limit. Source
+	// fingerprint bounds must not exceed it.
 	maxCheckpointHashBytes = 4096
 )
 
@@ -59,12 +62,17 @@ var (
 // preferred checkpoint for the same physical file and was not persisted.
 var ErrFileCheckpointSuperseded = errors.New("source file checkpoint superseded")
 
+// DB is the Node Agent checkpoint database: one bbolt file holding the
+// target-bound recovery state for the Pipeline, Sinks, and per-Source private
+// namespaces.
 type DB struct {
 	db       *bolt.DB
 	writerID string
 	targetID string
 }
 
+// FileCheckpoint is one Source file's durable read position. Revision orders
+// competing checkpoints for the same physical file.
 type FileCheckpoint struct {
 	StreamRef       string `json:"stream_ref"`
 	FileID          string `json:"file_id"`
@@ -79,6 +87,8 @@ type FileCheckpoint struct {
 	Revision        uint64 `json:"revision"`
 }
 
+// SourceDropRecord documents one range of bytes a Source dropped and cannot
+// recover.
 type SourceDropRecord struct {
 	ID         string `json:"id"`
 	FileID     string `json:"file_id"`
@@ -88,6 +98,9 @@ type SourceDropRecord struct {
 	Reason     string `json:"reason"`
 }
 
+// GapRecord documents one hole in a stream's coverage: bytes possibly missed
+// between FromOffset and ToOffset, optionally resolved or scheduled for
+// repair.
 type GapRecord struct {
 	ID           string `json:"id"`
 	FileID       string `json:"file_id,omitempty"`
@@ -106,6 +119,9 @@ type GapRecord struct {
 	Resolved     bool   `json:"resolved,omitempty"`
 }
 
+// FrozenResource is the on-disk decoupled form of api.Resource: it adds the
+// Source-owned log directory and terminated flag so persisted state survives
+// Pod deletion without referencing the live Store.
 type FrozenResource struct {
 	SandboxID    string `json:"sandbox_id"`
 	ClusterName  string `json:"k8s.cluster.name"`
@@ -118,6 +134,8 @@ type FrozenResource struct {
 	Terminated   bool   `json:"terminated,omitempty"`
 }
 
+// SourceStream is a Source's durable per-stream recovery record: identity,
+// coverage progress, drop and gap bookkeeping, and finalization progress.
 type SourceStream struct {
 	StreamRef            string             `json:"stream_ref"`
 	Resource             FrozenResource     `json:"resource"`
@@ -139,12 +157,18 @@ type SourceStream struct {
 	RepairDeadline       *time.Time         `json:"repair_deadline,omitempty"`
 }
 
+// OutcomeSnapshot is the persisted decoupled form of api.SourceOutcome. It is
+// a separate type on purpose: state serialization must not change when the
+// api contract gains fields.
 type OutcomeSnapshot struct {
 	HadDrops      bool     `json:"had_drops"`
 	HadSourceGaps bool     `json:"had_source_gaps"`
 	LossReasons   []string `json:"loss_reasons"`
 }
 
+// SinkStream is a Sink's durable per-stream write record: current generation,
+// byte position, CRC state, and the intents that make appends and object
+// transitions crash-recoverable.
 type SinkStream struct {
 	SinkName             string                `json:"sink_name"`
 	StreamRef            string                `json:"stream_ref"`
@@ -164,6 +188,9 @@ type SinkStream struct {
 	CleanupPath          string                `json:"cleanup_path,omitempty"`
 }
 
+// AppendIntent records an append that may or may not have reached storage
+// before a crash. On recovery a Sink compares observed bytes against
+// Position/Length to adopt or roll back the append.
 type AppendIntent struct {
 	Position int64  `json:"position"`
 	Length   int64  `json:"length"`
@@ -172,12 +199,16 @@ type AppendIntent struct {
 	Inode    uint64 `json:"inode,omitempty"`
 }
 
+// GenerationTransition records an in-progress switch to the next object
+// generation so a crash between checkpoint and file creation is detectable.
 type GenerationTransition struct {
 	FromGeneration uint64 `json:"from_generation"`
 	ToGeneration   uint64 `json:"to_generation"`
 	ObjectKey      string `json:"object_key"`
 }
 
+// MarkerIntent records an in-progress finalization marker publication
+// (temp file plus expected content digest) so publication is idempotent.
 type MarkerIntent struct {
 	Revision uint64 `json:"revision"`
 	Path     string `json:"path"`
@@ -185,6 +216,8 @@ type MarkerIntent struct {
 	SHA256   string `json:"sha256"`
 }
 
+// ClosedObject describes one completed generation object: its key, generation
+// index, size, and content CRC64.
 type ClosedObject struct {
 	Key        string `json:"key"`
 	Generation uint64 `json:"generation"`
@@ -192,6 +225,9 @@ type ClosedObject struct {
 	CRC64      string `json:"crc64"`
 }
 
+// FinalizeIntent is the two-phase commit record for closing one stream
+// revision: the Sink finalizes first (SinkDone), then the Source acknowledges
+// its end token (SourceDone). Each phase persists before the next starts.
 type FinalizeIntent struct {
 	FinalizeID        string             `json:"finalize_id"`
 	TargetID          string             `json:"target_id"`
@@ -208,6 +244,9 @@ type FinalizeIntent struct {
 	SourceDone        bool               `json:"source_done"`
 }
 
+// Open creates or opens the checkpoint database below dir. It refuses to open
+// state written for a different targetID or an incompatible schema. maxBytes
+// bounds the file size; zero means unlimited.
 func Open(dir, targetID string, maxBytes int64) (*DB, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
@@ -245,10 +284,10 @@ func (d *DB) initialize() error {
 			}
 		}
 		if raw := meta.Get(keySchema); raw == nil {
-			if err := meta.Put(keySchema, []byte(strconv.Itoa(SchemaVersion))); err != nil {
+			if err := meta.Put(keySchema, []byte(strconv.Itoa(schemaVersion))); err != nil {
 				return err
 			}
-		} else if string(raw) != strconv.Itoa(SchemaVersion) {
+		} else if string(raw) != strconv.Itoa(schemaVersion) {
 			return fmt.Errorf("unsupported state schema %q", raw)
 		}
 		if raw := meta.Get(keyWriterID); raw == nil {
@@ -273,10 +312,14 @@ func (d *DB) initialize() error {
 	})
 }
 
+// Close releases the database file.
 func (d *DB) Close() error { return d.db.Close() }
 
+// WriterID returns the stable per-database writer identity used in object
+// metadata.
 func (d *DB) WriterID() string { return d.writerID }
 
+// TargetID returns the storage-target identity this database is bound to.
 func (d *DB) TargetID() string { return d.targetID }
 
 // ValidateEnabledSources prevents a configuration change from silently
@@ -300,7 +343,7 @@ func (d *DB) ValidateEnabledSources(sources []string) error {
 				return fmt.Errorf("persisted stream %q has no Source namespace", streamID)
 			}
 			if _, ok := enabled[source]; !ok {
-				return fmt.Errorf("Source %q is disabled while stream %q still has recovery state", source, streamID)
+				return fmt.Errorf("source %q is disabled while stream %q still has recovery state", source, streamID)
 			}
 			return nil
 		}); err != nil {
@@ -325,7 +368,7 @@ func (d *DB) ValidateEnabledSources(sources []string) error {
 				return nil
 			}
 			if _, ok := enabled[source]; !ok {
-				return fmt.Errorf("Source %q is disabled while private recovery state remains", source)
+				return fmt.Errorf("source %q is disabled while private recovery state remains", source)
 			}
 			return nil
 		})
@@ -370,6 +413,8 @@ func validateStreamRef(streamRef api.StreamRef) error {
 	return nil
 }
 
+// GetFileCheckpoint returns the persisted read checkpoint for one file of a
+// stream.
 func (d *DB) GetFileCheckpoint(streamRef, path string) (FileCheckpoint, bool, error) {
 	var out FileCheckpoint
 	found, err := d.get(bucketSource, stateKey(streamRef, path), &out)
@@ -379,6 +424,7 @@ func (d *DB) GetFileCheckpoint(streamRef, path string) (FileCheckpoint, bool, er
 	return out, found, err
 }
 
+// ListFileCheckpoints returns every valid checkpoint of a stream.
 func (d *DB) ListFileCheckpoints(streamRef string) ([]FileCheckpoint, error) {
 	var out []FileCheckpoint
 	err := d.db.View(func(tx *bolt.Tx) error {
@@ -399,6 +445,7 @@ func (d *DB) ListFileCheckpoints(streamRef string) ([]FileCheckpoint, error) {
 	return out, err
 }
 
+// GetSourceStream returns a stream's Source recovery record.
 func (d *DB) GetSourceStream(streamRef string) (SourceStream, bool, error) {
 	var out SourceStream
 	found, err := d.get(bucketSource, stateKey("stream", streamRef), &out)
@@ -408,6 +455,7 @@ func (d *DB) GetSourceStream(streamRef string) (SourceStream, bool, error) {
 	return out, found, err
 }
 
+// PutSourceStream validates and persists a stream's Source recovery record.
 func (d *DB) PutSourceStream(stream SourceStream) error {
 	if err := validateSourceStream(stream); err != nil {
 		return err
@@ -415,6 +463,7 @@ func (d *DB) PutSourceStream(stream SourceStream) error {
 	return d.put(bucketSource, stateKey("stream", stream.StreamRef), stream)
 }
 
+// ListSourceStreams returns every valid Source recovery record.
 func (d *DB) ListSourceStreams() ([]SourceStream, error) {
 	var out []SourceStream
 	err := d.db.View(func(tx *bolt.Tx) error {
@@ -485,6 +534,7 @@ func (d *DB) CommitSource(checkpoints []FileCheckpoint, stream SourceStream) err
 	})
 }
 
+// GetSinkStream returns a stream's Sink write record for sinkName.
 func (d *DB) GetSinkStream(sinkName, streamRef string) (SinkStream, bool, error) {
 	var out SinkStream
 	found, err := d.get(bucketSink, stateKey(sinkName, streamRef), &out)
@@ -497,6 +547,8 @@ func (d *DB) GetSinkStream(sinkName, streamRef string) (SinkStream, bool, error)
 	return out, found, err
 }
 
+// PutSinkStream validates and persists a stream's Sink write record,
+// stamping the owning sink name.
 func (d *DB) PutSinkStream(sinkName string, stream SinkStream) error {
 	if sinkName == "" {
 		return errors.New("invalid sink stream identity")
@@ -511,6 +563,8 @@ func (d *DB) PutSinkStream(sinkName string, stream SinkStream) error {
 	return d.put(bucketSink, stateKey(sinkName, stream.StreamRef), stream)
 }
 
+// GetFinalizeIntent returns the two-phase finalize record for one stream
+// revision.
 func (d *DB) GetFinalizeIntent(streamRef string, revision uint64) (FinalizeIntent, bool, error) {
 	var out FinalizeIntent
 	found, err := d.get(bucketPipeline, stateKey(streamRef, strconv.FormatUint(revision, 10)), &out)
@@ -523,6 +577,8 @@ func (d *DB) GetFinalizeIntent(streamRef string, revision uint64) (FinalizeInten
 	return out, found, err
 }
 
+// PutFinalizeIntent validates and persists a finalize record, binding the
+// stream's RecordKind when known.
 func (d *DB) PutFinalizeIntent(intent FinalizeIntent) error {
 	if err := validateFinalizeIntent(intent); err != nil {
 		return err
@@ -544,6 +600,7 @@ func (d *DB) PutFinalizeIntent(intent FinalizeIntent) error {
 	})
 }
 
+// ListFinalizeIntents returns every valid finalize record.
 func (d *DB) ListFinalizeIntents() ([]FinalizeIntent, error) {
 	var out []FinalizeIntent
 	err := d.db.View(func(tx *bolt.Tx) error {
@@ -1002,7 +1059,7 @@ func validateSourceOutcome(stream SourceStream) error {
 		wantReasons = append(wantReasons, reason)
 	}
 	sort.Strings(wantReasons)
-	if !equalStrings(stream.LossReasons, wantReasons) {
+	if !slices.Equal(stream.LossReasons, wantReasons) {
 		return errors.New("loss_reasons does not match persisted loss records")
 	}
 	return nil
@@ -1075,18 +1132,6 @@ func validateFinalizeIntent(intent FinalizeIntent) error {
 
 func finalizeIntentHasReplayData(intent FinalizeIntent) bool {
 	return intent.StreamKind != "" || intent.Resource != nil || intent.Metadata != nil || intent.Outcome != nil || intent.EndToken != nil
-}
-
-func equalStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func preferCheckpoint(left, right FileCheckpoint) bool {

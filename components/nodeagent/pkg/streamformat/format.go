@@ -22,9 +22,7 @@ import (
 	"mime"
 	"path"
 	"sort"
-	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/objectlayout"
@@ -54,7 +52,7 @@ var registry = struct {
 // duplicate registrations so binary construction cannot silently change a
 // persisted object contract.
 func Register(format Format) {
-	if format == nil || !safePathSegment(string(format.Kind())) {
+	if format == nil || !objectlayout.SafeSegment(string(format.Kind())) {
 		panic("nodeagent: invalid stream format registration")
 	}
 	mediaType, _, err := mime.ParseMediaType(format.ContentType())
@@ -131,7 +129,7 @@ func ResolveFamily(format Format, prefix string, streamRef api.StreamRef, resour
 	if format == nil || streamRef.Kind == "" || format.Kind() != streamRef.Kind {
 		return objectlayout.Family{}, errors.New("stream format does not match stream kind")
 	}
-	if !safePathSegment(resource.ClusterName) || !safePathSegment(string(streamRef.Kind)) {
+	if !objectlayout.SafeSegment(resource.ClusterName) || !objectlayout.SafeSegment(string(streamRef.Kind)) {
 		return objectlayout.Family{}, errors.New("stream format has an unsafe cluster or record kind")
 	}
 	family, err := format.ObjectFamily(streamRef, resource, metadata)
@@ -146,16 +144,4 @@ func ResolveFamily(format Format, prefix string, streamRef api.StreamRef, resour
 		return objectlayout.Family{}, fmt.Errorf("object family directory %q is outside record-kind root %q", family.Directory(), root)
 	}
 	return family.WithPrefix(prefix)
-}
-
-func safePathSegment(value string) bool {
-	if value == "" || value == "." || value == ".." || !utf8.ValidString(value) || strings.ContainsAny(value, `/\`) {
-		return false
-	}
-	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
-			return false
-		}
-	}
-	return true
 }

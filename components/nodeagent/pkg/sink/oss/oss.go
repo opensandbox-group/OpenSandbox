@@ -34,6 +34,7 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/config"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/identity"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/marker"
+	"github.com/alibaba/opensandbox/nodeagent/pkg/objectlayout"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/registry"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/streamformat"
@@ -274,14 +275,7 @@ func (s *ossSink) Consume(ctx context.Context, batch api.Batch) error {
 		return err
 	}
 	if stream.CurrentClosed {
-		stream.Generation++
-		stream.Position = 0
-		stream.CurrentClosed = false
-		stream.ObjectKey, err = dataKey(format, s.cfg.Prefix, batch.StreamRef, resource, batch.Metadata, stream.Generation)
-		if err != nil {
-			return err
-		}
-		if err := validateOSSObjectKey(stream.ObjectKey); err != nil {
+		if err := s.advanceGeneration(format, &stream, batch.StreamRef, resource, batch.Metadata); err != nil {
 			return err
 		}
 	}
@@ -289,14 +283,7 @@ func (s *ossSink) Consume(ctx context.Context, batch api.Batch) error {
 		if err := s.closeGeneration(ctx, batch.StreamRef, resource, batch.Metadata, format, &stream); err != nil {
 			return err
 		}
-		stream.Generation++
-		stream.Position = 0
-		stream.CurrentClosed = false
-		stream.ObjectKey, err = dataKey(format, s.cfg.Prefix, batch.StreamRef, resource, batch.Metadata, stream.Generation)
-		if err != nil {
-			return err
-		}
-		if err := validateOSSObjectKey(stream.ObjectKey); err != nil {
+		if err := s.advanceGeneration(format, &stream, batch.StreamRef, resource, batch.Metadata); err != nil {
 			return err
 		}
 	}
@@ -496,7 +483,9 @@ func (s *ossSink) getStream(ctx context.Context, streamRef api.StreamRef, resour
 			case intent.Position:
 				stream.AppendIntent = nil
 			case intent.Position + intent.Length:
-				// The Source checkpoint was not committed, so replay is allowed.
+				// The append landed but the checkpoint clearing the intent was
+				// not committed; adopt the completed length so a retried append
+				// starts after the recovered bytes.
 				stream.Position = size
 				stream.AppendIntent = nil
 			default:
@@ -606,18 +595,42 @@ func appendExceedsObjectLimit(position, appendBytes, limit int64) bool {
 	return position > limit || appendBytes > limit-position
 }
 
-func dataKey(format streamformat.Format, prefix string, streamRef api.StreamRef, resource api.Resource, metadata api.StreamMetadata, generation uint64) (string, error) {
+// advanceGeneration moves a stream to its next generation: a fresh data key
+// with an empty write position and a reopened current object.
+func (s *ossSink) advanceGeneration(format streamformat.Format, stream *state.SinkStream, streamRef api.StreamRef, resource api.Resource, metadata api.StreamMetadata) error {
+	stream.Generation++
+	stream.Position = 0
+	stream.CurrentClosed = false
+	key, err := dataKey(format, s.cfg.Prefix, streamRef, resource, metadata, stream.Generation)
+	if err != nil {
+		return err
+	}
+	stream.ObjectKey = key
+	return validateOSSObjectKey(key)
+}
+
+// resolveFamily resolves and validates the object family for a stream below
+// the configured prefix.
+func resolveFamily(format streamformat.Format, prefix string, streamRef api.StreamRef, resource api.Resource, metadata api.StreamMetadata) (objectlayout.Family, error) {
 	family, err := streamformat.ResolveFamily(format, prefix, streamRef, resource, metadata)
 	if err != nil {
-		return "", api.Permanent(fmt.Errorf("resolve OSS object family: %w", err))
+		return objectlayout.Family{}, api.Permanent(fmt.Errorf("resolve OSS object family: %w", err))
+	}
+	return family, nil
+}
+
+func dataKey(format streamformat.Format, prefix string, streamRef api.StreamRef, resource api.Resource, metadata api.StreamMetadata, generation uint64) (string, error) {
+	family, err := resolveFamily(format, prefix, streamRef, resource, metadata)
+	if err != nil {
+		return "", err
 	}
 	return family.DataKey(generation), nil
 }
 
 func finalizationKey(format streamformat.Format, prefix string, streamRef api.StreamRef, resource api.Resource, metadata api.StreamMetadata, revision uint64) (string, error) {
-	family, err := streamformat.ResolveFamily(format, prefix, streamRef, resource, metadata)
+	family, err := resolveFamily(format, prefix, streamRef, resource, metadata)
 	if err != nil {
-		return "", api.Permanent(fmt.Errorf("resolve OSS object family: %w", err))
+		return "", err
 	}
 	return family.MarkerKey(revision), nil
 }

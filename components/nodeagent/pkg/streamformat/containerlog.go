@@ -26,6 +26,9 @@ import (
 
 type containerLogFormat struct{}
 
+// ContainerLogDirectoryMetadata is the stream metadata key carrying the
+// container's log directory relative to the node log root. It pins the
+// object family to the CRI directory the records were read from.
 const ContainerLogDirectoryMetadata = "log-directory"
 
 func init() { Register(containerLogFormat{}) }

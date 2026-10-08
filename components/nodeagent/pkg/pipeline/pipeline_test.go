@@ -156,7 +156,7 @@ func (s *muxPipelineSource) Acknowledge(ctx context.Context, results []api.AckRe
 
 func (s *muxPipelineSource) AcknowledgeEnd(ctx context.Context, token api.EndToken) error {
 	select {
-	case s.ended <- cloneEndToken(token):
+	case s.ended <- token.Clone():
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1334,7 +1334,7 @@ func TestPipelineReplaysSelfContainedFinalizeIntentAfterRestart(t *testing.T) {
 			}
 			if len(sink.finalized) == 1 {
 				replayed := sink.finalized[0]
-				if replayed.StreamRef != ref || replayed.Resource != resource || !replayed.Metadata.Equal(metadata) || !equalSourceOutcome(replayed.Outcome, outcome) {
+				if replayed.StreamRef != ref || replayed.Resource != resource || !replayed.Metadata.Equal(metadata) || !replayed.Outcome.Equal(outcome) {
 					t.Fatalf("replayed finalize request = %+v", replayed)
 				}
 			}
@@ -1388,7 +1388,7 @@ func TestPipelineEnrichesLegacyFinalizeIntentWhenSourceReplaysEnd(t *testing.T) 
 		t.Fatal(err)
 	}
 	got, found, err := db.GetFinalizeIntent(ref.ID, 1)
-	if err != nil || !found || !got.SourceDone || got.StreamKind != ref.Kind || got.Resource == nil || *got.Resource != resource || got.Outcome == nil || !equalSourceOutcome(*got.Outcome, outcome) || got.EndToken == nil || !equalEndToken(*got.EndToken, token) {
+	if err != nil || !found || !got.SourceDone || got.StreamKind != ref.Kind || got.Resource == nil || *got.Resource != resource || got.Outcome == nil || !got.Outcome.Equal(outcome) || got.EndToken == nil || !got.EndToken.Equal(token) {
 		t.Fatalf("enriched finalize intent = %+v found=%v err=%v", got, found, err)
 	}
 	sink.mu.Lock()

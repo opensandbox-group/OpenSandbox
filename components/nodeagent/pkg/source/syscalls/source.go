@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,7 +38,10 @@ import (
 )
 
 const (
-	sourceName                   = api.SourceNameSyscalls
+	sourceName = api.SourceNameSyscalls
+	// reconcileInterval is this Source's own cadence, faster than the
+	// container-log reconcile interval, because cgroup attachment latency
+	// directly extends the unobservable coverage gap at container start.
 	reconcileInterval            = 5 * time.Second
 	sourceQueueSize              = 1024
 	lossReasonOverflow           = "ring-buffer-overflow"
@@ -292,6 +296,10 @@ func (s *source) run(ctx context.Context, streams map[string]*streamRuntime) {
 	}
 }
 
+// drainCoordinator serializes ring-buffer drains against the tracer. schedule
+// queues a request and returns the drain generation it will complete under;
+// start issues at most one tracer Flush at a time; complete consumes the
+// tracer's Drained message for the in-flight generation.
 type drainCoordinator struct {
 	tracer     kernelTracer
 	generation uint64
@@ -330,6 +338,11 @@ func (d *drainCoordinator) complete() (uint64, error) {
 	return completed, nil
 }
 
+// reconcile aligns the tracked stream set with the Store view: it resolves
+// cgroups for containers needing attachment, attaches new streams, hot-swaps
+// the tracer binding when a container's cgroup or restart count changes,
+// prepares ends for terminated or vanished Pods, and releases Pod identities
+// that never became streams.
 func (s *source) reconcile(streams map[string]*streamRuntime, byHandle map[uint64]*streamBinding, nextHandle *uint64, drains *drainCoordinator) error {
 	resources := s.store.List()
 	seen := make(map[string]bool, len(resources))
@@ -442,6 +455,9 @@ func (s *source) attach(stream *streamRuntime, resource store.Resource, cgroupID
 	return nil
 }
 
+// prepareEnd begins closing a stream: it untracks the cgroup and schedules a
+// drain so in-flight events land before the StreamEnd is emitted. It is
+// a no-op while a drain for this stream is already pending.
 func (s *source) prepareEnd(stream *streamRuntime, binding *streamBinding, drains *drainCoordinator) error {
 	if stream.endDrain != 0 || binding != nil && binding.drainAfter != 0 {
 		return nil
@@ -471,7 +487,7 @@ func (s *source) enqueueEvent(pending *[]api.SourceEvent, binding *streamBinding
 	if len(*pending) >= sourceQueueSize {
 		stream := binding.stream
 		stream.outcome.HadSourceGaps = true
-		if contains(stream.outcome.LossReasons, lossReasonSourceBackpressure) {
+		if slices.Contains(stream.outcome.LossReasons, lossReasonSourceBackpressure) {
 			return nil
 		}
 		stream.outcome.LossReasons = append(stream.outcome.LossReasons, lossReasonSourceBackpressure)
@@ -550,7 +566,7 @@ func (s *source) collectLoss(byHandle map[uint64]*streamBinding) error {
 		stream := binding.stream
 		delta := total - binding.lost
 		stream.outcome.HadSourceGaps = true
-		if !contains(stream.outcome.LossReasons, lossReasonOverflow) {
+		if !slices.Contains(stream.outcome.LossReasons, lossReasonOverflow) {
 			stream.outcome.LossReasons = append(stream.outcome.LossReasons, lossReasonOverflow)
 		}
 		s.log.Warnf("syscall ring buffer dropped %d events for sandbox %s", delta, stream.resource.SandboxID)
@@ -585,13 +601,4 @@ func (s *source) reportError(err error) {
 	if s.onError != nil {
 		s.onError(err)
 	}
-}
-
-func contains(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == value {
-			return true
-		}
-	}
-	return false
 }

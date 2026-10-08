@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -168,7 +169,7 @@ func TestRecoveredMissingStreamFinalizesUntilEndAcknowledged(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := streams["u1"]
-	if stream == nil || !contains(stream.outcome.LossReasons, lossReasonRestart) {
+	if stream == nil || !slices.Contains(stream.outcome.LossReasons, lossReasonRestart) {
 		t.Fatalf("recovered stream=%+v", stream)
 	}
 	drains := drainCoordinator{tracer: recovered.tracer}
@@ -183,7 +184,7 @@ func TestRecoveredMissingStreamFinalizesUntilEndAcknowledged(t *testing.T) {
 		t.Fatalf("pending events=%d, want 1", len(pending))
 	}
 	event := pending[0]
-	if event.End == nil || !contains(event.End.Outcome.LossReasons, lossReasonRestart) {
+	if event.End == nil || !slices.Contains(event.End.Outcome.LossReasons, lossReasonRestart) {
 		t.Fatalf("end=%+v", event.End)
 	}
 	replayed, err := recovered.loadStreams()
@@ -229,7 +230,7 @@ func TestTerminatedStreamEmitsQueuedEventBeforeEnd(t *testing.T) {
 	if err := source.enqueueEvent(&full, bindings[1], kernelEvent{CgroupID: 11, Handle: 1}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if len(full) != sourceQueueSize || !contains(stream.outcome.LossReasons, lossReasonSourceBackpressure) {
+	if len(full) != sourceQueueSize || !slices.Contains(stream.outcome.LossReasons, lossReasonSourceBackpressure) {
 		t.Fatalf("full queue=%d outcome=%+v", len(full), stream.outcome)
 	}
 	pending := []api.SourceEvent{}

@@ -47,11 +47,11 @@ func NewFamily(prefix string, directorySegments []string, base, dataExtension st
 		return Family{}, errors.New("object family directory must contain at least one segment")
 	}
 	for _, segment := range directorySegments {
-		if !safeLeaf(segment) {
+		if !SafeSegment(segment) {
 			return Family{}, errors.New("object family directory contains an unsafe path segment")
 		}
 	}
-	if !safeLeaf(base) {
+	if !SafeSegment(base) {
 		return Family{}, errors.New("object family base must be a safe path segment")
 	}
 	if !validDataExtension(dataExtension) {
@@ -65,6 +65,7 @@ func NewFamily(prefix string, directorySegments []string, base, dataExtension st
 	return Family{directory: path.Join(parts...), base: base, dataExtension: dataExtension}, nil
 }
 
+// Directory returns the family's relative directory path.
 func (f Family) Directory() string { return f.directory }
 
 // WithPrefix returns the same family below a Sink-owned relative prefix.
@@ -88,50 +89,60 @@ func (f Family) Within(root string) bool {
 	return f.directory == root || strings.HasPrefix(f.directory, root+"/")
 }
 
-func (f Family) GenerationName(generation uint64) string {
+func (f Family) generationName(generation uint64) string {
 	if generation == 0 {
 		return f.base + f.dataExtension
 	}
 	return f.base + "." + strconv.FormatUint(generation, 10) + f.dataExtension
 }
 
+// DataKey returns the family-relative object key holding generation's data.
 func (f Family) DataKey(generation uint64) string {
-	return path.Join(f.directory, f.GenerationName(generation))
+	return path.Join(f.directory, f.generationName(generation))
 }
 
+// MarkerName returns the family-relative marker file name for a revision.
 func (f Family) MarkerName(revision uint64) string {
 	return f.base + markerInfix + strconv.FormatUint(revision, 10) + ".json"
 }
 
+// MarkerKey returns the family-relative object key holding a revision's
+// finalization marker.
 func (f Family) MarkerKey(revision uint64) string {
 	return path.Join(f.directory, f.MarkerName(revision))
 }
 
 // The helpers below preserve the original container-log object layout used by
-// the offline cleanup command and existing persisted objects.
-func GenerationName(container string, generation uint64) string {
+// the offline cleanup command and existing persisted objects. They must stay
+// aligned with the Family methods, which generalize the same scheme.
+func generationName(container string, generation uint64) string {
 	if generation == 0 {
 		return container + ".log"
 	}
 	return container + "." + strconv.FormatUint(generation, 10) + ".log"
 }
 
+// DataKey returns the legacy container-log data object key.
 func DataKey(familyPrefix, container string, generation uint64) string {
-	return path.Join(familyPrefix, GenerationName(container, generation))
+	return path.Join(familyPrefix, generationName(container, generation))
 }
 
+// MarkerPrefix returns the legacy marker key prefix for one container family.
 func MarkerPrefix(familyPrefix, container string) string {
 	return path.Join(familyPrefix, container) + markerInfix
 }
 
-func MarkerName(container string, revision uint64) string {
+func markerName(container string, revision uint64) string {
 	return container + markerInfix + strconv.FormatUint(revision, 10) + ".json"
 }
 
+// MarkerKey returns the legacy finalization marker key for a revision.
 func MarkerKey(familyPrefix, container string, revision uint64) string {
-	return path.Join(familyPrefix, MarkerName(container, revision))
+	return path.Join(familyPrefix, markerName(container, revision))
 }
 
+// StreamRef returns the legacy container-log stream identity below the
+// container-logs Source namespace.
 func StreamRef(podUID, container string) string {
 	return path.Join(api.SourceNameContainerLogs, podUID, container)
 }
@@ -144,14 +155,17 @@ func validateRelativeDirectory(directory string) error {
 		return errors.New("object family directory must be a clean relative path")
 	}
 	for _, segment := range strings.Split(directory, "/") {
-		if !safeLeaf(segment) {
+		if !SafeSegment(segment) {
 			return errors.New("object family directory contains an unsafe path segment")
 		}
 	}
 	return nil
 }
 
-func safeLeaf(value string) bool {
+// SafeSegment reports whether value can be used as one path-leaf component:
+// non-empty, not "." or "..", free of path separators and control characters,
+// and valid UTF-8.
+func SafeSegment(value string) bool {
 	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, `/\`) || !utf8.ValidString(value) {
 		return false
 	}
@@ -163,8 +177,11 @@ func safeLeaf(value string) bool {
 	return true
 }
 
+// validDataExtension accepts any safe dot-prefixed suffix except one shaped
+// like a canonical finalization marker name (.finalized.<canonical-uint>.json);
+// such a name would collide with MarkerName outputs.
 func validDataExtension(value string) bool {
-	if len(value) < 2 || value[0] != '.' || !safeLeaf(value[1:]) {
+	if len(value) < 2 || value[0] != '.' || !SafeSegment(value[1:]) {
 		return false
 	}
 	if !strings.HasPrefix(value, markerInfix) || !strings.HasSuffix(value, ".json") {

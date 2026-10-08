@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package identity derives stable cryptographic identities for storage
+// targets, finalize intents, and canonical OSS endpoints. Identities bind
+// persisted state to a specific target configuration so a misconfigured
+// restart cannot mix or silently adopt foreign data.
 package identity
 
 import (
@@ -27,6 +31,9 @@ import (
 	"strings"
 )
 
+// OSSTargetID returns the durable state identity of the OSS target defined by
+// endpoint, bucket, key prefix, and cluster. All fields participate in the
+// digest; a change in any of them is a different target.
 func OSSTargetID(endpoint, bucket, prefix, clusterID string) (string, error) {
 	normalized, err := CanonicalOSSEndpoint(endpoint)
 	if err != nil {
@@ -38,6 +45,9 @@ func OSSTargetID(endpoint, bucket, prefix, clusterID string) (string, error) {
 	return digest("opensandbox-nodeagent-target-v1\x00", "oss", normalized, bucket, strings.Trim(prefix, "/"), clusterID), nil
 }
 
+// CanonicalOSSEndpoint normalizes an OSS endpoint to its HTTPS origin form
+// (lowercased host, default port elided, IPv6 hosts bracketed). Anything but
+// a plain HTTPS origin is rejected.
 func CanonicalOSSEndpoint(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" && u.Path != "/" {
@@ -55,6 +65,9 @@ func CanonicalOSSEndpoint(raw string) (string, error) {
 	return "https://" + host, nil
 }
 
+// FileTargetID returns the durable state identity of the file target at root,
+// canonicalized through symlink resolution so the same physical directory
+// reached by different paths maps to one identity.
 func FileTargetID(root, clusterID, nodeName string) (string, error) {
 	canonical, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {
@@ -93,14 +106,21 @@ func resolveExistingAncestor(path string) (string, error) {
 	}
 }
 
+// StdoutTargetID returns the durable state identity of the stdout-only mode,
+// which has no configurable location of its own.
 func StdoutTargetID(clusterID, nodeName string) string {
 	return digest("opensandbox-nodeagent-target-v1\x00", "stdout", clusterID, nodeName)
 }
 
+// FinalizeID derives the idempotent identity of one stream revision's
+// finalization for a target. Sinks use it to deduplicate finalization work
+// across retries and restarts.
 func FinalizeID(streamRef string, revision uint64, targetID string) string {
 	return digest("opensandbox-nodeagent-finalize-v1\x00", streamRef, strconv.FormatUint(revision, 10), targetID)
 }
 
+// digest joins domain-separated, length-prefixed parts into a hex-encoded
+// SHA-256 digest.
 func digest(domain string, parts ...string) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(domain))

@@ -19,17 +19,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 )
 
+// Child pairs one Source with its registry name. The name is also the
+// StreamRef namespace prefix the Source must prefix to every stream ID it
+// emits.
 type Child struct {
 	Name   string
 	Source api.Source
 }
 
+// Mux fans several Sources into one event channel, routes acknowledgements
+// back to the emitting Source, and enforces per-Source stream namespacing. It
+// implements api.Source.
 type Mux struct {
 	children     []Child
 	byName       map[string]api.Source
@@ -44,6 +51,9 @@ type Mux struct {
 	done    chan struct{}
 }
 
+// NewMux validates the child set: names must be unique, non-empty, and
+// slash-free, every Source must declare at least one record kind, and kinds
+// must be unique across children.
 func NewMux(children []Child, onError func(error)) (*Mux, error) {
 	if len(children) == 0 {
 		return nil, errors.New("source mux requires at least one Source")
@@ -83,10 +93,15 @@ func NewMux(children []Child, onError func(error)) (*Mux, error) {
 	return mux, nil
 }
 
+// Capabilities returns the union of the children's record kinds.
 func (m *Mux) Capabilities() api.Capabilities {
 	return api.Capabilities{RecordKinds: append([]api.RecordKind(nil), m.capabilities.RecordKinds...)}
 }
 
+// Start starts every child against runCtx and forwards their events to out.
+// It closes out after all children have stopped. If a child fails to start,
+// the already-started children are stopped and the error is joined with
+// their Stop results.
 func (m *Mux) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 	m.mu.Lock()
 	if m.started {
@@ -118,18 +133,17 @@ func (m *Mux) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 		close(m.done)
 	}()
 
-	started := make([]Child, 0, len(inputs))
 	for _, input := range inputs {
 		if err := input.child.Source.Start(runCtx, input.events); err != nil {
 			cancel()
-			stopErr := stopChildren(ctx, started)
-			<-m.done
 			m.mu.Lock()
+			started := m.active
 			m.active = nil
 			m.mu.Unlock()
+			stopErr := stopChildren(ctx, started)
+			<-m.done
 			return errors.Join(fmt.Errorf("start source %q: %w", input.child.Name, err), stopErr)
 		}
-		started = append(started, input.child)
 		m.mu.Lock()
 		m.active = append(m.active, input.child)
 		m.mu.Unlock()
@@ -137,6 +151,8 @@ func (m *Mux) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 	return nil
 }
 
+// Acknowledge routes a same-Source acknowledgement batch to the emitting
+// child. Batches mixing several Sources are permanent errors.
 func (m *Mux) Acknowledge(ctx context.Context, results []api.AckResult) error {
 	if len(results) == 0 {
 		return nil
@@ -154,6 +170,7 @@ func (m *Mux) Acknowledge(ctx context.Context, results []api.AckResult) error {
 	return child.Acknowledge(ctx, results)
 }
 
+// AcknowledgeEnd routes a stream-end acknowledgement to the emitting child.
 func (m *Mux) AcknowledgeEnd(ctx context.Context, token api.EndToken) error {
 	child := m.byName[token.Source]
 	if child == nil {
@@ -162,6 +179,9 @@ func (m *Mux) AcknowledgeEnd(ctx context.Context, token api.EndToken) error {
 	return child.AcknowledgeEnd(ctx, token)
 }
 
+// Stop cancels the run context, stops every active child, and waits for the
+// forwarded event channel to close or ctx to expire. It is safe to call
+// before Start or twice.
 func (m *Mux) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	if !m.started {
@@ -220,6 +240,10 @@ func (m *Mux) fail(err error) {
 	}
 }
 
+// normalizeEvent enforces Source namespacing and token ownership before an
+// event reaches the Pipeline: the stream ID must live below the Source's
+// namespace, the kind must be declared by that Source, and ack/end tokens
+// must be owned by it and reference the same stream.
 func normalizeEvent(child Child, kinds []api.RecordKind, event api.SourceEvent) (api.SourceEvent, error) {
 	if !event.Valid() {
 		return api.SourceEvent{}, fmt.Errorf("source %q emitted an invalid event", child.Name)
@@ -230,7 +254,7 @@ func normalizeEvent(child Child, kinds []api.RecordKind, event api.SourceEvent) 
 			return api.SourceEvent{}, fmt.Errorf("source %q emitted non-namespaced stream ID %q", child.Name, delivery.StreamRef.ID)
 		}
 		kind := delivery.StreamRef.Kind
-		if !containsKind(kinds, kind) {
+		if !slices.Contains(kinds, kind) {
 			return api.SourceEvent{}, fmt.Errorf("source %q emitted unsupported record kind %q", child.Name, kind)
 		}
 		if delivery.Record.Kind != kind {
@@ -250,7 +274,7 @@ func normalizeEvent(child Child, kinds []api.RecordKind, event api.SourceEvent) 
 		return api.SourceEvent{}, fmt.Errorf("source %q emitted non-namespaced stream ID %q", child.Name, end.StreamRef.ID)
 	}
 	kind := end.StreamRef.Kind
-	if !containsKind(kinds, kind) {
+	if !slices.Contains(kinds, kind) {
 		return api.SourceEvent{}, fmt.Errorf("source %q emitted unsupported stream kind %q", child.Name, kind)
 	}
 	if end.EndToken.Source != child.Name {
@@ -265,15 +289,6 @@ func normalizeEvent(child Child, kinds []api.RecordKind, event api.SourceEvent) 
 func sourceOwnsStream(source, streamID string) bool {
 	prefix, localID, found := strings.Cut(streamID, "/")
 	return found && prefix == source && localID != ""
-}
-
-func containsKind(kinds []api.RecordKind, target api.RecordKind) bool {
-	for _, kind := range kinds {
-		if kind == target {
-			return true
-		}
-	}
-	return false
 }
 
 func stopChildren(ctx context.Context, children []Child) error {

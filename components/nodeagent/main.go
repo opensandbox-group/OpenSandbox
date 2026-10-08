@@ -287,6 +287,9 @@ func run() (exitCode int) {
 	return 0
 }
 
+// errPipelinePanicked is the sentinel runPipeline reports when the pipeline
+// goroutine panics: runErr is pre-assigned so a panic (which skips the
+// assignment) is distinguishable from a nil return.
 var errPipelinePanicked = errors.New("pipeline goroutine panicked")
 
 func runPipeline(done chan<- error, run func() error) {
@@ -301,6 +304,12 @@ func waitForSignal() {
 	<-ctx.Done()
 }
 
+// serverAddresses picks the health and pprof listen addresses. Even with an
+// invalid configuration the health server must come up so readiness can
+// report the failure; the fallback therefore re-validates the raw
+// NODEAGENT_SERVER_ADDR value (or defaults to :8080) instead of trusting the
+// config, while pprof is disabled because its loopback-only rule cannot be
+// verified without a valid config.
 func serverAddresses(cfg config.Config, cfgErr error) (healthAddr, pprofAddr string) {
 	if cfgErr == nil {
 		return cfg.ServerAddr, cfg.PprofAddr

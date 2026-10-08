@@ -344,7 +344,7 @@ func TestOSSAppendUnknownResultAndFinalize(t *testing.T) {
 	object := backend.objects[key]
 	want := mustEncodeBatch(t, batch)
 	if !bytes.Equal(object.data, want) || object.contentType != "application/octet-stream" || !reflect.DeepEqual(object.metadata, testOSSMetadata(testOSSConfig(db), batch.StreamRef, resource, 0)) {
-		t.Fatalf("object=%+v content-type=%q data=%q", object.metadata, object.contentType, object.data)
+		t.Fatalf("metadata=%+v content-type=%q data=%q", object.metadata, object.contentType, object.data)
 	}
 	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: batch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
 	if err := sink.Finalize(context.Background(), request); err != nil {

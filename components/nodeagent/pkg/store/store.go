@@ -33,12 +33,18 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+// Label and container-name selectors for OpenSandbox sandbox Pods. The
+// Store tracks only Pods labeled with the sandbox ID, not assigned to a Pool,
+// and carrying the sandbox container.
 const (
-	SandboxIDLabel = "opensandbox.io/id"
-	PoolNameLabel  = "sandbox.opensandbox.io/pool-name"
-	ContainerName  = "sandbox"
+	sandboxIDLabel = "opensandbox.io/id"
+	poolNameLabel  = "sandbox.opensandbox.io/pool-name"
+	containerName  = "sandbox"
 )
 
+// View is one Source's isolated window onto the node-local sandbox Pod cache:
+// a stable snapshot list, lookups, change notifications, and per-Source
+// release of terminated identities.
 type View interface {
 	List() []Resource
 	GetByUID(string) (Resource, bool)
@@ -56,6 +62,9 @@ type Resource struct {
 	ContainerRestartCount int32
 }
 
+// Store watches the node's OpenSandbox sandbox Pods through a shared
+// informer and fans out per-Source views. A terminated Pod's identity is
+// retained until every Source view has released it.
 type Store struct {
 	nodeName  string
 	clusterID string
@@ -74,6 +83,8 @@ type sourceView struct {
 	changes chan struct{}
 }
 
+// New builds the Pod Store for one node. Start must be called before views
+// reflect cluster state.
 func New(client kubernetes.Interface, nodeName, clusterID string) *Store {
 	s := &Store{
 		nodeName:    nodeName,
@@ -115,6 +126,7 @@ func New(client kubernetes.Interface, nodeName, clusterID string) *Store {
 	return s
 }
 
+// Start launches the informer and waits for its initial sync.
 func (s *Store) Start(ctx context.Context) error {
 	go s.informer.Run(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(), s.informer.HasSynced) {
@@ -141,6 +153,8 @@ func (s *Store) ForSource(source string) (View, error) {
 	return view, nil
 }
 
+// Stale reports whether the Pod watch has been failing for at least
+// threshold, meaning the cache may lag reality.
 func (s *Store) Stale(now time.Time, threshold time.Duration) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -211,9 +225,9 @@ func (s *Store) upsert(obj any) {
 	if !ok || pod.Spec.NodeName != s.nodeName {
 		return
 	}
-	sandboxID := pod.Labels[SandboxIDLabel]
-	_, pooled := pod.Labels[PoolNameLabel]
-	if sandboxID == "" || pooled || !hasContainer(pod, ContainerName) {
+	sandboxID := pod.Labels[sandboxIDLabel]
+	_, pooled := pod.Labels[poolNameLabel]
+	if sandboxID == "" || pooled || !hasContainer(pod, containerName) {
 		s.markTerminated(string(pod.UID))
 		return
 	}
@@ -226,11 +240,11 @@ func (s *Store) upsert(obj any) {
 			PodName:     pod.Name,
 			PodUID:      string(pod.UID),
 			NodeName:    pod.Spec.NodeName,
-			Container:   ContainerName,
+			Container:   containerName,
 		},
 		Terminated: terminated,
 	}
-	resource.ContainerRuntime, resource.ContainerID, resource.ContainerRestartCount = containerStatus(pod, ContainerName)
+	resource.ContainerRuntime, resource.ContainerID, resource.ContainerRestartCount = containerStatus(pod, containerName)
 	s.mu.Lock()
 	if previous, exists := s.resources[resource.PodUID]; exists && previous.SandboxID != resource.SandboxID {
 		previous.Terminated = true

@@ -90,6 +90,10 @@ func checkDiskReserve(path string, reserve uint64) error {
 	return nil
 }
 
+// reserveFor derives the disk reserve required before accepting a byte
+// budget: 5% of the limit, clamped to [16 MiB, 256 MiB], so a small state
+// directory still keeps headroom and a huge budget never withholds too much
+// of the disk from other workloads.
 func reserveFor(limit int64) uint64 {
 	reserve := uint64(limit / 20)
 	if reserve < 16<<20 {

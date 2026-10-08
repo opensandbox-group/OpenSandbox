@@ -129,8 +129,8 @@ func TestDurableFileConsumeAndFinalize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Status != "complete" || len(value.Objects) != 1 || value.Objects[0].Size != int64(len(raw)) {
-		t.Fatalf("marker=%+v", value)
+	if !bytes.Contains(markerRaw, []byte(`"status":"complete"`)) || len(value.Objects) != 1 || value.Objects[0].Size != int64(len(raw)) {
+		t.Fatalf("marker=%+v raw=%s", value, markerRaw)
 	}
 
 	batch.Items[0].Record.Body = []byte("late")

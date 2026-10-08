@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package server exposes the Node Agent health and readiness HTTP endpoints
+// plus an optional loopback-only pprof server.
 package server
 
 import (
@@ -26,15 +28,22 @@ import (
 	"time"
 )
 
+// Readiness tracks the set of reasons the process is currently not ready.
+// Reasons are free-form labels reported on /readyz.
 type Readiness struct {
 	mu      sync.RWMutex
 	reasons map[string]struct{}
 }
 
+// NewReadiness returns a Readiness that starts not-ready with reason
+// "starting".
 func NewReadiness() *Readiness {
 	return &Readiness{reasons: map[string]struct{}{"starting": {}}}
 }
 
+// Set adds reason to the not-ready set while active and removes it otherwise.
+// Concurrent reasons combine; the process is ready only when the set is
+// empty.
 func (r *Readiness) Set(reason string, active bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -45,12 +54,17 @@ func (r *Readiness) Set(reason string, active bool) {
 	}
 }
 
+// Replace discards every pending reason and marks the process not-ready with
+// exactly reason. Use it for permanent conditions that make all other reasons
+// irrelevant.
 func (r *Readiness) Replace(reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reasons = map[string]struct{}{reason: {}}
 }
 
+// Ready reports whether the process is ready and, when not, the sorted set of
+// blocking reasons.
 func (r *Readiness) Ready() (bool, []string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -62,11 +76,15 @@ func (r *Readiness) Ready() (bool, []string) {
 	return len(reasons) == 0, reasons
 }
 
+// Servers holds the running health and pprof HTTP servers.
 type Servers struct {
 	health *http.Server
 	pprof  *http.Server
 }
 
+// Start serves /healthz and /readyz on addr and, when pprofAddr is non-empty,
+// the pprof handlers on pprofAddr. Servers are started in the background;
+// listen failures are reported through onError.
 func Start(addr, pprofAddr string, readiness *Readiness, onError func(error)) *Servers {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -103,6 +121,7 @@ func Start(addr, pprofAddr string, readiness *Readiness, onError func(error)) *S
 	return servers
 }
 
+// Shutdown gracefully stops both servers within ctx.
 func (s *Servers) Shutdown(ctx context.Context) error {
 	err := s.health.Shutdown(ctx)
 	if s.pprof != nil {
