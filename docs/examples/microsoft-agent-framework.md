@@ -134,4 +134,4 @@ when execution or the agent call fails.
 - [Microsoft Agent Framework Python samples](https://github.com/microsoft/agent-framework/tree/main/python/samples)
 - [Functional workflow with agents](https://github.com/microsoft/agent-framework/blob/main/python/samples/01-get-started/05_functional_workflow_with_agents.py)
 - [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox)
-- [Source code](../../examples/microsoft-agent-framework)
+- [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/microsoft-agent-framework)
