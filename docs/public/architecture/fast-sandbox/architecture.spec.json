@@ -7,7 +7,7 @@
     "quality_profile": "showcase",
     "viewBox": [
       1360,
-      540
+      460
     ],
     "output": "opensandbox-fast-sandbox-architecture.html",
     "views": [
@@ -21,7 +21,7 @@
           "builder",
           "s3_store"
         ],
-        "note": "From Server DB source of truth to content-addressed golden images in S3"
+        "note": "FastPath reconciles SandboxTemplate CRs into privileged builder Pods; golden images land in S3"
       },
       {
         "id": "sandbox-create",
@@ -31,9 +31,9 @@
           "server",
           "fastpath",
           "fastlet",
-          "node_rt"
+          "state_root"
         ],
-        "note": "templateId create: FastPath constant-time admission to a ready microVM"
+        "note": "Hot: reflink clone from node cache; cold: agent pull via DART, then boot"
       },
       {
         "id": "access-path",
@@ -44,20 +44,33 @@
           "fastpath",
           "fastlet"
         ],
-        "note": "The server issues gateway endpoints; signed routes reach Fastlets directly"
+        "note": "ResolveEndpoint signs Ed25519 credentials; traffic hits fastlet-proxy :5780"
       },
       {
         "id": "artifacts",
-        "label": "Artifacts & checkpoints",
+        "label": "Artifacts & storage acceleration",
         "focus": [
           "s3_store",
-          "oci_reg",
+          "dart",
+          "state_root",
+          "node_rt",
+          "builder"
+        ],
+        "note": "Digest-first publish; DART block cache + P2P; XFS reflink restore"
+      },
+      {
+        "id": "pause-resume",
+        "label": "Pause / resume lifecycle",
+        "focus": [
+          "server",
+          "fastpath",
           "fastlet",
           "node_rt",
-          "controller",
-          "sbx_pod"
+          "state_root",
+          "dart",
+          "s3_store"
         ],
-        "note": "Digest-first pause checkpoints and snapshot images"
+        "note": "Pause: reflink before pause, dump vmstate/memory, digest-first publish to S3. Resume: pull by digest via P2P or S3, restore anywhere"
       }
     ]
   },
@@ -93,6 +106,21 @@
       ]
     },
     {
+      "id": "ingress",
+      "type": "backend",
+      "label": "ingress-gateway",
+      "sublabel": "Traffic :28888 · Ed25519 routes",
+      "tag": "Deployment ×2",
+      "pos": [
+        280,
+        32
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
       "id": "server",
       "type": "backend",
       "label": "opensandbox-server",
@@ -100,40 +128,10 @@
       "tag": "Deployment",
       "pos": [
         280,
-        32
-      ],
-      "size": [
-        175,
-        80
-      ]
-    },
-    {
-      "id": "controller",
-      "type": "backend",
-      "label": "controller-manager",
-      "sublabel": "BatchSandbox/Pool/Snapshot CRs",
-      "tag": "Deployment",
-      "pos": [
-        275,
         150
       ],
       "size": [
-        185,
-        76
-      ]
-    },
-    {
-      "id": "ingress",
-      "type": "backend",
-      "label": "ingress-gateway",
-      "sublabel": "Traffic :28888 · signed routes",
-      "tag": "Deployment ×2",
-      "pos": [
-        565,
-        32
-      ],
-      "size": [
-        180,
+        175,
         80
       ]
     },
@@ -153,25 +151,10 @@
       ]
     },
     {
-      "id": "builder",
-      "type": "backend",
-      "label": "Template Builder",
-      "sublabel": "SandboxTemplate → golden image",
-      "tag": "Pod · on demand",
-      "pos": [
-        855,
-        32
-      ],
-      "size": [
-        190,
-        80
-      ]
-    },
-    {
       "id": "fastlet",
       "type": "cloud",
       "label": "Fastlet Pod",
-      "sublabel": "N microVMs + proxy + egress",
+      "sublabel": "HTTP :5758 · netns slots",
       "tag": "Pod · pre-warmed",
       "pos": [
         855,
@@ -186,7 +169,7 @@
       "id": "node_rt",
       "type": "cloud",
       "label": "firecracker-runtime",
-      "sublabel": "UDS · DART :9000 · state root",
+      "sublabel": "agent · SigV4 S3 · FC api.sock",
       "tag": "DaemonSet",
       "pos": [
         855,
@@ -198,18 +181,48 @@
       ]
     },
     {
-      "id": "sbx_pod",
+      "id": "builder",
       "type": "backend",
-      "label": "BatchSandbox Pod",
-      "sublabel": "execd :44772 · tasks :5758",
-      "tag": "Pod",
+      "label": "Template Builder",
+      "sublabel": "KVM Pod · FastPath-built",
+      "tag": "Pod · on demand",
       "pos": [
         855,
-        432
+        32
       ],
       "size": [
         190,
         80
+      ]
+    },
+    {
+      "id": "state_root",
+      "type": "database",
+      "label": "XFS StateRoot",
+      "sublabel": "reflink CoW · digest cache",
+      "tag": "hostPath · shared",
+      "pos": [
+        1155,
+        312
+      ],
+      "size": [
+        180,
+        76
+      ]
+    },
+    {
+      "id": "dart",
+      "type": "messagebus",
+      "label": "P2P block cache",
+      "sublabel": "peer :9000 · miss→S3",
+      "tag": "node daemon",
+      "pos": [
+        1155,
+        150
+      ],
+      "size": [
+        180,
+        76
       ]
     },
     {
@@ -219,27 +232,12 @@
       "sublabel": "s3://sandbox-images/publish",
       "tag": "MinIO/S3",
       "pos": [
-        1155,
+        1160,
         32
       ],
       "size": [
         170,
         80
-      ]
-    },
-    {
-      "id": "oci_reg",
-      "type": "database",
-      "label": "OCI Registry",
-      "sublabel": "snap-gen* · snap-* images",
-      "tag": "Registry",
-      "pos": [
-        1155,
-        432
-      ],
-      "size": [
-        170,
-        72
       ]
     }
   ],
@@ -248,9 +246,8 @@
       "kind": "region",
       "label": "opensandbox-system · Control Plane",
       "wraps": [
-        "server",
-        "controller",
         "ingress",
+        "server",
         "fastpath"
       ],
       "pad": 20
@@ -259,19 +256,19 @@
       "kind": "region",
       "label": "Nodes · Data Plane (fsb CRs: opensandbox-dataplane)",
       "wraps": [
-        "builder",
         "fastlet",
         "node_rt",
-        "sbx_pod"
+        "state_root",
+        "dart"
       ],
       "pad": 20
     },
     {
       "kind": "region",
-      "label": "Artifact Storage · External",
+      "label": "Template Pipeline & Artifact Storage",
       "wraps": [
-        "s3_store",
-        "oci_reg"
+        "builder",
+        "s3_store"
       ],
       "pad": 20
     }
@@ -282,25 +279,9 @@
       "to": "server",
       "label": "HTTP /v1 · API Key",
       "variant": "emphasis",
-      "fromSide": "right",
-      "toSide": "top",
-      "via": [
-        [
-          210,
-          186
-        ],
-        [
-          210,
-          4
-        ],
-        [
-          367.5,
-          4
-        ]
-      ],
       "labelAt": [
-        180,
-        116
+        235,
+        240
       ]
     },
     {
@@ -308,51 +289,25 @@
       "to": "server_db",
       "label": "Templates · snapshot metadata",
       "variant": "dashed",
-      "fromSide": "left",
+      "fromSide": "bottom",
       "toSide": "right",
       "via": [
         [
-          240,
-          72
+          367.5,
+          269
         ],
         [
-          240,
+          250,
+          269
+        ],
+        [
+          250,
           348
         ]
       ],
       "labelAt": [
-        240,
-        260
-      ]
-    },
-    {
-      "from": "server",
-      "to": "fastpath",
-      "label": "gRPC :9090",
-      "variant": "emphasis",
-      "fromSide": "right",
-      "toSide": "left",
-      "via": [
-        [
-          520,
-          72
-        ],
-        [
-          520,
-          190
-        ]
-      ]
-    },
-    {
-      "from": "server",
-      "to": "controller",
-      "label": "BatchSandbox CR · pause",
-      "variant": "dashed",
-      "fromSide": "bottom",
-      "toSide": "top",
-      "labelAt": [
-        368,
-        131
+        300,
+        269
       ]
     },
     {
@@ -360,75 +315,96 @@
       "to": "fastpath",
       "label": "ResolveEndpoint",
       "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          370,
+          131
+        ],
+        [
+          655,
+          131
+        ]
+      ],
       "labelAt": [
-        655,
+        511,
         131
       ]
     },
     {
-      "from": "controller",
-      "to": "sbx_pod",
-      "label": "Pool alloc · /setTasks",
-      "variant": "dashed",
-      "fromSide": "bottom",
-      "toSide": "left",
-      "via": [
-        [
-          367.5,
-          472
-        ]
-      ]
+      "from": "server",
+      "to": "fastpath",
+      "label": "gRPC :9090",
+      "variant": "emphasis"
     },
     {
-      "from": "controller",
-      "to": "oci_reg",
-      "label": "image-committer push · resume pull",
-      "variant": "dashed",
-      "fromSide": "right",
-      "toSide": "left",
+      "from": "ingress",
+      "to": "fastlet",
+      "label": "Signed :5780 routes",
+      "fromSide": "top",
+      "toSide": "top",
       "via": [
         [
-          500,
-          188
+          370,
+          16
         ],
         [
-          500,
-          410
+          800,
+          16
         ],
         [
-          1130,
-          410
+          800,
+          131
         ],
         [
-          1130,
-          468
+          950,
+          131
         ]
+      ],
+      "labelAt": [
+        560,
+        16
       ]
     },
     {
       "from": "fastpath",
-      "to": "builder",
-      "label": "Reconcile SandboxTemplate",
-      "variant": "dashed",
+      "to": "fastlet",
+      "label": "HTTP :5758 · admit/snapshot",
+      "variant": "emphasis",
+      "labelAt": [
+        750,
+        244
+      ]
+    },
+    {
+      "from": "fastlet",
+      "to": "node_rt",
+      "label": "UDS · checkpoint publish/pull",
+      "labelAt": [
+        920,
+        289
+      ]
+    },
+    {
+      "from": "node_rt",
+      "to": "dart",
+      "label": ":8145 GET /dart/",
       "fromSide": "right",
-      "toSide": "bottom",
+      "toSide": "left",
       "via": [
         [
-          800,
-          190
+          1090,
+          350
         ],
         [
-          800,
-          130
-        ],
-        [
-          950,
-          130
+          1090,
+          188
         ]
       ],
       "labelAt": [
-        950,
-        124
+        1090,
+        269
       ]
     },
     {
@@ -437,40 +413,36 @@
       "label": "Golden images"
     },
     {
-      "from": "fastpath",
-      "to": "fastlet",
-      "label": "Admission · slots first",
-      "variant": "emphasis",
+      "from": "node_rt",
+      "to": "state_root",
+      "label": "commit cache",
       "fromSide": "bottom",
       "toSide": "bottom",
       "via": [
         [
-          655,
-          278
+          950,
+          430
         ],
         [
-          950,
-          278
+          1245,
+          430
         ]
+      ],
+      "labelAt": [
+        1100,
+        405
       ]
     },
     {
-      "from": "fastlet",
+      "from": "dart",
       "to": "s3_store",
-      "label": "Pause checkpoints, digest first"
-    },
-    {
-      "from": "s3_store",
-      "to": "node_rt",
-      "label": "DART block fetch :9000",
+      "label": "Origin GET on miss",
       "variant": "dashed",
-      "fromSide": "bottom",
-      "toSide": "right",
-      "via": [
-        [
-          1240,
-          350
-        ]
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        1245,
+        131
       ]
     }
   ],
@@ -479,30 +451,31 @@
       "dot": "cyan",
       "title": "Control plane & access",
       "items": [
-        "All control-plane components: Helm Deployments",
-        "FastPath: single replica, state in CRDs",
-        "Server DB: template catalog + snapshot metadata",
-        "Signed :28888 routes; endpoints issued by server"
+        "Control plane: Helm Deployments; FastPath co-hosts Reconciler + gRPC :9090",
+        "Create persists a Sandbox CRD intent, then Top-K selects a Fastlet",
+        "ResolveEndpoint signs Ed25519 route credentials for ingress",
+        "Server DB: template catalog + snapshot metadata"
       ]
     },
     {
       "dot": "emerald",
       "title": "Template artifact flow",
       "items": [
-        "Server DB truth → SandboxTemplate CR",
-        "Builder bakes immutable golden images",
-        "Content-addressed in the S3 artifact store"
+        "FastPath reconciles SandboxTemplate CR → privileged builder Pod (KVM)",
+        "Golden set: rootfs.ext4 + vmstate + memory + manifest + SHA256SUMS",
+        "S3 digest16(manifest) namespace; index (template ID) written last"
       ]
     },
     {
       "dot": "amber",
-      "title": "Sandbox lifecycle & artifacts",
+      "title": "Storage acceleration & checkpoints",
       "items": [
-        "templateId → FastSandboxService → FastPath admission",
-        "Slots first, CR first; reflink restore; execd :44772",
-        "Pause: digest-first to S3; Fastlet released",
-        "Resume anywhere; re-resolve endpoints",
-        "BatchSandbox: image-committer → OCI Registry"
+        "Hot path: XFS reflink clone from node cache; LoadSnapshot restore only",
+        "Cold path: agent pulls whole files via P2P cache or direct S3; sha256 + atomic commit",
+        "P2P cache-miss → origin S3 (presigned GET); block transfer on :9000 (DNS dart:9000)",
+        "Agent fallback: direct SigV4 S3 pull/publish when P2P cache is down",
+        "Resume: placement prefers same Fastlet; cross-node pulls checkpoint by digest",
+        "Pause: reflink before pause; digest-first ManifestRef+Digest; then release"
       ]
     }
   ]

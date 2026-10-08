@@ -5085,7 +5085,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       </div>
     </div>
 
-    <script id="archify-guided-views-data" type="application/json">[{"id":"template-flow","label":"Template artifact flow","focus":["server_db","server","fastpath","builder","s3_store"],"note":"From Server DB source of truth to content-addressed golden images in S3"},{"id":"sandbox-create","label":"Sandbox creation","focus":["clients","server","fastpath","fastlet","node_rt"],"note":"templateId create: FastPath constant-time admission to a ready microVM"},{"id":"access-path","label":"Traffic access","focus":["clients","ingress","fastpath","fastlet"],"note":"The server issues gateway endpoints; signed routes reach Fastlets directly"},{"id":"artifacts","label":"Artifacts \u0026 checkpoints","focus":["s3_store","oci_reg","fastlet","node_rt","controller","sbx_pod"],"note":"Digest-first pause checkpoints and snapshot images"}]</script>
+    <script id="archify-guided-views-data" type="application/json">[{"id":"template-flow","label":"Template artifact flow","focus":["server_db","server","fastpath","builder","s3_store"],"note":"FastPath reconciles SandboxTemplate CRs into privileged builder Pods; golden images land in S3"},{"id":"sandbox-create","label":"Sandbox creation","focus":["clients","server","fastpath","fastlet","state_root"],"note":"Hot: reflink clone from node cache; cold: agent pull via DART, then boot"},{"id":"access-path","label":"Traffic access","focus":["clients","ingress","fastpath","fastlet"],"note":"ResolveEndpoint signs Ed25519 credentials; traffic hits fastlet-proxy :5780"},{"id":"artifacts","label":"Artifacts \u0026 storage acceleration","focus":["s3_store","dart","state_root","node_rt","builder"],"note":"Digest-first publish; DART block cache + P2P; XFS reflink restore"},{"id":"pause-resume","label":"Pause / resume lifecycle","focus":["server","fastpath","fastlet","node_rt","state_root","dart","s3_store"],"note":"Pause: reflink before pause, dump vmstate/memory, digest-first publish to S3. Resume: pull by digest via P2P or S3, restore anywhere"}]</script>
 
     <script id="archify-i18n-data" type="application/json">{"locale":"en","messages":{"viewer.kind.frontend":"Frontend","viewer.kind.backend":"Backend","viewer.kind.database":"Database","viewer.kind.cloud":"Cloud","viewer.kind.security":"Security","viewer.kind.messagebus":"Message bus","viewer.kind.external":"External","viewer.kind.neutral":"Neutral","viewer.kind.node":"Node","viewer.kind.start":"Start","viewer.kind.active":"Active","viewer.kind.waiting":"Waiting","viewer.kind.decision":"Decision","viewer.kind.success":"Success","viewer.kind.failure":"Failure","viewer.toolbar.actions":"Diagram actions","viewer.theme.toggle.title":"Toggle theme (T)","viewer.theme.toggle":"Toggle color theme","viewer.theme.dark":"Dark","viewer.theme.light":"Light","viewer.preset.choose.title":"Choose visual style (S cycles)","viewer.preset.choose":"Choose visual style","viewer.preset.style":"Style","viewer.preset.menu":"Visual style","viewer.preset.identity":"Visual identity","viewer.preset.cycles":"S cycles","viewer.preset.classic":"Classic","viewer.preset.classic.short":"Classic","viewer.preset.classic.hint":"Stable technical default","viewer.preset.flow":"Signal Flow","viewer.preset.flow.short":"Flow","viewer.preset.flow.hint":"Motion-forward presentation","viewer.preset.blueprint":"Blueprint","viewer.preset.blueprint.hint":"Engineering review","viewer.preset.editorial":"Editorial","viewer.preset.editorial.hint":"Publication and launch notes","viewer.preset.badge.signalFlow":"SIGNAL FLOW","viewer.preset.badge.blueprint":"BLUEPRINT / REV 01","viewer.preset.badge.editorial":"EDITORIAL / FIELD NOTE","viewer.preset.badge.editorialPlate":"ARCHIFY / PLATE 04","viewer.preset.current":"Visual style: {style}. Choose visual style","viewer.motion.live":"Live","viewer.motion.still":"Still","viewer.motion.pause":"Pause motion","viewer.motion.resume":"Resume motion","viewer.motion.reduced":"Motion paused by reduced-motion preference","viewer.motion.hidden":"Motion paused while this page is hidden","viewer.motion.yielding":"Pause motion; currently yielding to {owner}","viewer.motion.yielding.title":"Live preview enabled · yielding to {owner}","viewer.owner.story":"the guided story","viewer.owner.chapter":"the active chapter","viewer.owner.chapterPreview":"the chapter delta preview","viewer.owner.handoff":"the chapter handoff","viewer.owner.route":"Route Probe","viewer.owner.lens":"Semantic Lens","viewer.owner.relationship":"Relationship Preview","viewer.owner.intent":"Intent Trace","viewer.owner.focus":"semantic focus","viewer.owner.legend":"legend preview","viewer.owner.reader":"reader interaction","viewer.present.enter":"Enter presentation stage","viewer.present.enter.title":"Presentation stage (F)","viewer.present.exit":"Exit presentation stage","viewer.present.exit.title":"Exit presentation stage (F or Escape)","viewer.present.present":"Present","viewer.present.exit.label":"Exit","viewer.export.button":"Export","viewer.export.button.title":"Export diagram (E)","viewer.export.diagram":"Export diagram","viewer.export.menu":"Export","viewer.export.subtitle":"Portable, clean outputs","viewer.export.share":"Share","viewer.export.shareCard":"Share Card","viewer.export.routeShareCard":"Route Share Card","viewer.export.reachShareCard":"Reach Share Card","viewer.export.copyShareCard":"Copy Share Card","viewer.export.copyDiagram":"Copy diagram","viewer.export.clipboardPng":"PNG to clipboard","viewer.export.raster":"Raster images","viewer.export.image":"Image","viewer.export.lossless":"Lossless image","viewer.export.compact":"Compact image","viewer.export.modern":"Modern image","viewer.export.vectorMotion":"Vector and motion","viewer.export.vectorMotion.heading":"Vector \u0026 motion","viewer.export.editable":"Editable vector","viewer.export.motion6s":"6s motion","viewer.export.unsupported":"Not supported by this browser","viewer.export.clipboardUnsupported":"Clipboard image write not supported by this browser","viewer.export.clipboardUnsupported.period":"Clipboard image write not supported by this browser.","viewer.export.clipboardUnsupported.short":"Clipboard image write not supported in this browser.","viewer.export.motionUnavailable":"Motion capture unavailable in this browser","viewer.export.webmUnavailable":"WebM unavailable in this browser","viewer.export.failed":"Export failed: {message}","viewer.export.unknownVariant":"Unknown Share Card variant: {variant}","viewer.export.routeRequired":"Trace a route before exporting a Route Share Card","viewer.export.reachRequired":"Trace authored reach before exporting a Reach Share Card","viewer.export.unknown":"unknown","viewer.export.routeFailed":"Route Share Card export failed: {message}","viewer.export.reachFailed":"Reach Share Card export failed: {message}","viewer.export.copyFailed":"Copy failed: {message}","viewer.export.copiedPng":"Copied PNG to clipboard","viewer.export.copiedShare":"Copied Share Card","viewer.export.downloadedShare":"Downloaded Share Card","viewer.export.downloadedRoute":"Downloaded Route Share Card","viewer.export.downloadedReach":"Downloaded Reach Share Card","viewer.export.downloadedWebm":"Downloaded WebM","viewer.export.recording":"Recording 6 seconds of motion…","viewer.export.card.routeSummary.one":"Route: {source} → {target} · {count} directed hop","viewer.export.card.routeSummary.other":"Route: {source} → {target} · {count} directed hops","viewer.export.card.reachSummary":"Authored {direction} from {origin} · {nodes} · {links} · max {hops}","viewer.export.card.node.one":"{count} node","viewer.export.card.node.other":"{count} nodes","viewer.export.card.link.one":"{count} link","viewer.export.card.link.other":"{count} links","viewer.export.card.hop.one":"{count} hop","viewer.export.card.hop.other":"{count} hops","viewer.export.card.routeBadge":"ARCHIFY · ROUTE · {hops}","viewer.export.card.reachBadge":"ARCHIFY · {direction} REACH","viewer.export.card.defaultBadge":"ARCHIFY · {preset} · {theme}","viewer.export.direction.upstream":"Upstream","viewer.export.direction.downstream":"Downstream","viewer.export.error.canvasUnavailable":"Canvas unavailable for {label}","viewer.export.error.contextUnavailable":"2D canvas context unavailable for {label}","viewer.export.error.toBlobUnavailable":"canvas.toBlob unavailable for {label}","viewer.export.error.toBlobNull":"canvas.toBlob returned no data for {label}","viewer.export.error.variantsCombined":"Share Card variants cannot be combined","viewer.export.error.viewerState":"Share Card export could not remove temporary viewer state","viewer.export.error.routeState":"Route Card export could not preserve the resolved route safely","viewer.export.error.reachState":"Reach Card export could not preserve authored reach safely","viewer.export.error.webmRequirements":"WebM motion export requires a trace animation and browser MediaRecorder support","viewer.export.error.mediaRecorder":"MediaRecorder failed","viewer.export.error.emptyWebm":"MediaRecorder produced an empty WebM","viewer.export.error.webmBackground":"SVG background could not be loaded for WebM export","viewer.guided.region":"Guided diagram views","viewer.guided.previous":"Previous guided view","viewer.guided.previous.title":"Previous guided view ([)","viewer.guided.next":"Next guided view","viewer.guided.next.title":"Next guided view (])","viewer.guided.views":"Guided views","viewer.guided.explore":"Explore this system","viewer.guided.intro":"Step through curated paths without changing the source diagram.","viewer.guided.trail":"Story trail","viewer.guided.beat":"Beat","viewer.guided.nextBeat":"Next","viewer.guided.play":"Play guided story","viewer.guided.play.title":"Play guided story (P)","viewer.guided.pause":"Pause guided story","viewer.guided.pause.title":"Pause guided story (P)","viewer.guided.replay":"Replay guided story","viewer.guided.replay.title":"Replay guided story (P)","viewer.guided.playStory":"Play story","viewer.guided.pauseStory":"Pause","viewer.guided.replayStory":"Replay story","viewer.guided.motionUnavailable":"Story playback unavailable while motion is Still","viewer.guided.enableMotion":"Switch motion to Live to play the guided story","viewer.guided.selectBeatLink":"Select a Story Beat to copy its exact link","viewer.guided.copyMoment":"Copy moment","viewer.guided.momentCopied":"Moment link copied","viewer.guided.momentCopyFailed":"Could not copy story moment link","viewer.guided.copied":"Copied","viewer.guided.copyFailed":"Copy failed","viewer.guided.showAll":"Show all","viewer.guided.showAll.aria":"Show entire diagram","viewer.guided.chapters":"Story chapters","viewer.guided.storyTrail":"Story trail for {label}: {count} beats","viewer.guided.chapter.open":"Open chapter {index} of {total}: {label}, {count} stops","viewer.guided.chapter.current":"Current chapter {index} of {total}: {label}, {count} stops","viewer.guided.chapter.selectedNodes":"{count} selected nodes","viewer.guided.chapter.stops":"{count} stops","viewer.guided.chapter.stop.one":"{count} stop","viewer.guided.chapter.stop.other":"{count} stops","viewer.guided.chapter.current.title":"{label} — current chapter, {count} stops","viewer.guided.chapter.delta.expanded":"{stay} stay, {enter} enter, {leave} leave","viewer.guided.chapter.delta.aria":"Open chapter {index} of {total}: {label}. Chapter focus delta: {delta}","viewer.guided.chapter.delta.title":"{label} — {delta} chapter focus","viewer.guided.handoff":"{from} → {to} · via {label}","viewer.guided.share.chapter":"Chapter {index} / {total}","viewer.guided.share.initial":"Chapter 01 / 01","viewer.guided.share.default":"Guided chapter","viewer.guided.state.ready":"Ready","viewer.guided.state.playing":"Playing","viewer.guided.state.settled":"Settled","viewer.guided.state.paused":"Paused","viewer.guided.state.pinned":"Pinned","viewer.guided.state.still":"Still","viewer.guided.share.step":"Step {index} / {total} · {label}","viewer.guided.share.staticMoment":"{step} · Static moment","viewer.guided.share.complete":"{count} steps complete · {note}","viewer.guided.share.settled":"Path settled for reading.","viewer.guided.share.staticPath":"{count} steps · Static path","viewer.guided.share.ready":"{count} steps · Ready","viewer.guided.share.aria":"{state} chapter {index} of {total}: {label}. {beat}. {route}","viewer.guided.beat.start":"Beat {index} / {total} · {label} · starting point","viewer.guided.beat.forward":"Beat {index} / {total} · {from} → {to}","viewer.guided.beat.reverse":"Beat {index} / {total} · {from} → {to} · reverse authored link","viewer.guided.beat.multiple":"Beat {index} / {total} · {from} ⇄ {to} · {count} authored links","viewer.guided.beat.group":"Beat {index} / {total} · {from} · {to} · grouped · no direct link","viewer.guided.beat.aria.prefix":"Story beat {index} of {total}: {label}. ","viewer.guided.beat.aria.start":"Starting point.","viewer.guided.beat.aria.forward":"From {from} through one authored forward relationship.","viewer.guided.beat.aria.reverse":"From {from}; the authored relationship points from {to} to {from}.","viewer.guided.beat.aria.multiple":"From {from} through {count} authored relationships; shown without arbitrary motion.","viewer.guided.beat.aria.group":"Grouped from {from} with no direct authored relationship.","viewer.guided.caption.start":"Starting point","viewer.guided.caption.grouped":"Grouped transition · no direct authored link","viewer.guided.caption.more":" +{count} more","viewer.guided.caption.reverse":"Reverse authored relationship","viewer.guided.caption.relationships":"{count} authored relationships","viewer.guided.caption.relationship":"Authored relationship","viewer.guided.caption.direction":"authored direction: {from} → {to}","viewer.guided.caption.starting":"Authored starting point","viewer.guided.beatLink":"Copy link to current story moment: Beat {index} of {total}: {label}","viewer.guided.noStory":"This diagram has no authored guided story.","viewer.guide.eyebrow":"Diagram guide","viewer.guide.close":"Close diagram guide","viewer.guide.inspecting":"Inspecting compiled semantics","viewer.guide.actions":"Diagram exploration actions","viewer.guide.find":"Find any node","viewer.guide.find.hint":"Search labels, responsibilities, kinds, and stable IDs.","viewer.guide.route":"Trace a route","viewer.guide.route.aria":"Trace a directed route","viewer.guide.route.hint":"Ask how two semantic nodes connect in authored direction.","viewer.guide.map":"See the whole system","viewer.guide.map.hint":"Open Semantic Radar with a live viewport and stable nodes.","viewer.guide.lens":"Compare semantic kinds","viewer.guide.lens.hint":"Count roles, reveal their traffic, and compare direct authored links.","viewer.guide.story":"Play the guided story","viewer.guide.story.hint":"Walk the authored chapters and real relationships.","viewer.guide.present":"Enter Presentation Stage","viewer.guide.present.hint":"Give the live diagram the viewport without changing export.","viewer.guide.shortcuts":"Additional keyboard shortcuts","viewer.guide.shortcut.export":"Export","viewer.guide.shortcut.theme":"Theme","viewer.guide.shortcut.style":"Style","viewer.guide.shortcut.reset":"Reset","viewer.guide.shortcut.zoomIn":"Zoom in","viewer.guide.shortcut.zoomOut":"Zoom out","viewer.guide.shortcut.close":"Close","viewer.guide.facts":"{nodes} · {relationships} · {views}","viewer.guide.fact.node.one":"{count} semantic node","viewer.guide.fact.node.other":"{count} semantic nodes","viewer.guide.fact.relationship.one":"{count} relationship","viewer.guide.fact.relationship.other":"{count} relationships","viewer.guide.fact.view.one":"{count} guided view","viewer.guide.fact.view.other":"{count} guided views","viewer.guide.story.available.one":"Walk {count} authored chapter and its real relationships.","viewer.guide.story.available.other":"Walk {count} authored chapters and their real relationships.","viewer.guide.story.unavailable":"No authored guided story in this diagram.","viewer.guide.open":"Open diagram guide","viewer.guide.noStory":"This diagram has no authored guided story.","viewer.finder.title":"Find a node","viewer.finder.close":"Close node finder","viewer.finder.placeholder":"Search labels or IDs","viewer.finder.search":"Search diagram nodes","viewer.finder.results":"Diagram nodes","viewer.finder.empty":"No matching nodes","viewer.finder.result.focus":"Focus {label}","viewer.finder.result.routeStart":"Choose {label} as route start","viewer.finder.result.routeTarget":"Choose {label} as route destination, {links}","viewer.finder.status.empty":"No matching nodes","viewer.finder.status.count.one":"{count} matching node","viewer.finder.status.count.other":"{count} matching nodes","viewer.finder.noun.nodes":"nodes","viewer.finder.link.one":"{count} link","viewer.finder.link.other":"{count} links","viewer.finder.result.focus.one":"Focus {label}, {count} related connection","viewer.finder.result.focus.other":"Focus {label}, {count} related connections","viewer.finder.status.filtered":"{visible} of {available} {noun}","viewer.finder.status.all":"{available} {noun}","viewer.passport.eyebrow":"Semantic passport","viewer.passport.metadata":"Node metadata","viewer.passport.evidence":"Verified source evidence","viewer.passport.verified":"Verified source","viewer.passport.verificationScope":"Verified against local Git at the pinned revision. Remote access has not been checked.","viewer.passport.reach":"Authored reach","viewer.passport.reach.trace":"Trace authored reachability","viewer.passport.upstream":"Upstream","viewer.passport.downstream":"Downstream","viewer.passport.upstream.trace":"Trace upstream authored reachability","viewer.passport.downstream.trace":"Trace downstream authored reachability","viewer.passport.close":"Close semantic passport","viewer.passport.copy":"Copy link","viewer.passport.copy.focus":"Copy link to focused node","viewer.passport.relations":"Relations","viewer.passport.relations.show":"Show connected relationships","viewer.passport.relations.hide":"Hide connected relationships","viewer.passport.relations.list":"Connected relationships","viewer.passport.copyRelation":"Copy relation","viewer.passport.copyNode":"Copy node","viewer.passport.copyPinned":"Copy link to pinned relationship","viewer.passport.copySource":"Copy link to source node","viewer.passport.copy.focused.success":"Focused node link copied","viewer.passport.copy.pinned.success":"Pinned relationship link copied","viewer.passport.copy.focused.failed":"Could not copy focused node link","viewer.passport.copy.pinned.failed":"Could not copy pinned relationship link","viewer.passport.relationship.none":"No connected relationships","viewer.passport.relationship.count.one":"{count} relation","viewer.passport.relationship.count.other":"{count} relations","viewer.passport.relationship.show.one":"Show {count} connected relationship","viewer.passport.relationship.show.other":"Show {count} connected relationships","viewer.passport.relationship.summary":"{out} outgoing · {in} incoming{loops}","viewer.passport.relationship.loops":" · {count} loop","viewer.passport.relationship.explorer":"Direct relationship explorer","viewer.passport.relationship.help":"Use arrow keys to explore relationships. Press Enter or Space to pin details; Escape clears.","viewer.passport.relationship.loopsBack":"loops back","viewer.passport.relationship.connectsTo":"connects to","viewer.passport.relationship.connectsFrom":"connects from","viewer.passport.relationship.pinned":"Pinned relationship · {from} → {to} · {label}","viewer.passport.relationship.inspect":"Inspect relationship {index} of {total}: {from} to {to}, {label}. Press Enter for details.","viewer.passport.relationship.group.out":"Outgoing","viewer.passport.relationship.group.in":"Incoming","viewer.passport.relationship.group.loop":"Self loops","viewer.passport.relationship.row":"{group}: {relationship}, {neighbor}","viewer.passport.relationship.direction.out":"OUT →","viewer.passport.relationship.direction.in":"← IN","viewer.passport.relationship.direction.loop":"LOOP","viewer.passport.sourceCount.one":"{count} verified source reference","viewer.passport.sourceCount.other":"{count} verified source references","viewer.passport.sourceMarker":"SRC","viewer.passport.beacon.one":"{count} verified source; focus this node to inspect","viewer.passport.beacon.other":"{count} verified sources; focus this node to inspect","viewer.passport.repository.open":"Open verified repository revision {revision}","viewer.passport.source.open":"Open verified source {path} at revision {revision}","viewer.passport.source.openLink":"Open ↗","viewer.passport.reach.upstream.one":"Trace {count} upstream authored node","viewer.passport.reach.upstream.other":"Trace {count} upstream authored nodes","viewer.passport.reach.downstream.one":"Trace {count} downstream authored node","viewer.passport.reach.downstream.other":"Trace {count} downstream authored nodes","viewer.passport.reach.noUpstream":"No upstream authored nodes","viewer.passport.reach.noDownstream":"No downstream authored nodes","viewer.passport.reach.status":"{direction} · {nodes} nodes · {links} links · max {hops} hops","viewer.route.eyebrow":"Route probe","viewer.route.start":"Choose a start node","viewer.route.start.find":"Find start","viewer.route.start.find.aria":"Find a route start","viewer.route.copy":"Copy link","viewer.route.copy.aria":"Copy link to traced route","viewer.route.clear":"Clear","viewer.route.clear.aria":"Clear route probe","viewer.route.traced":"Traced route","viewer.route.pickTwo":"Pick two semantic nodes on the diagram","viewer.route.pickOne":"Pick a semantic node on the diagram","viewer.route.controls":"Route journey controls","viewer.route.previous":"Previous route position","viewer.route.play":"Play route journey","viewer.route.pause":"Pause route journey","viewer.route.replay":"Replay route journey","viewer.route.next":"Next route position","viewer.route.journey":"Journey","viewer.route.pause.label":"Pause","viewer.route.replay.label":"Replay","viewer.route.overview":"Overview","viewer.route.overview.aria":"Show complete route overview","viewer.route.instructions":"Choose the source, then the destination. Direction matters.","viewer.route.destination":"Choose a destination from {label}","viewer.route.destination.find":"Find target","viewer.route.destination.find.aria":"Find a reachable route destination","viewer.route.differentDestination":"Choose a different destination","viewer.route.distinct":"A route needs two distinct semantic nodes.","viewer.route.unreachable":"No directed route to {label}","viewer.route.unreachable.detail":"{target} is not reachable from {source}. Pick a highlighted destination.","viewer.route.start.instructions":"Select the source. The next step will reveal only directed destinations.","viewer.route.copy.success":"Traced route link copied","viewer.route.copy.failed":"Could not copy traced route link","viewer.route.position":"Route position {index} of {total}: {label}","viewer.route.step":"Step {index} of {total} · {phase} · {label}","viewer.route.motionRequired":"Automatic journey requires Live motion","viewer.route.trigger.clear":"Clear traced route","viewer.route.overview.status":"{nodes} · {hops} · shortest authored route","viewer.route.overview.node.one":"{count} node","viewer.route.overview.node.other":"{count} nodes","viewer.route.overview.hop.one":"{count} directed hop","viewer.route.overview.hop.other":"{count} directed hops","viewer.route.phase.playing":"Playing","viewer.route.phase.complete":"Complete","viewer.route.phase.inspecting":"Inspecting","viewer.route.destination.count.one":"{count} directed destination available. Pick a highlighted node.","viewer.route.destination.count.other":"{count} directed destinations available. Pick a highlighted node.","viewer.route.noOutgoing":"No outgoing route starts here. Clear and choose another source.","viewer.route.result.title":"{source} to {target}","viewer.route.finder.source.title":"Choose route start","viewer.route.finder.source.placeholder":"Search route sources","viewer.route.finder.source.empty":"No matching route sources","viewer.route.finder.source.results":"Nodes that can start a route","viewer.route.finder.source.noun":"route sources","viewer.route.finder.source.badge":"start","viewer.route.finder.target.title":"Destination from {label}","viewer.route.finder.target.placeholder":"Search reachable destinations","viewer.route.finder.target.empty":"No matching reachable destinations","viewer.route.finder.target.results":"Reachable route destinations","viewer.route.finder.target.noun":"reachable destinations","viewer.route.hop.one":"{count} hop","viewer.route.hop.other":"{count} hops","viewer.lens.eyebrow":"Semantic lens","viewer.lens.title":"Compare system roles","viewer.lens.close":"Close semantic lens","viewer.lens.instruction":"Choose up to two semantic kinds. One reveals its real traffic; two compare only direct authored relationships.","viewer.lens.kinds":"Semantic kinds","viewer.lens.choose":"Choose a kind to inspect its nodes and touching relationships.","viewer.lens.copy":"Copy link to semantic lens","viewer.lens.clear":"Clear semantic lens","viewer.lens.open":"Open semantic lens","viewer.lens.openActive":"Open active semantic lens","viewer.lens.legend":"Semantic legend","viewer.lens.legend.inspect.one":"Inspect {label}, {count} node","viewer.lens.legend.inspect.other":"Inspect {label}, {count} nodes","viewer.lens.kind.count.one":"{label}, {count} node","viewer.lens.kind.count.other":"{label}, {count} nodes","viewer.lens.compare.one":"{first} → {second}: {forward} · {second} → {first}: {reverse} · {count} direct relationship","viewer.lens.compare.other":"{first} → {second}: {forward} · {second} → {first}: {reverse} · {count} direct relationships","viewer.lens.single":"{nodes} · {relationships} · connected peers remain visible","viewer.lens.node.one":"{count} {label} node","viewer.lens.node.other":"{count} {label} nodes","viewer.lens.relationship.one":"{count} touching relationship","viewer.lens.relationship.other":"{count} touching relationships","viewer.radar.title":"Semantic radar","viewer.radar.building":"Building overview","viewer.radar.openFull":"Open full semantic radar","viewer.radar.open":"Open radar","viewer.radar.close":"Close semantic radar","viewer.radar.surface":"Diagram overview. Click a node to focus it, or use arrow keys to pan.","viewer.radar.click":"Click node","viewer.radar.drag":"Drag to pan","viewer.radar.space":"Semantic radar needs more MAP space.","viewer.radar.nodes":"Semantic diagram radar nodes","viewer.radar.focus":"Focus {label} from Semantic Radar","viewer.radar.status":"{count} nodes · {viewport}","viewer.radar.fullMap":"{count} nodes · full map","viewer.radar.compacted":"Radar compacted to avoid covering the Semantic Passport or MAP controls.","viewer.radar.cancelWaiting":"Cancel semantic radar waiting for more MAP space","viewer.radar.needsSpace":"Semantic radar needs more visible MAP space","viewer.radar.viewport.full":"full map","viewer.radar.viewport.width":"{percent}% width","viewer.radar.viewport.scale":"{percent}% viewport","viewer.nav.controls":"Diagram view controls","viewer.nav.route":"Trace a directed route","viewer.nav.route.title":"Trace route (R)","viewer.nav.route.short":"PATH","viewer.nav.radar":"Open semantic radar","viewer.nav.radar.title":"Semantic radar (M)","viewer.nav.radar.short":"MAP","viewer.nav.lens":"Open semantic lens","viewer.nav.lens.title":"Semantic lens (L)","viewer.nav.lens.short":"LENS","viewer.nav.find":"Find a node","viewer.nav.find.title":"Find a node (/)","viewer.nav.guide":"Open diagram guide","viewer.nav.guide.title":"Diagram guide (?)","viewer.nav.zoomOut":"Zoom out","viewer.nav.zoomOut.title":"Zoom out (-)","viewer.nav.reset":"Reset diagram view","viewer.nav.reset.title":"Reset view (0)","viewer.nav.read":"READ","viewer.nav.zoomIn":"Zoom in","viewer.nav.zoomIn.title":"Zoom in (+)","viewer.nav.camera":"{hint}. Reset diagram view","viewer.nav.camera.title":"{semantic}{hint} · reset view (0)","viewer.nav.camera.semantic":"Semantic camera active · ","viewer.nav.level.map":"MAP","viewer.nav.level.read":"READ","viewer.nav.level.full":"FULL","viewer.nav.level.auto":"AUTO","viewer.nav.detail.map":"Zoom in to reveal relationship labels and node context","viewer.nav.detail.read":"Zoom in again to reveal tags and annotations","viewer.nav.detail.full":"Full diagram detail","viewer.intent.summary":"{label}. {out} outgoing, {in} incoming{loops}. {total} connections. Press Enter for details.","viewer.intent.loops":", {count} self loop","viewer.common.copied":"Copied","viewer.common.copyFailed":"Copy failed","viewer.common.copyLink":"Copy link","viewer.common.clear":"Clear","viewer.common.close":"Close"}}</script>
     <div class="guided-views no-print" id="guided-views" hidden aria-label="Guided diagram views">
@@ -5130,7 +5130,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
-      <svg viewBox="0 0 1360 540" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+      <svg viewBox="0 0 1360 460" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">OpenSandbox × fast-sandbox Integration Architecture</title>
         <desc id="archify-diagram-description">An architecture diagram generated by Archify.</desc>
         <!-- Definitions -->
@@ -5156,25 +5156,24 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="opensandbox-system · Control Plane" x="255" y="8" width="510" height="242" rx="12" class="c-region" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="opensandbox-system · Control Plane" x="260" y="8" width="505" height="242" rx="12" class="c-region" stroke-width="1"/>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-composition-frame-label="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" x="806.7548234096774" y="8" width="286.4903531806451" height="524" rx="12" class="c-region" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-composition-frame-label="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" x="835" y="126" width="520" height="282" rx="12" class="c-region" stroke-width="1"/>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-composition-frame-label="Artifact Storage · External" x="1135" y="8" width="210" height="516" rx="12" class="c-region" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-composition-frame-label="Template Pipeline &amp; Artifact Storage" x="835" y="8" width="515" height="124" rx="12" class="c-region" stroke-width="1"/>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="clients" data-edge-to="server" data-edge-label="HTTP /v1 · API Key" data-edge-key="0" data-composition-points="190,186;210,186;210,4;367.5,4;367.5,32" d="M 190 186 L 202 186 Q 210 186 210 178 L 210 12 Q 210 4 218 4 L 359.5 4 Q 367.5 4 367.5 12 L 367.5 32" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="server" data-edge-to="server_db" data-edge-label="Templates · snapshot metadata" data-edge-key="1" data-composition-points="280,72;240,72;240,348;190,348" d="M 280 72 L 248 72 Q 240 72 240 80 L 240 340 Q 240 348 232 348 L 190 348" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="server" data-edge-to="fastpath" data-edge-label="gRPC :9090" data-edge-key="2" data-composition-points="455,72;520,72;520,190;565,190" d="M 455 72 L 512 72 Q 520 72 520 80 L 520 182 Q 520 190 528 190 L 565 190" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="server" data-edge-to="controller" data-edge-label="BatchSandbox CR · pause" data-edge-key="3" data-composition-points="367.5,112;367.5,150" d="M 367.5 112 L 367.5 150" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="ingress" data-edge-to="fastpath" data-edge-label="ResolveEndpoint" data-edge-key="4" data-composition-points="655,112;655,150" d="M 655 112 L 655 150" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="controller" data-edge-to="sbx_pod" data-edge-label="Pool alloc · /setTasks" data-edge-key="5" data-composition-points="367.5,226;367.5,472;855,472" d="M 367.5 226 L 367.5 464 Q 367.5 472 375.5 472 L 855 472" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="controller" data-edge-to="oci_reg" data-edge-label="image-committer push · resume pull" data-edge-key="6" data-composition-points="460,188;500,188;500,410;1130,410;1130,468;1155,468" d="M 460 188 L 492 188 Q 500 188 500 196 L 500 402 Q 500 410 508 410 L 1122 410 Q 1130 410 1130 418 L 1130 460 Q 1130 468 1138 468 L 1155 468" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="fastpath" data-edge-to="builder" data-edge-label="Reconcile SandboxTemplate" data-edge-key="7" data-composition-points="745,190;800,190;800,130;950,130;950,112" d="M 745 190 L 792 190 Q 800 190 800 182 L 800 138 Q 800 130 808 130 L 942 130 Q 950 130 950 122 L 950 112" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="builder" data-edge-to="s3_store" data-edge-label="Golden images" data-edge-key="8" data-composition-points="1045,65;1155,65" d="M 1045 65 L 1155 65" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="fastpath" data-edge-to="fastlet" data-edge-label="Admission · slots first" data-edge-key="9" data-composition-points="655,230;655,278;950,278;950,250" d="M 655 230 L 655 270 Q 655 278 663 278 L 942 278 Q 950 278 950 270 L 950 250" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="fastlet" data-edge-to="s3_store" data-edge-label="Pause checkpoints, digest first" data-edge-key="10" data-composition-points="1045,200;1100,200;1100,79;1155,79" d="M 1045 200 L 1092 200 Q 1100 200 1100 192 L 1100 87 Q 1100 79 1108 79 L 1155 79" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="s3_store" data-edge-to="node_rt" data-edge-label="DART block fetch :9000" data-edge-key="11" data-composition-points="1240,112;1240,350;1045,350" d="M 1240 112 L 1240 342 Q 1240 350 1232 350 L 1045 350" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="clients" data-edge-to="server" data-edge-label="HTTP /v1 · API Key" data-edge-key="0" data-composition-points="190,186;214,186;214,206;256,206;256,190;280,190" d="M 190 186 L 206 186 Q 214 186 214 194 L 214 198 Q 214 206 222 206 L 248 206 Q 256 206 256 198 L 256 198 Q 256 190 264 190 L 280 190" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="server" data-edge-to="server_db" data-edge-label="Templates · snapshot metadata" data-edge-key="1" data-composition-points="367.5,230;367.5,269;250,269;250,348;190,348" d="M 367.5 230 L 367.5 261 Q 367.5 269 359.5 269 L 258 269 Q 250 269 250 277 L 250 340 Q 250 348 242 348 L 190 348" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="ingress" data-edge-to="fastpath" data-edge-label="ResolveEndpoint" data-edge-key="2" data-composition-points="370,112;370,131;655,131;655,150" d="M 370 112 L 370 123 Q 370 131 378 131 L 647 131 Q 655 131 655 139 L 655 150" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="server" data-edge-to="fastpath" data-edge-label="gRPC :9090" data-edge-key="3" data-composition-points="455,190;565,190" d="M 455 190 L 565 190" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="ingress" data-edge-to="fastlet" data-edge-label="Signed :5780 routes" data-edge-key="4" data-composition-points="370,32;370,16;800,16;800,131;950,131;950,150" d="M 370 32 L 370 24 Q 370 16 378 16 L 792 16 Q 800 16 800 24 L 800 123 Q 800 131 808 131 L 942 131 Q 950 131 950 139 L 950 150" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="fastpath" data-edge-to="fastlet" data-edge-label="HTTP :5758 · admit/snapshot" data-edge-key="5" data-composition-points="745,190;769,190;769,216;831,216;831,200;855,200" d="M 745 190 L 761 190 Q 769 190 769 198 L 769 208 Q 769 216 777 216 L 823 216 Q 831 216 831 208 L 831 208 Q 831 200 839 200 L 855 200" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="fastlet" data-edge-to="node_rt" data-edge-label="UDS · checkpoint publish/pull" data-edge-key="6" data-composition-points="950,250;950,312" d="M 950 250 L 950 312" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="node_rt" data-edge-to="dart" data-edge-label=":8145 GET /dart/" data-edge-key="7" data-composition-points="1045,350;1090,350;1090,188;1155,188" d="M 1045 350 L 1082 350 Q 1090 350 1090 342 L 1090 196 Q 1090 188 1098 188 L 1155 188" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="builder" data-edge-to="s3_store" data-edge-label="Golden images" data-edge-key="8" data-composition-points="1045,72;1160,72" d="M 1045 72 L 1160 72" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="node_rt" data-edge-to="state_root" data-edge-label="commit cache" data-edge-key="9" data-composition-points="950,388;950,430;1245,430;1245,388" d="M 950 388 L 950 422 Q 950 430 958 430 L 1237 430 Q 1245 430 1245 422 L 1245 388" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="dart" data-edge-to="s3_store" data-edge-label="Origin GET on miss" data-edge-key="10" data-composition-points="1245,150;1245,112" d="M 1245 150 L 1245 112" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
 
         <!-- Components -->
         <g id="node-clients" data-node-id="clients" data-node-label="SDK · CLI · MCP" tabindex="0" role="button" aria-label="Focus SDK · CLI · MCP, Python·TS·Go·Java·C#·osb, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="Python·TS·Go·Java·C#·osb" data-node-tag="Client-side" data-node-context="Architecture component">
@@ -5203,40 +5202,28 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="105" y="376" class="t-database" font-size="7" text-anchor="middle">SQLite/PG</text>
         </g>
 
-        <g id="node-server" data-node-id="server" data-node-label="opensandbox-server" tabindex="0" role="button" aria-label="Focus opensandbox-server, FastAPI /v1 · runtime routing, opensandbox-system · Control Plane" aria-pressed="false" data-node-kind="backend" data-node-sublabel="FastAPI /v1 · runtime routing" data-node-tag="Deployment" data-node-context="opensandbox-system · Control Plane">
-          <title>opensandbox-server · FastAPI /v1 · runtime routing · opensandbox-system · Control Plane · Deployment</title>
-          <rect x="280" y="32" width="175" height="80" rx="6" class="c-mask"/>
-          <rect x="280" y="32" width="175" height="80" rx="6" class="c-backend" stroke-width="1.5"/>
+        <g id="node-ingress" data-node-id="ingress" data-node-label="ingress-gateway" tabindex="0" role="button" aria-label="Focus ingress-gateway, Traffic :28888 · Ed25519 routes, opensandbox-system · Control Plane" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Traffic :28888 · Ed25519 routes" data-node-tag="Deployment ×2" data-node-context="opensandbox-system · Control Plane">
+          <title>ingress-gateway · Traffic :28888 · Ed25519 routes · opensandbox-system · Control Plane · Deployment ×2</title>
+          <rect x="280" y="32" width="180" height="80" rx="6" class="c-mask"/>
+          <rect x="280" y="32" width="180" height="80" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(286 38) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="367.5" y="70" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">opensandbox-server</text>
-        <text data-detail="context" x="367.5" y="86" class="t-muted" font-size="9" text-anchor="middle">FastAPI /v1 · runtime routing</text>
-        <text data-detail="fine" x="367.5" y="104" class="t-backend" font-size="7" text-anchor="middle">Deployment</text>
+          <text data-node-label="" data-detail-anchor="" x="370" y="70" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">ingress-gateway</text>
+        <text data-detail="context" x="370" y="86" class="t-muted" font-size="9" text-anchor="middle">Traffic :28888 · Ed25519 routes</text>
+        <text data-detail="fine" x="370" y="104" class="t-backend" font-size="7" text-anchor="middle">Deployment ×2</text>
         </g>
 
-        <g id="node-controller" data-node-id="controller" data-node-label="controller-manager" tabindex="0" role="button" aria-label="Focus controller-manager, BatchSandbox/Pool/Snapshot CRs, opensandbox-system · Control Plane" aria-pressed="false" data-node-kind="backend" data-node-sublabel="BatchSandbox/Pool/Snapshot CRs" data-node-tag="Deployment" data-node-context="opensandbox-system · Control Plane">
-          <title>controller-manager · BatchSandbox/Pool/Snapshot CRs · opensandbox-system · Control Plane · Deployment</title>
-          <rect x="275" y="150" width="185" height="76" rx="6" class="c-mask"/>
-          <rect x="275" y="150" width="185" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(281 156) scale(0.6875)">
+        <g id="node-server" data-node-id="server" data-node-label="opensandbox-server" tabindex="0" role="button" aria-label="Focus opensandbox-server, FastAPI /v1 · runtime routing, opensandbox-system · Control Plane" aria-pressed="false" data-node-kind="backend" data-node-sublabel="FastAPI /v1 · runtime routing" data-node-tag="Deployment" data-node-context="opensandbox-system · Control Plane">
+          <title>opensandbox-server · FastAPI /v1 · runtime routing · opensandbox-system · Control Plane · Deployment</title>
+          <rect x="280" y="150" width="175" height="80" rx="6" class="c-mask"/>
+          <rect x="280" y="150" width="175" height="80" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(286 156) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="367.5" y="186" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">controller-manager</text>
-        <text data-detail="context" x="367.5" y="202" class="t-muted" font-size="9" text-anchor="middle">BatchSandbox/Pool/Snapshot CRs</text>
-        <text data-detail="fine" x="367.5" y="218" class="t-backend" font-size="7" text-anchor="middle">Deployment</text>
-        </g>
-
-        <g id="node-ingress" data-node-id="ingress" data-node-label="ingress-gateway" tabindex="0" role="button" aria-label="Focus ingress-gateway, Traffic :28888 · signed routes, opensandbox-system · Control Plane" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Traffic :28888 · signed routes" data-node-tag="Deployment ×2" data-node-context="opensandbox-system · Control Plane">
-          <title>ingress-gateway · Traffic :28888 · signed routes · opensandbox-system · Control Plane · Deployment ×2</title>
-          <rect x="565" y="32" width="180" height="80" rx="6" class="c-mask"/>
-          <rect x="565" y="32" width="180" height="80" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(571 38) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="655" y="70" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">ingress-gateway</text>
-        <text data-detail="context" x="655" y="86" class="t-muted" font-size="9" text-anchor="middle">Traffic :28888 · signed routes</text>
-        <text data-detail="fine" x="655" y="104" class="t-backend" font-size="7" text-anchor="middle">Deployment ×2</text>
+          <text data-node-label="" data-detail-anchor="" x="367.5" y="188" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">opensandbox-server</text>
+        <text data-detail="context" x="367.5" y="204" class="t-muted" font-size="9" text-anchor="middle">FastAPI /v1 · runtime routing</text>
+        <text data-detail="fine" x="367.5" y="222" class="t-backend" font-size="7" text-anchor="middle">Deployment</text>
         </g>
 
         <g id="node-fastpath" data-node-id="fastpath" data-node-label="fsb-controller · FastPath" tabindex="0" role="button" aria-label="Focus fsb-controller · FastPath, gRPC :9090 · admit/pause/resume, opensandbox-system · Control Plane" aria-pressed="false" data-node-kind="backend" data-node-sublabel="gRPC :9090 · admit/pause/resume" data-node-tag="Deployment ×1" data-node-context="opensandbox-system · Control Plane">
@@ -5251,144 +5238,143 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="655" y="222" class="t-backend" font-size="7" text-anchor="middle">Deployment ×1</text>
         </g>
 
-        <g id="node-builder" data-node-id="builder" data-node-label="Template Builder" tabindex="0" role="button" aria-label="Focus Template Builder, SandboxTemplate → golden image, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="backend" data-node-sublabel="SandboxTemplate → golden image" data-node-tag="Pod · on demand" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
-          <title>Template Builder · SandboxTemplate → golden image · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · Pod · on demand</title>
-          <rect x="855" y="32" width="190" height="80" rx="6" class="c-mask"/>
-          <rect x="855" y="32" width="190" height="80" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(861 38) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="950" y="70" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Template Builder</text>
-        <text data-detail="context" x="950" y="86" class="t-muted" font-size="9" text-anchor="middle">SandboxTemplate → golden image</text>
-        <text data-detail="fine" x="950" y="104" class="t-backend" font-size="7" text-anchor="middle">Pod · on demand</text>
-        </g>
-
-        <g id="node-fastlet" data-node-id="fastlet" data-node-label="Fastlet Pod" tabindex="0" role="button" aria-label="Focus Fastlet Pod, N microVMs + proxy + egress, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="N microVMs + proxy + egress" data-node-tag="Pod · pre-warmed" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
-          <title>Fastlet Pod · N microVMs + proxy + egress · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · Pod · pre-warmed</title>
+        <g id="node-fastlet" data-node-id="fastlet" data-node-label="Fastlet Pod" tabindex="0" role="button" aria-label="Focus Fastlet Pod, HTTP :5758 · netns slots, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="HTTP :5758 · netns slots" data-node-tag="Pod · pre-warmed" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
+          <title>Fastlet Pod · HTTP :5758 · netns slots · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · Pod · pre-warmed</title>
           <rect x="855" y="150" width="190" height="100" rx="6" class="c-mask"/>
           <rect x="855" y="150" width="190" height="100" rx="6" class="c-cloud" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(861 156) scale(0.6875)">
             <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="950" y="198" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Fastlet Pod</text>
-        <text data-detail="context" x="950" y="214" class="t-muted" font-size="9" text-anchor="middle">N microVMs + proxy + egress</text>
+        <text data-detail="context" x="950" y="214" class="t-muted" font-size="9" text-anchor="middle">HTTP :5758 · netns slots</text>
         <text data-detail="fine" x="950" y="242" class="t-cloud" font-size="7" text-anchor="middle">Pod · pre-warmed</text>
         </g>
 
-        <g id="node-node_rt" data-node-id="node_rt" data-node-label="firecracker-runtime" tabindex="0" role="button" aria-label="Focus firecracker-runtime, UDS · DART :9000 · state root, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="UDS · DART :9000 · state root" data-node-tag="DaemonSet" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
-          <title>firecracker-runtime · UDS · DART :9000 · state root · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · DaemonSet</title>
+        <g id="node-node_rt" data-node-id="node_rt" data-node-label="firecracker-runtime" tabindex="0" role="button" aria-label="Focus firecracker-runtime, agent · SigV4 S3 · FC api.sock, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="agent · SigV4 S3 · FC api.sock" data-node-tag="DaemonSet" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
+          <title>firecracker-runtime · agent · SigV4 S3 · FC api.sock · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · DaemonSet</title>
           <rect x="855" y="312" width="190" height="76" rx="6" class="c-mask"/>
           <rect x="855" y="312" width="190" height="76" rx="6" class="c-cloud" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(861 318) scale(0.6875)">
             <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="950" y="348" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">firecracker-runtime</text>
-        <text data-detail="context" x="950" y="364" class="t-muted" font-size="9" text-anchor="middle">UDS · DART :9000 · state root</text>
+        <text data-detail="context" x="950" y="364" class="t-muted" font-size="9" text-anchor="middle">agent · SigV4 S3 · FC api.sock</text>
         <text data-detail="fine" x="950" y="380" class="t-cloud" font-size="7" text-anchor="middle">DaemonSet</text>
         </g>
 
-        <g id="node-sbx_pod" data-node-id="sbx_pod" data-node-label="BatchSandbox Pod" tabindex="0" role="button" aria-label="Focus BatchSandbox Pod, execd :44772 · tasks :5758, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="backend" data-node-sublabel="execd :44772 · tasks :5758" data-node-tag="Pod" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
-          <title>BatchSandbox Pod · execd :44772 · tasks :5758 · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · Pod</title>
-          <rect x="855" y="432" width="190" height="80" rx="6" class="c-mask"/>
-          <rect x="855" y="432" width="190" height="80" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(861 438) scale(0.6875)">
+        <g id="node-builder" data-node-id="builder" data-node-label="Template Builder" tabindex="0" role="button" aria-label="Focus Template Builder, KVM Pod · FastPath-built, Template Pipeline &amp; Artifact Storage" aria-pressed="false" data-node-kind="backend" data-node-sublabel="KVM Pod · FastPath-built" data-node-tag="Pod · on demand" data-node-context="Template Pipeline &amp; Artifact Storage">
+          <title>Template Builder · KVM Pod · FastPath-built · Template Pipeline &amp; Artifact Storage · Pod · on demand</title>
+          <rect x="855" y="32" width="190" height="80" rx="6" class="c-mask"/>
+          <rect x="855" y="32" width="190" height="80" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(861 38) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="950" y="470" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">BatchSandbox Pod</text>
-        <text data-detail="context" x="950" y="486" class="t-muted" font-size="9" text-anchor="middle">execd :44772 · tasks :5758</text>
-        <text data-detail="fine" x="950" y="504" class="t-backend" font-size="7" text-anchor="middle">Pod</text>
+          <text data-node-label="" data-detail-anchor="" x="950" y="70" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Template Builder</text>
+        <text data-detail="context" x="950" y="86" class="t-muted" font-size="9" text-anchor="middle">KVM Pod · FastPath-built</text>
+        <text data-detail="fine" x="950" y="104" class="t-backend" font-size="7" text-anchor="middle">Pod · on demand</text>
         </g>
 
-        <g id="node-s3_store" data-node-id="s3_store" data-node-label="S3 Artifact Store" tabindex="0" role="button" aria-label="Focus S3 Artifact Store, s3://sandbox-images/publish, Artifact Storage · External" aria-pressed="false" data-node-kind="database" data-node-sublabel="s3://sandbox-images/publish" data-node-tag="MinIO/S3" data-node-context="Artifact Storage · External">
-          <title>S3 Artifact Store · s3://sandbox-images/publish · Artifact Storage · External · MinIO/S3</title>
-          <rect x="1155" y="32" width="170" height="80" rx="6" class="c-mask"/>
-          <rect x="1155" y="32" width="170" height="80" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1161 38) scale(0.6875)">
+        <g id="node-state_root" data-node-id="state_root" data-node-label="XFS StateRoot" tabindex="0" role="button" aria-label="Focus XFS StateRoot, reflink CoW · digest cache, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="database" data-node-sublabel="reflink CoW · digest cache" data-node-tag="hostPath · shared" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
+          <title>XFS StateRoot · reflink CoW · digest cache · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · hostPath · shared</title>
+          <rect x="1155" y="312" width="180" height="76" rx="6" class="c-mask"/>
+          <rect x="1155" y="312" width="180" height="76" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1161 318) scale(0.6875)">
             <ellipse cx="8" cy="4" rx="5" ry="2"/>
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="1240" y="70" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">S3 Artifact Store</text>
-        <text data-detail="context" x="1240" y="86" class="t-muted" font-size="9" text-anchor="middle">s3://sandbox-images/publish</text>
-        <text data-detail="fine" x="1240" y="104" class="t-database" font-size="7" text-anchor="middle">MinIO/S3</text>
+          <text data-node-label="" data-detail-anchor="" x="1245" y="348" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">XFS StateRoot</text>
+        <text data-detail="context" x="1245" y="364" class="t-muted" font-size="9" text-anchor="middle">reflink CoW · digest cache</text>
+        <text data-detail="fine" x="1245" y="380" class="t-database" font-size="7" text-anchor="middle">hostPath · shared</text>
         </g>
 
-        <g id="node-oci_reg" data-node-id="oci_reg" data-node-label="OCI Registry" tabindex="0" role="button" aria-label="Focus OCI Registry, snap-gen* · snap-* images, Artifact Storage · External" aria-pressed="false" data-node-kind="database" data-node-sublabel="snap-gen* · snap-* images" data-node-tag="Registry" data-node-context="Artifact Storage · External">
-          <title>OCI Registry · snap-gen* · snap-* images · Artifact Storage · External · Registry</title>
-          <rect x="1155" y="432" width="170" height="72" rx="6" class="c-mask"/>
-          <rect x="1155" y="432" width="170" height="72" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1161 438) scale(0.6875)">
+        <g id="node-dart" data-node-id="dart" data-node-label="P2P block cache" tabindex="0" role="button" aria-label="Focus P2P block cache, peer :9000 · miss→S3, Nodes · Data Plane (fsb CRs: opensandbox-dataplane)" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="peer :9000 · miss→S3" data-node-tag="node daemon" data-node-context="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
+          <title>P2P block cache · peer :9000 · miss→S3 · Nodes · Data Plane (fsb CRs: opensandbox-dataplane) · node daemon</title>
+          <rect x="1155" y="150" width="180" height="76" rx="6" class="c-mask"/>
+          <rect x="1155" y="150" width="180" height="76" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(1161 156) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="1245" y="186" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">P2P block cache</text>
+        <text data-detail="context" x="1245" y="202" class="t-muted" font-size="9" text-anchor="middle">peer :9000 · miss→S3</text>
+        <text data-detail="fine" x="1245" y="218" class="t-messagebus" font-size="7" text-anchor="middle">node daemon</text>
+        </g>
+
+        <g id="node-s3_store" data-node-id="s3_store" data-node-label="S3 Artifact Store" tabindex="0" role="button" aria-label="Focus S3 Artifact Store, s3://sandbox-images/publish, Template Pipeline &amp; Artifact Storage" aria-pressed="false" data-node-kind="database" data-node-sublabel="s3://sandbox-images/publish" data-node-tag="MinIO/S3" data-node-context="Template Pipeline &amp; Artifact Storage">
+          <title>S3 Artifact Store · s3://sandbox-images/publish · Template Pipeline &amp; Artifact Storage · MinIO/S3</title>
+          <rect x="1160" y="32" width="170" height="80" rx="6" class="c-mask"/>
+          <rect x="1160" y="32" width="170" height="80" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1166 38) scale(0.6875)">
             <ellipse cx="8" cy="4" rx="5" ry="2"/>
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="1240" y="466" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">OCI Registry</text>
-        <text data-detail="context" x="1240" y="482" class="t-muted" font-size="9" text-anchor="middle">snap-gen* · snap-* images</text>
-        <text data-detail="fine" x="1240" y="496" class="t-database" font-size="7" text-anchor="middle">Registry</text>
+          <text data-node-label="" data-detail-anchor="" x="1245" y="70" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">S3 Artifact Store</text>
+        <text data-detail="context" x="1245" y="86" class="t-muted" font-size="9" text-anchor="middle">s3://sandbox-images/publish</text>
+        <text data-detail="fine" x="1245" y="104" class="t-database" font-size="7" text-anchor="middle">MinIO/S3</text>
         </g>
 
         <!-- Connection labels -->
         <g data-detail="context" data-edge-from="clients" data-edge-to="server" data-edge-label="HTTP /v1 · API Key" data-edge-key="0">
-          <rect x="131.8" y="106" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="180" y="116" class="t-backend" font-size="8" text-anchor="middle">HTTP /v1 · API Key</text>
+          <rect x="186.8" y="230" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="235" y="240" class="t-backend" font-size="8" text-anchor="middle">HTTP /v1 · API Key</text>
         </g>
         <g data-detail="context" data-edge-from="server" data-edge-to="server_db" data-edge-label="Templates · snapshot metadata" data-edge-key="1">
-          <rect x="165.4" y="250" width="149.2" height="14" rx="3" class="c-mask"/>
-          <text x="240" y="260" class="t-messagebus" font-size="8" text-anchor="middle">Templates · snapshot metadata</text>
+          <rect x="225.4" y="259" width="149.2" height="14" rx="3" class="c-mask"/>
+          <text x="300" y="269" class="t-messagebus" font-size="8" text-anchor="middle">Templates · snapshot metadata</text>
         </g>
-        <g data-detail="context" data-edge-from="server" data-edge-to="fastpath" data-edge-label="gRPC :9090" data-edge-key="2">
-          <rect x="491" y="111" width="58" height="14" rx="3" class="c-mask"/>
-          <text x="520" y="121" class="t-backend" font-size="8" text-anchor="middle">gRPC :9090</text>
+        <g data-detail="context" data-edge-from="ingress" data-edge-to="fastpath" data-edge-label="ResolveEndpoint" data-edge-key="2">
+          <rect x="470" y="121" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="511" y="131" class="t-messagebus" font-size="8" text-anchor="middle">ResolveEndpoint</text>
         </g>
-        <g data-detail="context" data-edge-from="server" data-edge-to="controller" data-edge-label="BatchSandbox CR · pause" data-edge-key="3">
-          <rect x="307.8" y="121" width="120.39999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="368" y="131" class="t-messagebus" font-size="8" text-anchor="middle">BatchSandbox CR · pause</text>
+        <g data-detail="context" data-edge-from="server" data-edge-to="fastpath" data-edge-label="gRPC :9090" data-edge-key="3">
+          <rect x="481" y="170" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="510" y="180" class="t-backend" font-size="8" text-anchor="middle">gRPC :9090</text>
         </g>
-        <g data-detail="context" data-edge-from="ingress" data-edge-to="fastpath" data-edge-label="ResolveEndpoint" data-edge-key="4">
-          <rect x="614" y="121" width="82" height="14" rx="3" class="c-mask"/>
-          <text x="655" y="131" class="t-messagebus" font-size="8" text-anchor="middle">ResolveEndpoint</text>
+        <g data-detail="context" data-edge-from="ingress" data-edge-to="fastlet" data-edge-label="Signed :5780 routes" data-edge-key="4">
+          <rect x="509.4" y="6" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="560" y="16" class="t-muted" font-size="8" text-anchor="middle">Signed :5780 routes</text>
         </g>
-        <g data-detail="context" data-edge-from="controller" data-edge-to="sbx_pod" data-edge-label="Pool alloc · /setTasks" data-edge-key="5">
-          <rect x="553.45" y="452" width="115.6" height="14" rx="3" class="c-mask"/>
-          <text x="611.25" y="462" class="t-messagebus" font-size="8" text-anchor="middle">Pool alloc · /setTasks</text>
+        <g data-detail="context" data-edge-from="fastpath" data-edge-to="fastlet" data-edge-label="HTTP :5758 · admit/snapshot" data-edge-key="5">
+          <rect x="680.2" y="234" width="139.6" height="14" rx="3" class="c-mask"/>
+          <text x="750" y="244" class="t-backend" font-size="8" text-anchor="middle">HTTP :5758 · admit/snapshot</text>
         </g>
-        <g data-detail="context" data-edge-from="controller" data-edge-to="oci_reg" data-edge-label="image-committer push · resume pull" data-edge-key="6">
-          <rect x="413.4" y="279" width="173.2" height="14" rx="3" class="c-mask"/>
-          <text x="500" y="289" class="t-messagebus" font-size="8" text-anchor="middle">image-committer push · resume pull</text>
+        <g data-detail="context" data-edge-from="fastlet" data-edge-to="node_rt" data-edge-label="UDS · checkpoint publish/pull" data-edge-key="6">
+          <rect x="845.4" y="279" width="149.2" height="14" rx="3" class="c-mask"/>
+          <text x="920" y="289" class="t-muted" font-size="8" text-anchor="middle">UDS · checkpoint publish/pull</text>
         </g>
-        <g data-detail="context" data-edge-from="fastpath" data-edge-to="builder" data-edge-label="Reconcile SandboxTemplate" data-edge-key="7">
-          <rect x="885" y="114" width="130" height="14" rx="3" class="c-mask"/>
-          <text x="950" y="124" class="t-messagebus" font-size="8" text-anchor="middle">Reconcile SandboxTemplate</text>
+        <g data-detail="context" data-edge-from="node_rt" data-edge-to="dart" data-edge-label=":8145 GET /dart/" data-edge-key="7">
+          <rect x="1046.6" y="259" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="1090" y="269" class="t-muted" font-size="8" text-anchor="middle">:8145 GET /dart/</text>
         </g>
         <g data-detail="context" data-edge-from="builder" data-edge-to="s3_store" data-edge-label="Golden images" data-edge-key="8">
-          <rect x="1063.8" y="45" width="72.4" height="14" rx="3" class="c-mask"/>
-          <text x="1100" y="55" class="t-muted" font-size="8" text-anchor="middle">Golden images</text>
+          <rect x="1066.3" y="52" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="1102.5" y="62" class="t-muted" font-size="8" text-anchor="middle">Golden images</text>
         </g>
-        <g data-detail="context" data-edge-from="fastpath" data-edge-to="fastlet" data-edge-label="Admission · slots first" data-edge-key="9">
-          <rect x="742.3" y="258" width="120.39999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="802.5" y="268" class="t-backend" font-size="8" text-anchor="middle">Admission · slots first</text>
+        <g data-detail="context" data-edge-from="node_rt" data-edge-to="state_root" data-edge-label="commit cache" data-edge-key="9">
+          <rect x="1066.2" y="395" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="1100" y="405" class="t-muted" font-size="8" text-anchor="middle">commit cache</text>
         </g>
-        <g data-detail="context" data-edge-from="fastlet" data-edge-to="s3_store" data-edge-label="Pause checkpoints, digest first" data-edge-key="10">
-          <rect x="1020.6" y="119.5" width="158.79999999999998" height="14" rx="3" class="c-mask"/>
-          <text x="1100" y="129.5" class="t-muted" font-size="8" text-anchor="middle">Pause checkpoints, digest first</text>
-        </g>
-        <g data-detail="context" data-edge-from="s3_store" data-edge-to="node_rt" data-edge-label="DART block fetch :9000" data-edge-key="11">
-          <rect x="1084.7" y="330" width="115.6" height="14" rx="3" class="c-mask"/>
-          <text x="1142.5" y="340" class="t-messagebus" font-size="8" text-anchor="middle">DART block fetch :9000</text>
+        <g data-detail="context" data-edge-from="dart" data-edge-to="s3_store" data-edge-label="Origin GET on miss" data-edge-key="10">
+          <rect x="1196.8" y="121" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="1245" y="131" class="t-messagebus" font-size="8" text-anchor="middle">Origin GET on miss</text>
         </g>
 
         <!-- Boundary labels (foreground masks keep routes out of titles) -->
         <g data-graph-role="structural-frame-label" data-composition-frame-id="0" data-composition-frame-kind="region" data-composition-frame-label="opensandbox-system · Control Plane">
-          <rect data-graph-role="structural-frame-label-mask" x="259" y="12" width="193.6" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="263" y="25" class="t-cloud" font-size="9" font-weight="600">opensandbox-system · Control Plane</text>
+          <rect data-graph-role="structural-frame-label-mask" x="264" y="12" width="193.6" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="268" y="25" class="t-cloud" font-size="9" font-weight="600">opensandbox-system · Control Plane</text>
         </g>
 
         <g data-graph-role="structural-frame-label" data-composition-frame-id="1" data-composition-frame-kind="region" data-composition-frame-label="Nodes · Data Plane (fsb CRs: opensandbox-dataplane)">
-          <rect data-graph-role="structural-frame-label-mask" x="810.7548234096774" y="12" width="278.4903531806451" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="814.7548234096774" y="24.774194548387094" class="t-cloud" font-size="8.774194548387095" font-weight="600">Nodes · Data Plane (fsb CRs: opensandbox-dataplane)</text>
+          <rect data-graph-role="structural-frame-label-mask" x="839" y="130" width="285.4" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="843" y="143" class="t-cloud" font-size="9" font-weight="600">Nodes · Data Plane (fsb CRs: opensandbox-dataplane)</text>
         </g>
 
-        <g data-graph-role="structural-frame-label" data-composition-frame-id="2" data-composition-frame-kind="region" data-composition-frame-label="Artifact Storage · External">
-          <rect data-graph-role="structural-frame-label-mask" x="1139" y="12" width="155.79999999999998" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="1143" y="25" class="t-cloud" font-size="9" font-weight="600">Artifact Storage · External</text>
+        <g data-graph-role="structural-frame-label" data-composition-frame-id="2" data-composition-frame-kind="region" data-composition-frame-label="Template Pipeline &amp; Artifact Storage">
+          <rect data-graph-role="structural-frame-label-mask" x="839" y="12" width="204.4" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="843" y="25" class="t-cloud" font-size="9" font-weight="600">Template Pipeline &amp; Artifact Storage</text>
         </g>
 
         <!-- Legend -->
@@ -5585,10 +5571,10 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Control plane &amp; access</h3>
         </div>
         <ul>
-          <li>&bull; All control-plane components: Helm Deployments</li>
-          <li>&bull; FastPath: single replica, state in CRDs</li>
+          <li>&bull; Control plane: Helm Deployments; FastPath co-hosts Reconciler + gRPC :9090</li>
+          <li>&bull; Create persists a Sandbox CRD intent, then Top-K selects a Fastlet</li>
+          <li>&bull; ResolveEndpoint signs Ed25519 route credentials for ingress</li>
           <li>&bull; Server DB: template catalog + snapshot metadata</li>
-          <li>&bull; Signed :28888 routes; endpoints issued by server</li>
         </ul>
       </div>
 
@@ -5598,23 +5584,24 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Template artifact flow</h3>
         </div>
         <ul>
-          <li>&bull; Server DB truth → SandboxTemplate CR</li>
-          <li>&bull; Builder bakes immutable golden images</li>
-          <li>&bull; Content-addressed in the S3 artifact store</li>
+          <li>&bull; FastPath reconciles SandboxTemplate CR → privileged builder Pod (KVM)</li>
+          <li>&bull; Golden set: rootfs.ext4 + vmstate + memory + manifest + SHA256SUMS</li>
+          <li>&bull; S3 digest16(manifest) namespace; index (template ID) written last</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot amber"></div>
-          <h3>Sandbox lifecycle &amp; artifacts</h3>
+          <h3>Storage acceleration &amp; checkpoints</h3>
         </div>
         <ul>
-          <li>&bull; templateId → FastSandboxService → FastPath admission</li>
-          <li>&bull; Slots first, CR first; reflink restore; execd :44772</li>
-          <li>&bull; Pause: digest-first to S3; Fastlet released</li>
-          <li>&bull; Resume anywhere; re-resolve endpoints</li>
-          <li>&bull; BatchSandbox: image-committer → OCI Registry</li>
+          <li>&bull; Hot path: XFS reflink clone from node cache; LoadSnapshot restore only</li>
+          <li>&bull; Cold path: agent pulls whole files via P2P cache or direct S3; sha256 + atomic commit</li>
+          <li>&bull; P2P cache-miss → origin S3 (presigned GET); block transfer on :9000 (DNS dart:9000)</li>
+          <li>&bull; Agent fallback: direct SigV4 S3 pull/publish when P2P cache is down</li>
+          <li>&bull; Resume: placement prefers same Fastlet; cross-node pulls checkpoint by digest</li>
+          <li>&bull; Pause: reflink before pause; digest-first ManifestRef+Digest; then release</li>
         </ul>
       </div>
     </div>
@@ -15047,17 +15034,5 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       }
     });
   </script>
-
-<style id="font-override">
-  body, .header, .guided-views, .cards, .container, .diagram-container,
-  svg, svg text, svg [data-node-label], svg [data-boundary-label],
-  .diagram-nav, button, input, select, th, td {
-    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
-      Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif !important;
-  }
-  code, pre, kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace !important;
-  }
-</style>
 </body>
 </html>
