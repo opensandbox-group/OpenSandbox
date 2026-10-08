@@ -22,7 +22,11 @@ import pytest
 
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import SandboxApiException, SandboxReadyTimeoutException
+from opensandbox.exceptions import (
+    SandboxApiException,
+    SandboxError,
+    SandboxReadyTimeoutException,
+)
 from opensandbox.internal.readiness import ReadinessBudget
 from opensandbox.sandbox import Sandbox
 from opensandbox.sync.sandbox import SandboxSync
@@ -197,11 +201,31 @@ async def test_permanent_endpoint_error_is_returned_without_retry(
 
 
 @pytest.mark.asyncio
-async def test_endpoint_timeout_preserves_last_error(connect):
+async def test_endpoint_timeout_preserves_last_error(connect, monkeypatch):
+    from types import SimpleNamespace
+
+    from opensandbox.internal import readiness
+
+    now = 0.0
+    calls = []
+    respond = responder(calls, failures=9999)
+
+    def handle(request):
+        nonlocal now
+        # Drain a fake budget deterministically instead of racing a
+        # wall-clock deadline that expires before the first endpoint
+        # error is recorded on loaded CI runners.
+        if "/endpoints/" in request.url.path:
+            now += 10
+        return respond(request)
+
+    monkeypatch.setattr(
+        readiness,
+        "time",
+        SimpleNamespace(monotonic=lambda: now, sleep=lambda *_: None),
+    )
     with pytest.raises(SandboxReadyTimeoutException) as caught:
-        await connect(
-            responder([], failures=9999), connect_timeout=timedelta(milliseconds=20)
-        )
+        await connect(handle, connect_timeout=timedelta(seconds=30))
     assert caught.value.__cause__.error.code == CODE
 
 
@@ -501,6 +525,39 @@ def test_sync_transport_maps_httpcore_exception_subclasses(monkeypatch):
             transport.handle_request(request)
     assert actual.value.__cause__ is error
     assert actual.value.request is request
+
+
+def test_sync_request_dying_on_deadline_keeps_last_endpoint_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from opensandbox.internal import readiness
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(
+        readiness,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock["now"], sleep=lambda *_: None),
+    )
+    budget = ReadinessBudget(timedelta(seconds=1), timedelta(milliseconds=1))
+    attempts = []
+
+    def action():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise SandboxApiException(
+                "starting", status_code=404, error=SandboxError(CODE, "starting")
+            )
+        # The deadline passes mid-request, like constrain_readiness_request
+        # raising while preparing a request whose budget just ran out.
+        clock["now"] = 2.0
+        raise budget.expired()
+
+    with pytest.raises(SandboxReadyTimeoutException) as caught:
+        budget.endpoint_sync(action)
+    assert attempts == [True, True]
+    # The last *real* endpoint error is preserved as the cause, not the
+    # budget's own READY_TIMEOUT.
+    assert caught.value.__cause__.error.code == CODE
 
 
 @pytest.mark.parametrize("sync", [False, True])

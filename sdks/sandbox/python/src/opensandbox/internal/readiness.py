@@ -169,8 +169,12 @@ class ReadinessBudget:
         try:
             result = action()
         except Exception as error:
-            # Record the latest error so a later expired() reports it.
-            self.last_error = error
+            # Record the latest error so a later expired() reports it. The
+            # budget's own timeout (raised by the readiness request hook when
+            # the deadline passes mid-request) is not a real endpoint error:
+            # keep the last real failure so the cause chain stays meaningful.
+            if not isinstance(error, SandboxReadyTimeoutException):
+                self.last_error = error
             self.remaining()
             raise
         finally:

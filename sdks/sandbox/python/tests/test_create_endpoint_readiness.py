@@ -157,12 +157,31 @@ async def test_permanent_endpoint_error_is_returned_without_retry(
 
 
 @pytest.mark.asyncio
-async def test_endpoint_timeout_preserves_last_error(create):
+async def test_endpoint_timeout_preserves_last_error(create, monkeypatch):
+    from types import SimpleNamespace
+
+    from opensandbox.internal import readiness
+
+    now = 0.0
     calls = []
+    respond = responder(calls, failures=9999)
+
+    def handle(request):
+        nonlocal now
+        # Drain a fake budget deterministically instead of racing a
+        # wall-clock deadline that expires before the first endpoint
+        # error is recorded on loaded CI runners.
+        if "/endpoints/" in request.url.path:
+            now += 10
+        return respond(request)
+
+    monkeypatch.setattr(
+        readiness,
+        "time",
+        SimpleNamespace(monotonic=lambda: now, sleep=lambda *_: None),
+    )
     with pytest.raises(SandboxReadyTimeoutException) as caught:
-        await create(
-            responder(calls, failures=9999), ready_timeout=timedelta(milliseconds=20)
-        )
+        await create(handle, ready_timeout=timedelta(seconds=30))
     assert caught.value.__cause__.error.code == CODE
     assert "/ping" not in calls
     assert calls.count("/v1/sandboxes/sbx-created") == 1
