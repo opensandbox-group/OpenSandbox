@@ -232,6 +232,10 @@ export default defineConfig({
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
+            {
+              text: "Node Agent Configuration",
+              link: "/guides/node-agent",
+            },
           ],
         },
       ],
