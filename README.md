@@ -38,8 +38,6 @@ OpenSandbox gives AI applications isolated environments to execute code, run com
 | **SDKs, CLI, and MCP** | Integrate with Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET, or Go SDKs. Use `osb` from the terminal or connect agents through MCP. | [SDKs](#sdks) · [CLI](#cli) · [MCP](#mcp) |
 | **Extensible sandbox protocol** | Build custom runtime integrations against defined sandbox lifecycle and execution APIs. | [API specs](specs/README.md) |
 
-Performance figures measure Python SDK create through a successful execd health check via the gateway: 100/100 successful creates per load shape, with template artifacts cached and readiness polled every 10 ms. See the [test setup and results](docs/architecture/fast-sandbox/performance.md) for the environment, separate batches, and limitations.
-
 ## Getting Started
 
 Requirements:
