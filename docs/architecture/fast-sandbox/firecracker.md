@@ -1,6 +1,6 @@
 ---
 title: Fast Sandbox Firecracker
-description: Firecracker microVM support in the fast-sandbox integration — per-VM networking, isolation guarantees, and measured boot characteristics.
+description: Firecracker microVM support in the fast-sandbox integration — per-VM networking, isolation guarantees, and snapshot restore characteristics.
 ---
 
 # Firecracker Support
@@ -60,13 +60,10 @@ Lifecycle ordering is fixed: VM netns created → `SET_BINDING` (deny-first) →
 
 ## Measured characteristics
 
-From the real-hardware verification:
-
-| Phase | Measured |
-|---|---|
-| VM `InstanceStart` → first response | ~1.6 s (kernel boot ~1.0 s) |
-
-The full set of measured figures — create, snapshot, pause/resume, request latency, artifact delivery — lives in [Performance](/architecture/fast-sandbox/performance).
+The ACK measurements cover template creates, request latency, live snapshot,
+and same-node pause/resume; results and environment details live in
+[Performance](/architecture/fast-sandbox/performance). Cold kernel boot and
+DART P2P performance were not verified in that run.
 
 ## Isolation guarantees
 

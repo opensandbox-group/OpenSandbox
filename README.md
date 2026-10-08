@@ -30,7 +30,7 @@ OpenSandbox gives AI applications isolated environments to execute code, run com
 
 | Feature | What it enables | Learn more |
 |---------|-----------------|------------|
-| **Fast Sandbox runtime** | Fast, high-density sandboxes on Kubernetes. Reference warm Firecracker creation: **97 ms P50 (serial)** / **308 ms P99 (10 concurrent)**. Firecracker sandboxes support pause/resume with memory and disk state preserved. | [Integration](docs/architecture/fast-sandbox/index.md) · [Performance](docs/architecture/fast-sandbox/performance.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
+| **Fast Sandbox runtime** | Fast, high-density sandboxes on Kubernetes. Warm Firecracker creation on Alibaba Cloud's managed Kubernetes (ACK): **64 ms P50 (serial baseline)** / **125.4 ms P99 (10 concurrent)**. Firecracker sandboxes support pause/resume with memory and disk state preserved. | [Integration](docs/architecture/fast-sandbox/index.md) · [Performance](docs/architecture/fast-sandbox/performance.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
 | **Agent working environments** | Execute commands, manage files, and run code with built-in APIs. Integration examples show how to run coding agents, browsers, and desktops inside sandboxes. | [Examples](docs/examples/index.md) |
 | **Network access control** | Route inbound traffic through a unified ingress gateway and control outbound access with per-sandbox egress policies. | [Ingress](docs/architecture/network/ingress.md) · [Egress](docs/architecture/network/egress.md) |
 | **Credential Vault** | Let agents call external services without exposing real credentials to sandbox workloads. | [Credential Vault](docs/guides/credential-vault.md) |
@@ -38,7 +38,7 @@ OpenSandbox gives AI applications isolated environments to execute code, run com
 | **SDKs, CLI, and MCP** | Integrate with Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET, or Go SDKs. Use `osb` from the terminal or connect agents through MCP. | [SDKs](#sdks) · [CLI](#cli) · [MCP](#mcp) |
 | **Extensible sandbox protocol** | Build custom runtime integrations against defined sandbox lifecycle and execution APIs. | [API specs](specs/README.md) |
 
-Performance figures measure Python SDK create through a successful execd health check via the gateway: 100 creates per load shape on the reference host, with template artifacts cached. See the [test setup and results](docs/architecture/fast-sandbox/performance.md).
+Performance figures were measured on 2026-10-08 on a two-node ACK (Alibaba Cloud Container Service for Kubernetes) cluster, from Python SDK create through a successful execd health check via the gateway. The serial baseline and 10-concurrent run each completed 100/100 creates, with template artifacts cached and readiness polled every 10 ms. They are separate batches; the serial repeat, other load results, and limitations are in the [test setup and results](docs/architecture/fast-sandbox/performance.md).
 
 ## Getting Started
 

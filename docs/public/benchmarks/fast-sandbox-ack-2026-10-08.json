@@ -1,0 +1,6688 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-08",
+  "classification": "engineering_measurement",
+  "sdk_version": "1.1.1rc2.dev106+gc7dc78a4.d20261008",
+  "sdk_source_commit": "c7dc78a4090e5de2b9119e9bd93952cae24f87bd",
+  "environment": {
+    "nodes": [
+      {
+        "label": "node-1",
+        "capacity_cpu": "192",
+        "allocatable_cpu": "191450m",
+        "capacity_memory": "791555352Ki",
+        "allocatable_memory": "778450200Ki",
+        "kernel": "5.10.134-19.6.1.lifsea8.x86_64",
+        "os": "Alibaba Cloud Linux Lifsea (ContainerOS) 3",
+        "kubernetes": "v1.36.2-aliyun.1",
+        "container_runtime": "containerd://2.1.9",
+        "architecture": "amd64"
+      },
+      {
+        "label": "node-2",
+        "capacity_cpu": "192",
+        "allocatable_cpu": "191450m",
+        "capacity_memory": "791555296Ki",
+        "allocatable_memory": "778450144Ki",
+        "kernel": "5.10.134-19.6.1.lifsea8.x86_64",
+        "os": "Alibaba Cloud Linux Lifsea (ContainerOS) 3",
+        "kubernetes": "v1.36.2-aliyun.1",
+        "container_runtime": "containerd://2.1.9",
+        "architecture": "amd64"
+      }
+    ],
+    "deployed_images": [
+      {
+        "component": "manager",
+        "image": "docker.io/opensandbox/fsb-controller:release-1.1.1-rc.1",
+        "image_id": "docker.io/opensandbox/fsb-controller@sha256:0cd07ba0655bbfefb44074942d74338dcf31ee2aa66589fac0bb29f3c30a2651"
+      },
+      {
+        "component": "firecracker-agent",
+        "image": "docker.io/opensandbox/fsb-firecracker-runtime:release-1.1.1-rc.1",
+        "image_id": "docker.io/opensandbox/fsb-firecracker-runtime@sha256:b83ba5e762c229bcb565547811c3bd0a223452f26f96c60d5e150b74c9c19038"
+      },
+      {
+        "component": "janitor",
+        "image": "docker.io/opensandbox/fsb-janitor:release-1.1.1-rc.1",
+        "image_id": "docker.io/opensandbox/fsb-janitor@sha256:23911ea381d5631c331004e94ffb3a7a811882349200a3d7c1362f6075f39428"
+      },
+      {
+        "component": "main",
+        "image": "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress:release-1.1.1-rc.1",
+        "image_id": "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress@sha256:de5ee95a370032b862edf2d654d61a735fe0211412c430c06d18d6ebca458c40"
+      },
+      {
+        "component": "main",
+        "image": "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server:release-1.1.1-rc.1",
+        "image_id": "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server@sha256:e417bfea577d6a00fea69b53eae76bfb0cc94d0f7fc8d41acf75f19e5206a665"
+      }
+    ],
+    "cpu_model": "AMD EPYC 9T95 192-Core Processor",
+    "firecracker_version": "1.16.1",
+    "state_root": "50 GiB XFS reflink=1 loop filesystem, backed by an ext4 ESSD data disk on each node",
+    "copy_tool": "GNU coreutils cp 9.11 in the derived Fastlet image",
+    "template": {
+      "source": "Alpine 3.19 with execd",
+      "vcpus": 1,
+      "memory_gib": 2,
+      "rootfs_gib": 2,
+      "artifact_digest": "d78575470094c6fe1a2da2a71b7578971dff9e77cd5381dee236dd53e01b54cb",
+      "cache": "warm on both nodes"
+    },
+    "pool": {
+      "fastlets": 5,
+      "slots_per_fastlet": 4,
+      "min_fastlets": 5,
+      "max_fastlets": 10,
+      "buffer_min": 0
+    },
+    "object_store": "RustFS on persistent hostPath on one existing node",
+    "client": "Python 3.11 in-cluster Pod, four-CPU limit",
+    "startup_storage_guard_deployed": false,
+    "fastlet_image": "docker.io/opensandbox/fsb-fastlet:release-1.1.1-rc.1-reflink-20261007",
+    "fastlet_manifest_digest": "sha256:4185e1c6e0366742fd57f310617089e33a56e9aea548b90a6cddc7351fad39f7"
+  },
+  "method": {
+    "create_start": "before Sandbox.create_from_template",
+    "create_finish": "SDK guest /ping 200 through signed ingress gateway",
+    "readiness_poll_ms": 10,
+    "sdk_default_readiness_poll_ms": 200,
+    "request_timeout_seconds": 10,
+    "disable_metrics": true,
+    "create_ready_timeout_seconds": 180,
+    "resume_timeout_seconds": 240,
+    "sdk_default_resume_timeout_seconds": 30,
+    "pause_status_poll_ms": 200,
+    "warmup_per_create_run": 2,
+    "percentiles": "nearest_rank",
+    "successful_sample_timing_excludes": [
+      "delete",
+      "between-batch reclamation pause"
+    ],
+    "lifecycle_topology": "same Kubernetes node, different Fastlet for each resume; original nodeSelector restored",
+    "create_run_notes": "Original 64 ms-p50 baseline and later 78 ms-p50 repeat are distinct batches. Concurrency comparisons use the later four-CPU client run; do not pool the two serial batches or attribute their difference to one changed setting."
+  },
+  "creates": {
+    "serial_initial": {
+      "role": "Initial warm serial validation baseline, separate from subsequent comparison runs",
+      "date": "2026-10-08",
+      "concurrency": 1,
+      "attempts": 100,
+      "successes": 100,
+      "failures": 0,
+      "successful_latency_ms": {
+        "p50": 63.99548612535,
+        "p90": 93.8400630839169,
+        "p99": 108.32429816946387,
+        "mean": 70.5874916864559,
+        "min": 53.81055292673409,
+        "max": 113.32567199133337
+      },
+      "successful_samples": [
+        {
+          "index": 0,
+          "ready_ms": 55.252568097785115
+        },
+        {
+          "index": 1,
+          "ready_ms": 57.35397199168801
+        },
+        {
+          "index": 2,
+          "ready_ms": 88.50267017260194
+        },
+        {
+          "index": 3,
+          "ready_ms": 59.75557607598603
+        },
+        {
+          "index": 4,
+          "ready_ms": 57.224398013204336
+        },
+        {
+          "index": 5,
+          "ready_ms": 72.11891608312726
+        },
+        {
+          "index": 6,
+          "ready_ms": 75.88251191191375
+        },
+        {
+          "index": 7,
+          "ready_ms": 55.00549986027181
+        },
+        {
+          "index": 8,
+          "ready_ms": 56.34619086049497
+        },
+        {
+          "index": 9,
+          "ready_ms": 53.81055292673409
+        },
+        {
+          "index": 10,
+          "ready_ms": 62.97990493476391
+        },
+        {
+          "index": 11,
+          "ready_ms": 94.0474490635097
+        },
+        {
+          "index": 12,
+          "ready_ms": 55.70369213819504
+        },
+        {
+          "index": 13,
+          "ready_ms": 57.84905795007944
+        },
+        {
+          "index": 14,
+          "ready_ms": 90.89027298614383
+        },
+        {
+          "index": 15,
+          "ready_ms": 85.60403995215893
+        },
+        {
+          "index": 16,
+          "ready_ms": 62.992886174470186
+        },
+        {
+          "index": 17,
+          "ready_ms": 66.52734405361116
+        },
+        {
+          "index": 18,
+          "ready_ms": 85.46063606627285
+        },
+        {
+          "index": 19,
+          "ready_ms": 55.98239111714065
+        },
+        {
+          "index": 20,
+          "ready_ms": 87.69175386987627
+        },
+        {
+          "index": 21,
+          "ready_ms": 54.958558874204755
+        },
+        {
+          "index": 22,
+          "ready_ms": 55.735012982040644
+        },
+        {
+          "index": 23,
+          "ready_ms": 57.2370991576463
+        },
+        {
+          "index": 24,
+          "ready_ms": 58.368113124743104
+        },
+        {
+          "index": 25,
+          "ready_ms": 85.59858007356524
+        },
+        {
+          "index": 26,
+          "ready_ms": 54.45781396701932
+        },
+        {
+          "index": 27,
+          "ready_ms": 63.262813026085496
+        },
+        {
+          "index": 28,
+          "ready_ms": 56.681830901652575
+        },
+        {
+          "index": 29,
+          "ready_ms": 68.62125918269157
+        },
+        {
+          "index": 30,
+          "ready_ms": 56.004590820521116
+        },
+        {
+          "index": 31,
+          "ready_ms": 67.26432591676712
+        },
+        {
+          "index": 32,
+          "ready_ms": 66.03529886342585
+        },
+        {
+          "index": 33,
+          "ready_ms": 73.5412600915879
+        },
+        {
+          "index": 34,
+          "ready_ms": 113.32567199133337
+        },
+        {
+          "index": 35,
+          "ready_ms": 100.75774579308927
+        },
+        {
+          "index": 36,
+          "ready_ms": 56.2931289896369
+        },
+        {
+          "index": 37,
+          "ready_ms": 59.66902314685285
+        },
+        {
+          "index": 38,
+          "ready_ms": 87.45204680599272
+        },
+        {
+          "index": 39,
+          "ready_ms": 55.858975974842906
+        },
+        {
+          "index": 40,
+          "ready_ms": 54.449273040518165
+        },
+        {
+          "index": 41,
+          "ready_ms": 55.89815718121827
+        },
+        {
+          "index": 42,
+          "ready_ms": 84.04560294002295
+        },
+        {
+          "index": 43,
+          "ready_ms": 56.94112996570766
+        },
+        {
+          "index": 44,
+          "ready_ms": 56.58249813131988
+        },
+        {
+          "index": 45,
+          "ready_ms": 55.29351904988289
+        },
+        {
+          "index": 46,
+          "ready_ms": 63.99548612535
+        },
+        {
+          "index": 47,
+          "ready_ms": 54.59298682399094
+        },
+        {
+          "index": 48,
+          "ready_ms": 80.13138198293746
+        },
+        {
+          "index": 49,
+          "ready_ms": 83.46646511927247
+        },
+        {
+          "index": 50,
+          "ready_ms": 54.31542918086052
+        },
+        {
+          "index": 51,
+          "ready_ms": 66.55739480629563
+        },
+        {
+          "index": 52,
+          "ready_ms": 103.07727800682187
+        },
+        {
+          "index": 53,
+          "ready_ms": 96.38117207214236
+        },
+        {
+          "index": 54,
+          "ready_ms": 90.36059607751667
+        },
+        {
+          "index": 55,
+          "ready_ms": 91.91127400845289
+        },
+        {
+          "index": 56,
+          "ready_ms": 105.19552184268832
+        },
+        {
+          "index": 57,
+          "ready_ms": 58.51511796936393
+        },
+        {
+          "index": 58,
+          "ready_ms": 55.840796092525125
+        },
+        {
+          "index": 59,
+          "ready_ms": 56.725092930719256
+        },
+        {
+          "index": 60,
+          "ready_ms": 66.56566495075822
+        },
+        {
+          "index": 61,
+          "ready_ms": 79.3453378137201
+        },
+        {
+          "index": 62,
+          "ready_ms": 57.173367124050856
+        },
+        {
+          "index": 63,
+          "ready_ms": 64.50255285017192
+        },
+        {
+          "index": 64,
+          "ready_ms": 54.66165905818343
+        },
+        {
+          "index": 65,
+          "ready_ms": 56.29750993102789
+        },
+        {
+          "index": 66,
+          "ready_ms": 105.41166900657117
+        },
+        {
+          "index": 67,
+          "ready_ms": 55.4385029245168
+        },
+        {
+          "index": 68,
+          "ready_ms": 83.9790201280266
+        },
+        {
+          "index": 69,
+          "ready_ms": 84.61444987915456
+        },
+        {
+          "index": 70,
+          "ready_ms": 85.24641883559525
+        },
+        {
+          "index": 71,
+          "ready_ms": 55.72225200012326
+        },
+        {
+          "index": 72,
+          "ready_ms": 80.82992397248745
+        },
+        {
+          "index": 73,
+          "ready_ms": 54.89478702656925
+        },
+        {
+          "index": 74,
+          "ready_ms": 70.04510192200541
+        },
+        {
+          "index": 75,
+          "ready_ms": 54.03957096859813
+        },
+        {
+          "index": 76,
+          "ready_ms": 64.12507104687393
+        },
+        {
+          "index": 77,
+          "ready_ms": 55.56253716349602
+        },
+        {
+          "index": 78,
+          "ready_ms": 75.16829995438457
+        },
+        {
+          "index": 79,
+          "ready_ms": 80.7995421346277
+        },
+        {
+          "index": 80,
+          "ready_ms": 54.94114803150296
+        },
+        {
+          "index": 81,
+          "ready_ms": 62.78186896815896
+        },
+        {
+          "index": 82,
+          "ready_ms": 87.03576400876045
+        },
+        {
+          "index": 83,
+          "ready_ms": 56.708473013713956
+        },
+        {
+          "index": 84,
+          "ready_ms": 54.735320853069425
+        },
+        {
+          "index": 85,
+          "ready_ms": 64.9105638731271
+        },
+        {
+          "index": 86,
+          "ready_ms": 53.909927140921354
+        },
+        {
+          "index": 87,
+          "ready_ms": 86.0887251328677
+        },
+        {
+          "index": 88,
+          "ready_ms": 82.53151620738208
+        },
+        {
+          "index": 89,
+          "ready_ms": 54.18472504243255
+        },
+        {
+          "index": 90,
+          "ready_ms": 79.49343207292259
+        },
+        {
+          "index": 91,
+          "ready_ms": 91.15485101938248
+        },
+        {
+          "index": 92,
+          "ready_ms": 93.8400630839169
+        },
+        {
+          "index": 93,
+          "ready_ms": 96.04009194299579
+        },
+        {
+          "index": 94,
+          "ready_ms": 108.22063405066729
+        },
+        {
+          "index": 95,
+          "ready_ms": 108.32429816946387
+        },
+        {
+          "index": 96,
+          "ready_ms": 88.82427890785038
+        },
+        {
+          "index": 97,
+          "ready_ms": 56.139804888516665
+        },
+        {
+          "index": 98,
+          "ready_ms": 86.48567809723318
+        },
+        {
+          "index": 99,
+          "ready_ms": 55.5931581184268
+        }
+      ],
+      "between_batch_pause_seconds": 0,
+      "method": {
+        "warmup": 2,
+        "client": "In-cluster Python 3.11 Pod, two-CPU limit, 1 GiB memory limit, placement not explicitly pinned",
+        "pool": "Five Fastlets, four slots each, on the same two ACK nodes",
+        "template_artifact_digest": "d78575470094c6fe1a2da2a71b7578971dff9e77cd5381dee236dd53e01b54cb",
+        "cache": "warm",
+        "start": "before Sandbox.create_from_template",
+        "finish": "SDK guest /ping 200 through the gateway",
+        "request_timeout_seconds": 10,
+        "readiness_poll_ms": 10,
+        "disable_metrics": true,
+        "ready_timeout_seconds": 180,
+        "sandbox_lifetime_seconds": 900,
+        "artifact_store_note": "RustFS used ephemeral storage during the initial validation; its hostPath persistence was installed before the later comparison runs"
+      },
+      "raw_source": "Initial validation result.json, creation samples only; lifecycle results are excluded"
+    },
+    "serial_repeat": {
+      "concurrency": 1,
+      "attempts": 100,
+      "successes": 100,
+      "failures": 0,
+      "failure_types": {},
+      "successful_latency_ms": {
+        "p50": 77.8617758769542,
+        "p90": 105.30169494450092,
+        "p99": 112.52071894705296,
+        "mean": 78.2417929195799,
+        "min": 36.61302011460066,
+        "max": 116.11180403269827
+      },
+      "successful_samples": [
+        {
+          "index": 0,
+          "ready_ms": 54.96405088342726
+        },
+        {
+          "index": 1,
+          "ready_ms": 56.45857495255768
+        },
+        {
+          "index": 2,
+          "ready_ms": 56.98375101201236
+        },
+        {
+          "index": 3,
+          "ready_ms": 77.8617758769542
+        },
+        {
+          "index": 4,
+          "ready_ms": 84.35789798386395
+        },
+        {
+          "index": 5,
+          "ready_ms": 57.71855218335986
+        },
+        {
+          "index": 6,
+          "ready_ms": 68.31848504953086
+        },
+        {
+          "index": 7,
+          "ready_ms": 86.37012704275548
+        },
+        {
+          "index": 8,
+          "ready_ms": 55.65755092538893
+        },
+        {
+          "index": 9,
+          "ready_ms": 56.525717955082655
+        },
+        {
+          "index": 10,
+          "ready_ms": 56.25933897681534
+        },
+        {
+          "index": 11,
+          "ready_ms": 56.43391492776573
+        },
+        {
+          "index": 12,
+          "ready_ms": 72.65762286260724
+        },
+        {
+          "index": 13,
+          "ready_ms": 55.70552218705416
+        },
+        {
+          "index": 14,
+          "ready_ms": 82.617097068578
+        },
+        {
+          "index": 15,
+          "ready_ms": 92.63663203455508
+        },
+        {
+          "index": 16,
+          "ready_ms": 90.51875001750886
+        },
+        {
+          "index": 17,
+          "ready_ms": 55.7708649430424
+        },
+        {
+          "index": 18,
+          "ready_ms": 81.1472530476749
+        },
+        {
+          "index": 19,
+          "ready_ms": 99.83475413173437
+        },
+        {
+          "index": 20,
+          "ready_ms": 36.61302011460066
+        },
+        {
+          "index": 21,
+          "ready_ms": 65.62191597186029
+        },
+        {
+          "index": 22,
+          "ready_ms": 95.82545608282089
+        },
+        {
+          "index": 23,
+          "ready_ms": 93.7062839511782
+        },
+        {
+          "index": 24,
+          "ready_ms": 105.44518986716866
+        },
+        {
+          "index": 25,
+          "ready_ms": 98.24408800341189
+        },
+        {
+          "index": 26,
+          "ready_ms": 56.61306902766228
+        },
+        {
+          "index": 27,
+          "ready_ms": 98.50689582526684
+        },
+        {
+          "index": 28,
+          "ready_ms": 105.00484798103571
+        },
+        {
+          "index": 29,
+          "ready_ms": 112.52071894705296
+        },
+        {
+          "index": 30,
+          "ready_ms": 107.61835402809083
+        },
+        {
+          "index": 31,
+          "ready_ms": 111.69319390319288
+        },
+        {
+          "index": 32,
+          "ready_ms": 91.0556260496378
+        },
+        {
+          "index": 33,
+          "ready_ms": 107.80120990239084
+        },
+        {
+          "index": 34,
+          "ready_ms": 57.080562924966216
+        },
+        {
+          "index": 35,
+          "ready_ms": 70.04989590495825
+        },
+        {
+          "index": 36,
+          "ready_ms": 91.10555797815323
+        },
+        {
+          "index": 37,
+          "ready_ms": 86.02648694068193
+        },
+        {
+          "index": 38,
+          "ready_ms": 59.38379210419953
+        },
+        {
+          "index": 39,
+          "ready_ms": 63.56782512739301
+        },
+        {
+          "index": 40,
+          "ready_ms": 89.2148211132735
+        },
+        {
+          "index": 41,
+          "ready_ms": 94.86563806422055
+        },
+        {
+          "index": 42,
+          "ready_ms": 54.54566888511181
+        },
+        {
+          "index": 43,
+          "ready_ms": 61.07062101364136
+        },
+        {
+          "index": 44,
+          "ready_ms": 55.08930515497923
+        },
+        {
+          "index": 45,
+          "ready_ms": 63.29208589158952
+        },
+        {
+          "index": 46,
+          "ready_ms": 97.25589887239039
+        },
+        {
+          "index": 47,
+          "ready_ms": 56.426143972203135
+        },
+        {
+          "index": 48,
+          "ready_ms": 81.84637408703566
+        },
+        {
+          "index": 49,
+          "ready_ms": 55.416614981368184
+        },
+        {
+          "index": 50,
+          "ready_ms": 72.61601113714278
+        },
+        {
+          "index": 51,
+          "ready_ms": 58.05117194540799
+        },
+        {
+          "index": 52,
+          "ready_ms": 92.69637311808765
+        },
+        {
+          "index": 53,
+          "ready_ms": 75.2349691465497
+        },
+        {
+          "index": 54,
+          "ready_ms": 54.495046846568584
+        },
+        {
+          "index": 55,
+          "ready_ms": 67.05076713114977
+        },
+        {
+          "index": 56,
+          "ready_ms": 90.14799911528826
+        },
+        {
+          "index": 57,
+          "ready_ms": 104.67737796716392
+        },
+        {
+          "index": 58,
+          "ready_ms": 55.073854979127645
+        },
+        {
+          "index": 59,
+          "ready_ms": 56.538877077400684
+        },
+        {
+          "index": 60,
+          "ready_ms": 71.66214287281036
+        },
+        {
+          "index": 61,
+          "ready_ms": 71.68827508576214
+        },
+        {
+          "index": 62,
+          "ready_ms": 95.4548348672688
+        },
+        {
+          "index": 63,
+          "ready_ms": 100.53344490006566
+        },
+        {
+          "index": 64,
+          "ready_ms": 54.79668593034148
+        },
+        {
+          "index": 65,
+          "ready_ms": 59.11665316671133
+        },
+        {
+          "index": 66,
+          "ready_ms": 54.49506710283458
+        },
+        {
+          "index": 67,
+          "ready_ms": 60.42652204632759
+        },
+        {
+          "index": 68,
+          "ready_ms": 86.35621587745845
+        },
+        {
+          "index": 69,
+          "ready_ms": 105.30169494450092
+        },
+        {
+          "index": 70,
+          "ready_ms": 97.45725500397384
+        },
+        {
+          "index": 71,
+          "ready_ms": 94.59485998377204
+        },
+        {
+          "index": 72,
+          "ready_ms": 103.09852100908756
+        },
+        {
+          "index": 73,
+          "ready_ms": 116.11180403269827
+        },
+        {
+          "index": 74,
+          "ready_ms": 82.66465808264911
+        },
+        {
+          "index": 75,
+          "ready_ms": 55.832946905866265
+        },
+        {
+          "index": 76,
+          "ready_ms": 89.46304791606963
+        },
+        {
+          "index": 77,
+          "ready_ms": 56.54319794848561
+        },
+        {
+          "index": 78,
+          "ready_ms": 54.39909501001239
+        },
+        {
+          "index": 79,
+          "ready_ms": 93.80821697413921
+        },
+        {
+          "index": 80,
+          "ready_ms": 55.27588981203735
+        },
+        {
+          "index": 81,
+          "ready_ms": 61.648098984733224
+        },
+        {
+          "index": 82,
+          "ready_ms": 111.672354163602
+        },
+        {
+          "index": 83,
+          "ready_ms": 108.08085813187063
+        },
+        {
+          "index": 84,
+          "ready_ms": 109.13018812425435
+        },
+        {
+          "index": 85,
+          "ready_ms": 103.44118112698197
+        },
+        {
+          "index": 86,
+          "ready_ms": 104.66230707243085
+        },
+        {
+          "index": 87,
+          "ready_ms": 59.432902140542865
+        },
+        {
+          "index": 88,
+          "ready_ms": 56.15688604302704
+        },
+        {
+          "index": 89,
+          "ready_ms": 86.2481240183115
+        },
+        {
+          "index": 90,
+          "ready_ms": 53.60025097616017
+        },
+        {
+          "index": 91,
+          "ready_ms": 58.448373805731535
+        },
+        {
+          "index": 92,
+          "ready_ms": 88.14136008732021
+        },
+        {
+          "index": 93,
+          "ready_ms": 108.2029810640961
+        },
+        {
+          "index": 94,
+          "ready_ms": 104.80469092726707
+        },
+        {
+          "index": 95,
+          "ready_ms": 55.6362709030509
+        },
+        {
+          "index": 96,
+          "ready_ms": 62.24103597924113
+        },
+        {
+          "index": 97,
+          "ready_ms": 83.3471268415451
+        },
+        {
+          "index": 98,
+          "ready_ms": 97.20343700610101
+        },
+        {
+          "index": 99,
+          "ready_ms": 105.11198989115655
+        }
+      ],
+      "failed_samples": [],
+      "started_utc": "2026-10-08T01:59:04Z",
+      "finished_utc": "2026-10-08T01:59:14Z",
+      "wall_seconds_including_delete_and_batch_pause": 9.404344546142966,
+      "batch_wall_ms_including_delete": [
+        72.33634404838085,
+        70.55990118533373,
+        71.46949786692858,
+        94.20237806625664,
+        101.08842188492417,
+        74.65156191028655,
+        82.46026188135147,
+        102.72969002835453,
+        71.4647478889674,
+        70.435426896438,
+        72.21705885604024,
+        73.08473507873714,
+        88.63048395141959,
+        70.08455693721771,
+        97.22764790058136,
+        107.61251300573349,
+        106.35635606013238,
+        70.6920949742198,
+        96.2339979596436,
+        114.62579993531108,
+        57.23847798071802,
+        81.58030593767762,
+        110.25644186884165,
+        107.88574302569032,
+        130.94964204356074,
+        117.23780795000494,
+        70.62285300344229,
+        113.60153998248279,
+        121.94653693586588,
+        130.23733184672892,
+        122.57949612103403,
+        127.24093301221728,
+        106.3320271205157,
+        123.38338000699878,
+        72.79366697184741,
+        85.00648709014058,
+        106.63908487185836,
+        103.06287906132638,
+        73.66264215670526,
+        78.51324509829283,
+        104.04955805279315,
+        110.13055802322924,
+        69.18309000320733,
+        76.22952898964286,
+        70.27711300179362,
+        78.66834988817573,
+        113.33936196751893,
+        70.42541704140604,
+        96.58776805736125,
+        78.69743090122938,
+        87.62796502560377,
+        72.16058811172843,
+        108.29045390710235,
+        90.74169700033963,
+        69.62709408253431,
+        82.38438004627824,
+        105.10413907468319,
+        121.0286789573729,
+        71.92906085401773,
+        73.03763506934047,
+        86.43010910600424,
+        86.76724787801504,
+        110.27001193724573,
+        116.24111793935299,
+        68.55613109655678,
+        74.29159083403647,
+        76.96928107179701,
+        75.02598315477371,
+        101.29383718594909,
+        120.34215894527733,
+        113.04645403288305,
+        113.78521611914039,
+        121.83405319228768,
+        130.91272115707397,
+        98.09647290967405,
+        69.85063990578055,
+        104.7095088288188,
+        71.45377690903842,
+        68.14009905792773,
+        108.71667577885091,
+        70.21521986462176,
+        77.17501604929566,
+        128.17966099828482,
+        122.38329998217523,
+        124.89621411077678,
+        120.7215809263289,
+        119.89584588445723,
+        75.69848303683102,
+        71.98586314916611,
+        101.7090599052608,
+        72.53756001591682,
+        73.99124302901328,
+        103.41283003799617,
+        123.04515880532563,
+        120.13727310113609,
+        70.7176961004734,
+        78.21313594467938,
+        99.23612605780363,
+        112.60566115379333,
+        120.82748301327229
+      ],
+      "between_batch_pause_seconds": 0,
+      "role": "Serial repeat collected alongside concurrency runs; retained for comparison"
+    },
+    "concurrent10": {
+      "concurrency": 10,
+      "attempts": 100,
+      "successes": 100,
+      "failures": 0,
+      "failure_types": {},
+      "successful_latency_ms": {
+        "p50": 102.70625888369977,
+        "p90": 120.05724105983973,
+        "p99": 125.43826992623508,
+        "mean": 102.3515014629811,
+        "min": 69.47572901844978,
+        "max": 127.61851283721626
+      },
+      "successful_samples": [
+        {
+          "index": 0,
+          "ready_ms": 93.71621394529939
+        },
+        {
+          "index": 2,
+          "ready_ms": 93.24268996715546
+        },
+        {
+          "index": 6,
+          "ready_ms": 91.48328797891736
+        },
+        {
+          "index": 8,
+          "ready_ms": 86.88220288604498
+        },
+        {
+          "index": 3,
+          "ready_ms": 106.76560900174081
+        },
+        {
+          "index": 4,
+          "ready_ms": 107.74315684102476
+        },
+        {
+          "index": 1,
+          "ready_ms": 120.05724105983973
+        },
+        {
+          "index": 5,
+          "ready_ms": 105.62362498603761
+        },
+        {
+          "index": 7,
+          "ready_ms": 98.03845104761422
+        },
+        {
+          "index": 9,
+          "ready_ms": 91.16283780895174
+        },
+        {
+          "index": 17,
+          "ready_ms": 72.8749989066273
+        },
+        {
+          "index": 14,
+          "ready_ms": 95.87648813612759
+        },
+        {
+          "index": 15,
+          "ready_ms": 93.29055109992623
+        },
+        {
+          "index": 12,
+          "ready_ms": 104.9263949971646
+        },
+        {
+          "index": 19,
+          "ready_ms": 83.33514793775976
+        },
+        {
+          "index": 11,
+          "ready_ms": 117.82359518110752
+        },
+        {
+          "index": 16,
+          "ready_ms": 98.62506901845336
+        },
+        {
+          "index": 10,
+          "ready_ms": 125.16224198043346
+        },
+        {
+          "index": 18,
+          "ready_ms": 93.80179597064853
+        },
+        {
+          "index": 13,
+          "ready_ms": 115.30656088143587
+        },
+        {
+          "index": 27,
+          "ready_ms": 88.69710587896407
+        },
+        {
+          "index": 26,
+          "ready_ms": 92.84229902550578
+        },
+        {
+          "index": 24,
+          "ready_ms": 104.16296194307506
+        },
+        {
+          "index": 29,
+          "ready_ms": 86.84349106624722
+        },
+        {
+          "index": 20,
+          "ready_ms": 124.79133089073002
+        },
+        {
+          "index": 25,
+          "ready_ms": 106.41803918406367
+        },
+        {
+          "index": 23,
+          "ready_ms": 114.64198096655309
+        },
+        {
+          "index": 28,
+          "ready_ms": 92.92701003141701
+        },
+        {
+          "index": 22,
+          "ready_ms": 119.036901043728
+        },
+        {
+          "index": 21,
+          "ready_ms": 123.10170102864504
+        },
+        {
+          "index": 37,
+          "ready_ms": 69.47572901844978
+        },
+        {
+          "index": 35,
+          "ready_ms": 82.63235702179372
+        },
+        {
+          "index": 31,
+          "ready_ms": 116.70400178991258
+        },
+        {
+          "index": 39,
+          "ready_ms": 84.6950279083103
+        },
+        {
+          "index": 30,
+          "ready_ms": 122.82441183924675
+        },
+        {
+          "index": 36,
+          "ready_ms": 97.39543288014829
+        },
+        {
+          "index": 33,
+          "ready_ms": 111.79191712290049
+        },
+        {
+          "index": 32,
+          "ready_ms": 115.6557910144329
+        },
+        {
+          "index": 38,
+          "ready_ms": 92.28223212994635
+        },
+        {
+          "index": 34,
+          "ready_ms": 110.97879288718104
+        },
+        {
+          "index": 48,
+          "ready_ms": 85.1439309772104
+        },
+        {
+          "index": 47,
+          "ready_ms": 89.06831685453653
+        },
+        {
+          "index": 45,
+          "ready_ms": 101.51494294404984
+        },
+        {
+          "index": 49,
+          "ready_ms": 85.36210795864463
+        },
+        {
+          "index": 43,
+          "ready_ms": 113.00912289880216
+        },
+        {
+          "index": 46,
+          "ready_ms": 99.20359589159489
+        },
+        {
+          "index": 42,
+          "ready_ms": 118.17197501659393
+        },
+        {
+          "index": 41,
+          "ready_ms": 122.65188712626696
+        },
+        {
+          "index": 40,
+          "ready_ms": 127.61851283721626
+        },
+        {
+          "index": 44,
+          "ready_ms": 112.62261192314327
+        },
+        {
+          "index": 58,
+          "ready_ms": 80.94240678474307
+        },
+        {
+          "index": 54,
+          "ready_ms": 105.2476151380688
+        },
+        {
+          "index": 51,
+          "ready_ms": 116.801313823089
+        },
+        {
+          "index": 57,
+          "ready_ms": 88.34195509552956
+        },
+        {
+          "index": 52,
+          "ready_ms": 114.70115208067
+        },
+        {
+          "index": 56,
+          "ready_ms": 94.59641017019749
+        },
+        {
+          "index": 53,
+          "ready_ms": 112.67286282964051
+        },
+        {
+          "index": 55,
+          "ready_ms": 105.51629192195833
+        },
+        {
+          "index": 50,
+          "ready_ms": 124.60558395832777
+        },
+        {
+          "index": 59,
+          "ready_ms": 102.21535502932966
+        },
+        {
+          "index": 65,
+          "ready_ms": 102.70625888369977
+        },
+        {
+          "index": 63,
+          "ready_ms": 110.3331740014255
+        },
+        {
+          "index": 64,
+          "ready_ms": 107.9506641253829
+        },
+        {
+          "index": 66,
+          "ready_ms": 96.73109301365912
+        },
+        {
+          "index": 67,
+          "ready_ms": 93.13107701018453
+        },
+        {
+          "index": 61,
+          "ready_ms": 120.37062086164951
+        },
+        {
+          "index": 60,
+          "ready_ms": 125.43826992623508
+        },
+        {
+          "index": 68,
+          "ready_ms": 91.4435270242393
+        },
+        {
+          "index": 62,
+          "ready_ms": 118.40374208986759
+        },
+        {
+          "index": 69,
+          "ready_ms": 91.58744104206562
+        },
+        {
+          "index": 70,
+          "ready_ms": 104.74190884269774
+        },
+        {
+          "index": 71,
+          "ready_ms": 115.08069396950305
+        },
+        {
+          "index": 76,
+          "ready_ms": 92.69173396751285
+        },
+        {
+          "index": 72,
+          "ready_ms": 114.21198793686926
+        },
+        {
+          "index": 78,
+          "ready_ms": 85.44796099886298
+        },
+        {
+          "index": 77,
+          "ready_ms": 89.2754930537194
+        },
+        {
+          "index": 74,
+          "ready_ms": 108.30855392850935
+        },
+        {
+          "index": 75,
+          "ready_ms": 105.9943160507828
+        },
+        {
+          "index": 73,
+          "ready_ms": 113.91753004863858
+        },
+        {
+          "index": 79,
+          "ready_ms": 84.7533899359405
+        },
+        {
+          "index": 81,
+          "ready_ms": 96.31156106479466
+        },
+        {
+          "index": 80,
+          "ready_ms": 111.89625016413629
+        },
+        {
+          "index": 85,
+          "ready_ms": 98.15475484356284
+        },
+        {
+          "index": 82,
+          "ready_ms": 114.65001082979143
+        },
+        {
+          "index": 88,
+          "ready_ms": 90.87197994813323
+        },
+        {
+          "index": 86,
+          "ready_ms": 98.69392099790275
+        },
+        {
+          "index": 87,
+          "ready_ms": 95.16485617496073
+        },
+        {
+          "index": 89,
+          "ready_ms": 88.18454993888736
+        },
+        {
+          "index": 83,
+          "ready_ms": 115.50316703505814
+        },
+        {
+          "index": 84,
+          "ready_ms": 112.51207906752825
+        },
+        {
+          "index": 93,
+          "ready_ms": 91.80991817265749
+        },
+        {
+          "index": 98,
+          "ready_ms": 74.63321089744568
+        },
+        {
+          "index": 99,
+          "ready_ms": 79.08894307911396
+        },
+        {
+          "index": 91,
+          "ready_ms": 114.62297104299068
+        },
+        {
+          "index": 92,
+          "ready_ms": 111.58729181624949
+        },
+        {
+          "index": 97,
+          "ready_ms": 89.5731020718813
+        },
+        {
+          "index": 90,
+          "ready_ms": 121.35172891430557
+        },
+        {
+          "index": 96,
+          "ready_ms": 94.32745189405978
+        },
+        {
+          "index": 94,
+          "ready_ms": 106.33234702982008
+        },
+        {
+          "index": 95,
+          "ready_ms": 103.71598904021084
+        }
+      ],
+      "failed_samples": [],
+      "started_utc": "2026-10-08T01:59:29Z",
+      "finished_utc": "2026-10-08T02:00:16Z",
+      "wall_seconds_including_delete_and_batch_pause": 46.68639461696148,
+      "batch_wall_ms_including_delete": [
+        160.67658900283277,
+        199.33814788237214,
+        157.9323981422931,
+        153.56197906658053,
+        161.44507192075253,
+        174.06626394949853,
+        168.01392496563494,
+        156.2817390076816,
+        156.53874701820314,
+        153.03953411057591
+      ],
+      "between_batch_pause_seconds": 5
+    },
+    "concurrent20": {
+      "concurrency": 20,
+      "attempts": 100,
+      "successes": 51,
+      "failures": 49,
+      "failure_types": {
+        "SandboxRateLimitException": 48,
+        "SandboxReadyTimeoutException": 1
+      },
+      "successful_latency_ms": {
+        "p50": 136.65433996357024,
+        "p90": 162.9753070883453,
+        "p99": 196.96495914831758,
+        "mean": 134.15976107467478,
+        "min": 79.2759379837662,
+        "max": 196.96495914831758
+      },
+      "successful_samples": [
+        {
+          "index": 3,
+          "ready_ms": 142.39713991992176
+        },
+        {
+          "index": 0,
+          "ready_ms": 162.50125295482576
+        },
+        {
+          "index": 4,
+          "ready_ms": 151.10179595649242
+        },
+        {
+          "index": 5,
+          "ready_ms": 147.14416908100247
+        },
+        {
+          "index": 19,
+          "ready_ms": 97.81051496975124
+        },
+        {
+          "index": 11,
+          "ready_ms": 136.65433996357024
+        },
+        {
+          "index": 6,
+          "ready_ms": 157.85573609173298
+        },
+        {
+          "index": 8,
+          "ready_ms": 151.9934230018407
+        },
+        {
+          "index": 16,
+          "ready_ms": 124.34052699245512
+        },
+        {
+          "index": 17,
+          "ready_ms": 120.90884591452777
+        },
+        {
+          "index": 12,
+          "ready_ms": 139.69902996905148
+        },
+        {
+          "index": 7,
+          "ready_ms": 158.29100809060037
+        },
+        {
+          "index": 2,
+          "ready_ms": 180.456412024796
+        },
+        {
+          "index": 15,
+          "ready_ms": 133.92311008647084
+        },
+        {
+          "index": 9,
+          "ready_ms": 160.55468493141234
+        },
+        {
+          "index": 13,
+          "ready_ms": 146.75562805496156
+        },
+        {
+          "index": 20,
+          "ready_ms": 148.17494992166758
+        },
+        {
+          "index": 22,
+          "ready_ms": 165.81729985773563
+        },
+        {
+          "index": 29,
+          "ready_ms": 138.27942800708115
+        },
+        {
+          "index": 27,
+          "ready_ms": 146.68410597369075
+        },
+        {
+          "index": 31,
+          "ready_ms": 133.27185111120343
+        },
+        {
+          "index": 38,
+          "ready_ms": 108.5487708915025
+        },
+        {
+          "index": 28,
+          "ready_ms": 145.45403001829982
+        },
+        {
+          "index": 24,
+          "ready_ms": 162.9753070883453
+        },
+        {
+          "index": 39,
+          "ready_ms": 115.47625600360334
+        },
+        {
+          "index": 35,
+          "ready_ms": 130.99369290284812
+        },
+        {
+          "index": 36,
+          "ready_ms": 129.02954616583884
+        },
+        {
+          "index": 25,
+          "ready_ms": 171.42438585869968
+        },
+        {
+          "index": 26,
+          "ready_ms": 165.24952393956482
+        },
+        {
+          "index": 33,
+          "ready_ms": 155.76206403784454
+        },
+        {
+          "index": 37,
+          "ready_ms": 143.41247989796102
+        },
+        {
+          "index": 23,
+          "ready_ms": 196.96495914831758
+        },
+        {
+          "index": 42,
+          "ready_ms": 124.88307291641831
+        },
+        {
+          "index": 40,
+          "ready_ms": 133.70237313210964
+        },
+        {
+          "index": 50,
+          "ready_ms": 117.8148549515754
+        },
+        {
+          "index": 44,
+          "ready_ms": 142.58471596986055
+        },
+        {
+          "index": 43,
+          "ready_ms": 146.8251310288906
+        },
+        {
+          "index": 59,
+          "ready_ms": 88.2745929993689
+        },
+        {
+          "index": 53,
+          "ready_ms": 110.40423600934446
+        },
+        {
+          "index": 58,
+          "ready_ms": 95.91604792512953
+        },
+        {
+          "index": 54,
+          "ready_ms": 111.10999691300094
+        },
+        {
+          "index": 61,
+          "ready_ms": 135.33878116868436
+        },
+        {
+          "index": 60,
+          "ready_ms": 140.71353012695909
+        },
+        {
+          "index": 76,
+          "ready_ms": 84.80107109062374
+        },
+        {
+          "index": 79,
+          "ready_ms": 79.2759379837662
+        },
+        {
+          "index": 67,
+          "ready_ms": 124.47484093718231
+        },
+        {
+          "index": 81,
+          "ready_ms": 128.8864710368216
+        },
+        {
+          "index": 88,
+          "ready_ms": 111.53426999226213
+        },
+        {
+          "index": 98,
+          "ready_ms": 80.1725247874856
+        },
+        {
+          "index": 94,
+          "ready_ms": 103.27687603421509
+        },
+        {
+          "index": 92,
+          "ready_ms": 112.25222097709775
+        }
+      ],
+      "failed_samples": [
+        {
+          "index": 18,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 14,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 1,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 10,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 34,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 30,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 21,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 32,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 46,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 52,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 55,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 45,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 47,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 41,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 48,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 56,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 49,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 57,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 51,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 70,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 66,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 73,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 63,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 75,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 64,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 65,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 71,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 62,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 74,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 78,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 72,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 69,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 77,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 68,
+          "error": "SandboxReadyTimeoutException"
+        },
+        {
+          "index": 97,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 91,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 95,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 86,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 96,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 80,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 87,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 93,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 89,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 90,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 84,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 85,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 83,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 99,
+          "error": "SandboxRateLimitException"
+        },
+        {
+          "index": 82,
+          "error": "SandboxRateLimitException"
+        }
+      ],
+      "started_utc": "2026-10-08T02:00:19Z",
+      "finished_utc": "2026-10-08T02:03:41Z",
+      "wall_seconds_including_delete_and_batch_pause": 201.13757405499928,
+      "batch_wall_ms_including_delete": [
+        281.4544921275228,
+        227.48606908135116,
+        196.52629597112536,
+        180227.4989320431,
+        185.42215903289616
+      ],
+      "between_batch_pause_seconds": 5,
+      "observed_diagnostics": {
+        "http_429": "Fastlet admission CapacityRejected",
+        "readiness_timeout": "gateway HTTP 503 retries",
+        "stuck_deleting_test_crs": 4,
+        "controller_error": "assignment annotation and status projection conflict",
+        "cleanup": "Cleared only the stale placement projections of the four deleting test CRs; controller then performed cleanup"
+      }
+    }
+  },
+  "requests": {
+    "n": 100,
+    "ping_ms": {
+      "p50": 0.9216968901455402,
+      "p90": 1.1485540308058262,
+      "p99": 5.905843805521727,
+      "mean": 1.06557926395908,
+      "min": 0.7951939478516579,
+      "max": 6.830051075667143
+    },
+    "completed_command_ms": {
+      "p50": 202.81358202919364,
+      "p90": 204.32408596388996,
+      "p99": 207.13202888146043,
+      "mean": 203.1961879064329,
+      "min": 202.30091596022248,
+      "max": 208.47757905721664
+    },
+    "command": "echo ack-perf",
+    "command_completion": "SSE stream EOF",
+    "samples": [
+      {
+        "index": 0,
+        "ping_ms": 1.5061839949339628,
+        "exec_ms": 204.87736188806593
+      },
+      {
+        "index": 1,
+        "ping_ms": 1.1711250990629196,
+        "exec_ms": 203.4301208332181
+      },
+      {
+        "index": 2,
+        "ping_ms": 1.080692047253251,
+        "exec_ms": 202.5129720568657
+      },
+      {
+        "index": 3,
+        "ping_ms": 1.1159628629684448,
+        "exec_ms": 203.61738605424762
+      },
+      {
+        "index": 4,
+        "ping_ms": 1.1485540308058262,
+        "exec_ms": 202.7431488968432
+      },
+      {
+        "index": 5,
+        "ping_ms": 0.985829159617424,
+        "exec_ms": 202.6077751070261
+      },
+      {
+        "index": 6,
+        "ping_ms": 1.062470953911543,
+        "exec_ms": 203.85626307688653
+      },
+      {
+        "index": 7,
+        "ping_ms": 0.9595078881829977,
+        "exec_ms": 204.32408596388996
+      },
+      {
+        "index": 8,
+        "ping_ms": 0.932788010686636,
+        "exec_ms": 203.501651994884
+      },
+      {
+        "index": 9,
+        "ping_ms": 0.9208270348608494,
+        "exec_ms": 203.29516590572894
+      },
+      {
+        "index": 10,
+        "ping_ms": 0.9597279131412506,
+        "exec_ms": 203.33167701028287
+      },
+      {
+        "index": 11,
+        "ping_ms": 0.9496079292148352,
+        "exec_ms": 203.26535496860743
+      },
+      {
+        "index": 12,
+        "ping_ms": 0.9476679842919111,
+        "exec_ms": 208.47757905721664
+      },
+      {
+        "index": 13,
+        "ping_ms": 1.0208000894635916,
+        "exec_ms": 203.22521403431892
+      },
+      {
+        "index": 14,
+        "ping_ms": 1.051219878718257,
+        "exec_ms": 202.67835701815784
+      },
+      {
+        "index": 15,
+        "ping_ms": 0.9930201340466738,
+        "exec_ms": 203.69083806872368
+      },
+      {
+        "index": 16,
+        "ping_ms": 0.9335170034319162,
+        "exec_ms": 202.54493388347328
+      },
+      {
+        "index": 17,
+        "ping_ms": 0.9221569634974003,
+        "exec_ms": 202.30091596022248
+      },
+      {
+        "index": 18,
+        "ping_ms": 0.9176069870591164,
+        "exec_ms": 205.1386700477451
+      },
+      {
+        "index": 19,
+        "ping_ms": 0.9254568722099066,
+        "exec_ms": 202.81358202919364
+      },
+      {
+        "index": 20,
+        "ping_ms": 0.9074967820197344,
+        "exec_ms": 202.55324407480657
+      },
+      {
+        "index": 21,
+        "ping_ms": 0.8871261961758137,
+        "exec_ms": 202.42092991247773
+      },
+      {
+        "index": 22,
+        "ping_ms": 1.1928949970752,
+        "exec_ms": 202.3925289977342
+      },
+      {
+        "index": 23,
+        "ping_ms": 0.9696988854557276,
+        "exec_ms": 202.51950179226696
+      },
+      {
+        "index": 24,
+        "ping_ms": 0.9221772197633982,
+        "exec_ms": 203.0791100114584
+      },
+      {
+        "index": 25,
+        "ping_ms": 0.9279269725084305,
+        "exec_ms": 204.03415709733963
+      },
+      {
+        "index": 26,
+        "ping_ms": 0.8961970452219248,
+        "exec_ms": 203.28161492943764
+      },
+      {
+        "index": 27,
+        "ping_ms": 1.0043890215456486,
+        "exec_ms": 204.3846680317074
+      },
+      {
+        "index": 28,
+        "ping_ms": 0.9168270044028759,
+        "exec_ms": 202.67788716591895
+      },
+      {
+        "index": 29,
+        "ping_ms": 0.9254980832338333,
+        "exec_ms": 205.1361110061407
+      },
+      {
+        "index": 30,
+        "ping_ms": 0.9216968901455402,
+        "exec_ms": 204.1340300347656
+      },
+      {
+        "index": 31,
+        "ping_ms": 0.9335270151495934,
+        "exec_ms": 203.31720705144107
+      },
+      {
+        "index": 32,
+        "ping_ms": 0.9347968734800816,
+        "exec_ms": 202.37422897480428
+      },
+      {
+        "index": 33,
+        "ping_ms": 0.9187969844788313,
+        "exec_ms": 202.46432209387422
+      },
+      {
+        "index": 34,
+        "ping_ms": 1.3922809157520533,
+        "exec_ms": 202.52357283607125
+      },
+      {
+        "index": 35,
+        "ping_ms": 0.9610180277377367,
+        "exec_ms": 204.48629092425108
+      },
+      {
+        "index": 36,
+        "ping_ms": 0.9319770615547895,
+        "exec_ms": 204.30540503002703
+      },
+      {
+        "index": 37,
+        "ping_ms": 0.9500579908490181,
+        "exec_ms": 202.47059199027717
+      },
+      {
+        "index": 38,
+        "ping_ms": 0.9891388472169638,
+        "exec_ms": 202.3390878457576
+      },
+      {
+        "index": 39,
+        "ping_ms": 0.896046869456768,
+        "exec_ms": 202.37759896554053
+      },
+      {
+        "index": 40,
+        "ping_ms": 0.8814260363578796,
+        "exec_ms": 204.400478862226
+      },
+      {
+        "index": 41,
+        "ping_ms": 0.8762748911976814,
+        "exec_ms": 203.97416595369577
+      },
+      {
+        "index": 42,
+        "ping_ms": 0.8660561870783567,
+        "exec_ms": 202.41061900742352
+      },
+      {
+        "index": 43,
+        "ping_ms": 0.9611980058252811,
+        "exec_ms": 204.08162917010486
+      },
+      {
+        "index": 44,
+        "ping_ms": 0.9196070022881031,
+        "exec_ms": 202.61949603445828
+      },
+      {
+        "index": 45,
+        "ping_ms": 0.9007060434669256,
+        "exec_ms": 202.60183489881456
+      },
+      {
+        "index": 46,
+        "ping_ms": 0.8639760781079531,
+        "exec_ms": 203.0873908661306
+      },
+      {
+        "index": 47,
+        "ping_ms": 0.8804560638964176,
+        "exec_ms": 202.5360530242324
+      },
+      {
+        "index": 48,
+        "ping_ms": 5.905843805521727,
+        "exec_ms": 204.28371499292552
+      },
+      {
+        "index": 49,
+        "ping_ms": 0.8921660482883453,
+        "exec_ms": 203.19259306415915
+      },
+      {
+        "index": 50,
+        "ping_ms": 0.8823459502309561,
+        "exec_ms": 203.16087291575968
+      },
+      {
+        "index": 51,
+        "ping_ms": 0.9788789320737123,
+        "exec_ms": 203.09918001294136
+      },
+      {
+        "index": 52,
+        "ping_ms": 1.1638440191745758,
+        "exec_ms": 202.4512600619346
+      },
+      {
+        "index": 53,
+        "ping_ms": 1.2302570976316929,
+        "exec_ms": 203.81765090860426
+      },
+      {
+        "index": 54,
+        "ping_ms": 1.3154579792171717,
+        "exec_ms": 204.20880313031375
+      },
+      {
+        "index": 55,
+        "ping_ms": 1.2845781166106462,
+        "exec_ms": 202.5755939539522
+      },
+      {
+        "index": 56,
+        "ping_ms": 1.0182899422943592,
+        "exec_ms": 202.36322889104486
+      },
+      {
+        "index": 57,
+        "ping_ms": 6.830051075667143,
+        "exec_ms": 202.46034115552902
+      },
+      {
+        "index": 58,
+        "ping_ms": 0.9274869225919247,
+        "exec_ms": 202.51530199311674
+      },
+      {
+        "index": 59,
+        "ping_ms": 0.8805959951132536,
+        "exec_ms": 202.34889793209732
+      },
+      {
+        "index": 60,
+        "ping_ms": 0.8891557808965445,
+        "exec_ms": 203.77500005997717
+      },
+      {
+        "index": 61,
+        "ping_ms": 0.8754958398640156,
+        "exec_ms": 204.4692300260067
+      },
+      {
+        "index": 62,
+        "ping_ms": 0.9162467904388905,
+        "exec_ms": 202.47585186734796
+      },
+      {
+        "index": 63,
+        "ping_ms": 0.8916768711060286,
+        "exec_ms": 202.45776092633605
+      },
+      {
+        "index": 64,
+        "ping_ms": 0.8705449290573597,
+        "exec_ms": 203.63602600991726
+      },
+      {
+        "index": 65,
+        "ping_ms": 0.8621660526841879,
+        "exec_ms": 203.6173758096993
+      },
+      {
+        "index": 66,
+        "ping_ms": 0.8777659386396408,
+        "exec_ms": 203.24283395893872
+      },
+      {
+        "index": 67,
+        "ping_ms": 0.8905560243874788,
+        "exec_ms": 202.3868588730693
+      },
+      {
+        "index": 68,
+        "ping_ms": 0.8633360266685486,
+        "exec_ms": 202.38720905035734
+      },
+      {
+        "index": 69,
+        "ping_ms": 0.8735249284654856,
+        "exec_ms": 202.37263897433877
+      },
+      {
+        "index": 70,
+        "ping_ms": 0.9125270880758762,
+        "exec_ms": 202.39418908022344
+      },
+      {
+        "index": 71,
+        "ping_ms": 0.874876044690609,
+        "exec_ms": 203.21842399425805
+      },
+      {
+        "index": 72,
+        "ping_ms": 0.8769659325480461,
+        "exec_ms": 202.46993098407984
+      },
+      {
+        "index": 73,
+        "ping_ms": 0.9865290485322475,
+        "exec_ms": 203.20072304457426
+      },
+      {
+        "index": 74,
+        "ping_ms": 0.9282478131353855,
+        "exec_ms": 202.3644980508834
+      },
+      {
+        "index": 75,
+        "ping_ms": 0.9750579483807087,
+        "exec_ms": 202.3680389393121
+      },
+      {
+        "index": 76,
+        "ping_ms": 0.9537679143249989,
+        "exec_ms": 202.47746095992625
+      },
+      {
+        "index": 77,
+        "ping_ms": 0.9147869423031807,
+        "exec_ms": 202.4193990509957
+      },
+      {
+        "index": 78,
+        "ping_ms": 1.018900191411376,
+        "exec_ms": 202.57712504826486
+      },
+      {
+        "index": 79,
+        "ping_ms": 0.9140470065176487,
+        "exec_ms": 202.39937002770603
+      },
+      {
+        "index": 80,
+        "ping_ms": 0.8879059460014105,
+        "exec_ms": 204.0396980009973
+      },
+      {
+        "index": 81,
+        "ping_ms": 1.0245509911328554,
+        "exec_ms": 203.3492769114673
+      },
+      {
+        "index": 82,
+        "ping_ms": 1.0957519989460707,
+        "exec_ms": 203.03666801191866
+      },
+      {
+        "index": 83,
+        "ping_ms": 0.9429780766367912,
+        "exec_ms": 202.36786897294223
+      },
+      {
+        "index": 84,
+        "ping_ms": 0.9154370054602623,
+        "exec_ms": 202.454281039536
+      },
+      {
+        "index": 85,
+        "ping_ms": 0.8888659067451954,
+        "exec_ms": 202.36647804267704
+      },
+      {
+        "index": 86,
+        "ping_ms": 0.9055768605321646,
+        "exec_ms": 202.43324083276093
+      },
+      {
+        "index": 87,
+        "ping_ms": 0.8876360952854156,
+        "exec_ms": 203.13434209674597
+      },
+      {
+        "index": 88,
+        "ping_ms": 0.8844160474836826,
+        "exec_ms": 202.3368279915303
+      },
+      {
+        "index": 89,
+        "ping_ms": 0.8972170762717724,
+        "exec_ms": 202.39104004576802
+      },
+      {
+        "index": 90,
+        "ping_ms": 0.8780548814684153,
+        "exec_ms": 204.0493069216609
+      },
+      {
+        "index": 91,
+        "ping_ms": 0.9048758074641228,
+        "exec_ms": 203.84452189318836
+      },
+      {
+        "index": 92,
+        "ping_ms": 0.8777959737926722,
+        "exec_ms": 202.6924779638648
+      },
+      {
+        "index": 93,
+        "ping_ms": 0.856615137308836,
+        "exec_ms": 202.48249103315175
+      },
+      {
+        "index": 94,
+        "ping_ms": 0.9300080128014088,
+        "exec_ms": 204.6428748872131
+      },
+      {
+        "index": 95,
+        "ping_ms": 0.8797559421509504,
+        "exec_ms": 203.27515481039882
+      },
+      {
+        "index": 96,
+        "ping_ms": 0.8637048304080963,
+        "exec_ms": 202.48655299656093
+      },
+      {
+        "index": 97,
+        "ping_ms": 0.8637360297143459,
+        "exec_ms": 203.28413508832455
+      },
+      {
+        "index": 98,
+        "ping_ms": 0.8678860031068325,
+        "exec_ms": 203.41533003374934
+      },
+      {
+        "index": 99,
+        "ping_ms": 0.7951939478516579,
+        "exec_ms": 207.13202888146043
+      }
+    ]
+  },
+  "same_node_lifecycle": {
+    "samples": [
+      {
+        "index": 0,
+        "create_ms": 74.49576701037586,
+        "pause_accept_ms": 22.447602124884725,
+        "pause_durable_ms": 61126.481536077335,
+        "resume_ready_ms": 65163.94311492331,
+        "state_preserved": {
+          "filesystem": true,
+          "tmpfs": true,
+          "boot_id": true,
+          "background_pid_and_start_time": true
+        },
+        "runtime": {
+          "same_node": true,
+          "same_fastlet": false,
+          "pause_window_ms": 11132.830394,
+          "rootfs_clone_ms": 0.942018,
+          "rootfs_copy_ms": 0.0,
+          "publish_ms": 45613.936979,
+          "checkpoint_bytes": 4294979361,
+          "resume_runtime_ms": 35.489726,
+          "resume_acquire_ms": 0.08483199999999999,
+          "resume_rootfs_ms": 3.259896,
+          "resume_vmstate_boot_ms": 0.292788,
+          "checkpoint_delivery_attempts_in_fastlet_logs": 0
+        },
+        "runtime_events": [
+          {
+            "timestamp": "2026-10-08T10:08:06.254923603+08:00",
+            "message": "firecracker sandbox created"
+          },
+          {
+            "timestamp": "2026-10-08T10:08:06.255182620+08:00",
+            "message": "sandbox data plane ready; route published"
+          },
+          {
+            "timestamp": "2026-10-08T10:08:21.945860640+08:00",
+            "message": "firecracker sandbox resumed after dump"
+          },
+          {
+            "timestamp": "2026-10-08T10:09:10.224121638+08:00",
+            "message": "firecracker snapshot published"
+          },
+          {
+            "timestamp": "2026-10-08T10:09:12.009757902+08:00",
+            "message": "firecracker sandbox created"
+          },
+          {
+            "timestamp": "2026-10-08T10:09:12.010150264+08:00",
+            "message": "sandbox data plane ready; route published"
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "create_ms": 60.849023051559925,
+        "pause_accept_ms": 25.490651139989495,
+        "pause_durable_ms": 61227.1629080642,
+        "resume_ready_ms": 58290.18763080239,
+        "state_preserved": {
+          "filesystem": true,
+          "tmpfs": true,
+          "boot_id": true,
+          "background_pid_and_start_time": true
+        },
+        "runtime": {
+          "same_node": true,
+          "same_fastlet": false,
+          "pause_window_ms": 11152.414605,
+          "rootfs_clone_ms": 0.938288,
+          "rootfs_copy_ms": 0.0,
+          "publish_ms": 45612.734863,
+          "checkpoint_bytes": 4294979361,
+          "resume_runtime_ms": 35.503256,
+          "resume_acquire_ms": 0.098373,
+          "resume_rootfs_ms": 2.918597,
+          "resume_vmstate_boot_ms": 0.287428,
+          "checkpoint_delivery_attempts_in_fastlet_logs": 0
+        },
+        "runtime_events": [
+          {
+            "timestamp": "2026-10-08T10:10:26.669484057+08:00",
+            "message": "firecracker sandbox created"
+          },
+          {
+            "timestamp": "2026-10-08T10:10:26.669746045+08:00",
+            "message": "sandbox data plane ready; route published"
+          },
+          {
+            "timestamp": "2026-10-08T10:10:46.285957096+08:00",
+            "message": "firecracker sandbox resumed after dump"
+          },
+          {
+            "timestamp": "2026-10-08T10:11:34.559858665+08:00",
+            "message": "firecracker snapshot published"
+          },
+          {
+            "timestamp": "2026-10-08T10:11:36.429128754+08:00",
+            "message": "firecracker sandbox created"
+          },
+          {
+            "timestamp": "2026-10-08T10:11:36.429484255+08:00",
+            "message": "sandbox data plane ready; route published"
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "create_ms": 60.66167703829706,
+        "pause_accept_ms": 21.97196800261736,
+        "pause_durable_ms": 61136.46906008944,
+        "resume_ready_ms": 62659.83265894465,
+        "state_preserved": {
+          "filesystem": true,
+          "tmpfs": true,
+          "boot_id": true,
+          "background_pid_and_start_time": true
+        },
+        "runtime": {
+          "same_node": true,
+          "same_fastlet": false,
+          "pause_window_ms": 11181.756018,
+          "rootfs_clone_ms": 0.884736,
+          "rootfs_copy_ms": 0.0,
+          "publish_ms": 45629.046602,
+          "checkpoint_bytes": 4294979361,
+          "resume_runtime_ms": 33.638912,
+          "resume_acquire_ms": 0.084903,
+          "resume_rootfs_ms": 2.639528,
+          "resume_vmstate_boot_ms": 0.25196799999999997,
+          "checkpoint_delivery_attempts_in_fastlet_logs": 0
+        },
+        "runtime_events": [
+          {
+            "timestamp": "2026-10-08T10:12:41.211204349+08:00",
+            "message": "firecracker sandbox created"
+          },
+          {
+            "timestamp": "2026-10-08T10:12:41.211462086+08:00",
+            "message": "sandbox data plane ready; route published"
+          },
+          {
+            "timestamp": "2026-10-08T10:12:57.650189320+08:00",
+            "message": "firecracker sandbox resumed after dump"
+          },
+          {
+            "timestamp": "2026-10-08T10:13:45.947238140+08:00",
+            "message": "firecracker snapshot published"
+          },
+          {
+            "timestamp": "2026-10-08T10:13:47.696912165+08:00",
+            "message": "firecracker sandbox created"
+          },
+          {
+            "timestamp": "2026-10-08T10:13:47.697251735+08:00",
+            "message": "sandbox data plane ready; route published"
+          }
+        ]
+      }
+    ]
+  },
+  "live_snapshot": {
+    "n": 1,
+    "started_utc": "2026-10-08T02:20:30Z",
+    "status": "PASS",
+    "create_ms": 72.74100417271256,
+    "accept_ms": 14.436594909057021,
+    "durable_ms": 60626.80867686868,
+    "source_healthy_after_snapshot": true,
+    "source_same_boot_id": true,
+    "snapshot_metadata_deleted": true,
+    "finished_utc": "2026-10-08T02:21:39Z",
+    "runtime_dump": {
+      "pauseWindow": "11.141353224s",
+      "rootfsClone": "932.607\u00b5s",
+      "rootfsCopy": "0s",
+      "dumpAPI": "11.140765206s"
+    },
+    "runtime_publish_duration": "46.219407821s"
+  },
+  "excluded_trials": [
+    {
+      "trial": "initial live snapshot",
+      "reason": "Probe waited for Succeeded; public snapshot completion is Ready",
+      "performance_samples_included": false
+    }
+  ],
+  "limitations": [
+    "Engineering runs, not a release-grade production guarantee",
+    "Creation latency statistics describe successes; admission failures are retained separately",
+    "No saturation throughput claim",
+    "Three resume samples do not establish tail percentiles",
+    "Runtime log windows include untimed warmups; SDK and runtime samples are not paired",
+    "Guest request continuity during live snapshot was not sampled",
+    "Cold kernel boot, DART origin/peer counters, and cold delivery were not remeasured"
+  ],
+  "runtime_create_windows": {
+    "serial": {
+      "includes_untimed_warmups": true,
+      "stages_ms": {
+        "total": {
+          "count": 102,
+          "p50": 49.959825,
+          "p90": 81.846053,
+          "p99": 89.134919,
+          "min": 13.166779,
+          "max": 90.887831
+        },
+        "rootfs": {
+          "count": 102,
+          "p50": 2.309538,
+          "p90": 2.637108,
+          "p99": 2.848077,
+          "min": 1.97524,
+          "max": 3.05268
+        },
+        "launch": {
+          "count": 102,
+          "p50": 20.581157,
+          "p90": 21.137474,
+          "p99": 22.404961,
+          "min": 1.918046,
+          "max": 22.420561
+        },
+        "configure": {
+          "count": 102,
+          "p50": 6.257904,
+          "p90": 28.158531,
+          "p99": 32.723665,
+          "min": 3.071534,
+          "max": 39.763142
+        },
+        "boot": {
+          "count": 102,
+          "p50": 0.23325700000000002,
+          "p90": 0.263808,
+          "p99": 0.287979,
+          "min": 0.196826,
+          "max": 0.323039
+        }
+      },
+      "samples": [
+        {
+          "timestamp": "2026-10-08T09:59:04.637574932+08:00",
+          "stages_ms": {
+            "total": 34.285321,
+            "acquire": 0.090203,
+            "rootfs": 2.644288,
+            "launch": 21.03748,
+            "configure": 4.262496,
+            "boot": 0.232066
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:04.802866487+08:00",
+          "stages_ms": {
+            "total": 31.763307,
+            "acquire": 0.052671,
+            "rootfs": 2.650188,
+            "launch": 20.35586,
+            "configure": 3.525724,
+            "boot": 0.287979
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.039380063+08:00",
+          "stages_ms": {
+            "total": 52.829428,
+            "acquire": 0.055521,
+            "rootfs": 2.345038,
+            "launch": 20.34515,
+            "configure": 8.769469,
+            "boot": 0.26914800000000005
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.474044102+08:00",
+          "stages_ms": {
+            "total": 33.034814,
+            "acquire": 0.06586199999999999,
+            "rootfs": 2.225226,
+            "launch": 22.404961,
+            "configure": 3.39235,
+            "boot": 0.23325700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.119022699+08:00",
+          "stages_ms": {
+            "total": 32.132888,
+            "acquire": 0.068392,
+            "rootfs": 2.37291,
+            "launch": 20.573507,
+            "configure": 3.998467,
+            "boot": 0.230117
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.351153855+08:00",
+          "stages_ms": {
+            "total": 81.595446,
+            "acquire": 0.047451,
+            "rootfs": 2.061701,
+            "launch": 20.295049,
+            "configure": 28.241772,
+            "boot": 0.254888
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.606365883+08:00",
+          "stages_ms": {
+            "total": 84.210744,
+            "acquire": 0.054372000000000004,
+            "rootfs": 2.206655,
+            "launch": 20.293488,
+            "configure": 29.236972,
+            "boot": 0.263808
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.327561344+08:00",
+          "stages_ms": {
+            "total": 61.505824,
+            "acquire": 0.075222,
+            "rootfs": 2.352649,
+            "launch": 21.086641,
+            "configure": 11.518339,
+            "boot": 0.250108
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.587125549+08:00",
+          "stages_ms": {
+            "total": 65.908664,
+            "acquire": 0.051862000000000005,
+            "rootfs": 2.02812,
+            "launch": 20.305898,
+            "configure": 6.11689,
+            "boot": 0.23087700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.695893557+08:00",
+          "stages_ms": {
+            "total": 70.754537,
+            "acquire": 0.056172,
+            "rootfs": 2.534375,
+            "launch": 20.239957,
+            "configure": 19.276389,
+            "boot": 0.226767
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.988886398+08:00",
+          "stages_ms": {
+            "total": 36.2727,
+            "acquire": 0.057332,
+            "rootfs": 2.465543,
+            "launch": 20.3376,
+            "configure": 3.446702,
+            "boot": 0.21230600000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.231073974+08:00",
+          "stages_ms": {
+            "total": 32.166289,
+            "acquire": 0.060822,
+            "rootfs": 2.160054,
+            "launch": 20.340749,
+            "configure": 3.569845,
+            "boot": 0.23816700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.148144172+08:00",
+          "stages_ms": {
+            "total": 78.935169,
+            "acquire": 0.07151300000000001,
+            "rootfs": 2.36707,
+            "launch": 20.720801,
+            "configure": 25.374518,
+            "boot": 0.242797
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.371131758+08:00",
+          "stages_ms": {
+            "total": 60.32148,
+            "acquire": 0.051402,
+            "rootfs": 2.69401,
+            "launch": 20.239387,
+            "configure": 17.400543,
+            "boot": 0.243677
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.220698254+08:00",
+          "stages_ms": {
+            "total": 32.051316,
+            "acquire": 0.063342,
+            "rootfs": 2.151104,
+            "launch": 20.806993,
+            "configure": 3.652037,
+            "boot": 0.235636
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.913149147+08:00",
+          "stages_ms": {
+            "total": 81.186635,
+            "acquire": 0.057642000000000006,
+            "rootfs": 2.3895,
+            "launch": 20.964388,
+            "configure": 28.158531,
+            "boot": 0.222226
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.308879428+08:00",
+          "stages_ms": {
+            "total": 34.599741,
+            "acquire": 0.057362,
+            "rootfs": 2.558385,
+            "launch": 20.830994,
+            "configure": 3.362199,
+            "boot": 0.219737
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.413188044+08:00",
+          "stages_ms": {
+            "total": 64.119921,
+            "acquire": 0.054612,
+            "rootfs": 2.125793,
+            "launch": 21.081782,
+            "configure": 5.485672,
+            "boot": 0.220016
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.536105240+08:00",
+          "stages_ms": {
+            "total": 84.445141,
+            "acquire": 0.048851,
+            "rootfs": 2.569755,
+            "launch": 20.780823,
+            "configure": 32.54957,
+            "boot": 0.206496
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.902469385+08:00",
+          "stages_ms": {
+            "total": 58.571027,
+            "acquire": 0.06877200000000001,
+            "rootfs": 2.427972,
+            "launch": 20.320539,
+            "configure": 9.308055,
+            "boot": 0.243137
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:04.876480214+08:00",
+          "stages_ms": {
+            "total": 32.394365,
+            "acquire": 0.09040300000000001,
+            "rootfs": 2.664652,
+            "launch": 21.074507,
+            "configure": 3.170678,
+            "boot": 0.23935700000000001
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.688485606+08:00",
+          "stages_ms": {
+            "total": 33.023275,
+            "acquire": 0.057322000000000005,
+            "rootfs": 2.848077,
+            "launch": 20.343045,
+            "configure": 3.342313,
+            "boot": 0.246198
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.778497972+08:00",
+          "stages_ms": {
+            "total": 49.959825,
+            "acquire": 0.057282,
+            "rootfs": 2.356182,
+            "launch": 21.000916,
+            "configure": 20.888322,
+            "boot": 0.244018
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.441618328+08:00",
+          "stages_ms": {
+            "total": 76.239842,
+            "acquire": 0.057662,
+            "rootfs": 2.226728,
+            "launch": 20.318684,
+            "configure": 16.353243,
+            "boot": 0.24696700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.691759755+08:00",
+          "stages_ms": {
+            "total": 67.730661,
+            "acquire": 0.054361,
+            "rootfs": 2.399854,
+            "launch": 20.966605,
+            "configure": 16.195918,
+            "boot": 0.22487700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:04.947642517+08:00",
+          "stages_ms": {
+            "total": 32.441077,
+            "acquire": 0.09742300000000001,
+            "rootfs": 2.539755,
+            "launch": 20.978899,
+            "configure": 3.408751,
+            "boot": 0.278498
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.141223826+08:00",
+          "stages_ms": {
+            "total": 59.880306,
+            "acquire": 0.07591200000000001,
+            "rootfs": 2.71553,
+            "launch": 20.479494,
+            "configure": 16.444315,
+            "boot": 0.240447
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.615814324+08:00",
+          "stages_ms": {
+            "total": 32.426306,
+            "acquire": 0.053901000000000004,
+            "rootfs": 2.360189,
+            "launch": 20.511095,
+            "configure": 3.507254,
+            "boot": 0.268568
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.849656730+08:00",
+          "stages_ms": {
+            "total": 32.682233,
+            "acquire": 0.079972,
+            "rootfs": 2.151384,
+            "launch": 20.982609,
+            "configure": 3.987338,
+            "boot": 0.243117
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.053185703+08:00",
+          "stages_ms": {
+            "total": 67.724097,
+            "acquire": 0.064312,
+            "rootfs": 2.607027,
+            "launch": 20.305419,
+            "configure": 8.278154,
+            "boot": 0.26337700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.159322083+08:00",
+          "stages_ms": {
+            "total": 61.945218,
+            "acquire": 0.053612,
+            "rootfs": 2.05447,
+            "launch": 20.619778,
+            "configure": 19.076373,
+            "boot": 0.22024600000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.493501309+08:00",
+          "stages_ms": {
+            "total": 13.166779,
+            "acquire": 0.058302,
+            "rootfs": 2.149573,
+            "launch": 1.918046,
+            "configure": 3.905215,
+            "boot": 0.246097
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.731397481+08:00",
+          "stages_ms": {
+            "total": 87.784469,
+            "acquire": 0.086263,
+            "rootfs": 2.440752,
+            "launch": 20.357541,
+            "configure": 24.792231,
+            "boot": 0.257218
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.839010175+08:00",
+          "stages_ms": {
+            "total": 67.833081,
+            "acquire": 0.057701999999999996,
+            "rootfs": 2.04328,
+            "launch": 21.112053,
+            "configure": 20.33922,
+            "boot": 0.215666
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.405676878+08:00",
+          "stages_ms": {
+            "total": 35.482916,
+            "acquire": 0.069471,
+            "rootfs": 2.0542,
+            "launch": 2.40192,
+            "configure": 4.439141,
+            "boot": 0.241537
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.481710210+08:00",
+          "stages_ms": {
+            "total": 38.725502,
+            "acquire": 0.056352,
+            "rootfs": 3.05268,
+            "launch": 21.03722,
+            "configure": 5.369469,
+            "boot": 0.236017
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.841683067+08:00",
+          "stages_ms": {
+            "total": 37.62068,
+            "acquire": 0.060342,
+            "rootfs": 2.231496,
+            "launch": 20.67581,
+            "configure": 9.127999,
+            "boot": 0.24257700000000001
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.103579271+08:00",
+          "stages_ms": {
+            "total": 73.275271,
+            "acquire": 0.051762,
+            "rootfs": 2.541825,
+            "launch": 20.184086,
+            "configure": 11.999644,
+            "boot": 0.246457
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.511187943+08:00",
+          "stages_ms": {
+            "total": 33.765216,
+            "acquire": 0.06323100000000001,
+            "rootfs": 2.242246,
+            "launch": 20.735331,
+            "configure": 4.962756,
+            "boot": 0.22412700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.617658323+08:00",
+          "stages_ms": {
+            "total": 68.351405,
+            "acquire": 0.055481,
+            "rootfs": 2.065331,
+            "launch": 20.285918,
+            "configure": 3.602957,
+            "boot": 0.323039
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.707720259+08:00",
+          "stages_ms": {
+            "total": 49.640933,
+            "acquire": 0.050461,
+            "rootfs": 2.509214,
+            "launch": 20.389532,
+            "configure": 3.866044,
+            "boot": 0.207426
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.966589224+08:00",
+          "stages_ms": {
+            "total": 65.588135,
+            "acquire": 0.057602,
+            "rootfs": 2.643028,
+            "launch": 20.837504,
+            "configure": 6.257904,
+            "boot": 0.275829
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.085192412+08:00",
+          "stages_ms": {
+            "total": 79.256797,
+            "acquire": 0.055922,
+            "rootfs": 2.174724,
+            "launch": 21.095923,
+            "configure": 29.18504,
+            "boot": 0.220297
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.516508743+08:00",
+          "stages_ms": {
+            "total": 72.598821,
+            "acquire": 0.077812,
+            "rootfs": 2.637108,
+            "launch": 20.581157,
+            "configure": 23.608807,
+            "boot": 0.269188
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.631676819+08:00",
+          "stages_ms": {
+            "total": 77.147366,
+            "acquire": 0.059351999999999995,
+            "rootfs": 2.423722,
+            "launch": 21.937176,
+            "configure": 16.596239,
+            "boot": 0.230957
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.927633968+08:00",
+          "stages_ms": {
+            "total": 34.882238,
+            "acquire": 0.060011,
+            "rootfs": 2.233575,
+            "launch": 20.563506,
+            "configure": 3.727569,
+            "boot": 0.26291699999999996
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.029161992+08:00",
+          "stages_ms": {
+            "total": 62.03004,
+            "acquire": 0.058851999999999995,
+            "rootfs": 2.36289,
+            "launch": 20.217807,
+            "configure": 15.031593,
+            "boot": 0.239277
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.494451135+08:00",
+          "stages_ms": {
+            "total": 77.611248,
+            "acquire": 0.057531,
+            "rootfs": 2.38652,
+            "launch": 20.307469,
+            "configure": 22.249576,
+            "boot": 0.26244799999999996
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.628165929+08:00",
+          "stages_ms": {
+            "total": 90.887831,
+            "acquire": 0.057072000000000005,
+            "rootfs": 2.189665,
+            "launch": 20.873765,
+            "configure": 31.596763,
+            "boot": 0.236307
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.727062915+08:00",
+          "stages_ms": {
+            "total": 58.973169,
+            "acquire": 0.15887500000000002,
+            "rootfs": 2.063851,
+            "launch": 21.956267,
+            "configure": 8.337606,
+            "boot": 0.20985700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.296990155+08:00",
+          "stages_ms": {
+            "total": 38.203777,
+            "acquire": 0.06963200000000001,
+            "rootfs": 2.448142,
+            "launch": 20.569706,
+            "configure": 10.053686,
+            "boot": 0.228397
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.671730457+08:00",
+          "stages_ms": {
+            "total": 85.09413,
+            "acquire": 0.060922,
+            "rootfs": 2.405331,
+            "launch": 20.512225,
+            "configure": 27.241413,
+            "boot": 0.249517
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.789889692+08:00",
+          "stages_ms": {
+            "total": 78.00193,
+            "acquire": 0.056021,
+            "rootfs": 2.185195,
+            "launch": 21.159404,
+            "configure": 14.028934,
+            "boot": 0.207946
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.060197484+08:00",
+          "stages_ms": {
+            "total": 32.791627,
+            "acquire": 0.048691000000000005,
+            "rootfs": 2.204925,
+            "launch": 21.142883,
+            "configure": 3.379629,
+            "boot": 0.230967
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.655447660+08:00",
+          "stages_ms": {
+            "total": 81.846053,
+            "acquire": 0.071202,
+            "rootfs": 2.34483,
+            "launch": 20.540476,
+            "configure": 32.723665,
+            "boot": 0.272858
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:14.017288951+08:00",
+          "stages_ms": {
+            "total": 74.768065,
+            "acquire": 0.064871,
+            "rootfs": 2.602636,
+            "launch": 21.194965,
+            "configure": 24.916145,
+            "boot": 0.253428
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:14.136423765+08:00",
+          "stages_ms": {
+            "total": 81.295578,
+            "acquire": 0.06949200000000001,
+            "rootfs": 2.106532,
+            "launch": 20.216796,
+            "configure": 26.370697,
+            "boot": 0.232886
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:04.726419974+08:00",
+          "stages_ms": {
+            "total": 33.956733,
+            "acquire": 0.093893,
+            "rootfs": 2.568499,
+            "launch": 20.916162,
+            "configure": 3.787476,
+            "boot": 0.276329
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.214023077+08:00",
+          "stages_ms": {
+            "total": 31.441377,
+            "acquire": 0.056962000000000006,
+            "rootfs": 2.677542,
+            "launch": 20.372496,
+            "configure": 3.190218,
+            "boot": 0.253888
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.301405902+08:00",
+          "stages_ms": {
+            "total": 44.304911,
+            "acquire": 0.063222,
+            "rootfs": 2.408624,
+            "launch": 20.277583,
+            "configure": 3.550969,
+            "boot": 0.202646
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.400586859+08:00",
+          "stages_ms": {
+            "total": 62.004126,
+            "acquire": 0.053052,
+            "rootfs": 2.329991,
+            "launch": 20.706566,
+            "configure": 11.916606,
+            "boot": 0.211127
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.545705909+08:00",
+          "stages_ms": {
+            "total": 31.743896,
+            "acquire": 0.049502000000000004,
+            "rootfs": 2.214088,
+            "launch": 20.427898,
+            "configure": 3.358224,
+            "boot": 0.196826
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.231101420+08:00",
+          "stages_ms": {
+            "total": 31.529839,
+            "acquire": 0.061782,
+            "rootfs": 2.069963,
+            "launch": 20.493379,
+            "configure": 3.727684,
+            "boot": 0.248948
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.326617675+08:00",
+          "stages_ms": {
+            "total": 57.138886,
+            "acquire": 0.048382,
+            "rootfs": 2.399774,
+            "launch": 20.366276,
+            "configure": 8.541903,
+            "boot": 0.208686
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.579348360+08:00",
+          "stages_ms": {
+            "total": 42.454954,
+            "acquire": 0.054762,
+            "rootfs": 2.658772,
+            "launch": 20.582823,
+            "configure": 3.508578,
+            "boot": 0.265638
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.798751632+08:00",
+          "stages_ms": {
+            "total": 69.351011,
+            "acquire": 0.055462000000000004,
+            "rootfs": 2.203557,
+            "launch": 20.454928,
+            "configure": 21.793009,
+            "boot": 0.22912700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:06.919739720+08:00",
+          "stages_ms": {
+            "total": 82.720692,
+            "acquire": 0.050751,
+            "rootfs": 2.351502,
+            "launch": 20.322734,
+            "configure": 39.763142,
+            "boot": 0.23102699999999998
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.042308526+08:00",
+          "stages_ms": {
+            "total": 74.422677,
+            "acquire": 0.051542000000000004,
+            "rootfs": 2.020292,
+            "launch": 20.783689,
+            "configure": 15.382623,
+            "boot": 0.234657
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.035737192+08:00",
+          "stages_ms": {
+            "total": 32.640393,
+            "acquire": 0.053132,
+            "rootfs": 2.132436,
+            "launch": 21.100768,
+            "configure": 4.020844,
+            "boot": 0.223027
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.767196248+08:00",
+          "stages_ms": {
+            "total": 31.640732,
+            "acquire": 0.049250999999999996,
+            "rootfs": 2.257189,
+            "launch": 20.385616,
+            "configure": 3.436066,
+            "boot": 0.231297
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.913132473+08:00",
+          "stages_ms": {
+            "total": 31.434837,
+            "acquire": 0.052022,
+            "rootfs": 2.563868,
+            "launch": 20.724156,
+            "configure": 3.150027,
+            "boot": 0.241047
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.175316169+08:00",
+          "stages_ms": {
+            "total": 31.488378,
+            "acquire": 0.045492,
+            "rootfs": 2.170137,
+            "launch": 20.571152,
+            "configure": 3.781487,
+            "boot": 0.22958699999999999
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.272800725+08:00",
+          "stages_ms": {
+            "total": 58.858188,
+            "acquire": 0.052671,
+            "rootfs": 2.119065,
+            "launch": 20.346166,
+            "configure": 15.95777,
+            "boot": 0.208847
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.779857785+08:00",
+          "stages_ms": {
+            "total": 31.478078,
+            "acquire": 0.048262,
+            "rootfs": 2.099164,
+            "launch": 20.571732,
+            "configure": 3.492517,
+            "boot": 0.228667
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.158506060+08:00",
+          "stages_ms": {
+            "total": 31.420516,
+            "acquire": 0.052482,
+            "rootfs": 2.059383,
+            "launch": 20.597683,
+            "configure": 3.488448,
+            "boot": 0.22337700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.319853268+08:00",
+          "stages_ms": {
+            "total": 48.13709,
+            "acquire": 0.056442,
+            "rootfs": 2.332562,
+            "launch": 20.378816,
+            "configure": 4.303012,
+            "boot": 0.21862700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.703553568+08:00",
+          "stages_ms": {
+            "total": 31.427646,
+            "acquire": 0.045171,
+            "rootfs": 2.370662,
+            "launch": 20.634374,
+            "configure": 3.198928,
+            "boot": 0.229896
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.846723158+08:00",
+          "stages_ms": {
+            "total": 31.777836,
+            "acquire": 0.051131,
+            "rootfs": 2.151927,
+            "launch": 20.83751,
+            "configure": 3.082125,
+            "boot": 0.21517599999999998
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.797833123+08:00",
+          "stages_ms": {
+            "total": 31.88611,
+            "acquire": 0.044681,
+            "rootfs": 2.213968,
+            "launch": 20.507161,
+            "configure": 4.020854,
+            "boot": 0.228378
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.901603901+08:00",
+          "stages_ms": {
+            "total": 66.756402,
+            "acquire": 0.055572,
+            "rootfs": 2.481266,
+            "launch": 21.125119,
+            "configure": 11.607147,
+            "boot": 0.230387
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.043716358+08:00",
+          "stages_ms": {
+            "total": 30.817187,
+            "acquire": 0.047942,
+            "rootfs": 1.97524,
+            "launch": 20.459848,
+            "configure": 3.290131,
+            "boot": 0.21307700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.149751456+08:00",
+          "stages_ms": {
+            "total": 69.241348,
+            "acquire": 0.048932,
+            "rootfs": 2.130936,
+            "launch": 20.49886,
+            "configure": 11.69567,
+            "boot": 0.22712700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.987411456+08:00",
+          "stages_ms": {
+            "total": 32.853349,
+            "acquire": 0.054631,
+            "rootfs": 2.191077,
+            "launch": 21.18442,
+            "configure": 4.23014,
+            "boot": 0.230128
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.232375923+08:00",
+          "stages_ms": {
+            "total": 31.119666,
+            "acquire": 0.045762000000000004,
+            "rootfs": 1.997551,
+            "launch": 20.887052,
+            "configure": 3.28555,
+            "boot": 0.230738
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.726351852+08:00",
+          "stages_ms": {
+            "total": 31.521758,
+            "acquire": 0.053302,
+            "rootfs": 2.131075,
+            "launch": 21.17514,
+            "configure": 3.071534,
+            "boot": 0.231147
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:05.946077204+08:00",
+          "stages_ms": {
+            "total": 58.365291,
+            "acquire": 0.088962,
+            "rootfs": 2.518424,
+            "launch": 21.137474,
+            "configure": 8.845091,
+            "boot": 0.242707
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.230330912+08:00",
+          "stages_ms": {
+            "total": 74.760195,
+            "acquire": 0.06370100000000001,
+            "rootfs": 2.616917,
+            "launch": 20.555416,
+            "configure": 26.502402,
+            "boot": 0.26185800000000004
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.480450789+08:00",
+          "stages_ms": {
+            "total": 88.602384,
+            "acquire": 0.052812,
+            "rootfs": 2.289648,
+            "launch": 20.391542,
+            "configure": 21.975158,
+            "boot": 0.23794700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:07.961467397+08:00",
+          "stages_ms": {
+            "total": 83.649877,
+            "acquire": 0.059202,
+            "rootfs": 2.204434,
+            "launch": 20.32805,
+            "configure": 11.772657,
+            "boot": 0.249057
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.120833487+08:00",
+          "stages_ms": {
+            "total": 45.339927,
+            "acquire": 0.054191,
+            "rootfs": 2.535945,
+            "launch": 20.836394,
+            "configure": 3.336869,
+            "boot": 0.243817
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:08.227119602+08:00",
+          "stages_ms": {
+            "total": 67.378217,
+            "acquire": 0.084523,
+            "rootfs": 2.207995,
+            "launch": 21.223096,
+            "configure": 6.76407,
+            "boot": 0.25353800000000004
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.342079495+08:00",
+          "stages_ms": {
+            "total": 32.176229,
+            "acquire": 0.062442000000000004,
+            "rootfs": 2.471573,
+            "launch": 20.375931,
+            "configure": 3.813283,
+            "boot": 0.231467
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.438821608+08:00",
+          "stages_ms": {
+            "total": 48.566143,
+            "acquire": 0.050832,
+            "rootfs": 2.112993,
+            "launch": 20.974898,
+            "configure": 20.079943,
+            "boot": 0.21862600000000001
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:09.859675131+08:00",
+          "stages_ms": {
+            "total": 42.003989,
+            "acquire": 0.063712,
+            "rootfs": 2.276477,
+            "launch": 21.00089,
+            "configure": 3.691949,
+            "boot": 0.23262700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.405049736+08:00",
+          "stages_ms": {
+            "total": 47.855611,
+            "acquire": 0.059372,
+            "rootfs": 2.591727,
+            "launch": 22.420561,
+            "configure": 3.851384,
+            "boot": 0.22471700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:10.775552123+08:00",
+          "stages_ms": {
+            "total": 34.164647,
+            "acquire": 0.054591,
+            "rootfs": 2.202865,
+            "launch": 20.698321,
+            "configure": 3.546834,
+            "boot": 0.22292599999999999
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.262202036+08:00",
+          "stages_ms": {
+            "total": 73.293792,
+            "acquire": 0.055502,
+            "rootfs": 2.113202,
+            "launch": 20.821394,
+            "configure": 30.767367,
+            "boot": 0.25531800000000004
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:11.973138993+08:00",
+          "stages_ms": {
+            "total": 31.624923,
+            "acquire": 0.058392000000000006,
+            "rootfs": 2.293588,
+            "launch": 20.837685,
+            "configure": 3.40615,
+            "boot": 0.216807
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.424246057+08:00",
+          "stages_ms": {
+            "total": 89.134919,
+            "acquire": 0.056162000000000004,
+            "rootfs": 2.126723,
+            "launch": 20.378871,
+            "configure": 28.605784,
+            "boot": 0.235967
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:12.548033988+08:00",
+          "stages_ms": {
+            "total": 83.796711,
+            "acquire": 0.053701,
+            "rootfs": 2.273436,
+            "launch": 20.754692,
+            "configure": 31.380176,
+            "boot": 0.21787600000000001
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.161809601+08:00",
+          "stages_ms": {
+            "total": 61.428742,
+            "acquire": 0.055902,
+            "rootfs": 2.482093,
+            "launch": 20.452663,
+            "configure": 13.037035,
+            "boot": 0.249227
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:13.803595329+08:00",
+          "stages_ms": {
+            "total": 38.019151,
+            "acquire": 0.078822,
+            "rootfs": 2.309538,
+            "launch": 20.691801,
+            "configure": 3.165743,
+            "boot": 0.233587
+          }
+        }
+      ]
+    },
+    "concurrent10": {
+      "includes_untimed_warmups": true,
+      "stages_ms": {
+        "total": {
+          "count": 102,
+          "p50": 34.084538,
+          "p90": 36.794315,
+          "p99": 42.589986,
+          "min": 15.438955,
+          "max": 45.489712
+        },
+        "rootfs": {
+          "count": 102,
+          "p50": 2.756051,
+          "p90": 3.269556,
+          "p99": 3.609431,
+          "min": 2.185087,
+          "max": 3.611707
+        },
+        "launch": {
+          "count": 102,
+          "p50": 20.598803,
+          "p90": 21.195991,
+          "p99": 22.732241,
+          "min": 2.883875,
+          "max": 23.251165
+        },
+        "configure": {
+          "count": 102,
+          "p50": 3.024109,
+          "p90": 3.946706,
+          "p99": 12.839189,
+          "min": 2.02706,
+          "max": 15.140696
+        },
+        "boot": {
+          "count": 102,
+          "p50": 0.23381700000000002,
+          "p90": 0.577188,
+          "p99": 0.767024,
+          "min": 0.182595,
+          "max": 0.785873
+        }
+      },
+      "samples": [
+        {
+          "timestamp": "2026-10-08T09:59:29.388597760+08:00",
+          "stages_ms": {
+            "total": 15.438955,
+            "acquire": 0.077922,
+            "rootfs": 2.301518,
+            "launch": 2.883875,
+            "configure": 4.255656,
+            "boot": 0.254207
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.514536835+08:00",
+          "stages_ms": {
+            "total": 42.589986,
+            "acquire": 0.058022,
+            "rootfs": 2.859764,
+            "launch": 20.988299,
+            "configure": 12.839189,
+            "boot": 0.22440700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.666448929+08:00",
+          "stages_ms": {
+            "total": 33.717694,
+            "acquire": 0.069292,
+            "rootfs": 2.570256,
+            "launch": 20.505784,
+            "configure": 4.964016,
+            "boot": 0.302269
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.877819871+08:00",
+          "stages_ms": {
+            "total": 33.377264,
+            "acquire": 0.073212,
+            "rootfs": 2.318688,
+            "launch": 20.297318,
+            "configure": 3.946706,
+            "boot": 0.522746
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.878180521+08:00",
+          "stages_ms": {
+            "total": 33.501158,
+            "acquire": 0.06025200000000001,
+            "rootfs": 2.563495,
+            "launch": 21.0109,
+            "configure": 2.468213,
+            "boot": 0.219866
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.885424725+08:00",
+          "stages_ms": {
+            "total": 35.984671,
+            "acquire": 0.059082,
+            "rootfs": 2.458172,
+            "launch": 20.652939,
+            "configure": 2.763552,
+            "boot": 0.227656
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.888366032+08:00",
+          "stages_ms": {
+            "total": 38.772364,
+            "acquire": 0.09850300000000001,
+            "rootfs": 3.3836,
+            "launch": 20.369271,
+            "configure": 3.257856,
+            "boot": 0.459984
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.043404601+08:00",
+          "stages_ms": {
+            "total": 32.428027,
+            "acquire": 0.053462,
+            "rootfs": 2.69804,
+            "launch": 20.323839,
+            "configure": 2.585656,
+            "boot": 0.25000700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.202738676+08:00",
+          "stages_ms": {
+            "total": 33.57884,
+            "acquire": 0.066592,
+            "rootfs": 2.830713,
+            "launch": 21.506934,
+            "configure": 2.3663,
+            "boot": 0.212227
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.206993412+08:00",
+          "stages_ms": {
+            "total": 34.678173,
+            "acquire": 0.054972,
+            "rootfs": 2.594786,
+            "launch": 20.518525,
+            "configure": 2.675088,
+            "boot": 0.22240600000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.552512095+08:00",
+          "stages_ms": {
+            "total": 34.22026,
+            "acquire": 0.082963,
+            "rootfs": 2.707299,
+            "launch": 20.288058,
+            "configure": 3.129523,
+            "boot": 0.234237
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.725562343+08:00",
+          "stages_ms": {
+            "total": 35.291811,
+            "acquire": 0.088493,
+            "rootfs": 3.503073,
+            "launch": 20.283808,
+            "configure": 2.835243,
+            "boot": 0.66371
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.726413228+08:00",
+          "stages_ms": {
+            "total": 36.000602,
+            "acquire": 0.063092,
+            "rootfs": 2.943777,
+            "launch": 20.881726,
+            "configure": 3.226345,
+            "boot": 0.21593600000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.878968563+08:00",
+          "stages_ms": {
+            "total": 33.831258,
+            "acquire": 0.070982,
+            "rootfs": 2.639278,
+            "launch": 20.562156,
+            "configure": 3.74846,
+            "boot": 0.25647800000000004
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.885531317+08:00",
+          "stages_ms": {
+            "total": 36.794315,
+            "acquire": 0.069172,
+            "rootfs": 3.587406,
+            "launch": 20.613558,
+            "configure": 3.154073,
+            "boot": 0.233127
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.887214796+08:00",
+          "stages_ms": {
+            "total": 38.337161,
+            "acquire": 0.035461,
+            "rootfs": 3.517684,
+            "launch": 21.04501,
+            "configure": 3.491503,
+            "boot": 0.286348
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.887427542+08:00",
+          "stages_ms": {
+            "total": 37.99144,
+            "acquire": 0.064181,
+            "rootfs": 2.867235,
+            "launch": 21.875145,
+            "configure": 3.648408,
+            "boot": 0.262227
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.046718003+08:00",
+          "stages_ms": {
+            "total": 35.351303,
+            "acquire": 0.124163,
+            "rootfs": 3.38396,
+            "launch": 20.580597,
+            "configure": 2.775472,
+            "boot": 0.597238
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.046887889+08:00",
+          "stages_ms": {
+            "total": 36.163596,
+            "acquire": 0.08305200000000001,
+            "rootfs": 3.426601,
+            "launch": 20.509555,
+            "configure": 3.042669,
+            "boot": 0.602767
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.329868011+08:00",
+          "stages_ms": {
+            "total": 33.041825,
+            "acquire": 0.07780200000000001,
+            "rootfs": 2.2679,
+            "launch": 20.550882,
+            "configure": 4.053415,
+            "boot": 0.238617
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.503630441+08:00",
+          "stages_ms": {
+            "total": 32.259201,
+            "acquire": 0.050061,
+            "rootfs": 2.2915,
+            "launch": 20.85472,
+            "configure": 2.405823,
+            "boot": 0.217117
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.509645115+08:00",
+          "stages_ms": {
+            "total": 33.924262,
+            "acquire": 0.056182,
+            "rootfs": 3.22987,
+            "launch": 20.598803,
+            "configure": 3.434886,
+            "boot": 0.194166
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.671485699+08:00",
+          "stages_ms": {
+            "total": 33.491149,
+            "acquire": 0.059781999999999995,
+            "rootfs": 2.2945,
+            "launch": 21.195991,
+            "configure": 3.722045,
+            "boot": 0.22534700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.683992384+08:00",
+          "stages_ms": {
+            "total": 31.746495,
+            "acquire": 0.059842,
+            "rootfs": 2.563079,
+            "launch": 20.578752,
+            "configure": 2.665222,
+            "boot": 0.229547
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.685644564+08:00",
+          "stages_ms": {
+            "total": 35.178821,
+            "acquire": 0.071842,
+            "rootfs": 2.808347,
+            "launch": 23.251165,
+            "configure": 3.025573,
+            "boot": 0.200846
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.881081760+08:00",
+          "stages_ms": {
+            "total": 32.073975,
+            "acquire": 0.065191,
+            "rootfs": 2.28091,
+            "launch": 20.375206,
+            "configure": 3.827418,
+            "boot": 0.22980699999999998
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.044212731+08:00",
+          "stages_ms": {
+            "total": 34.205171,
+            "acquire": 0.06655200000000001,
+            "rootfs": 2.865048,
+            "launch": 20.278283,
+            "configure": 2.412395,
+            "boot": 0.631419
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.045612354+08:00",
+          "stages_ms": {
+            "total": 34.310455,
+            "acquire": 0.057572000000000005,
+            "rootfs": 2.580299,
+            "launch": 20.728547,
+            "configure": 2.874858,
+            "boot": 0.29337799999999997
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.046396928+08:00",
+          "stages_ms": {
+            "total": 34.406587,
+            "acquire": 0.044121,
+            "rootfs": 2.476776,
+            "launch": 20.714046,
+            "configure": 2.756304,
+            "boot": 0.214577
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.202322126+08:00",
+          "stages_ms": {
+            "total": 32.976384,
+            "acquire": 0.059531999999999995,
+            "rootfs": 2.449055,
+            "launch": 20.292644,
+            "configure": 3.774476,
+            "boot": 0.231497
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.368608175+08:00",
+          "stages_ms": {
+            "total": 34.47648,
+            "acquire": 0.056542,
+            "rootfs": 2.970191,
+            "launch": 21.205542,
+            "configure": 3.992093,
+            "boot": 0.297329
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.369223044+08:00",
+          "stages_ms": {
+            "total": 33.009735,
+            "acquire": 0.056412,
+            "rootfs": 3.051434,
+            "launch": 20.369616,
+            "configure": 2.674082,
+            "boot": 0.201206
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.369257935+08:00",
+          "stages_ms": {
+            "total": 31.948792,
+            "acquire": 0.052402000000000004,
+            "rootfs": 2.662212,
+            "launch": 20.535951,
+            "configure": 2.738294,
+            "boot": 0.220547
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.371654229+08:00",
+          "stages_ms": {
+            "total": 32.379655,
+            "acquire": 0.057732,
+            "rootfs": 2.783976,
+            "launch": 20.471779,
+            "configure": 2.299241,
+            "boot": 0.19164599999999998
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.550181474+08:00",
+          "stages_ms": {
+            "total": 33.552871,
+            "acquire": 0.063452,
+            "rootfs": 2.406394,
+            "launch": 20.18796,
+            "configure": 3.493558,
+            "boot": 0.577188
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.551756192+08:00",
+          "stages_ms": {
+            "total": 34.324085,
+            "acquire": 0.054432,
+            "rootfs": 2.642681,
+            "launch": 21.237033,
+            "configure": 3.177508,
+            "boot": 0.224218
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.723359355+08:00",
+          "stages_ms": {
+            "total": 33.055656,
+            "acquire": 0.06274199999999999,
+            "rootfs": 2.593079,
+            "launch": 21.132809,
+            "configure": 3.503877,
+            "boot": 0.233237
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.723362965+08:00",
+          "stages_ms": {
+            "total": 32.623363,
+            "acquire": 0.056702,
+            "rootfs": 2.446876,
+            "launch": 20.434218,
+            "configure": 3.511318,
+            "boot": 0.225737
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.871649403+08:00",
+          "stages_ms": {
+            "total": 32.246451,
+            "acquire": 0.057502000000000004,
+            "rootfs": 2.362653,
+            "launch": 21.003375,
+            "configure": 3.005412,
+            "boot": 0.232887
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.038960501+08:00",
+          "stages_ms": {
+            "total": 31.90889,
+            "acquire": 0.060362000000000006,
+            "rootfs": 2.405394,
+            "launch": 21.081818,
+            "configure": 2.90808,
+            "boot": 0.243897
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.044141940+08:00",
+          "stages_ms": {
+            "total": 32.945622,
+            "acquire": 0.056942,
+            "rootfs": 2.185087,
+            "launch": 21.023756,
+            "configure": 2.383383,
+            "boot": 0.21724600000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.045943916+08:00",
+          "stages_ms": {
+            "total": 32.447437,
+            "acquire": 0.11284300000000001,
+            "rootfs": 2.620411,
+            "launch": 20.405137,
+            "configure": 2.975972,
+            "boot": 0.22784700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.514494843+08:00",
+          "stages_ms": {
+            "total": 38.765273,
+            "acquire": 0.065322,
+            "rootfs": 2.450412,
+            "launch": 21.233996,
+            "configure": 7.625245,
+            "boot": 0.260928
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.514543155+08:00",
+          "stages_ms": {
+            "total": 42.03418,
+            "acquire": 0.095853,
+            "rootfs": 2.998678,
+            "launch": 20.906976,
+            "configure": 11.951312,
+            "boot": 0.21630600000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.683729199+08:00",
+          "stages_ms": {
+            "total": 33.693164,
+            "acquire": 0.091453,
+            "rootfs": 2.418371,
+            "launch": 20.288759,
+            "configure": 3.136803,
+            "boot": 0.253608
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.886888328+08:00",
+          "stages_ms": {
+            "total": 36.114245,
+            "acquire": 0.067262,
+            "rootfs": 2.513345,
+            "launch": 20.32883,
+            "configure": 3.37494,
+            "boot": 0.262818
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.888669231+08:00",
+          "stages_ms": {
+            "total": 39.170616,
+            "acquire": 0.141124,
+            "rootfs": 3.267167,
+            "launch": 21.182275,
+            "configure": 3.143923,
+            "boot": 0.199775
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.043227716+08:00",
+          "stages_ms": {
+            "total": 33.656312,
+            "acquire": 0.095252,
+            "rootfs": 2.596707,
+            "launch": 20.261387,
+            "configure": 2.783422,
+            "boot": 0.34578
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.199401448+08:00",
+          "stages_ms": {
+            "total": 33.375265,
+            "acquire": 0.102663,
+            "rootfs": 2.389931,
+            "launch": 20.3481,
+            "configure": 3.839913,
+            "boot": 0.220446
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.206851647+08:00",
+          "stages_ms": {
+            "total": 35.290441,
+            "acquire": 0.057132,
+            "rootfs": 2.658389,
+            "launch": 20.304569,
+            "configure": 2.441472,
+            "boot": 0.636359
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.370966932+08:00",
+          "stages_ms": {
+            "total": 33.59867,
+            "acquire": 0.094993,
+            "rootfs": 2.790002,
+            "launch": 20.921808,
+            "configure": 3.659508,
+            "boot": 0.210956
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.372222049+08:00",
+          "stages_ms": {
+            "total": 33.248951,
+            "acquire": 0.059792000000000005,
+            "rootfs": 2.459342,
+            "launch": 21.126223,
+            "configure": 2.633028,
+            "boot": 0.206686
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.373506577+08:00",
+          "stages_ms": {
+            "total": 33.803907,
+            "acquire": 0.056712000000000005,
+            "rootfs": 3.134772,
+            "launch": 21.553065,
+            "configure": 2.68475,
+            "boot": 0.22853700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.374387433+08:00",
+          "stages_ms": {
+            "total": 32.705644,
+            "acquire": 0.06810200000000001,
+            "rootfs": 3.020779,
+            "launch": 20.549786,
+            "configure": 2.222456,
+            "boot": 0.182595
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.550806264+08:00",
+          "stages_ms": {
+            "total": 34.370344,
+            "acquire": 0.064873,
+            "rootfs": 3.102872,
+            "launch": 20.612878,
+            "configure": 2.339609,
+            "boot": 0.763383
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.726115390+08:00",
+          "stages_ms": {
+            "total": 35.966861,
+            "acquire": 0.10331399999999999,
+            "rootfs": 2.961367,
+            "launch": 20.276748,
+            "configure": 3.310398,
+            "boot": 0.35958999999999997
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.726191642+08:00",
+          "stages_ms": {
+            "total": 36.027113,
+            "acquire": 0.224297,
+            "rootfs": 2.804073,
+            "launch": 20.278648,
+            "configure": 3.083631,
+            "boot": 0.785873
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.882688313+08:00",
+          "stages_ms": {
+            "total": 35.749234,
+            "acquire": 0.08454300000000001,
+            "rootfs": 3.026189,
+            "launch": 21.252007,
+            "configure": 2.72456,
+            "boot": 0.23056700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.882694103+08:00",
+          "stages_ms": {
+            "total": 35.28188,
+            "acquire": 0.060601,
+            "rootfs": 3.092941,
+            "launch": 21.02064,
+            "configure": 2.726721,
+            "boot": 0.24665700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.884361302+08:00",
+          "stages_ms": {
+            "total": 36.376843,
+            "acquire": 0.062662,
+            "rootfs": 2.72782,
+            "launch": 21.174614,
+            "configure": 2.966638,
+            "boot": 0.46606400000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.885596058+08:00",
+          "stages_ms": {
+            "total": 36.522147,
+            "acquire": 0.089213,
+            "rootfs": 3.39938,
+            "launch": 20.32754,
+            "configure": 2.619757,
+            "boot": 0.25178700000000004
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.035391550+08:00",
+          "stages_ms": {
+            "total": 35.196089,
+            "acquire": 0.078712,
+            "rootfs": 2.579377,
+            "launch": 20.740752,
+            "configure": 3.614267,
+            "boot": 0.204706
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.043795088+08:00",
+          "stages_ms": {
+            "total": 33.270071,
+            "acquire": 0.055431,
+            "rootfs": 2.277647,
+            "launch": 20.806984,
+            "configure": 2.611847,
+            "boot": 0.28190800000000005
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.496018307+08:00",
+          "stages_ms": {
+            "total": 32.191849,
+            "acquire": 0.071522,
+            "rootfs": 2.355272,
+            "launch": 20.772458,
+            "configure": 3.119725,
+            "boot": 0.254297
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.507621153+08:00",
+          "stages_ms": {
+            "total": 32.511509,
+            "acquire": 0.06328199999999999,
+            "rootfs": 2.765725,
+            "launch": 21.16845,
+            "configure": 2.687783,
+            "boot": 0.200206
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.509640215+08:00",
+          "stages_ms": {
+            "total": 34.18082,
+            "acquire": 0.050220999999999995,
+            "rootfs": 3.060734,
+            "launch": 20.458329,
+            "configure": 3.57744,
+            "boot": 0.205427
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.681729094+08:00",
+          "stages_ms": {
+            "total": 31.430266,
+            "acquire": 0.06755200000000001,
+            "rootfs": 2.384224,
+            "launch": 20.335084,
+            "configure": 2.533078,
+            "boot": 0.250808
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.884719902+08:00",
+          "stages_ms": {
+            "total": 32.397735,
+            "acquire": 0.072612,
+            "rootfs": 3.001052,
+            "launch": 21.15741,
+            "configure": 2.381223,
+            "boot": 0.28324900000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.036571866+08:00",
+          "stages_ms": {
+            "total": 32.55016,
+            "acquire": 0.074662,
+            "rootfs": 2.305471,
+            "launch": 20.322215,
+            "configure": 3.933061,
+            "boot": 0.24546700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.044392987+08:00",
+          "stages_ms": {
+            "total": 33.249292,
+            "acquire": 0.055812,
+            "rootfs": 2.329121,
+            "launch": 20.17128,
+            "configure": 2.531118,
+            "boot": 0.219857
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.206007469+08:00",
+          "stages_ms": {
+            "total": 33.422257,
+            "acquire": 0.115623,
+            "rootfs": 2.92876,
+            "launch": 20.465429,
+            "configure": 3.157507,
+            "boot": 0.240427
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.206079172+08:00",
+          "stages_ms": {
+            "total": 34.333105,
+            "acquire": 0.062722,
+            "rootfs": 3.017112,
+            "launch": 21.388317,
+            "configure": 3.209009,
+            "boot": 0.249908
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.206117623+08:00",
+          "stages_ms": {
+            "total": 34.084538,
+            "acquire": 0.055222,
+            "rootfs": 3.078874,
+            "launch": 21.080848,
+            "configure": 3.236089,
+            "boot": 0.248848
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.406538010+08:00",
+          "stages_ms": {
+            "total": 31.167508,
+            "acquire": 0.065192,
+            "rootfs": 2.791826,
+            "launch": 20.249732,
+            "configure": 2.611591,
+            "boot": 0.27837900000000004
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.550397110+08:00",
+          "stages_ms": {
+            "total": 33.332874,
+            "acquire": 0.09315300000000001,
+            "rootfs": 2.888388,
+            "launch": 20.401877,
+            "configure": 2.799386,
+            "boot": 0.235868
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.552610558+08:00",
+          "stages_ms": {
+            "total": 35.81127,
+            "acquire": 0.062082000000000005,
+            "rootfs": 3.069054,
+            "launch": 20.973984,
+            "configure": 3.304732,
+            "boot": 0.767024
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.552868646+08:00",
+          "stages_ms": {
+            "total": 35.217812,
+            "acquire": 0.090143,
+            "rootfs": 3.609431,
+            "launch": 20.711396,
+            "configure": 2.889249,
+            "boot": 0.22684700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.514348509+08:00",
+          "stages_ms": {
+            "total": 45.489712,
+            "acquire": 0.083593,
+            "rootfs": 2.857575,
+            "launch": 21.112003,
+            "configure": 15.140696,
+            "boot": 0.395542
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:29.514353309+08:00",
+          "stages_ms": {
+            "total": 38.958219,
+            "acquire": 0.079862,
+            "rootfs": 2.433502,
+            "launch": 20.296339,
+            "configure": 7.574913,
+            "boot": 0.403642
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.671752286+08:00",
+          "stages_ms": {
+            "total": 32.142398,
+            "acquire": 0.066072,
+            "rootfs": 2.235806,
+            "launch": 20.337459,
+            "configure": 2.637668,
+            "boot": 0.223336
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.673070025+08:00",
+          "stages_ms": {
+            "total": 32.825248,
+            "acquire": 0.059932000000000006,
+            "rootfs": 2.36873,
+            "launch": 20.66553,
+            "configure": 2.836374,
+            "boot": 0.20369600000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.683719309+08:00",
+          "stages_ms": {
+            "total": 33.748925,
+            "acquire": 0.049231000000000004,
+            "rootfs": 2.318378,
+            "launch": 20.71314,
+            "configure": 2.957808,
+            "boot": 0.207146
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:34.685155121+08:00",
+          "stages_ms": {
+            "total": 34.569999,
+            "acquire": 0.079732,
+            "rootfs": 2.780572,
+            "launch": 20.916737,
+            "configure": 3.291707,
+            "boot": 0.205416
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.885186658+08:00",
+          "stages_ms": {
+            "total": 36.193607,
+            "acquire": 0.06610200000000001,
+            "rootfs": 2.441222,
+            "launch": 20.305769,
+            "configure": 2.610297,
+            "boot": 0.487904
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:39.888722102+08:00",
+          "stages_ms": {
+            "total": 37.854996,
+            "acquire": 0.057101,
+            "rootfs": 3.269556,
+            "launch": 20.404792,
+            "configure": 3.178504,
+            "boot": 0.200686
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.032804589+08:00",
+          "stages_ms": {
+            "total": 32.311073,
+            "acquire": 0.06274199999999999,
+            "rootfs": 2.574447,
+            "launch": 20.266328,
+            "configure": 3.678989,
+            "boot": 0.263828
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.044609687+08:00",
+          "stages_ms": {
+            "total": 34.778906,
+            "acquire": 0.056062,
+            "rootfs": 2.573345,
+            "launch": 20.851304,
+            "configure": 3.168983,
+            "boot": 0.23262700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:45.044740271+08:00",
+          "stages_ms": {
+            "total": 35.101545,
+            "acquire": 0.065342,
+            "rootfs": 2.756051,
+            "launch": 20.611098,
+            "configure": 3.307138,
+            "boot": 0.199466
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.199968864+08:00",
+          "stages_ms": {
+            "total": 32.961982,
+            "acquire": 0.076172,
+            "rootfs": 2.589846,
+            "launch": 21.02816,
+            "configure": 2.567856,
+            "boot": 0.27240800000000004
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:50.207142986+08:00",
+          "stages_ms": {
+            "total": 35.996822,
+            "acquire": 0.062542,
+            "rootfs": 2.870874,
+            "launch": 20.492744,
+            "configure": 2.456143,
+            "boot": 0.221836
+          }
+        },
+        {
+          "timestamp": "2026-10-08T09:59:55.377325930+08:00",
+          "stages_ms": {
+            "total": 34.421785,
+            "acquire": 0.267318,
+            "rootfs": 3.188704,
+            "launch": 21.097102,
+            "configure": 2.02706,
+            "boot": 0.268278
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.546623531+08:00",
+          "stages_ms": {
+            "total": 33.682083,
+            "acquire": 0.055141,
+            "rootfs": 3.611707,
+            "launch": 20.792203,
+            "configure": 3.0549,
+            "boot": 0.222416
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.546632111+08:00",
+          "stages_ms": {
+            "total": 35.870547,
+            "acquire": 0.07963200000000001,
+            "rootfs": 2.796412,
+            "launch": 22.732241,
+            "configure": 4.392699,
+            "boot": 0.202497
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:00.550890427+08:00",
+          "stages_ms": {
+            "total": 34.024524,
+            "acquire": 0.06633199999999999,
+            "rootfs": 2.876065,
+            "launch": 20.396842,
+            "configure": 2.515024,
+            "boot": 0.222887
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.715597629+08:00",
+          "stages_ms": {
+            "total": 33.358984,
+            "acquire": 0.07830200000000001,
+            "rootfs": 2.469333,
+            "launch": 21.095212,
+            "configure": 3.74606,
+            "boot": 0.267548
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.721537705+08:00",
+          "stages_ms": {
+            "total": 34.347123,
+            "acquire": 0.07846299999999999,
+            "rootfs": 2.943967,
+            "launch": 20.796743,
+            "configure": 2.280037,
+            "boot": 0.23381700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.725302476+08:00",
+          "stages_ms": {
+            "total": 35.028094,
+            "acquire": 0.046522,
+            "rootfs": 3.204644,
+            "launch": 20.163144,
+            "configure": 3.024109,
+            "boot": 0.6136780000000001
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:05.725553023+08:00",
+          "stages_ms": {
+            "total": 35.909849,
+            "acquire": 0.060522,
+            "rootfs": 3.167764,
+            "launch": 20.259258,
+            "configure": 2.870164,
+            "boot": 0.686121
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:10.885432614+08:00",
+          "stages_ms": {
+            "total": 36.209018,
+            "acquire": 0.074672,
+            "rootfs": 3.596176,
+            "launch": 20.414943,
+            "configure": 3.075811,
+            "boot": 0.40106200000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.043976053+08:00",
+          "stages_ms": {
+            "total": 34.526949,
+            "acquire": 0.06639300000000001,
+            "rootfs": 2.843234,
+            "launch": 20.448613,
+            "configure": 2.575576,
+            "boot": 0.268158
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.047049253+08:00",
+          "stages_ms": {
+            "total": 34.200519,
+            "acquire": 0.072282,
+            "rootfs": 2.725241,
+            "launch": 20.889797,
+            "configure": 2.974988,
+            "boot": 0.207727
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:16.047052353+08:00",
+          "stages_ms": {
+            "total": 33.720974,
+            "acquire": 0.090402,
+            "rootfs": 2.911797,
+            "launch": 20.199536,
+            "configure": 2.794002,
+            "boot": 0.222477
+          }
+        }
+      ]
+    },
+    "concurrent20": {
+      "includes_untimed_warmups": true,
+      "stages_ms": {
+        "total": {
+          "count": 53,
+          "p50": 33.54371,
+          "p90": 37.528247,
+          "p99": 56.904829,
+          "min": 30.350295,
+          "max": 56.904829
+        },
+        "rootfs": {
+          "count": 53,
+          "p50": 2.625877,
+          "p90": 3.054104,
+          "p99": 3.788192,
+          "min": 2.124065,
+          "max": 3.788192
+        },
+        "launch": {
+          "count": 53,
+          "p50": 20.69338,
+          "p90": 21.115139,
+          "p99": 21.412948,
+          "min": 20.165625,
+          "max": 21.412948
+        },
+        "configure": {
+          "count": 53,
+          "p50": 2.59413,
+          "p90": 3.268506,
+          "p99": 12.816004,
+          "min": 1.994791,
+          "max": 12.816004
+        },
+        "boot": {
+          "count": 53,
+          "p50": 0.22468600000000002,
+          "p90": 0.34721100000000005,
+          "p99": 0.523755,
+          "min": 0.185076,
+          "max": 0.523755
+        }
+      },
+      "samples": [
+        {
+          "timestamp": "2026-10-08T10:00:20.057088620+08:00",
+          "stages_ms": {
+            "total": 34.626341,
+            "acquire": 0.080442,
+            "rootfs": 3.194725,
+            "launch": 20.553566,
+            "configure": 3.277956,
+            "boot": 0.241127
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.057094320+08:00",
+          "stages_ms": {
+            "total": 35.505547,
+            "acquire": 0.075612,
+            "rootfs": 2.497623,
+            "launch": 21.256417,
+            "configure": 4.74114,
+            "boot": 0.253378
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.091008190+08:00",
+          "stages_ms": {
+            "total": 32.616942,
+            "acquire": 0.181155,
+            "rootfs": 3.124352,
+            "launch": 21.107303,
+            "configure": 2.508233,
+            "boot": 0.232367
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.097750759+08:00",
+          "stages_ms": {
+            "total": 33.481998,
+            "acquire": 0.060171999999999996,
+            "rootfs": 2.222416,
+            "launch": 20.69338,
+            "configure": 2.460253,
+            "boot": 0.231827
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.343257486+08:00",
+          "stages_ms": {
+            "total": 33.998883,
+            "acquire": 0.06821200000000001,
+            "rootfs": 2.794512,
+            "launch": 20.916667,
+            "configure": 3.933266,
+            "boot": 0.29569799999999996
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.349798319+08:00",
+          "stages_ms": {
+            "total": 36.502707,
+            "acquire": 0.058552,
+            "rootfs": 3.04438,
+            "launch": 20.979538,
+            "configure": 2.288007,
+            "boot": 0.34721100000000005
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.351647003+08:00",
+          "stages_ms": {
+            "total": 36.680052,
+            "acquire": 0.050522,
+            "rootfs": 3.012959,
+            "launch": 21.01561,
+            "configure": 3.155813,
+            "boot": 0.22709700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.352136598+08:00",
+          "stages_ms": {
+            "total": 34.147547,
+            "acquire": 0.066271,
+            "rootfs": 3.095091,
+            "launch": 20.378741,
+            "configure": 2.792873,
+            "boot": 0.201206
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.572738120+08:00",
+          "stages_ms": {
+            "total": 32.098986,
+            "acquire": 0.060112000000000006,
+            "rootfs": 2.896116,
+            "launch": 20.239797,
+            "configure": 2.646588,
+            "boot": 0.222327
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.574184113+08:00",
+          "stages_ms": {
+            "total": 32.573421,
+            "acquire": 0.056132,
+            "rootfs": 2.835614,
+            "launch": 20.851125,
+            "configure": 2.969328,
+            "boot": 0.20936600000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.576210302+08:00",
+          "stages_ms": {
+            "total": 31.613693,
+            "acquire": 0.06993200000000001,
+            "rootfs": 2.836884,
+            "launch": 20.875516,
+            "configure": 2.208855,
+            "boot": 0.199386
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:35.784657547+08:00",
+          "stages_ms": {
+            "total": 30.350295,
+            "acquire": 0.062372000000000004,
+            "rootfs": 2.351689,
+            "launch": 20.226836,
+            "configure": 2.36691,
+            "boot": 0.221007
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:35.790371585+08:00",
+          "stages_ms": {
+            "total": 32.22381,
+            "acquire": 0.056012,
+            "rootfs": 2.553985,
+            "launch": 20.209226,
+            "configure": 2.169244,
+            "boot": 0.211506
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:35.792947111+08:00",
+          "stages_ms": {
+            "total": 32.165108,
+            "acquire": 0.056812,
+            "rootfs": 2.915216,
+            "launch": 20.290478,
+            "configure": 2.586697,
+            "boot": 0.210807
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:19.793070667+08:00",
+          "stages_ms": {
+            "total": 31.56823,
+            "acquire": 0.059241999999999996,
+            "rootfs": 2.552028,
+            "launch": 20.440398,
+            "configure": 2.995572,
+            "boot": 0.241938
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:19.894848264+08:00",
+          "stages_ms": {
+            "total": 56.904829,
+            "acquire": 0.048102,
+            "rootfs": 2.124905,
+            "launch": 20.592252,
+            "configure": 12.816004,
+            "boot": 0.217557
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.055454179+08:00",
+          "stages_ms": {
+            "total": 30.714484,
+            "acquire": 0.049661000000000004,
+            "rootfs": 2.206098,
+            "launch": 20.20016,
+            "configure": 2.417885,
+            "boot": 0.21739599999999998
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.065041434+08:00",
+          "stages_ms": {
+            "total": 32.629592,
+            "acquire": 0.056271,
+            "rootfs": 2.473806,
+            "launch": 20.552581,
+            "configure": 2.350512,
+            "boot": 0.258788
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.066400235+08:00",
+          "stages_ms": {
+            "total": 33.54371,
+            "acquire": 0.047651000000000006,
+            "rootfs": 2.575279,
+            "launch": 21.003195,
+            "configure": 2.61691,
+            "boot": 0.193756
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.081371406+08:00",
+          "stages_ms": {
+            "total": 30.427455,
+            "acquire": 0.052872,
+            "rootfs": 2.229309,
+            "launch": 20.628664,
+            "configure": 1.994791,
+            "boot": 0.199706
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.352088863+08:00",
+          "stages_ms": {
+            "total": 33.820459,
+            "acquire": 0.065472,
+            "rootfs": 2.526258,
+            "launch": 21.115139,
+            "configure": 3.402244,
+            "boot": 0.42679300000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.352274889+08:00",
+          "stages_ms": {
+            "total": 32.120298,
+            "acquire": 0.054302,
+            "rootfs": 2.847917,
+            "launch": 20.371786,
+            "configure": 2.59413,
+            "boot": 0.23284700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.356180239+08:00",
+          "stages_ms": {
+            "total": 35.675016,
+            "acquire": 0.061522,
+            "rootfs": 3.054104,
+            "launch": 20.897172,
+            "configure": 3.108716,
+            "boot": 0.241277
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.364115453+08:00",
+          "stages_ms": {
+            "total": 30.617471,
+            "acquire": 0.046511000000000004,
+            "rootfs": 2.124065,
+            "launch": 21.037177,
+            "configure": 2.142286,
+            "boot": 0.22443700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.559732934+08:00",
+          "stages_ms": {
+            "total": 31.54265,
+            "acquire": 0.061762000000000004,
+            "rootfs": 2.350723,
+            "launch": 20.918713,
+            "configure": 2.832447,
+            "boot": 0.223427
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:35.771709959+08:00",
+          "stages_ms": {
+            "total": 32.273691,
+            "acquire": 0.065332,
+            "rootfs": 2.302841,
+            "launch": 20.911752,
+            "configure": 3.164298,
+            "boot": 0.244147
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:03:41.017520702+08:00",
+          "stages_ms": {
+            "total": 31.481477,
+            "acquire": 0.085563,
+            "rootfs": 2.838187,
+            "launch": 20.889592,
+            "configure": 2.415084,
+            "boot": 0.221917
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.059326096+08:00",
+          "stages_ms": {
+            "total": 34.549309,
+            "acquire": 0.068672,
+            "rootfs": 2.844214,
+            "launch": 20.452333,
+            "configure": 2.70419,
+            "boot": 0.194476
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.059342986+08:00",
+          "stages_ms": {
+            "total": 34.157607,
+            "acquire": 0.057112,
+            "rootfs": 3.273337,
+            "launch": 21.121093,
+            "configure": 2.931626,
+            "boot": 0.21945699999999999
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.066044484+08:00",
+          "stages_ms": {
+            "total": 38.103694,
+            "acquire": 0.105313,
+            "rootfs": 2.597707,
+            "launch": 20.634069,
+            "configure": 2.336249,
+            "boot": 0.22621700000000003
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.067362153+08:00",
+          "stages_ms": {
+            "total": 37.740184,
+            "acquire": 0.058632,
+            "rootfs": 2.199875,
+            "launch": 20.922267,
+            "configure": 2.538635,
+            "boot": 0.216006
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.350466918+08:00",
+          "stages_ms": {
+            "total": 34.705034,
+            "acquire": 0.077122,
+            "rootfs": 2.37972,
+            "launch": 20.258357,
+            "configure": 2.903336,
+            "boot": 0.220397
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.386252854+08:00",
+          "stages_ms": {
+            "total": 30.765187,
+            "acquire": 0.06068200000000001,
+            "rootfs": 2.177524,
+            "launch": 20.721711,
+            "configure": 2.247017,
+            "boot": 0.23691700000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.388554272+08:00",
+          "stages_ms": {
+            "total": 31.592062,
+            "acquire": 0.055232,
+            "rootfs": 2.652818,
+            "launch": 20.481344,
+            "configure": 2.463182,
+            "boot": 0.18917599999999998
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.388556542+08:00",
+          "stages_ms": {
+            "total": 30.761117,
+            "acquire": 0.050381,
+            "rootfs": 2.786503,
+            "launch": 20.165625,
+            "configure": 2.36557,
+            "boot": 0.191666
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.581599152+08:00",
+          "stages_ms": {
+            "total": 34.368254,
+            "acquire": 0.072892,
+            "rootfs": 2.492144,
+            "launch": 20.883845,
+            "configure": 2.244326,
+            "boot": 0.242847
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:03:40.995236068+08:00",
+          "stages_ms": {
+            "total": 32.151778,
+            "acquire": 0.08371200000000001,
+            "rootfs": 2.5819,
+            "launch": 20.279083,
+            "configure": 3.216108,
+            "boot": 0.233667
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:03:41.005380480+08:00",
+          "stages_ms": {
+            "total": 32.746986,
+            "acquire": 0.043651,
+            "rootfs": 2.243759,
+            "launch": 20.337105,
+            "configure": 2.349562,
+            "boot": 0.205376
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:03:41.007386281+08:00",
+          "stages_ms": {
+            "total": 32.165098,
+            "acquire": 0.057961,
+            "rootfs": 2.400744,
+            "launch": 21.412948,
+            "configure": 2.165377,
+            "boot": 0.226678
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.070004391+08:00",
+          "stages_ms": {
+            "total": 38.094463,
+            "acquire": 0.12848400000000001,
+            "rootfs": 3.788192,
+            "launch": 20.875975,
+            "configure": 2.772831,
+            "boot": 0.22468600000000002
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.070007871+08:00",
+          "stages_ms": {
+            "total": 37.528247,
+            "acquire": 0.063892,
+            "rootfs": 2.825493,
+            "launch": 20.882316,
+            "configure": 2.757871,
+            "boot": 0.225447
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.072320189+08:00",
+          "stages_ms": {
+            "total": 39.632849,
+            "acquire": 0.091523,
+            "rootfs": 2.877025,
+            "launch": 20.767972,
+            "configure": 2.553545,
+            "boot": 0.371601
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:20.072482994+08:00",
+          "stages_ms": {
+            "total": 34.987302,
+            "acquire": 0.047622,
+            "rootfs": 2.419031,
+            "launch": 20.363011,
+            "configure": 2.236176,
+            "boot": 0.185076
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.349344165+08:00",
+          "stages_ms": {
+            "total": 36.193427,
+            "acquire": 0.058232,
+            "rootfs": 2.860804,
+            "launch": 20.736962,
+            "configure": 2.757141,
+            "boot": 0.33967
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.349543201+08:00",
+          "stages_ms": {
+            "total": 37.085454,
+            "acquire": 0.061281999999999996,
+            "rootfs": 2.880785,
+            "launch": 20.569736,
+            "configure": 2.802823,
+            "boot": 0.35026
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.349544661+08:00",
+          "stages_ms": {
+            "total": 36.165067,
+            "acquire": 0.052571,
+            "rootfs": 2.884725,
+            "launch": 21.185245,
+            "configure": 2.636628,
+            "boot": 0.497375
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:25.351766087+08:00",
+          "stages_ms": {
+            "total": 36.153586,
+            "acquire": 0.066732,
+            "rootfs": 2.910255,
+            "launch": 21.00268,
+            "configure": 2.330919,
+            "boot": 0.523755
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.560735606+08:00",
+          "stages_ms": {
+            "total": 31.250812,
+            "acquire": 0.079723,
+            "rootfs": 2.473523,
+            "launch": 20.248467,
+            "configure": 3.100811,
+            "boot": 0.217827
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.585262420+08:00",
+          "stages_ms": {
+            "total": 35.012463,
+            "acquire": 0.110484,
+            "rootfs": 2.871954,
+            "launch": 20.281088,
+            "configure": 2.309398,
+            "boot": 0.205346
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.587594898+08:00",
+          "stages_ms": {
+            "total": 37.165706,
+            "acquire": 0.046281,
+            "rootfs": 2.850244,
+            "launch": 20.457283,
+            "configure": 2.447492,
+            "boot": 0.21226599999999998
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:30.587600309+08:00",
+          "stages_ms": {
+            "total": 36.367982,
+            "acquire": 0.044921,
+            "rootfs": 2.625877,
+            "launch": 21.339489,
+            "configure": 2.458023,
+            "boot": 0.188705
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:00:35.769708986+08:00",
+          "stages_ms": {
+            "total": 31.793658,
+            "acquire": 0.098853,
+            "rootfs": 2.522714,
+            "launch": 20.652729,
+            "configure": 3.04622,
+            "boot": 0.256258
+          }
+        },
+        {
+          "timestamp": "2026-10-08T10:03:41.016170711+08:00",
+          "stages_ms": {
+            "total": 32.54402,
+            "acquire": 0.09284300000000001,
+            "rootfs": 2.599546,
+            "launch": 20.444413,
+            "configure": 3.268506,
+            "boot": 0.254107
+          }
+        }
+      ]
+    }
+  },
+  "initial_serial_runtime_window": {
+    "includes": "100 timed creates, two untimed warmups, one subsequent lifecycle create; no resume",
+    "summary": {
+      "rootfs": {
+        "count": 103,
+        "p50_ms": 2.286,
+        "min_ms": 1.985,
+        "max_ms": 3.2103
+      },
+      "total": {
+        "count": 103,
+        "p50_ms": 39.4297,
+        "min_ms": 30.7599,
+        "max_ms": 88.0252
+      },
+      "launch": {
+        "count": 103,
+        "p50_ms": 20.6324,
+        "min_ms": 2.302,
+        "max_ms": 23.0203
+      }
+    },
+    "samples": [
+      {
+        "stages_ms": {
+          "total": 34.945494000000004,
+          "acquire": 0.09696299999999998,
+          "rootfs": 3.058124,
+          "launch": 21.177341,
+          "configure": 4.085676000000001,
+          "boot": 0.30549899999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.511549,
+          "acquire": 0.07904199999999999,
+          "rootfs": 2.563188,
+          "launch": 20.307715,
+          "configure": 3.697633,
+          "boot": 0.252567
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.308923,
+          "acquire": 0.060691999999999996,
+          "rootfs": 2.27156,
+          "launch": 20.850760000000005,
+          "configure": 3.297741,
+          "boot": 0.31179
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.040223,
+          "acquire": 0.055621000000000004,
+          "rootfs": 2.218138,
+          "launch": 20.242852,
+          "configure": 3.2883900000000006,
+          "boot": 0.24067799999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.607661000000004,
+          "acquire": 0.059612,
+          "rootfs": 2.447265,
+          "launch": 20.246832,
+          "configure": 3.311252,
+          "boot": 0.25670800000000005
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.54439,
+          "acquire": 0.054192,
+          "rootfs": 2.430155,
+          "launch": 21.064597,
+          "configure": 3.700464,
+          "boot": 0.24770799999999996
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 44.88562,
+          "acquire": 0.072292,
+          "rootfs": 2.195927,
+          "launch": 20.205141,
+          "configure": 3.679423,
+          "boot": 0.240428
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.688493000000005,
+          "acquire": 0.053761,
+          "rootfs": 2.182796,
+          "launch": 20.525381,
+          "configure": 3.8555380000000006,
+          "boot": 0.22946699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.15159800000001,
+          "acquire": 0.053651,
+          "rootfs": 2.032412,
+          "launch": 20.305334,
+          "configure": 3.807987,
+          "boot": 0.246498
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 30.92554,
+          "acquire": 0.07164199999999998,
+          "rootfs": 2.302271,
+          "launch": 20.337635,
+          "configure": 3.132896,
+          "boot": 0.24351699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.825548,
+          "acquire": 0.046261000000000004,
+          "rootfs": 2.4406250000000003,
+          "launch": 21.076227,
+          "configure": 3.274,
+          "boot": 0.235288
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 61.368646,
+          "acquire": 0.052941999999999996,
+          "rootfs": 2.186527,
+          "launch": 20.624383,
+          "configure": 12.67925,
+          "boot": 0.23621699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.636972,
+          "acquire": 0.05385199999999999,
+          "rootfs": 2.350012,
+          "launch": 20.612073,
+          "configure": 3.350663,
+          "boot": 0.22569699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 47.460458,
+          "acquire": 0.050661000000000005,
+          "rootfs": 2.511667,
+          "launch": 20.569232,
+          "configure": 19.392146000000004,
+          "boot": 0.202036
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.776666000000002,
+          "acquire": 0.050061999999999995,
+          "rootfs": 2.144296,
+          "launch": 20.981535,
+          "configure": 3.496687,
+          "boot": 0.23365699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 39.429681,
+          "acquire": 0.052472000000000005,
+          "rootfs": 2.085564,
+          "launch": 20.791019,
+          "configure": 3.122876,
+          "boot": 0.233348
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.948832000000003,
+          "acquire": 0.058252,
+          "rootfs": 2.315831,
+          "launch": 20.19865,
+          "configure": 4.011154,
+          "boot": 0.226957
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 30.973302,
+          "acquire": 0.050362,
+          "rootfs": 2.467296,
+          "launch": 20.52019,
+          "configure": 3.1201760000000003,
+          "boot": 0.20824600000000001
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 61.50543,
+          "acquire": 0.057691,
+          "rootfs": 2.098415,
+          "launch": 20.619514,
+          "configure": 11.555255,
+          "boot": 0.21654599999999996
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 59.740536,
+          "acquire": 0.048922,
+          "rootfs": 2.063104,
+          "launch": 21.17192,
+          "configure": 13.531955,
+          "boot": 0.23607699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 46.649455,
+          "acquire": 0.092683,
+          "rootfs": 3.210304,
+          "launch": 21.135163,
+          "configure": 3.72671,
+          "boot": 0.235687
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.952682,
+          "acquire": 0.061731999999999995,
+          "rootfs": 2.534605,
+          "launch": 21.02866,
+          "configure": 3.400511,
+          "boot": 0.228326
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 61.315317,
+          "acquire": 0.068352,
+          "rootfs": 2.246947,
+          "launch": 20.306058,
+          "configure": 3.7247,
+          "boot": 0.25592699999999996
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.373214999999995,
+          "acquire": 0.050291999999999996,
+          "rootfs": 2.1426230000000004,
+          "launch": 20.306629,
+          "configure": 3.5318150000000004,
+          "boot": 0.221116
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 34.160887,
+          "acquire": 0.052691,
+          "rootfs": 2.189574,
+          "launch": 20.527085,
+          "configure": 3.536314,
+          "boot": 0.22402699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.040234,
+          "acquire": 0.057891,
+          "rootfs": 2.169934,
+          "launch": 21.03942,
+          "configure": 3.341068,
+          "boot": 0.232767
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 42.534124,
+          "acquire": 0.05574199999999999,
+          "rootfs": 2.838334,
+          "launch": 20.757152,
+          "configure": 7.11921,
+          "boot": 0.214616
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 51.063975,
+          "acquire": 0.059771,
+          "rootfs": 2.458632,
+          "launch": 20.173085,
+          "configure": 7.918813999999999,
+          "boot": 0.231467
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 88.025225,
+          "acquire": 0.147114,
+          "rootfs": 2.151023,
+          "launch": 20.531405,
+          "configure": 30.783998,
+          "boot": 0.22501599999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 68.09669800000002,
+          "acquire": 0.08216299999999999,
+          "rootfs": 2.074851,
+          "launch": 20.905336,
+          "configure": 17.732453,
+          "boot": 0.259307
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.668173,
+          "acquire": 0.057892,
+          "rootfs": 2.111752,
+          "launch": 20.487244,
+          "configure": 3.837424,
+          "boot": 0.233786
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 33.541029,
+          "acquire": 0.096093,
+          "rootfs": 3.191374,
+          "launch": 21.300167,
+          "configure": 3.489772,
+          "boot": 0.293838
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 38.94188900000001,
+          "acquire": 0.070923,
+          "rootfs": 2.3339690000000006,
+          "launch": 21.084342,
+          "configure": 3.494943,
+          "boot": 0.279628
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 68.678414,
+          "acquire": 0.092072,
+          "rootfs": 2.305909,
+          "launch": 20.602447,
+          "configure": 20.411811,
+          "boot": 0.241348
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 61.617147,
+          "acquire": 0.060342,
+          "rootfs": 2.270497,
+          "launch": 20.35756,
+          "configure": 16.852027,
+          "boot": 0.2989379999999999
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 33.291612,
+          "acquire": 0.058452,
+          "rootfs": 2.284627,
+          "launch": 2.302008,
+          "configure": 4.05822,
+          "boot": 0.310379
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 65.415148,
+          "acquire": 0.06086099999999999,
+          "rootfs": 2.545145,
+          "launch": 20.3347,
+          "configure": 3.5924760000000004,
+          "boot": 0.249787
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 44.330187,
+          "acquire": 0.06231199999999999,
+          "rootfs": 2.598347,
+          "launch": 20.487734,
+          "configure": 15.95376,
+          "boot": 0.255337
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 75.826835,
+          "acquire": 0.064161,
+          "rootfs": 2.190905,
+          "launch": 20.632358,
+          "configure": 20.600898000000004,
+          "boot": 0.24354699999999999
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 36.434245,
+          "acquire": 0.054072,
+          "rootfs": 2.767902,
+          "launch": 20.828394,
+          "configure": 3.256666,
+          "boot": 0.288008
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.127027,
+          "acquire": 0.051112000000000005,
+          "rootfs": 2.406241,
+          "launch": 20.526826,
+          "configure": 3.9617159999999996,
+          "boot": 0.262398
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.204569,
+          "acquire": 0.08815300000000001,
+          "rootfs": 2.2644670000000002,
+          "launch": 21.085102,
+          "configure": 3.116712,
+          "boot": 0.253167
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 30.987823000000002,
+          "acquire": 0.059530999999999994,
+          "rootfs": 1.9850280000000002,
+          "launch": 20.728502,
+          "configure": 3.376219,
+          "boot": 0.22992699999999996
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 42.052399,
+          "acquire": 0.051310999999999996,
+          "rootfs": 2.418681,
+          "launch": 20.290178,
+          "configure": 3.316918,
+          "boot": 0.251227
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 79.417071,
+          "acquire": 0.073282,
+          "rootfs": 2.571275,
+          "launch": 21.075512,
+          "configure": 15.896088999999998,
+          "boot": 0.259747
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 72.47559600000001,
+          "acquire": 0.05701199999999999,
+          "rootfs": 2.106752,
+          "launch": 20.854735,
+          "configure": 24.914875,
+          "boot": 0.22585599999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 82.03174800000001,
+          "acquire": 0.055111999999999994,
+          "rootfs": 2.234726,
+          "launch": 21.256206,
+          "configure": 27.368237,
+          "boot": 0.250007
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 42.019539,
+          "acquire": 0.056892000000000005,
+          "rootfs": 2.602237,
+          "launch": 20.606008,
+          "configure": 13.355284000000001,
+          "boot": 0.216196
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 53.415664,
+          "acquire": 0.046721,
+          "rootfs": 2.321259,
+          "launch": 21.161694,
+          "configure": 16.60962,
+          "boot": 0.24039699999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 41.861294,
+          "acquire": 0.059362,
+          "rootfs": 2.433132,
+          "launch": 21.096302,
+          "configure": 13.023494,
+          "boot": 0.22600699999999999
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 34.900329,
+          "acquire": 0.053692000000000004,
+          "rootfs": 2.240066,
+          "launch": 20.665769,
+          "configure": 3.294727,
+          "boot": 0.200086
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 30.936272000000002,
+          "acquire": 0.054152,
+          "rootfs": 2.286008,
+          "launch": 20.503714,
+          "configure": 3.127572,
+          "boot": 0.221306
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 67.81304900000002,
+          "acquire": 0.050381999999999996,
+          "rootfs": 2.092322,
+          "launch": 20.745322000000005,
+          "configure": 21.597527,
+          "boot": 0.229907
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 70.832009,
+          "acquire": 0.051152,
+          "rootfs": 2.431901,
+          "launch": 20.466694,
+          "configure": 24.781201,
+          "boot": 0.21327600000000002
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 71.332483,
+          "acquire": 0.040901,
+          "rootfs": 2.134103,
+          "launch": 20.594417,
+          "configure": 22.846264,
+          "boot": 0.212336
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 86.575302,
+          "acquire": 0.044181,
+          "rootfs": 2.494624,
+          "launch": 20.932797,
+          "configure": 28.350476,
+          "boot": 0.22667699999999996
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.626123,
+          "acquire": 0.05377199999999999,
+          "rootfs": 2.504004,
+          "launch": 20.505015,
+          "configure": 3.41341,
+          "boot": 0.228117
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 52.960301,
+          "acquire": 0.053050999999999994,
+          "rootfs": 2.169244,
+          "launch": 20.946368,
+          "configure": 9.608523,
+          "boot": 0.227467
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 63.808351,
+          "acquire": 0.096423,
+          "rootfs": 2.855208,
+          "launch": 20.949173,
+          "configure": 13.741832,
+          "boot": 0.255138
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.638723,
+          "acquire": 0.082742,
+          "rootfs": 2.26496,
+          "launch": 20.50639,
+          "configure": 4.405416,
+          "boot": 0.27125799999999994
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.817347,
+          "acquire": 0.050061,
+          "rootfs": 2.791686,
+          "launch": 20.50516,
+          "configure": 3.429205,
+          "boot": 0.264288
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.746096,
+          "acquire": 0.06577200000000001,
+          "rootfs": 2.909859,
+          "launch": 20.82648,
+          "configure": 3.166497,
+          "boot": 0.26893799999999995
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.89528,
+          "acquire": 0.05517199999999999,
+          "rootfs": 2.170457,
+          "launch": 20.467359,
+          "configure": 4.208479,
+          "boot": 0.234887
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 38.548974,
+          "acquire": 0.058621999999999994,
+          "rootfs": 2.569359,
+          "launch": 20.221252,
+          "configure": 9.883834,
+          "boot": 0.24722699999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.941743,
+          "acquire": 0.061642,
+          "rootfs": 2.530278,
+          "launch": 20.256642,
+          "configure": 3.295041,
+          "boot": 0.24361699999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 30.793066,
+          "acquire": 0.048271,
+          "rootfs": 2.218758,
+          "launch": 20.308824,
+          "configure": 3.2078690000000005,
+          "boot": 0.20189599999999996
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.20232,
+          "acquire": 0.053121999999999996,
+          "rootfs": 2.296891,
+          "launch": 20.899112000000002,
+          "configure": 3.517628,
+          "boot": 0.23757699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 42.061393,
+          "acquire": 0.053692000000000004,
+          "rootfs": 2.26387,
+          "launch": 20.392176,
+          "configure": 13.817914,
+          "boot": 0.234997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.273781,
+          "acquire": 0.05467199999999999,
+          "rootfs": 2.3084110000000004,
+          "launch": 20.441178,
+          "configure": 3.5215190000000005,
+          "boot": 0.23291800000000001
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.554879,
+          "acquire": 0.054210999999999995,
+          "rootfs": 2.163426,
+          "launch": 20.341665,
+          "configure": 3.984942,
+          "boot": 0.238868
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 41.93414800000001,
+          "acquire": 0.058561999999999996,
+          "rootfs": 2.2473,
+          "launch": 21.128789,
+          "configure": 13.407802,
+          "boot": 0.23387799999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 61.04238600000001,
+          "acquire": 0.051081,
+          "rootfs": 2.105844,
+          "launch": 20.648265,
+          "configure": 12.012329000000001,
+          "boot": 0.255088
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 61.581643,
+          "acquire": 0.058092,
+          "rootfs": 2.053943,
+          "launch": 20.230932,
+          "configure": 18.158908,
+          "boot": 0.21792699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 52.116402,
+          "acquire": 0.057472,
+          "rootfs": 2.096404,
+          "launch": 20.50555,
+          "configure": 12.256116,
+          "boot": 0.25124799999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 56.419664000000004,
+          "acquire": 0.054172,
+          "rootfs": 2.135946,
+          "launch": 20.773388,
+          "configure": 10.505653,
+          "boot": 0.23219800000000002
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 63.939994,
+          "acquire": 0.049631,
+          "rootfs": 2.298241,
+          "launch": 20.618993,
+          "configure": 12.631538,
+          "boot": 0.254647
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.349374,
+          "acquire": 0.06247099999999999,
+          "rootfs": 2.4915460000000005,
+          "launch": 20.432377,
+          "configure": 4.124687,
+          "boot": 0.22816699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 64.144691,
+          "acquire": 0.053581000000000004,
+          "rootfs": 2.25542,
+          "launch": 20.705716,
+          "configure": 4.309492,
+          "boot": 0.422713
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 34.225849,
+          "acquire": 0.08751199999999999,
+          "rootfs": 3.182753,
+          "launch": 20.419762,
+          "configure": 4.730929,
+          "boot": 0.31673999999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.513459,
+          "acquire": 0.062262,
+          "rootfs": 2.329088,
+          "launch": 20.375291,
+          "configure": 3.72472,
+          "boot": 0.25110699999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 51.856078,
+          "acquire": 0.054111,
+          "rootfs": 2.102732,
+          "launch": 20.800913,
+          "configure": 4.824433,
+          "boot": 0.23698699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 33.076725,
+          "acquire": 0.065422,
+          "rootfs": 2.276357,
+          "launch": 21.163154,
+          "configure": 3.881404,
+          "boot": 0.23706699999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 68.072547,
+          "acquire": 0.081772,
+          "rootfs": 2.287397,
+          "launch": 20.665059,
+          "configure": 13.636282,
+          "boot": 0.298339
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 42.422831,
+          "acquire": 0.056262,
+          "rootfs": 3.003319,
+          "launch": 20.627877,
+          "configure": 10.103838,
+          "boot": 0.22623599999999996
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 62.038979,
+          "acquire": 0.057381999999999996,
+          "rootfs": 2.102302,
+          "launch": 21.093251,
+          "configure": 11.379675,
+          "boot": 0.23179699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 34.20319800000001,
+          "acquire": 0.057311,
+          "rootfs": 2.302798,
+          "launch": 23.020339,
+          "configure": 3.835733,
+          "boot": 0.23210699999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 65.025957,
+          "acquire": 0.06981199999999999,
+          "rootfs": 2.488263,
+          "launch": 20.187575,
+          "configure": 13.2147,
+          "boot": 0.24848699999999999
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 57.765654,
+          "acquire": 0.058781999999999994,
+          "rootfs": 2.112992,
+          "launch": 20.718781,
+          "configure": 5.978936,
+          "boot": 0.260798
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 57.396122,
+          "acquire": 0.05759199999999999,
+          "rootfs": 2.327979,
+          "launch": 20.992379,
+          "configure": 11.834239,
+          "boot": 0.24570799999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 59.680889,
+          "acquire": 0.052211,
+          "rootfs": 2.324609,
+          "launch": 20.638799,
+          "configure": 10.419387,
+          "boot": 0.216916
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 67.5022,
+          "acquire": 0.051722,
+          "rootfs": 2.093082,
+          "launch": 20.922047,
+          "configure": 17.769174,
+          "boot": 0.265117
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.22865,
+          "acquire": 0.068713,
+          "rootfs": 2.114232,
+          "launch": 21.02315,
+          "configure": 3.202995,
+          "boot": 0.242537
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.888520000000003,
+          "acquire": 0.047011000000000004,
+          "rootfs": 2.338498,
+          "launch": 20.618938,
+          "configure": 3.310458,
+          "boot": 0.23520699999999997
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.396546000000004,
+          "acquire": 0.054091999999999994,
+          "rootfs": 2.089602,
+          "launch": 21.132863,
+          "configure": 3.178664,
+          "boot": 0.219466
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 82.004727,
+          "acquire": 0.05257099999999999,
+          "rootfs": 2.094262,
+          "launch": 20.227716,
+          "configure": 25.792260000000002,
+          "boot": 0.219766
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.771987000000003,
+          "acquire": 0.055802,
+          "rootfs": 2.341838,
+          "launch": 21.181104,
+          "configure": 3.066861,
+          "boot": 0.274278
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 56.66230000000001,
+          "acquire": 0.082412,
+          "rootfs": 2.4731430000000003,
+          "launch": 21.076621,
+          "configure": 3.4027310000000006,
+          "boot": 0.228156
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 30.759927,
+          "acquire": 0.052901000000000004,
+          "rootfs": 2.04087,
+          "launch": 20.511425,
+          "configure": 3.348379,
+          "boot": 0.238897
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 32.349804000000006,
+          "acquire": 0.054292,
+          "rootfs": 2.320268,
+          "launch": 21.239366000000004,
+          "configure": 3.803942,
+          "boot": 0.234947
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 31.656813,
+          "acquire": 0.05556199999999999,
+          "rootfs": 2.606707,
+          "launch": 20.67092,
+          "configure": 3.314878,
+          "boot": 0.229706
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 55.799305000000004,
+          "acquire": 0.047191000000000004,
+          "rootfs": 2.215165,
+          "launch": 21.147783,
+          "configure": 3.42113,
+          "boot": 0.21875599999999998
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 85.82458,
+          "acquire": 0.062652,
+          "rootfs": 2.278097,
+          "launch": 20.932187,
+          "configure": 29.474279,
+          "boot": 0.254297
+        }
+      },
+      {
+        "stages_ms": {
+          "total": 65.626655,
+          "acquire": 0.05978199999999999,
+          "rootfs": 2.214296,
+          "launch": 22.106522,
+          "configure": 16.520637,
+          "boot": 0.237747
+        }
+      }
+    ]
+  }
+}

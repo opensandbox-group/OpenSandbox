@@ -35,14 +35,21 @@ Env:
   WARMUP=2                untimed warmup creates (first artifact pull)
   READY_TIMEOUT_COLD=900  first-create readiness budget (artifact pull)
   READY_TIMEOUT_WARM=300  readiness budget for warm creates
+  PING_INTERVAL_MS=10     readiness poll; SDK default is 200 ms
+  REQUEST_TIMEOUT=30     individual HTTP request timeout, in seconds
+  DISABLE_METRICS=0       set to 1 to exclude SDK metrics initialization
+  REPORT_PATH=           optional JSON report with raw attempts and settings
 """
 
 import asyncio
+import json
+import math
 import os
 import statistics
 import sys
 import time
 from datetime import timedelta
+from pathlib import Path
 
 from opensandbox.config import ConnectionConfig
 from opensandbox.manager import SandboxManager
@@ -66,8 +73,17 @@ WARMUP = int(os.environ.get("WARMUP", "2"))
 READY_TIMEOUT_COLD = int(os.environ.get("READY_TIMEOUT_COLD", "900"))
 READY_TIMEOUT_WARM = int(os.environ.get("READY_TIMEOUT_WARM", "300"))
 PING_INTERVAL_MS = int(os.environ.get("PING_INTERVAL_MS", "10"))
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "30"))
+DISABLE_METRICS = os.environ.get("DISABLE_METRICS", "0") == "1"
+REPORT_PATH = os.environ.get("REPORT_PATH", "")
 
-CONNECTION_CONFIG = ConnectionConfig(domain=DOMAIN, protocol=PROTOCOL, api_key=API_KEY)
+CONNECTION_CONFIG = ConnectionConfig(
+    domain=DOMAIN,
+    protocol=PROTOCOL,
+    api_key=API_KEY,
+    request_timeout=timedelta(seconds=REQUEST_TIMEOUT),
+    disable_metrics=DISABLE_METRICS,
+)
 
 
 async def ensure_template(manager: SandboxManager) -> str:
@@ -113,6 +129,7 @@ async def one_create(manager: SandboxManager, template_id: str, ready_timeout: i
         health_check_polling_interval=timedelta(milliseconds=PING_INTERVAL_MS),
     )
     latency = time.monotonic() - start
+    await sandbox.close()
     return latency, sandbox.id
 
 
@@ -133,16 +150,22 @@ async def main():
 
     print(f"==> measuring {N} creates in batches of {CONCURRENCY}, "
           f"pausing {BATCH_PAUSE}s between batches (slot reclamation)")
-    samples, failures = [], []
+    samples, failures, attempts = [], [], []
 
     async def run(i):
         try:
             latency, sandbox_id = await one_create(manager, template_id, READY_TIMEOUT_WARM)
         except Exception as err:
             failures.append(i)
+            attempts.append({
+                "index": i,
+                "success": False,
+                "error_type": type(err).__name__,
+            })
             print(f"[{i}/{N}] FAILED: {err}", flush=True)
             return
         samples.append(latency)
+        attempts.append({"index": i, "success": True, "ready_seconds": latency})
         await manager.kill_sandbox(sandbox_id)
         print(f"[{i}/{N}] create={latency:.3f}s id={sandbox_id} (killed)", flush=True)
 
@@ -153,12 +176,42 @@ async def main():
             print(f"==> batch done, resting {BATCH_PAUSE}s for slot reclamation")
             await asyncio.sleep(BATCH_PAUSE)
 
-    if not samples:
-        sys.exit(f"ERROR: all {len(failures)} creates failed")
-
     def pct(p):
         ordered = sorted(samples)
-        return ordered[min(len(ordered) - 1, round(p / 100 * (len(ordered) - 1)))]
+        return ordered[max(0, math.ceil(p / 100 * len(ordered)) - 1)]
+
+    summary = {
+        "mean": statistics.mean(samples),
+        "p50": pct(50),
+        "p90": pct(90),
+        "p99": pct(99),
+        "min": min(samples),
+        "max": max(samples),
+    } if samples else {}
+    if REPORT_PATH:
+        report = {
+            "measurement": "SDK create through guest /ping readiness",
+            "settings": {
+                "n": N,
+                "concurrency": CONCURRENCY,
+                "warmup": WARMUP,
+                "batch_pause_seconds": BATCH_PAUSE,
+                "ping_interval_ms": PING_INTERVAL_MS,
+                "request_timeout_seconds": REQUEST_TIMEOUT,
+                "disable_metrics": DISABLE_METRICS,
+                "template_id": template_id,
+            },
+            "successes": len(samples),
+            "failures": len(failures),
+            "percentile_method": "nearest_rank",
+            "successful_latency_seconds": summary,
+            "attempts": sorted(attempts, key=lambda attempt: attempt["index"]),
+        }
+        Path(REPORT_PATH).write_text(json.dumps(report, indent=2) + "\n")
+    await manager.close()
+
+    if not samples:
+        sys.exit(f"ERROR: all {len(failures)} creates failed")
 
     print(f"\n=== fsb create latency over {len(samples)} runs, {len(failures)} failed "
           f"(seconds, concurrency {CONCURRENCY}) ===")
@@ -167,6 +220,8 @@ async def main():
     print(f"p90 = {pct(90):.3f}")
     print(f"p99 = {pct(99):.3f}")
     print(f"min = {min(samples):.3f}   max = {max(samples):.3f}")
+    if failures:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

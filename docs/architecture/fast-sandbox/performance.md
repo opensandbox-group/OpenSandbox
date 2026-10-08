@@ -1,182 +1,284 @@
 ---
 title: Fast Sandbox Performance
-description: Measured performance characteristics of the fast-sandbox integration — create hot path (serial and concurrent), snapshot restore, live snapshot, pause/resume, request latency, and artifact delivery.
+description: ACK measurements of the fast-sandbox integration — serial and concurrent creates, request latency, live snapshot, and same-node pause/resume.
 ---
 
 # Performance
 
-This page collects performance figures measured on real hardware, organized by measurement surface:
+ACK (Alibaba Cloud Container Service for Kubernetes) is Alibaba Cloud's
+managed Kubernetes service. This page reports measurements collected on a
+two-node ACK cluster on 2026-10-08: serial and concurrent creates, request latency, live snapshot,
+and same-node pause/resume through the OpenSandbox SDK. Runtime logs provide
+phase timings alongside the SDK results. These are engineering measurements,
+not a production latency guarantee.
 
-- **Harness-level paths** — restore, snapshot, pause/resume, request latency, artifact delivery — come from the Firecracker integration verification harness (`integration-env.sh verify-all`).
-- **Full-stack creates** (Python SDK → lifecycle server → FastPath → fast-sandbox) are measured under two load shapes: **serial** (one create at a time, the floor for a single client) and **sustained concurrent** (batches of parallel creates, admission under load).
-
-Figures are reported as the tools emitted them — single-run observations, not tuned benchmark medians.
-
-Performance here is a consequence of the architecture, not an optimization pass: creates are constant-time admissions into pre-warmed capacity (see [Scheduling](/architecture/fast-sandbox/scheduling)), warm creates restore from a snapshot instead of booting a kernel (see [Firecracker](/architecture/fast-sandbox/firecracker)), and pause/resume rides the submit-and-converge mutation path (see [High Availability](/architecture/fast-sandbox/ha)).
+The warm create path admits work into pre-warmed capacity (see
+[Scheduling](/architecture/fast-sandbox/scheduling)) and restores a snapshot
+instead of booting a kernel (see [Firecracker](/architecture/fast-sandbox/firecracker)).
+Pause/resume uses the submit-and-converge mutation path (see
+[High Availability](/architecture/fast-sandbox/ha)). Capacity, runtime work,
+and the readiness boundary still determine the observed latency and success rate.
 
 ## How to read these numbers
 
-- **Pre-baked template path**: the figures below describe creates and restores where the template's artifacts are already in the node cache (pre-warmed Fastlets, snapshot-backed). First use of a template or snapshot on a node pays a one-time artifact delivery (~3.5 GiB through DART) and is not the subject of this page.
-- **Fastlet-side vs end-to-end**: restore-phase figures come from the runtime agent's own timing logs; end-to-end figures include the client harness, lifecycle server, and FastPath.
-- **Delivery criterion**: a full-stack create sample is delivered only when guest execd `/ping` returns 200 through the signed gateway route; each sandbox is killed right after readiness. Samples are produced by `scripts/fast-sandbox-env/create-bench.py` (see [Reproducing](#reproducing)).
-- These are functional-verification measurements. They demonstrate the order of magnitude of each path; they are not a throughput benchmark.
+- **SDK readiness** includes the Python SDK, lifecycle server, FastPath,
+  ingress gateway, and guest `/ping` 200. Runtime creation ends earlier.
+- **Warm creates** have template artifacts cached and Fastlet capacity prepared.
+  First-use artifact delivery is a separate cost.
+- **Sample counts and failures** are reported with latency. Successful-attempt
+  percentiles do not describe failed or timed-out requests, or prove throughput.
+- **Batch differences** matter: client resources and placement, and artifact-store
+  persistence changed between the initial serial baseline and later runs.
+  The two batches are reported separately and are not a controlled A/B comparison.
+
+[Download the raw SDK report](/benchmarks/fast-sandbox-ack-2026-10-08.json) for
+individual samples, failures, runtime phases, image digests, and settings.
 
 ## Environment
 
-All figures were measured on a single physical host running the entire integration environment — both kind nodes (control-plane + worker) and the MinIO artifact store are colocated on this machine, so "cross-host" resume means a move between kind nodes on the same physical host:
+| Dimension | ACK environment (2026-10-08) |
+|---|---|
+| Cluster | Two ACK nodes, Kubernetes `1.36.2-aliyun.1`, containerd 2.1.9 |
+| CPU | Per node: AMD EPYC 9T95, 192 CPUs exposed, 191.45 allocatable |
+| Memory | Approximately 742 GiB allocatable per node |
+| OS / kernel | ContainerOS/Lifsea, `5.10.134-19.6.1.lifsea8.x86_64` |
+| StateRoot | 50 GiB XFS `reflink=1` loop filesystem per node, backed by an ext4 ESSD data disk |
+| Pool | Five Fastlets, four slots each: 20 slots |
+| Snapshot workload | Alpine 3.19 + execd, 1 vCPU, 2 GiB memory, 2 GiB rootfs |
+| Artifact store | RustFS on a persistent hostPath on one node during the later runs |
+| Firecracker | 1.16.1 |
 
-- **Host**: Alibaba Cloud Linux 3, kernel 5.10.134; Intel Xeon Platinum 8163 @ 2.50 GHz (48 cores / 96 threads, 2 NUMA nodes); 503 GiB RAM
-- **Virtualization**: `/dev/kvm` and `/dev/net/tun` passed through, VMX on all 96 threads; cgroup v2
-- **State root**: XFS with `reflink=1` (60 GiB loop device mounted at `/var/lib/fast-sandbox`, backed by NVMe ext4)
-- **Cluster**: kind v0.24.0 on docker 24.0.0, 2 nodes with KVM passthrough
-- **Storage**: MinIO (`minio/minio:latest`) container as the S-compatible artifact store, on the same host
-- **Pool**: 2 Fastlet pods (pool min/max 2/2), 5 sandbox slots per pod (`MAX_SANDBOXES_PER_POD=5`) — 10 slots total
-- **Workload**: `opensandbox/fsb-sandbox-golden:latest` template source with `execd` `:latest` (integration defaults at measurement time); the harness-level figures predate the golden test image and used an `alpine:3.19` source with `execd` 1.1.0; Firecracker v1.16.1 (integration default)
+The SDK deployment uses server, controller, and runtime agent
+`release-1.1.1-rc.1`. Its derived Fastlet image adds GNU coreutils `cp` 9.11;
+working reflink support requires both the filesystem and copy tool. The XFS
+startup rejection change was not deployed during measurement. The template
+artifact digest is
+`d78575470094c6fe1a2da2a71b7578971dff9e77cd5381dee236dd53e01b54cb`, cached on
+both nodes. SDK version: `1.1.1rc2.dev106+gc7dc78a4.d20261008`.
 
 ## Create
 
-### Harness-level creates (`integration-env.sh verify-all`)
+### SDK creates
 
-| Scenario | End-to-end (run → first `/ping` 200) | Fastlet-side restore |
-|---|---|---|
-| Single create from a pre-baked template (snapshot + artifacts in node cache) | 115 ms (run RPC 59 ms + restore 35 ms) | 35 ms |
-| Burst: 5 concurrent creates across 2 Fastlets (10 slots) | run RPC 60–71 ms each; first 200 in 52–55 ms | ~36 ms |
-| Teardown: 7 sandboxes deleted | leases drained + jail dirs cleaned in 0.5 s | — |
+Each SDK create run has two untimed warmups and 100 timed attempts, with template
+artifacts already cached. Timing starts before `Sandbox.create_from_template()`
+and ends at guest `/ping` 200 through the gateway. Each sandbox is killed after
+readiness. Concurrent batches have a five-second reclamation pause; deletion
+and batch pauses are excluded from individual latency. The later serial and
+concurrent runs retain the same pool configuration.
 
-Notes:
+The in-cluster client disables metrics, uses a ten-second HTTP request timeout,
+and polls readiness every 10 ms (SDK default: 200 ms). Percentiles use the
+nearest-rank method. Client differences between the initial serial baseline and
+later comparison runs are noted below.
 
-- Restore phases: acquire 0.15 ms, rootfs reflink 0.7 ms, launch 20.7 ms, configure 2.8 ms, vmstate boot 0.3 ms.
-- Burst growth in total time comes from the harness's sequential probe loop (queue-to-probe up to 2.1 s), not from platform admission: every create RPC returned in 60–71 ms and every first probe hit 200 in ~53 ms.
+| Measurement | Success | p50 | p90 | p99 | Mean |
+|---|---:|---:|---:|---:|---:|
+| SDK create, initial serial baseline | 100/100 | **64.0 ms** | 93.8 ms | 108.3 ms | 70.6 ms |
+| SDK create, serial repeat alongside concurrency runs | 100/100 | 77.9 ms | 105.3 ms | 112.5 ms | 78.2 ms |
+| SDK create, concurrency 10 | 100/100 | 102.7 ms | 120.1 ms | 125.4 ms | 102.4 ms |
+| SDK create, concurrency 20 | 51/100 | 136.7 ms | 163.0 ms | 197.0 ms | 134.2 ms |
 
-### Full-stack creates (Python SDK → lifecycle server → FastPath)
+The initial 100-create validation is retained as the warm serial baseline.
+Its exact p50 is 63.995 ms, mean 70.587 ms, and range 53.811–113.326 ms;
+all 100 creates reached guest readiness. It used the same cluster, template,
+pool shape, SDK version, timeout, and 10 ms readiness criterion. Its client
+Pod had a two-CPU limit with placement not explicitly pinned; the later
+comparison client has a four-CPU limit and runs on one selected node. RustFS
+persistence also changed between runs, although these warm creates used
+cached template artifacts.
 
-Measured through the full OpenSandbox stack on the same reference host (see [Environment](#environment)): 100 creates with template artifacts already in the node cache, 2 untimed warmup creates first, each sandbox killed right after readiness. The two load shapes below share the method and differ only in `CONCURRENCY` and the between-batch pause; see [Reproducing](#reproducing) for the exact commands.
+The 77.9 ms repeat remains visible because it was collected alongside the
+concurrent runs with their client configuration. Both serial batches are in
+the raw report and are not pooled. Their difference is not a controlled
+experiment that isolates a host, client-CPU, or storage change.
 
-#### Concurrent (batches of 10)
+Runtime logs from the same creation windows give the following breakdown.
+These include each run's two untimed warmups, so their sample counts differ
+from the SDK table. They stop at runtime creation, before SDK readiness:
 
-10 concurrent creates across the 2-Fastlet pool (2 × 5 slots), 5 s between batches for slot reclamation — the fan-in matches the pool's 10-slot capacity, so the figures below are at-saturation admissions; a larger fan-in queues at the pool instead of scaling out. 0 of 100 creates failed.
+| Load | Runtime create p50 | Rootfs preparation p50 | VM state load/resume p50 | Runtime log samples |
+|---|---:|---:|---:|---:|
+| Serial repeat | 50.0 ms | 2.31 ms | 0.233 ms | 102 |
+| Concurrency 10 | 34.1 ms | 2.76 ms | 0.234 ms | 102 |
+| Concurrency 20 | 33.5 ms | 2.63 ms | 0.225 ms | 53 |
 
-| Metric | Measured |
-|---|---|
-| End-to-end create → Ready, 100 runs | p50 225 ms · p90 277 ms · p99 308 ms (avg 222 ms) |
-| Range | min 138 ms – max 308 ms |
+The initial serial validation's separate runtime window has a 39.43 ms
+runtime-create median and 2.286 ms rootfs-preparation median across 103
+creates (100 timed, two warmups, and one subsequent lifecycle create).
 
-Even at 10-way concurrency, p99 stays ~0.3 s with zero failures. The gap between the ~115 ms single-create figure above and the ~225 ms p50 is concurrency overhead — 10 concurrent restores sharing the Fastlet slots plus the lifecycle-server and SDK round trips — not a change in the restore path itself, which stays a ~35 ms snapshot resume.
-
-#### Serial (one create at a time)
-
-`CONCURRENCY=1`, no between-batch pause — a single client issuing back-to-back creates; this is the floor for unbatched clients and isolates the per-create path from concurrency interference. 0 of 100 creates failed.
-
-| Metric | Measured |
-|---|---|
-| End-to-end create → Ready, 100 runs | p50 97 ms · p90 116 ms · p99 136 ms (avg 100 ms) |
-| Range | min 75 ms – max 147 ms |
-
-The serial band lands right on the ~100 ms magnitude suggested by the concurrent run's untimed warmup creates (80–100 ms), at or below the ~115 ms harness-level single-create figure — confirming that the ~225 ms concurrent p50 is concurrency overhead, not a per-create tax.
+::: warning Saturation result
+The concurrency-20 latency distribution contains **successful attempts only**.
+There were 48 `SandboxRateLimitException` failures (HTTP 429 / Fastlet
+`CapacityRejected`) and one readiness timeout with repeated gateway HTTP 503.
+Four test CRs also stuck in deletion with an assignment annotation/status
+projection conflict. Their stale placement projections were cleared to let
+the controller perform cleanup before the next experiment. This run does not
+establish reliable 20-way admission or a sustainable requests-per-second rate.
+The implementation cause of the admission/projection failure needs a separate
+fix; replacing the host disk alone does not resolve it.
+:::
 
 ## Request latency
 
-| Path | Cold | Warm |
-|---|---|---|
-| `/ping` through the proxy chain (client → fastlet-proxy → execd) | 9 ms | 8 ms |
-| execd `/ping` API round trip | — | ~4 ms |
+The SDK samples use one warm sandbox and 100 sequential calls per path:
+
+| Path | Success | p50 | p90 | p99 | Mean |
+|---|---:|---:|---:|---:|---:|
+| Warm SDK `/ping` through the gateway | 100/100 | 0.92 ms | 1.15 ms | 5.91 ms | 1.07 ms |
+| SDK `commands.run('echo ack-perf')`, through completion and stream EOF | 100/100 | 202.8 ms | 204.3 ms | 207.1 ms | 203.2 ms |
+
+The
+[execd command handler](https://github.com/opensandbox-group/OpenSandbox/blob/c7dc78a4090e5de2b9119e9bd93952cae24f87bd/components/execd/pkg/web/controller/command.go)
+has a default 200 ms stream-close grace period; the observed approximately
+203 ms is consistent with that behavior. It is not a measurement of shell
+process startup alone.
 
 ## Live snapshot
 
-Measured on the live-snapshot verification run. The source sandbox kept serving throughout — the guest is only frozen for the pause window:
+One live snapshot was measured:
 
 | Phase | Measured |
-|---|---|
-| CreateSnapshot RPC | 33 ms |
-| Creating → Publishing (dump, spill, rootfs clone, staging) | 16.0 s |
-| Publishing → Succeeded (artifact upload) | 7.5 s (driver publish API 8.3 s for 3.5 GiB) |
-| Total create → Succeeded | 23.6 s |
-| VM pause window (guest frozen) | 232 ms (dump API 231 ms) |
-| Guest-visible impact during snapshot | 0 ping failures, max gap 0 ms |
-| Artifact set | rootfs.ext4 3.0 GiB, memory.snap 512 MiB, vmstate.snap 11 KiB |
+|---|---:|
+| Snapshot request accepted | 14.4 ms |
+| Request → available snapshot (`Ready` in the SDK) | 60.63 s |
+| VM frozen during dump | 11.14 s |
+| Runtime artifact publication | 46.22 s |
+| Artifact set | 2 GiB rootfs + 2 GiB memory |
 
-The guest's monotonic state is untouched by the snapshot: source uptime continued 6.1 s → 33.0 s across the snapshot, with `/ping` and in-guest execution healthy before and after.
+The SDK source was healthy afterward, with its file marker and boot ID
+preserved. Requests were not sampled throughout its freeze, so this establishes
+no zero-interruption claim. The initial probe used an incorrect terminal-state
+check and is excluded from the timings.
 
 ## Restore from snapshot
 
-| Scenario | Measured |
-|---|---|
-| Restore with artifacts already local (runtime phase) | 205 ms — rootfs reflink 171 ms + launch 20.5 ms + configure 2.7 ms + vmstate boot 0.3 ms |
-
-First use of a published snapshot on a node additionally pays the one-time ~3.5 GiB store pull (~20 s in this environment) before the restore.
-
-The manifest's recorded egress policy is re-applied automatically on restore; an explicit create-time binding overrides it (verified in the same run).
+Creating a new sandbox from a published live snapshot was not measured in
+this ACK run. Cached checkpoint restoration was measured as part of
+[same-node pause/resume](#pause-resume); template restoration is covered by
+[Create](#create). These operations have separate completion boundaries.
 
 ## Pause / resume
 
-| Phase | Measured |
-|---|---|
-| PauseSandbox → Paused (checkpoint durable, runtime released) | 24.3 s |
-| — VM frozen window during checkpoint | 257 ms (dump API 256 ms, spill move 391 ms) |
-| — publish checkpoint to artifact store | 7.9 s (3.5 GiB) |
-| Cross-host resume (node cache dropped, Fastlet replaced) → Ready | 20.7 s — incl. 16.7 s checkpoint pull from the store; the restore itself is 299 ms |
-| Local resume (checkpoint in node cache) → Ready | 1.0 s, 0 store pulls |
-| Guest memory state | preserved: uptime monotonic (6.2 s → 75.0 s across pause/resume), in-guest marker survived — memory restored, not rebooted |
+For this test only, the idle pool was restricted to one existing node, retaining
+five Fastlets and four slots per Fastlet. Every sample's source and destination
+Kubernetes node were verified through the CR's placement and the Fastlet Pod's
+`spec.nodeName`. All three resumes moved to a different Fastlet on that **same
+node** and used the node's checkpoint cache. The original pool selector was
+restored afterward.
+
+| Measurement | Median | Observed range (3 samples) |
+|---|---:|---:|
+| SDK pause request accepted | 22.4 ms | 22.0–25.5 ms |
+| Pause request → durable `Paused`, including upload and release | 61.14 s | 61.13–61.23 s |
+| VM frozen during checkpoint dump | 11.15 s | 11.13–11.18 s |
+| Publish approximately 4 GiB (2 GiB rootfs + 2 GiB memory) | 45.61 s | 45.61–45.63 s |
+| Resume runtime creation, after cached artifacts are available | 35.49 ms | 33.64–35.50 ms |
+| Resume rootfs preparation | 2.92 ms | 2.64–3.26 ms |
+| SDK same-node resume → guest `/ping` 200 | **62.66 s** | **58.29–65.16 s** |
+
+All three samples preserved the filesystem marker, tmpfs marker, boot ID,
+background PID, and process start time. The sandbox identity also stayed the
+same. No checkpoint artifact-delivery attempt appears in the corresponding
+Fastlet logs. Rootfs checkpoint cloning took 0.88–0.94 ms with zero full-copy
+time. Three samples establish this observed range, not a reliable p99.
+
+::: warning Same-node resume remains slow
+Cached runtime restoration is tens of milliseconds, but usable SDK resume is
+approximately a minute in this deployment. Runtime logs publish the route
+immediately after restoration, leaving most elapsed time in endpoint/guest
+availability and client waiting. These measurements do not isolate which
+network, gateway, endpoint-resolution, or retry mechanism causes that gap.
+The gap cannot be explained by copying a 2 GiB rootfs or fetching a checkpoint
+onto another node. Do not substitute the runtime number for SDK resume.
+
+The probe used a four-minute resume budget and ten-second HTTP request timeout;
+the SDK's default resume budget is 30 seconds. The reported result includes
+actual readiness waiting and does not skip health checks.
+:::
 
 ## Artifact delivery (DART P2P)
 
-| Observation | Measured |
-|---|---|
-| Cold cluster delivery of the ~3.5 GiB template (2 nodes) | 897/897 blocks from the origin — ~1 origin fetch per block cluster-wide; 192 blocks from peers |
-| Warm block reads | origin delta = 0 on both nodes — served from the node block cache and peers |
+Not verified in this ACK run. Template artifacts were already cached on both
+nodes, and same-node resumes used the checkpoint cache. Cold delivery latency,
+origin/peer block counts, and P2P efficiency require separate measurements.
 
 ## Boot characteristics
 
-The pre-baked template path never boots a kernel: the VM resumes from `vmstate.snap`, and the restore path's "boot" phase (vmstate load + resume) is ~0.3 ms — this is what makes template creates ~100 ms. For completeness, a cold VM boot from a golden image without a snapshot takes ~1.6 s from `InstanceStart` to first response (kernel boot ~1.0 s) — see [Firecracker: Measured characteristics](/architecture/fast-sandbox/firecracker#measured-characteristics).
+Cold kernel boot was not verified in this ACK run. Template creates restore
+`vmstate.snap` instead of booting a kernel; their measured VM state load/resume
+phases appear under [Create](#create).
+
+## Interpreting the results
+
+XFS reflink support and GNU `cp` keep warm rootfs preparation in the
+millisecond range: the initial serial runtime window measured a 2.286 ms
+median. This measures the storage/copy phase, not total SDK readiness.
+
+Concurrency changes admission contention; durable pause includes dumping,
+hashing, and uploading a checkpoint; SDK readiness includes endpoint resolution,
+HTTP timeouts, and retries. The saturation failures under [Create](#create) are
+control-plane evidence, not a host-only explanation. The same-node resume gap
+also remains unresolved. A warm `/ping`, completed command stream, runtime
+restore, and SDK resume have different completion boundaries.
 
 ## Reproducing
 
-The figures come from the fast-sandbox integration harness. To reproduce:
+### SDK measurements
 
-1. **Host**: bare-metal Linux with KVM passthrough (`/dev/kvm`, `/dev/net/tun`), Docker, Go ≥ 1.25, cgroup v2, and `sudo` for the XFS loop mount (the reference host is described in [Environment](#environment)).
-2. **Source**: clone [fast-sandbox](https://github.com/opensandbox-group/fast-sandbox) at the commit pinned by this repository — `manifests/third-party/fast-sandbox.commit` is the source of truth, so resolve the SHA from it instead of hardcoding one here:
-
-   ```bash
-   git clone https://github.com/opensandbox-group/fast-sandbox.git
-   git -C fast-sandbox checkout "$(sed -n 's/^commit:[[:space:]]*//p' manifests/third-party/fast-sandbox.commit)"
-   ```
-
-3. **Environment**: `./scripts/integration-env.sh up` builds the images and brings up the two-node kind cluster (KVM passthrough), the MinIO artifact store, the SandboxTemplate golden image, and the pool.
-4. **Figures**: `./scripts/integration-env.sh verify-all` runs the verification battery — base delivery (create timings), DART P2P evidence, execd API battery, live snapshot, cross-host pause/resume, egress matrix — and prints the timings shown on this page. Evidence logs land under the workspace's `logs/` directory (workspace default: `/data/fast-sandbox-env`).
-
-To measure through the OpenSandbox layers instead, this repository ships the equivalent full-stack environment — fast-sandbox at the same pinned commit plus the source-built server, ingress gateway, and egress — as `scripts/fast-sandbox-env/integration-env.sh up`. The full-stack create figures under [Create](#create) come from this environment via `scripts/fast-sandbox-env/create-bench.py`: it creates (or reuses) a Succeeded template, runs 2 untimed warmup creates, then times N creates and reports create → Ready (execd `/ping` 200) latency percentiles, killing each sandbox right after readiness:
+Use a source-built SDK matching the recorded version. Set `DOMAIN`, `API_KEY`,
+and `TEMPLATE_ID` for the target cluster without putting credentials in the
+report. Run from an in-cluster client to retain this network boundary:
 
 ```bash
-cd OpenSandbox/tests/python
+REQUEST_TIMEOUT=10 DISABLE_METRICS=1 PING_INTERVAL_MS=10 READY_TIMEOUT_WARM=180 \
+N=100 CONCURRENCY=1 BATCH_PAUSE=0 REPORT_PATH=serial.json \
+  python scripts/fast-sandbox-env/create-bench.py
 
-# sustained concurrent mode: batches of 10 across 2 Fastlet pods, 5 s between batches
-N=100 CONCURRENCY=10 BATCH_PAUSE=5 \
-  uv run python ../../scripts/fast-sandbox-env/create-bench.py
+REQUEST_TIMEOUT=10 DISABLE_METRICS=1 PING_INTERVAL_MS=10 READY_TIMEOUT_WARM=180 \
+N=100 CONCURRENCY=10 BATCH_PAUSE=5 REPORT_PATH=concurrent10.json \
+  python scripts/fast-sandbox-env/create-bench.py
 
-# serial mode: one create at a time, no between-batch pause
-N=100 CONCURRENCY=1 BATCH_PAUSE=0 \
-  uv run python ../../scripts/fast-sandbox-env/create-bench.py
+# Saturation diagnostic: record failures as well as successful latencies.
+REQUEST_TIMEOUT=10 DISABLE_METRICS=1 PING_INTERVAL_MS=10 READY_TIMEOUT_WARM=180 \
+N=100 CONCURRENCY=20 BATCH_PAUSE=5 REPORT_PATH=concurrent20.json \
+  python scripts/fast-sandbox-env/create-bench.py
 ```
 
-Keep the pool shape constant between runs (same Fastlet count and slot count) so the serial and concurrent figures are comparable.
+`REPORT_PATH` saves raw attempts, settings, success/failure counts, and
+nearest-rank percentiles. A run with failed creates returns a nonzero exit
+status. Save the deployed image digests, host/storage details, template
+digest, pool shape, and timestamped Fastlet/controller logs alongside it.
+The SDK run used an equivalent probe that also collected lifecycle
+and request samples; the report retains those original samples.
 
-When re-measuring, pin: node hardware, kernel version, Firecracker version, template digest, pool shape, and artifact-store placement — otherwise the numbers are not comparable across runs.
+For the other measurements, retain the same SDK connection settings:
 
-### Integration environment failures
+1. On one warm sandbox, time 100 sequential `sandbox.is_healthy()` calls,
+   asserting success; then time 100 `sandbox.commands.run('echo ack-perf')`
+   calls through stream EOF, asserting the expected output.
+2. On an idle pool restricted to one node, create a fresh sandbox for each of
+   three lifecycle samples. Before pausing, wait for CR
+   `status.runtime.state == Ready`; the SDK's early readiness result can precede
+   that projection. Write markers to the filesystem and tmpfs and record the
+   boot ID and a background process's PID/start time.
+3. Start the pause timer before `sandbox.pause()`. Poll
+   `manager.get_sandbox_info(id).status.state == 'Paused'` every 200 ms; an
+   accepted pause response alone is not a durable checkpoint.
+4. Time `Sandbox.resume(id, resume_timeout=timedelta(minutes=4),
+   health_check_polling_interval=timedelta(milliseconds=10),
+   connection_config=config)` through its normal readiness check. Verify
+   placement on the original node and all guest markers before killing the
+   sandbox. Restore the pool's original selector and wait for five warm,
+   ready Fastlets.
+5. For live snapshot, time `sandbox.create_snapshot()` acceptance separately
+   from `manager.get_snapshot(id).status.state == 'Ready'` (200 ms polling).
+   The public snapshot API uses `Ready`; template builds use `Succeeded`.
+   Verify the source and delete the test snapshot and sandbox.
 
-The OpenSandbox integration script keeps the full Kind creation output in
-`$WORK/logs/kind-create.log` and prints its last 40 lines when creation fails.
-The `Fast Sandbox Integration Tests` workflow uploads these logs in its
-`fast-sandbox-diagnostics-<attempt>` artifact before teardown.
+Capture runtime dump, publish, restore, and route-publication log timestamps
+to distinguish checkpoint I/O from later SDK readiness. Clean up only the
+artifacts created by the test after their sandbox/snapshot resources are gone.
 
-For stage command failures, only the main script process collects diagnostics
-and performs `--auto-clean` teardown. A failed command substitution exits with
-its original status instead of cleaning up the shared environment from a child
-shell and continuing the stage. Diagnostic or logging failures do not prevent
-the main process from attempting cleanup.
-
-If a runner was interrupted, check for an older integration script still
-running before starting another run against the same environment. The cleanup
-path does not recover from `SIGKILL`; an existing orphaned process needs to be
-stopped on the runner. An exit status of 137 alone does not establish an OOM:
-inspect the Kind log and host evidence before choosing a recovery action.
+Keep hardware, kernel, Firecracker version, template digest, pool shape, client
+placement, and artifact-store placement fixed when comparing load shapes.
