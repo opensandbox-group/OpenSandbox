@@ -528,6 +528,12 @@ The `ConnectionConfig` class manages API server connection settings.
 | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `False` | - |
 
+The Python Code Interpreter inherits the sandbox's connection configuration.
+With `use_server_proxy=True`, context requests and streamed code execution include
+the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct
+mode, the SDK does not automatically attach this key to code execution requests.
+This applies to both the asynchronous and synchronous APIs.
+
 When `follow_redirects` is enabled, same-origin redirects preserve request
 headers. An origin is the combination of scheme, host, and port, so changing
 any of those values is cross-origin. Before following a cross-origin redirect,

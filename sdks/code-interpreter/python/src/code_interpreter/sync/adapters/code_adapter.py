@@ -99,11 +99,7 @@ class CodesAdapterSync(CodesSync):
         base_url = f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}"
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **(self.execd_endpoint.headers or {}),
-        }
+        headers = self.execd_endpoint.build_request_headers(self.connection_config)
 
         # Adapter clients must own their transports: close() closes them,
         # and the shared/user connection_config transport must survive that.
