@@ -59,7 +59,7 @@ async def test_run_once_creates_runs_deletes(adapter, mock_session):
     create_mock.assert_called_once()
     mock_session.run.assert_called_once_with("echo hello", opts=None, handlers=None)
     mock_session.delete.assert_called_once()
-    assert result is not None
+    assert result == mock_session.run.return_value
 
 
 @pytest.mark.asyncio
@@ -76,9 +76,10 @@ async def test_run_once_deletes_on_run_failure(adapter, mock_session):
 async def test_run_once_tolerates_delete_failure(adapter, mock_session):
     mock_session.delete = AsyncMock(side_effect=RuntimeError("delete failed"))
     with patch.object(adapter, "create", AsyncMock(return_value=mock_session)):
+        # Delete failure must not raise: run_once still returns the execution.
         result = await adapter.run_once("echo ok", workspace="/workspace")
 
-    assert result is not None
+    assert result == mock_session.run.return_value
 
 
 @pytest.mark.asyncio

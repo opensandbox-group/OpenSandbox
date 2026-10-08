@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
@@ -100,24 +101,15 @@ func TestMetricSerialization(t *testing.T) {
 		Timestamp:   time.Now().UnixMilli(),
 	}
 
+	// Serialize under the JSON keys defined by the model tags so that
+	// external consumers (SDKs, dashboards) see a stable wire format.
 	data, err := json.Marshal(metrics)
-	assert.NoError(t, err)
-
-	var decodedMetrics model.Metrics
-	err = json.Unmarshal(data, &decodedMetrics)
-	assert.NoError(t, err)
-	assert.Equal(t, metrics.CpuCount, decodedMetrics.CpuCount)
-	assert.Equal(t, metrics.CpuUsedPct, decodedMetrics.CpuUsedPct)
-	assert.Equal(t, metrics.MemTotalMiB, decodedMetrics.MemTotalMiB)
-	assert.Equal(t, metrics.MemUsedMiB, decodedMetrics.MemUsedMiB)
-	assert.Equal(t, metrics.Timestamp, decodedMetrics.Timestamp)
-
-	errorMsg := map[string]string{"error": "test error"}
-	errorData, err := json.Marshal(errorMsg)
-	assert.NoError(t, err)
-
-	var decodedError map[string]string
-	err = json.Unmarshal(errorData, &decodedError)
-	assert.NoError(t, err)
-	assert.Equal(t, "test error", decodedError["error"])
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, float64(4), decoded["cpu_count"])
+	assert.Equal(t, 25.5, decoded["cpu_used_pct"])
+	assert.Equal(t, float64(8192), decoded["mem_total_mib"])
+	assert.Equal(t, float64(4096), decoded["mem_used_mib"])
+	assert.NotEmpty(t, decoded["timestamp"])
 }

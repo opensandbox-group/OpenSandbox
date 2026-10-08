@@ -59,12 +59,6 @@ func TestGenerateSeccompDenyBPF_EmptyOverride(t *testing.T) {
 	assert.Nil(t, bpf, "empty deny list should produce nil BPF")
 }
 
-func TestGenerateSeccompDenyBPF_ArchSpecific(t *testing.T) {
-	bpf, err := generateSeccompDenyBPF(nil)
-	require.NoError(t, err)
-	t.Logf("generated %d BPF instructions (%d bytes)", len(bpf)/8, len(bpf))
-}
-
 func TestFilterKnownSyscalls(t *testing.T) {
 	// Use real arch info to test known vs unknown filtering.
 	archInfo, err := arch.GetInfo("")

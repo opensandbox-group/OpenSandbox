@@ -98,40 +98,47 @@ func TestSetupRedirectIgnoresMissingStaleNftFallbackWhenIptablesSucceeds(t *test
 	require.NoError(t, err)
 }
 
+// TestSetupRedirectIgnoresUnavailableNftCleanupWhenIptablesSucceeds covers the
+// nft-unavailable error flavors that make stale-table cleanup best-effort:
+// a missing binary and an unsupported protocol revision are both ignored as
+// long as the iptables fallback path itself succeeds.
 func TestSetupRedirectIgnoresUnavailableNftCleanupWhenIptablesSucceeds(t *testing.T) {
-	var iptablesCalls int
-	r := redirectRunner{
-		runCommand: func(_ context.Context, _ []string) ([]byte, error) {
-			iptablesCalls++
-			return nil, nil
+	tests := []struct {
+		name    string
+		nftErr  error
+		nftOut  []byte
+		wantErr string
+	}{
+		{
+			name:   "nft binary missing",
+			nftErr: exec.ErrNotFound,
 		},
-		runNft: func(_ context.Context, _ string) ([]byte, error) {
-			return nil, exec.ErrNotFound
-		},
-	}
-
-	err := r.setupRedirect(context.Background(), 15353, nil)
-
-	require.NoError(t, err)
-	require.Equal(t, 8, iptablesCalls)
-}
-
-func TestSetupRedirectIgnoresUnsupportedNftCleanupWhenIptablesSucceeds(t *testing.T) {
-	var iptablesCalls int
-	r := redirectRunner{
-		runCommand: func(_ context.Context, _ []string) ([]byte, error) {
-			iptablesCalls++
-			return nil, nil
-		},
-		runNft: func(_ context.Context, _ string) ([]byte, error) {
-			return []byte("Error: Could not process rule: Protocol not supported"), errors.New("exit status 1")
+		{
+			name:   "nft ruleset from older protocol revision",
+			nftOut: []byte("Error: Could not process rule: Protocol not supported"),
+			nftErr: errors.New("exit status 1"),
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var iptablesCalls int
+			r := redirectRunner{
+				runCommand: func(_ context.Context, _ []string) ([]byte, error) {
+					iptablesCalls++
+					return nil, nil
+				},
+				runNft: func(_ context.Context, _ string) ([]byte, error) {
+					return tt.nftOut, tt.nftErr
+				},
+			}
 
-	require.NoError(t, err)
-	require.Equal(t, 8, iptablesCalls)
+			err := r.setupRedirect(context.Background(), 15353, nil)
+
+			require.NoError(t, err)
+			require.Equal(t, 8, iptablesCalls)
+		})
+	}
 }
 
 func TestSetupRedirectContinuesNftCleanupAfterUnsupportedFamilyWhenIptablesSucceeds(t *testing.T) {

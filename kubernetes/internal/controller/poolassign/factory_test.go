@@ -66,20 +66,6 @@ func TestNewPredicates(t *testing.T) {
 		assert.Len(t, predicates, 1)
 		assert.IsType(t, &imagePredicate{}, predicates[0])
 	})
-
-	t.Run("creator error propagates", func(t *testing.T) {
-		profile := &Profile{
-			Name: "bad-scorer-as-pred",
-			Plugins: PluginsSpec{
-				Predicate: []string{"image"},
-			},
-			PluginConf: []PluginConf{
-				{Name: "image", Args: map[string]interface{}{}},
-			},
-		}
-		_, err := newPredicates(profile)
-		assert.NoError(t, err)
-	})
 }
 
 func TestNewScorers(t *testing.T) {

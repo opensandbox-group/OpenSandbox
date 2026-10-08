@@ -89,33 +89,6 @@ func TestEnvAllowMode(t *testing.T) {
 	assert.Contains(t, lines[0], "BLOCKED=MISSING", "non-allowlisted var should be absent")
 }
 
-func TestNetworkIsolation(t *testing.T) {
-	r := newRunner(t)
-
-	opts := &runtime.IsolatedSessionOptions{
-		Profile:       "strict",
-		WorkspacePath: t.TempDir(),
-		WorkspaceMode: "rw",
-		ShareNet:      boolPtr(false),
-	}
-
-	id, err := r.CreateIsolatedSession(opts)
-	require.NoError(t, err)
-	defer r.DeleteIsolatedSession(id)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// With --unshare-net, only loopback should be visible.
-	var lines []string
-	err = r.RunInIsolatedSession(ctx, id, "ip addr show 2>/dev/null | grep -c 'LOOPBACK' || echo lo_visible", nil, func(line string) {
-		lines = append(lines, line)
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, lines)
-	t.Logf("network test output: %v", lines)
-}
-
 func TestCustomUID(t *testing.T) {
 	r := newRunner(t)
 

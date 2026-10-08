@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,11 +31,6 @@ type stubDriver struct {
 	columns          []string
 	rows             [][]driver.Value
 	execRowsAffected int64
-	queryErr         error
-	execErr          error
-	pingErr          error
-	execCalled       int32
-	queryCalled      int32
 }
 
 type stubConn struct {
@@ -48,22 +42,14 @@ func (c *stubConn) Close() error                        { return nil }
 func (c *stubConn) Begin() (driver.Tx, error)           { return nil, errors.New("not implemented") }
 
 func (c *stubConn) Ping(context.Context) error {
-	return c.d.pingErr
+	return nil
 }
 
 func (c *stubConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
-	atomic.AddInt32(&c.d.execCalled, 1)
-	if c.d.execErr != nil {
-		return nil, c.d.execErr
-	}
 	return driver.RowsAffected(c.d.execRowsAffected), nil
 }
 
 func (c *stubConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
-	atomic.AddInt32(&c.d.queryCalled, 1)
-	if c.d.queryErr != nil {
-		return nil, c.d.queryErr
-	}
 	return &stubRows{
 		columns: c.d.columns,
 		rows:    c.d.rows,

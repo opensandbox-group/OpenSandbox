@@ -434,7 +434,7 @@ func TestPool_Acquire_Empty_FailFast(t *testing.T) {
 		t.Fatal("expected PoolEmptyError, got nil")
 	}
 	var poolEmptyErr *PoolEmptyError
-	if !isPoolEmptyError(err, &poolEmptyErr) {
+	if !errors.As(err, &poolEmptyErr) {
 		t.Errorf("error type = %T, want *PoolEmptyError; error = %v", err, err)
 	}
 }
@@ -589,7 +589,7 @@ func TestPool_Acquire_PoolNotRunning(t *testing.T) {
 		t.Fatal("expected PoolNotRunningError, got nil")
 	}
 	var notRunning *PoolNotRunningError
-	if !isPoolNotRunningError(err, &notRunning) {
+	if !errors.As(err, &notRunning) {
 		t.Errorf("error type = %T, want *PoolNotRunningError; error = %v", err, err)
 	}
 }
@@ -1194,24 +1194,4 @@ func TestPoolStateStoreUnavailableError(t *testing.T) {
 		t.Errorf("Operation = %q, want %q", target.Operation, "TryTakeIdle")
 	}
 
-}
-
-// ---------- Helpers ----------
-
-// isPoolEmptyError checks if err is or wraps a *PoolEmptyError.
-func isPoolEmptyError(err error, target **PoolEmptyError) bool {
-	if e, ok := err.(*PoolEmptyError); ok {
-		*target = e
-		return true
-	}
-	return false
-}
-
-// isPoolNotRunningError checks if err is or wraps a *PoolNotRunningError.
-func isPoolNotRunningError(err error, target **PoolNotRunningError) bool {
-	if e, ok := err.(*PoolNotRunningError); ok {
-		*target = e
-		return true
-	}
-	return false
 }

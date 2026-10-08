@@ -38,12 +38,10 @@ func TestIsolationStatsProvider(t *testing.T) {
 	called := false
 	SetIsolationStatsProvider(func() IsolationStats {
 		called = true
-		return IsolationStats{ActiveSessions: 3, UpperUsageBytes: 1024}
+		return IsolationStats{}
 	})
 
 	assert.NotNil(t, isolationStatsProvider)
-	stats := isolationStatsProvider()
-	assert.True(t, called)
-	assert.Equal(t, int64(3), stats.ActiveSessions)
-	assert.Equal(t, int64(1024), stats.UpperUsageBytes)
+	isolationStatsProvider()
+	assert.True(t, called, "registered provider should be invoked")
 }

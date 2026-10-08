@@ -25,16 +25,6 @@ import (
 	"time"
 )
 
-func TestSandbox_Close(t *testing.T) {
-	sb := &Sandbox{id: "sbx-close"}
-	require.NoError(t, sb.Close(), "Close should return nil")
-}
-
-func TestSandboxManager_Close(t *testing.T) {
-	mgr := &SandboxManager{}
-	require.NoError(t, mgr.Close(), "Close should return nil")
-}
-
 func TestCreateSandbox_ForwardsLifecycle(t *testing.T) {
 	timeout := 300
 	var received *SandboxLifecycle

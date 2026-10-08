@@ -1116,35 +1116,23 @@ spec:
         assert call_kwargs["name"] == "test-id"
         assert call_kwargs["body"] == {"spec": {"operatingMode": "Suspended"}}
 
-    def test_pause_sandbox_already_paused_rejects(self, mock_k8s_client):
-        """Pause rejected when the sandbox is already paused."""
+    @pytest.mark.parametrize(
+        "workload_builder,expected_match",
+        [
+            ("_paused_sandbox", "already paused"),
+            ("_pausing_sandbox", "operation in progress"),
+            ("_pending_sandbox", "Cannot pause sandbox in state Pending, expected Running"),
+        ],
+        ids=["already-paused", "pausing", "pending"],
+    )
+    def test_pause_sandbox_rejects_non_running_state(self, mock_k8s_client, workload_builder, expected_match):
+        """Pause is only allowed from the Running state; no patch may be issued."""
         provider = AgentSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = self._paused_sandbox()
+        mock_k8s_client.get_custom_object.return_value = getattr(self, workload_builder)()
 
-        with pytest.raises(ValueError, match="already paused"):
+        with pytest.raises(ValueError, match=expected_match):
             provider.pause_sandbox("test-id", "test-ns")
 
-        mock_k8s_client.patch_custom_object.assert_not_called()
-
-    def test_pause_sandbox_pausing_rejects(self, mock_k8s_client):
-        """Pause rejected while the suspend operation is in progress."""
-        provider = AgentSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = self._pausing_sandbox()
-
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-        mock_k8s_client.patch_custom_object.assert_not_called()
-
-    def test_pause_sandbox_pending_rejects(self, mock_k8s_client):
-        """Pause rejected with the public state name when not Running."""
-        provider = AgentSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = self._pending_sandbox()
-
-        with pytest.raises(ValueError) as exc_info:
-            provider.pause_sandbox("test-id", "test-ns")
-
-        assert str(exc_info.value) == "Cannot pause sandbox in state Pending, expected Running"
         mock_k8s_client.patch_custom_object.assert_not_called()
 
     def test_pause_sandbox_terminated_rejects(self, mock_k8s_client):
@@ -1202,32 +1190,24 @@ spec:
         assert call_kwargs["name"] == "test-id"
         assert call_kwargs["body"] == {"spec": {"operatingMode": "Running"}}
 
-    def test_resume_sandbox_running_rejects(self, mock_k8s_client):
-        """Resume rejected when the sandbox is running."""
+    @pytest.mark.parametrize(
+        "workload_builder,expected_match",
+        [
+            ("_running_sandbox", "Cannot resume sandbox in state Running, expected Paused"),
+            ("_pausing_sandbox", "operation in progress"),
+            ("_pending_sandbox", "state Pending"),
+        ],
+        ids=["running", "pausing", "pending"],
+    )
+    def test_resume_sandbox_rejects_non_paused_state(self, mock_k8s_client, workload_builder, expected_match):
+        """Resume is only allowed from the Paused state; no patch may be issued."""
         provider = AgentSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = self._running_sandbox()
+        mock_k8s_client.get_custom_object.return_value = getattr(self, workload_builder)()
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(ValueError, match=expected_match):
             provider.resume_sandbox("test-id", "test-ns")
 
-        assert str(exc_info.value) == "Cannot resume sandbox in state Running, expected Paused"
         mock_k8s_client.patch_custom_object.assert_not_called()
-
-    def test_resume_sandbox_pausing_rejects(self, mock_k8s_client):
-        """Resume rejected while the suspend operation is in progress."""
-        provider = AgentSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = self._pausing_sandbox()
-
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_pending_rejects(self, mock_k8s_client):
-        """Resume rejected with the public state name when not Paused."""
-        provider = AgentSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = self._pending_sandbox()
-
-        with pytest.raises(ValueError, match="state Pending"):
-            provider.resume_sandbox("test-id", "test-ns")
 
     def test_resume_sandbox_not_found(self, mock_k8s_client):
         """Resume raises ValueError with 'not found' so the service maps it to 404."""

@@ -60,10 +60,6 @@ func TestDefaultRetryConfig_HasRetryableStatusCodes(t *testing.T) {
 	require.NotEmpty(t, cfg.RetryableStatusCodes, "DefaultRetryConfig should include retryable status codes")
 }
 
-func TestOctalMode_DoesNotPanic(t *testing.T) {
-	require.Equal(t, 755, OctalMode(0o755))
-}
-
 func TestHandleError_JSONBodyStillParsed(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusTooManyRequests,

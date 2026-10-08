@@ -193,7 +193,6 @@ func TestFileStore_CorruptedData(t *testing.T) {
 	}
 }
 
-// TestConcurrency verifies thread safety
 func TestFileStore_Concurrency(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewFileStore(tmpDir)

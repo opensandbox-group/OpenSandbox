@@ -1065,24 +1065,6 @@ spec:
 
         assert exc_info.value.status == 500
 
-    def test_get_workload_returns_object_from_client(self, mock_k8s_client):
-        cached = {"metadata": {"name": "test-id"}}
-        mock_k8s_client.get_custom_object.return_value = cached
-
-        provider = BatchSandboxProvider(mock_k8s_client)
-
-        result = provider.get_workload("test-id", "test-ns")
-
-        assert result == cached
-        mock_k8s_client.get_custom_object.assert_called()
-
-    def test_get_workload_logs_unexpected_errors(self, mock_k8s_client):
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.side_effect = RuntimeError("Unexpected")
-
-        with pytest.raises(RuntimeError, match="Unexpected"):
-            provider.get_workload("test-id", "test-ns")
-
     def test_create_workload_updates_informer_cache(self, mock_k8s_client):
         created_body = {"metadata": {"name": "test-id", "uid": "test-uid"}}
         mock_k8s_client.create_custom_object.return_value = created_body
@@ -2629,73 +2611,31 @@ spec:
         assert third_call == ("test-id", "test-ns", {"spec": {"pause": True}})
         provider.get_workload.assert_called_once_with("test-id", "test-ns")
 
-    def test_pause_sandbox_pausing_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Pausing."""
+    @pytest.mark.parametrize(
+        "phase,conditions,expected_match",
+        [
+            ("Pausing", [], "operation in progress"),
+            ("Resuming", [], "operation in progress"),
+            ("Paused", [], "already paused"),
+            ("Failed", [], "not available"),
+            (
+                "Failed",
+                [{"type": "PauseFailed", "status": "True", "reason": "PodNotFound"}],
+                "pause caused pod loss",
+            ),
+            ("Pending", [], "being created"),
+        ],
+        ids=["pausing", "resuming", "paused", "failed", "failed-pause-failed", "pending"],
+    )
+    def test_pause_sandbox_rejects_non_pausable_phase(self, mock_k8s_client, phase, conditions, expected_match):
+        """Pause is rejected unless the workload phase is Succeed/Running."""
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.get_custom_object.return_value = {
             "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pausing", "conditions": []},
+            "status": {"phase": phase, "conditions": conditions},
         }
 
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_resuming_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Resuming."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Resuming", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_paused_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Paused."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Paused", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="already paused"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_failed_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Failed."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Failed", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="not available"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_failed_with_pause_failed_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Failed + PauseFailed=True (pod loss scenario)."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {
-                "phase": "Failed",
-                "conditions": [{"type": "PauseFailed", "status": "True", "reason": "PodNotFound"}],
-            },
-        }
-
-        with pytest.raises(ValueError, match="pause caused pod loss"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_pending_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Pending."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pending", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="being created"):
+        with pytest.raises(ValueError, match=expected_match):
             provider.pause_sandbox("test-id", "test-ns")
 
     def test_resume_sandbox_paused_allows(self, mock_k8s_client):
@@ -2735,42 +2675,32 @@ spec:
         assert first_patch == {"spec": {"pause": None}}
         assert second_patch == {"spec": {"pause": False}}
 
-    def test_resume_sandbox_resuming_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Resuming."""
+    @pytest.mark.parametrize(
+        "phase,conditions,expected_match",
+        [
+            ("Resuming", [], "operation in progress"),
+            ("Pausing", [], "operation in progress"),
+            ("Succeed", [], "Cannot resume sandbox in state Running, expected Paused"),
+            ("Failed", [], "not available"),
+            (
+                "Failed",
+                [{"type": "ResumeFailed", "status": "True", "reason": "PodStartFailed"}],
+                "resume caused pod start failure",
+            ),
+            ("Pending", [], "being created"),
+        ],
+        ids=["resuming", "pausing", "running", "failed", "failed-resume-failed", "pending"],
+    )
+    def test_resume_sandbox_rejects_non_resumable_phase(self, mock_k8s_client, phase, conditions, expected_match):
+        """Resume is rejected unless the workload phase is Paused."""
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.get_custom_object.return_value = {
             "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Resuming", "conditions": []},
+            "status": {"phase": phase, "conditions": conditions},
         }
 
-        with pytest.raises(ValueError, match="operation in progress"):
+        with pytest.raises(ValueError, match=expected_match):
             provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_pausing_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Pausing."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pausing", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_running_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Succeed."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Succeed", "conditions": []},
-        }
-
-        with pytest.raises(ValueError) as exc_info:
-            provider.resume_sandbox("test-id", "test-ns")
-
-        assert str(exc_info.value) == (
-            "Cannot resume sandbox in state Running, expected Paused"
-        )
 
     @pytest.mark.parametrize("phase", ["", "Pending", "Succeed", "Running", "Failed", "Pausing", "Paused", "Resuming"])
     @pytest.mark.parametrize("task_failed", [0, 1])
@@ -2832,44 +2762,6 @@ spec:
         assert result["state"] == "Failed"
         assert result["reason"] == "FAILED"
         assert result["message"] == "Pod sandbox-abc-0: ImagePullBackOff - image not found"
-
-    def test_resume_sandbox_failed_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Failed."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Failed", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="not available"):
-            provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_failed_with_resume_failed_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Failed + ResumeFailed=True (pod start failure)."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {
-                "phase": "Failed",
-                "conditions": [
-                    {"type": "ResumeFailed", "status": "True", "reason": "PodStartFailed"}
-                ],
-            },
-        }
-
-        with pytest.raises(ValueError, match="resume caused pod start failure"):
-            provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_pending_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Pending."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pending", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="being created"):
-            provider.resume_sandbox("test-id", "test-ns")
 
     # ===== Image Auth Tests =====
 

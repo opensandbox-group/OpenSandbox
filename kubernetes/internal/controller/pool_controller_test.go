@@ -1016,124 +1016,6 @@ var _ = Describe("Pool recycle", func() {
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 
-		It("should create pool with Delete recycle strategy and release pods via deletion", func() {
-			By("creating a Pool with explicit Delete RecycleStrategy")
-			resource := &sandboxv1alpha1.Pool{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      typeNamespacedName.Name,
-					Namespace: typeNamespacedName.Namespace,
-				},
-				Spec: sandboxv1alpha1.PoolSpec{
-					Template: &v1.PodTemplateSpec{
-						Spec: v1.PodSpec{
-							Containers: []v1.Container{
-								{
-									Name:  "main",
-									Image: "example.com",
-								},
-							},
-						},
-					},
-					CapacitySpec: sandboxv1alpha1.CapacitySpec{
-						PoolMin:   0,
-						PoolMax:   2,
-						BufferMin: 1,
-						BufferMax: 1,
-					},
-					RecycleStrategy: &sandboxv1alpha1.RecycleStrategy{
-						Type: sandboxv1alpha1.RecycleTypeDelete,
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-
-			By("waiting for Pool to be ready")
-			Eventually(func(g Gomega) {
-				pool := &sandboxv1alpha1.Pool{}
-				err := k8sClient.Get(ctx, typeNamespacedName, pool)
-				g.Expect(err).NotTo(HaveOccurred())
-				cnt := min(pool.Spec.CapacitySpec.PoolMax, pool.Spec.CapacitySpec.BufferMin)
-				g.Expect(pool.Status.ObservedGeneration).To(Equal(pool.Generation))
-				g.Expect(pool.Status.Total).To(Equal(cnt))
-			}, timeout, interval).Should(Succeed())
-
-			By("setting pool pods to running state")
-			pool := &sandboxv1alpha1.Pool{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
-			pods := &v1.PodList{}
-			Expect(k8sClient.List(ctx, pods, &kclient.ListOptions{
-				Namespace:     typeNamespacedName.Namespace,
-				FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(pool.UID)}),
-			})).To(Succeed())
-			for _, pod := range pods.Items {
-				pod.Status.Phase = v1.PodRunning
-				pod.Status.Conditions = []v1.PodCondition{{Type: v1.PodReady, Status: v1.ConditionTrue}}
-				Expect(k8sClient.Status().Update(ctx, &pod)).To(Succeed())
-			}
-
-			By("creating a BatchSandbox to allocate pods from the pool")
-			bsbxNamespaceName := types.NamespacedName{
-				Name:      "batch-sandbox-recycle-test-" + rand.String(8),
-				Namespace: typeNamespacedName.Namespace,
-			}
-			batchSandbox := &sandboxv1alpha1.BatchSandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      bsbxNamespaceName.Name,
-					Namespace: bsbxNamespaceName.Namespace,
-				},
-				Spec: sandboxv1alpha1.BatchSandboxSpec{
-					Replicas: ptr.To(int32(1)),
-					PoolRef:  typeNamespacedName.Name,
-				},
-			}
-			Expect(k8sClient.Create(ctx, batchSandbox)).To(Succeed())
-
-			By("waiting for allocation")
-			var allocatedPodName string
-			Eventually(func(g Gomega) {
-				g.Expect(k8sClient.Get(ctx, bsbxNamespaceName, batchSandbox)).To(Succeed())
-				alloc, err := getSandboxAllocation(batchSandbox)
-				Expect(err).NotTo(HaveOccurred())
-				g.Expect(alloc.Pods).NotTo(BeEmpty())
-				allocatedPodName = alloc.Pods[0]
-			}, timeout, interval).Should(Succeed())
-
-			By("releasing pods by updating the BatchSandbox alloc-release annotation")
-			release := allocationRelease{
-				Pods: []string{allocatedPodName},
-			}
-			js, err := json.Marshal(release)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(k8sClient.Get(ctx, bsbxNamespaceName, batchSandbox)).To(Succeed())
-			if batchSandbox.Annotations == nil {
-				batchSandbox.Annotations = make(map[string]string)
-			}
-			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
-			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
-
-			By("verifying the pool allocation is cleared after Delete recycle")
-			Eventually(func(g Gomega) {
-				err := k8sClient.Get(ctx, typeNamespacedName, pool)
-				Expect(err).NotTo(HaveOccurred())
-				allocation, err := getPoolAllocation(pool)
-				Expect(err).NotTo(HaveOccurred())
-				g.Expect(len(allocation.PodAllocation)).To(Equal(0), "Pool allocation should be cleared after Delete recycle")
-			}, timeout, interval).Should(Succeed())
-
-			By("verifying the released pod is deleted with Delete recycle strategy")
-			Eventually(func(g Gomega) {
-				pod := &v1.Pod{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: allocatedPodName, Namespace: typeNamespacedName.Namespace}, pod)
-				if err != nil && errors.IsNotFound(err) {
-					return // pod already gone
-				}
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(pod.DeletionTimestamp).NotTo(BeNil(), "pod should be terminating with Delete recycle strategy")
-			}, timeout, interval).Should(Succeed())
-
-			Expect(k8sClient.Delete(ctx, batchSandbox)).To(Succeed())
-		})
-
 		It("should create pool with default (no explicit) RecycleStrategy which behaves as Delete", func() {
 			By("creating a Pool without explicit RecycleStrategy")
 			resource := &sandboxv1alpha1.Pool{
@@ -1226,6 +1108,15 @@ var _ = Describe("Pool recycle", func() {
 			}
 			batchSandbox.Annotations[annoAllocReleaseKey] = string(js)
 			Expect(k8sClient.Update(ctx, batchSandbox)).To(Succeed())
+
+			By("verifying the pool allocation is cleared after Delete recycle")
+			Eventually(func(g Gomega) {
+				pool := &sandboxv1alpha1.Pool{}
+				Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
+				allocation, err := getPoolAllocation(pool)
+				Expect(err).NotTo(HaveOccurred())
+				g.Expect(len(allocation.PodAllocation)).To(Equal(0), "Pool allocation should be cleared after Delete recycle")
+			}, timeout, interval).Should(Succeed())
 
 			By("verifying the released pod is deleted (default RecycleStrategy = Delete)")
 			Eventually(func(g Gomega) {

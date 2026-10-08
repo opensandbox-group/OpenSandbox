@@ -606,21 +606,6 @@ func TestCapabilities(t *testing.T) {
 	}
 }
 
-func TestIsolatedSessionOptions_Defaults(t *testing.T) {
-	opts := &IsolatedSessionOptions{
-		WorkspacePath: "/ws",
-	}
-	if opts.Profile != "" {
-		t.Error("Profile should default to empty (controller sets strict)")
-	}
-	if opts.WorkspaceMode != "" {
-		t.Error("WorkspaceMode should default to empty (controller sets overlay)")
-	}
-	if opts.ShareNet != nil {
-		t.Error("ShareNet should default to nil (start defaults to true)")
-	}
-}
-
 func TestRunInIsolatedSession_StdoutCallback(t *testing.T) {
 	runner := newTestRunner(t)
 

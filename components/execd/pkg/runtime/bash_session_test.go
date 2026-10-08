@@ -564,27 +564,20 @@ func TestBashSession_envDumpNotLeakedWhenNoOutput(t *testing.T) {
 }
 
 func TestBashSession_heredoc(t *testing.T) {
-	rewardDir := t.TempDir()
 	controller := NewController("", "")
 
 	sessionID, err := controller.CreateBashSession(&CreateContextRequest{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = controller.DeleteBashSession(sessionID) })
 
+	var stdoutLines []string
 	hooks := ExecuteResultHook{
 		OnExecuteStdout: func(line string) {
-			fmt.Printf("[stdout] %s\n", line)
-		},
-		OnExecuteComplete: func(d time.Duration) {
-			fmt.Printf("[complete] %s\n", d)
+			stdoutLines = append(stdoutLines, line)
 		},
 	}
 
-	script := fmt.Sprintf(`
-set -x
-reward_dir=%q
-mkdir -p "$reward_dir"
-
+	script := `set -x
 cat > /tmp/repro_script.sh <<'SHEOF'
 #!/usr/bin/env sh
 echo "hello heredoc"
@@ -593,9 +586,7 @@ SHEOF
 chmod +x /tmp/repro_script.sh
 /tmp/repro_script.sh
 echo "after heredoc"
-echo 1 > "$reward_dir/reward.txt"
-cat "$reward_dir/reward.txt"
-`, rewardDir)
+`
 
 	ctx := context.Background()
 	require.NoError(t, controller.RunInBashSession(ctx, &ExecuteCodeRequest{
@@ -613,6 +604,11 @@ cat "$reward_dir/reward.txt"
 		Code:     "echo 'second command works'",
 		Hooks:    hooks,
 	}))
+
+	joined := strings.Join(stdoutLines, "\n")
+	require.Contains(t, joined, "hello heredoc", "heredoc script output missing: %v", stdoutLines)
+	require.Contains(t, joined, "after heredoc", "command after heredoc missing: %v", stdoutLines)
+	require.Contains(t, joined, "second command works", "session unusable after heredoc: %v", stdoutLines)
 }
 
 func TestBashSession_execReplacesShell(t *testing.T) {

@@ -21,18 +21,6 @@ import (
 )
 
 // BenchmarkEvaluateLinearMiss benchmarks the linear evaluation of a domain that is not present in the policy.
-//
-// goos: darwin
-// goarch: arm64
-// pkg: github.com/alibaba/opensandbox/egress/pkg/policy
-// cpu: Apple M2 Pro
-// BenchmarkEvaluateLinearMiss
-// BenchmarkEvaluateLinearMiss/rules_500
-// BenchmarkEvaluateLinearMiss/rules_500-10         	   54367	     21454 ns/op	       0 B/op	       0 allocs/op
-// BenchmarkEvaluateLinearMiss/rules_1000
-// BenchmarkEvaluateLinearMiss/rules_1000-10        	   27912	     42489 ns/op	       0 B/op	       0 allocs/op
-// BenchmarkEvaluateLinearMiss/rules_10000
-// BenchmarkEvaluateLinearMiss/rules_10000-10       	    2684	    446589 ns/op	       0 B/op	       0 allocs/op
 func BenchmarkEvaluateLinearMiss(b *testing.B) {
 	for _, ruleCount := range []int{500, 1000, 10000} {
 		b.Run(fmt.Sprintf("rules_%d", ruleCount), func(b *testing.B) {
@@ -49,18 +37,6 @@ func BenchmarkEvaluateLinearMiss(b *testing.B) {
 }
 
 // BenchmarkEvaluateCompiledIndexMiss benchmarks the compiled evaluation of a domain that is not present in the policy.
-//
-// goos: darwin
-// goarch: arm64
-// pkg: github.com/alibaba/opensandbox/egress/pkg/policy
-// cpu: Apple M2 Pro
-// BenchmarkEvaluateCompiledIndexMiss
-// BenchmarkEvaluateCompiledIndexMiss/rules_500
-// BenchmarkEvaluateCompiledIndexMiss/rules_500-10         	25609082	        45.57 ns/op	       0 B/op	       0 allocs/op
-// BenchmarkEvaluateCompiledIndexMiss/rules_1000
-// BenchmarkEvaluateCompiledIndexMiss/rules_1000-10        	26226450	        46.85 ns/op	       0 B/op	       0 allocs/op
-// BenchmarkEvaluateCompiledIndexMiss/rules_10000
-// BenchmarkEvaluateCompiledIndexMiss/rules_10000-10       	26390857	        45.27 ns/op	       0 B/op	       0 allocs/op
 func BenchmarkEvaluateCompiledIndexMiss(b *testing.B) {
 	for _, ruleCount := range []int{500, 1000, 10000} {
 		b.Run(fmt.Sprintf("rules_%d", ruleCount), func(b *testing.B) {

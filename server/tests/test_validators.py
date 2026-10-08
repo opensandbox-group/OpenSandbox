@@ -340,28 +340,14 @@ class TestEnsureValidPvcName:
         assert ensure_valid_pvc_name("data-volume") is None
         assert ensure_valid_pvc_name("pvc1") is None
 
-    def test_empty_name_raises(self):
+    @pytest.mark.parametrize(
+        "name",
+        ["", "a" * 254, "MyPVC", "my_pvc"],
+        ids=["empty", "too-long", "uppercase", "underscore"],
+    )
+    def test_invalid_name_raises(self, name):
         with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name("")
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
-
-    def test_name_too_long_raises(self):
-        long_name = "a" * 254
-        with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name(long_name)
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
-
-    def test_uppercase_name_raises(self):
-        with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name("MyPVC")
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
-
-    def test_underscore_name_raises(self):
-        with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name("my_pvc")
+            ensure_valid_pvc_name(name)
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
 

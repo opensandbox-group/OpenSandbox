@@ -17,8 +17,6 @@
 package isolation
 
 import (
-	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -26,8 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func uidPtr(n uint32) *uint32 { return &n }
 
 func TestBuildArgv_NamespaceFlags(t *testing.T) {
 	tests := []struct {
@@ -907,8 +903,3 @@ func indexOf(items []string, s string) int {
 	}
 	return -1
 }
-
-// Ensure unused import vars don't break compilation on non-test.
-var _ = fmt.Sprintf
-var _ = os.Getpid
-var _ = uidPtr

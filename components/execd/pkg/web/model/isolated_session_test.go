@@ -63,10 +63,6 @@ func TestCreateIsolatedSessionRequest_Validate_Binds(t *testing.T) {
 	}
 }
 
-// TestSessionState_JSONRoundtrip verifies the creation-parameter echo fields
-// serialize under the JSON keys defined in specs/execd-api.yaml so that
-// SDKs (that share model definitions with the spec) deserialize them
-// correctly when calling attach(sessionId).
 func TestCreateIsolatedSessionRequest_Validate_Overlays(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -230,6 +226,10 @@ func TestCreateIsolatedSessionRequest_EffectiveOverlays(t *testing.T) {
 	})
 }
 
+// TestSessionState_JSONRoundtrip verifies the creation-parameter echo fields
+// serialize under the JSON keys defined in specs/execd-api.yaml so that
+// SDKs (that share model definitions with the spec) deserialize them
+// correctly when calling attach(sessionId).
 func TestSessionState_JSONRoundtrip(t *testing.T) {
 	shareNet := true
 	uid := uint32(42)

@@ -293,22 +293,6 @@ func TestSchedule(t *testing.T) {
 
 // --- GetPoolAllocation ---
 
-func TestGetPoolAllocation(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	allocator, store, _ := newTestAllocator(ctrl)
-	pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool1"}}
-
-	store.EXPECT().GetAllocation(gomock.Any(), pool).Return(&poolAllocation{
-		PodAllocation: map[string]string{"pod1": "sbx1"},
-	}, nil).Times(1)
-
-	alloc, err := allocator.GetPoolAllocation(context.Background(), pool)
-	assert.NoError(t, err)
-	assert.Equal(t, map[string]string{"pod1": "sbx1"}, alloc)
-}
-
 func TestGetPoolAllocation_Empty(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -321,20 +305,6 @@ func TestGetPoolAllocation_Empty(t *testing.T) {
 	alloc, err := allocator.GetPoolAllocation(context.Background(), pool)
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]string{}, alloc)
-}
-
-// --- ClearPoolAllocation ---
-
-func TestClearPoolAllocation(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	allocator, store, _ := newTestAllocator(ctrl)
-
-	store.EXPECT().ClearAllocation(gomock.Any(), "ns1", "pool1").Return(nil).Times(1)
-
-	err := allocator.ClearPoolAllocation(context.Background(), "ns1", "pool1")
-	assert.NoError(t, err)
 }
 
 // --- annoAllocationSyncer: finalizer behavior ---

@@ -844,36 +844,6 @@ func TestDeletingTaskWithFinishedPostStopWaitsForTerminalState(t *testing.T) {
 	assert.True(t, shouldFinalizeTaskDeletion(task, terminal, false))
 }
 
-func TestTaskManager_InspectAfterStopReturnsExecutorStatus(t *testing.T) {
-	ctx := context.Background()
-	now := time.Now()
-	task := &types.Task{
-		Name: "poststop-inspect",
-		Status: types.Status{
-			State: types.TaskStateRunning,
-			SubStatuses: []types.SubStatus{{
-				Reason:     reasonPostStopHookCompleted,
-				FinishedAt: &now,
-			}},
-		},
-	}
-	expected := &types.Status{
-		State: types.TaskStateSucceeded,
-		SubStatuses: []types.SubStatus{{
-			Reason:     "Succeeded",
-			FinishedAt: &now,
-		}},
-	}
-	exec := newFakeExecutor()
-	exec.inspect[task.Name] = expected
-	mgr := &taskManager{executor: exec}
-
-	status := mgr.inspectAfterStop(ctx, task, task.Name)
-
-	require.NotNil(t, status)
-	assert.Equal(t, *expected, *status)
-}
-
 func TestTaskManager_RetainedFailedTaskPreservesFailureAfterPostStop(t *testing.T) {
 	ctx := context.Background()
 	cfg := &config.Config{

@@ -862,58 +862,32 @@ class TestSplitEgressEnv:
         assert sandbox_env == env
         assert egress_env == {}
 
-    def test_rejects_disallowed_rules(self):
+    @pytest.mark.parametrize(
+        "env_key,env_value",
+        [
+            ("OPENSANDBOX_EGRESS_RULES", "evil"),
+            ("OPENSANDBOX_EGRESS_MODE", "evil"),
+            ("OPENSANDBOX_EGRESS_TOKEN", "evil"),
+            ("OPENSANDBOX_EGRESS_HTTP_ADDR", "0.0.0.0:9999"),
+            ("OPENSANDBOX_EGRESS_DNS_UPSTREAM", "8.8.8.8"),
+            ("OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT", "1.1.1.1"),
+            # OPENSANDBOX_EGRESS_SANDBOX_ID is server-injected; users must not set it.
+            ("OPENSANDBOX_EGRESS_SANDBOX_ID", "spoofed"),
+            # OPENSANDBOX_EGRESS_UPSTREAM_PROXY comes only from [egress.upstream_proxy].
+            ("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "http://proxy.local:3128"),
+            ("OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH", "Basic abc"),
+            # The extra CA env is admin-only and must not be request-settable.
+            ("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "/tmp/evil.pem"),
+        ],
+        ids=[
+            "rules", "mode", "token", "http-addr", "dns-upstream",
+            "nameserver-exempt", "sandbox-id", "upstream-proxy",
+            "upstream-proxy-auth", "upstream-extra-ca",
+        ],
+    )
+    def test_rejects_disallowed_env_var(self, env_key, env_value):
         with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env({"OPENSANDBOX_EGRESS_RULES": "evil"})
-
-    def test_rejects_disallowed_mode(self):
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env({"OPENSANDBOX_EGRESS_MODE": "evil"})
-
-    def test_rejects_disallowed_token(self):
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env({"OPENSANDBOX_EGRESS_TOKEN": "evil"})
-
-    def test_rejects_disallowed_http_addr(self):
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env({"OPENSANDBOX_EGRESS_HTTP_ADDR": "0.0.0.0:9999"})
-
-    def test_rejects_disallowed_dns_upstream(self):
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env({"OPENSANDBOX_EGRESS_DNS_UPSTREAM": "8.8.8.8"})
-
-    def test_rejects_disallowed_nameserver_exempt(self):
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env({"OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT": "1.1.1.1"})
-
-    def test_rejects_disallowed_sandbox_id(self):
-        """OPENSANDBOX_EGRESS_SANDBOX_ID is server-injected; users must not set it."""
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env({"OPENSANDBOX_EGRESS_SANDBOX_ID": "spoofed"})
-
-    def test_rejects_disallowed_upstream_proxy(self):
-        """OPENSANDBOX_EGRESS_UPSTREAM_PROXY comes only from [egress.upstream_proxy]."""
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env(
-                {"OPENSANDBOX_EGRESS_UPSTREAM_PROXY": "http://proxy.local:3128"}
-            )
-
-    def test_rejects_disallowed_upstream_proxy_auth(self):
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env(
-                {"OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH": "Basic abc"}
-            )
-
-    def test_rejects_disallowed_upstream_extra_ca(self):
-        """The extra CA env is admin-only and must not be request-settable."""
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env(
-                {
-                    "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA": (
-                        "/tmp/evil.pem"
-                    )
-                }
-            )
+            split_egress_env({env_key: env_value})
 
     def test_extra_ca_env_not_in_allowed_egress_env_vars(self):
         from opensandbox_server.services.constants import (

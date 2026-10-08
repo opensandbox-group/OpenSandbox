@@ -113,23 +113,6 @@ func TestContextCancellation(t *testing.T) {
 		"error should be context-related, got: %v", err)
 }
 
-func TestContextNotCancelledOnNormalExit(t *testing.T) {
-	r := newRunner(t)
-
-	opts := &runtime.IsolatedSessionOptions{
-		WorkspacePath: t.TempDir(), WorkspaceMode: "rw",
-	}
-	id, err := r.CreateIsolatedSession(opts)
-	require.NoError(t, err)
-	defer r.DeleteIsolatedSession(id)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err = r.RunInIsolatedSession(ctx, id, "echo fast", nil, nil)
-	require.NoError(t, err)
-}
-
 // TestStrictNetworkIsolation verifies --unshare-net blocks non-loopback
 // network access.
 func TestStrictNetworkIsolation(t *testing.T) {
@@ -157,15 +140,14 @@ func TestStrictNetworkIsolation(t *testing.T) {
 		func(line string) { lines = append(lines, line) })
 	require.NoError(t, err)
 
-	// With only loopback, we expect exactly 2 lines: lo + DONE.
-	// If eth0 existed, we'd see more.
+	// With --unshare-net, only loopback should exist, so the `ip link show`
+	// line count must be at most 1 (a fresh netns always has `lo`; "0" only
+	// when `ip` is unavailable). Anything greater means a non-isolated netns.
 	assert.Contains(t, lines, "DONE")
-	for _, line := range lines {
-		if line == "DONE" {
-			continue
-		}
-		t.Logf("ip link count: %s", line)
-	}
+	require.NotEmpty(t, lines)
+	count, err := strconv.Atoi(strings.TrimSpace(lines[0]))
+	require.NoError(t, err, "first line should be the `ip link show | wc -l` count, got %v", lines)
+	assert.LessOrEqual(t, count, 1, "--unshare-net should leave only loopback, got %d links", count)
 }
 
 func TestManyConsecutiveRuns(t *testing.T) {

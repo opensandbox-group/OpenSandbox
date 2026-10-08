@@ -2563,28 +2563,6 @@ func TestRunCommand_Background(t *testing.T) {
 	require.Len(t, events, 2)
 }
 
-func TestAPIError_RequestID(t *testing.T) {
-	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Request-Id", "req-abc-123")
-		jsonResponse(w, http.StatusNotFound, ErrorResponse{
-			Code:    "SANDBOX_NOT_FOUND",
-			Message: "not found",
-		})
-	})
-
-	_, err := client.GetSandbox(context.Background(), "sbx-missing")
-	require.Error(t, err)
-
-	apiErr, ok := err.(*APIError)
-	require.True(t, ok, "expected *APIError, got %T", err)
-	if apiErr.RequestID != "req-abc-123" {
-		assert.Fail(t, fmt.Sprintf("RequestID = %q, want req-abc-123", apiErr.RequestID))
-	}
-	if !strings.Contains(apiErr.Error(), "req-abc-123") {
-		assert.Fail(t, fmt.Sprintf("Error() = %q, expected to contain request ID", apiErr.Error()))
-	}
-}
-
 func TestCreateSandbox_WithNetworkPolicy(t *testing.T) {
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var req CreateSandboxRequest

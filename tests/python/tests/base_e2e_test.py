@@ -141,21 +141,3 @@ def create_connection_config_sync() -> ConnectionConfigSync:
         protocol=TEST_PROTOCOL,
         use_server_proxy=should_use_server_proxy(),
     )
-
-
-def create_connection_config_sync_server_proxy() -> ConnectionConfigSync:
-    """Create sync ConnectionConfig for E2E tests using server-proxied endpoints."""
-    return ConnectionConfigSync(
-        domain=TEST_DOMAIN,
-        api_key=TEST_API_KEY,
-        request_timeout=timedelta(minutes=3),
-        transport=httpx.HTTPTransport(
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=20,
-                keepalive_expiry=15,
-            )
-        ),
-        protocol=TEST_PROTOCOL,
-        use_server_proxy=True,
-    )

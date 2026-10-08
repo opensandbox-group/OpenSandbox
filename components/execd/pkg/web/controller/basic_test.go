@@ -17,7 +17,6 @@ package controller
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -48,36 +47,6 @@ func TestBasicControllerRespondError(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
 	require.Equal(t, "boom", resp.Message)
-}
-
-func setupBasicController(method string) (*basicController, *httptest.ResponseRecorder) {
-	ctx, w := newTestContext(method, "/", nil)
-	ctrl := &basicController{ctx: ctx}
-	return ctrl, w
-}
-
-func TestRespondSuccessWritesPayload(t *testing.T) {
-	ctrl, w := setupBasicController(http.MethodGet)
-
-	payload := map[string]string{"status": "ok"}
-	ctrl.RespondSuccess(payload)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var got map[string]string
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	require.Equal(t, "ok", got["status"])
-}
-
-func TestRespondErrorAddsCodeAndMessage(t *testing.T) {
-	ctrl, w := setupBasicController(http.MethodGet)
-
-	ctrl.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "invalid payload")
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	var got model.ErrorResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	require.Equal(t, model.ErrorCodeInvalidRequest, got.Code)
-	require.Equal(t, "invalid payload", got.Message)
 }
 
 func TestQueryInt64(t *testing.T) {

@@ -496,9 +496,6 @@ func TestIsolationAttach_ToleratesMissingCreationParams(t *testing.T) {
 	}
 }
 
-// TestIsolationAttach_NotFound verifies that a 404 from the server surfaces
-// as an *APIError with StatusCode 404, matching the error type used by
-// IsolatedGet for a missing session.
 // TestIsolationAttach_PreservesIdleTimeoutZero verifies that a session
 // created with idle_timeout_seconds=0 (idle GC disabled — the long-window
 // stateless-recovery configuration) round-trips through attach as a
@@ -536,6 +533,9 @@ func TestIsolationAttach_PreservesIdleTimeoutZero(t *testing.T) {
 	require.Equal(t, 0, *info.IdleTimeoutSeconds)
 }
 
+// TestIsolationAttach_NotFound verifies that a 404 from the server surfaces
+// as an *APIError with StatusCode 404, matching the error type used by
+// IsolationGet for a missing session.
 func TestIsolationAttach_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/isolated/session/missing" {

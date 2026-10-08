@@ -265,8 +265,8 @@ func TestIdleGC(t *testing.T) {
 	// GC interval is 60s, too slow for test. Manually trigger.
 	r.CollectIdle()
 
-	// After GC, session should be gone (idle > 2s since we waited).
-	// But since lastRunAt was just updated, it should still exist.
+	// lastRunAt was just refreshed by the run above, so the session must
+	// survive this GC pass despite being older than the idle timeout.
 	_, err = r.GetIsolatedSession(id)
 	require.NoError(t, err)
 

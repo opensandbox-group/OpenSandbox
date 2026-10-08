@@ -39,9 +39,6 @@ func TestGetImageDigestReturnsErrorOnInspectFailure(t *testing.T) {
 	if digest != "" {
 		t.Fatalf("expected empty digest on error, got %q", digest)
 	}
-	if digest == "sha256:placeholder" {
-		t.Fatal("digest extraction must not return placeholder")
-	}
 }
 
 func TestGetImageDigestReturnsErrorOnEmptyInspectOutput(t *testing.T) {
