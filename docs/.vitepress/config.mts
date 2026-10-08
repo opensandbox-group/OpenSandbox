@@ -208,6 +208,7 @@ export default defineConfig({
           items: [
             { text: "Overview", link: "/guides/" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
+            { text: "Sandbox Fork", link: "/guides/sandbox-fork" },
             {
               text: "Chained Upstream Proxy",
               link: "/guides/egress-upstream-proxy",

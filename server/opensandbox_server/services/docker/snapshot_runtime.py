@@ -72,6 +72,9 @@ class DockerSnapshotRuntime:
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         return None
 
+    def create_rootfs_snapshot(self, snapshot_id: str, sandbox_id: str, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
+        return self._create_snapshot(snapshot_id, sandbox_id, rootfs_only=True)
+
     def delete_snapshot(
         self,
         snapshot_id: str,
@@ -151,14 +154,31 @@ class DockerSnapshotRuntime:
         self,
         snapshot_id: str,
         sandbox_id: str,
+        *, rootfs_only: bool = False,
     ) -> SnapshotRuntimeStatus:
         image_ref = build_snapshot_image_ref(snapshot_id)
 
         try:
             container = self._get_container_by_sandbox_id(sandbox_id)
+            options = {}
+            if rootfs_only:
+                # Docker merges unspecified image config. Explicitly neutralize
+                # inherited values so deleted overrides and source tokens cannot
+                # reappear when the fork image is booted.
+                config = container.attrs.get("Config") or {}
+                # Keep the standard executable search path usable when an
+                # explicit empty env override clears inherited user settings.
+                default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                options["conf"] = {
+                    "Env": [f"{entry.partition('=')[0]}=" for entry in config.get("Env") or []
+                            if entry.partition("=")[0] != "PATH"] + [f"PATH={default_path}"],
+                    "Labels": {key: "" for key in config.get("Labels") or {}},
+                    "Entrypoint": [], "Cmd": [],
+                }
             container.commit(
                 repository=SNAPSHOT_IMAGE_REPOSITORY,
                 tag=snapshot_id,
+                **options,
             )
         except (ReadTimeout, ConnectTimeout, TimeoutError) as exc:
             logger.warning(

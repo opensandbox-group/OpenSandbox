@@ -1027,7 +1027,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         self._ensure_network_policy_support(request)
         self._ensure_image_auth_support(request)
 
-        sandbox_id = self.generate_sandbox_id()
+        sandbox_id = request._operation_sandbox_id or self.generate_sandbox_id()
 
         created_at = datetime.now(timezone.utc)
 

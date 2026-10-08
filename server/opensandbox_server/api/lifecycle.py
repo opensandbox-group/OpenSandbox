@@ -23,6 +23,9 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response
+from opensandbox_server.api.fork_schema import ForkOperation, ForkSandboxRequest
+from opensandbox_server.repositories.forks import ForkRepository
+from opensandbox_server.services.fork_service import ForkService
 
 from opensandbox_server.extensions import validate_extensions
 from opensandbox_server.config import get_config
@@ -61,6 +64,23 @@ sandbox_service = create_sandbox_service()
 snapshot_service = create_snapshot_service(sandbox_service)
 # React to snapshot status changes so rows converge without waiting on reads
 snapshot_service.start_background_sync()
+fork_service = ForkService(ForkRepository(get_config()), sandbox_service, snapshot_service)
+
+
+@router.post("/sandboxes/{sandbox_id}/fork", response_model=ForkOperation,
+             response_model_exclude_none=True, status_code=202)
+async def fork_sandbox(
+    sandbox_id: str, request: ForkSandboxRequest, response: Response,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+) -> ForkOperation:
+    operation = await fork_service.fork(sandbox_id, request, idempotency_key)
+    response.headers["Location"] = f"/v1/forks/{operation.id}"
+    return operation
+
+
+@router.get("/forks/{fork_id}", response_model=ForkOperation, response_model_exclude_none=True)
+def get_fork(fork_id: str) -> ForkOperation:
+    return fork_service.get(fork_id)
 
 
 # ============================================================================

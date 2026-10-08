@@ -457,6 +457,8 @@ class CreateSandboxRequest(BaseModel):
     # Internal routing hint: set by snapshot restore resolution to the backend
     # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
     _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+    # Reserved for durable server-side operations; never accepted over HTTP.
+    _operation_sandbox_id: Optional[str] = PrivateAttr(default=None)
 
     image: Optional[ImageSpec] = Field(
         None,

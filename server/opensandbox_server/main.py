@@ -21,6 +21,7 @@ and configuration for the sandbox lifecycle management service.
 
 import logging
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -90,7 +91,7 @@ tenant_provider: TenantProvider | None = _build_tenant_provider(app_config)
 from opensandbox_server.api.devops import router as devops_router  # noqa: E402
 from opensandbox_server.api.metrics import router as metrics_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
-from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
+from opensandbox_server.api.lifecycle import fork_service, router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
 from opensandbox_server.api.network_policy import router as policy_router  # noqa: E402
 from opensandbox_server.api.templates import router as templates_router  # noqa: E402
@@ -194,6 +195,7 @@ async def lifespan(app: FastAPI):
     )
 
     setup_otel_metrics(app_config.otel)
+    fork_service.start()
 
     yield
 
@@ -201,6 +203,7 @@ async def lifespan(app: FastAPI):
     if consumer is not None:
         await consumer.stop()
     shutdown_otel_metrics()
+    await asyncio.to_thread(fork_service.close)
     sandbox_service.close()
     snapshot_service.close()
     close_snapshot_repository()

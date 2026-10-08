@@ -81,7 +81,7 @@ SNAPSHOT_LIST_SYNC_BUDGET_SECONDS = 2.0
 class SnapshotService(ABC):
 
     @abstractmethod
-    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest) -> Snapshot:
+    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest, *, snapshot_id: str | None = None, rootfs_only: bool = False, capture_namespace: str | None = None) -> Snapshot:
         pass
 
     @abstractmethod
@@ -135,7 +135,14 @@ class PersistedSnapshotService(SnapshotService):
         if recover_unfinished_snapshots:
             self.recover_unfinished_snapshots()
 
-    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest) -> Snapshot:
+    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest, *, snapshot_id: str | None = None, rootfs_only: bool = False, capture_namespace: str | None = None) -> Snapshot:
+        if snapshot_id is not None:
+            existing = self._snapshot_repository.get(snapshot_id)
+            if existing is not None:
+                self._verify_tenant_access(existing)
+                if existing.source_sandbox_id != sandbox_id:
+                    raise HTTPException(409, detail={"code": "FORK::RESOURCE_CONFLICT", "message": "Snapshot belongs to another source."})
+                return self._to_snapshot_response(existing)
         sandbox = self._sandbox_service.get_sandbox(sandbox_id)
         self._ensure_source_sandbox_running(sandbox)
 
@@ -148,7 +155,7 @@ class PersistedSnapshotService(SnapshotService):
                 },
             )
 
-        namespace = self._get_tenant_namespace()
+        namespace = capture_namespace if capture_namespace is not None else self._get_tenant_namespace()
         try:
             self._snapshot_runtime.preflight_create_snapshot(
                 sandbox_id,
@@ -173,7 +180,7 @@ class PersistedSnapshotService(SnapshotService):
 
         now = datetime.now(timezone.utc)
         record = SnapshotRecord(
-            id=str(uuid4()),
+            id=snapshot_id or str(uuid4()),
             source_sandbox_id=sandbox_id,
             namespace=namespace,
             name=request.name,
@@ -187,6 +194,7 @@ class PersistedSnapshotService(SnapshotService):
             created_at=now,
             updated_at=now,
         )
+        record.restore_config.rootfs_only = rootfs_only
         self._snapshot_repository.create(record)
         self._submit_snapshot_worker(record)
         return self._to_snapshot_response(record)
@@ -462,7 +470,10 @@ class PersistedSnapshotService(SnapshotService):
 
     def _create_snapshot_worker(self, record: SnapshotRecord) -> None:
         try:
-            runtime_status = self._snapshot_runtime.create_snapshot(
+            capture = self._snapshot_runtime.create_snapshot
+            if record.restore_config.rootfs_only:
+                capture = getattr(self._snapshot_runtime, "create_rootfs_snapshot", capture)
+            runtime_status = capture(
                 record.id,
                 record.source_sandbox_id,
                 namespace=record.namespace,
@@ -658,6 +669,7 @@ class PersistedSnapshotService(SnapshotService):
                 restore_config=SnapshotRestoreConfig(
                     image=runtime_status.image,
                     backend=runtime_status.backend,
+                    rootfs_only=record.restore_config.rootfs_only,
                 ),
                 status=SnapshotStatusRecord(
                     state=SnapshotState.READY,

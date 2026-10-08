@@ -196,6 +196,23 @@ def test_snapshot_service_rejects_create_when_source_sandbox_not_running(tmp_pat
     assert runtime.calls == []
 
 
+def test_fork_snapshot_replay_survives_source_deletion(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    runtime.create_result = SnapshotRuntimeStatus(state=SnapshotState.READY, image="fork:image")
+    source = SimpleNamespace(get_sandbox=StubSandboxService.get_sandbox)
+    service = PersistedSnapshotService(repo, source, snapshot_runtime=runtime,
+                                       snapshot_executor=ImmediateExecutor())
+    service.create_snapshot("source", CreateSnapshotRequest(name=None), snapshot_id="fork-snapshot", rootfs_only=True)
+    def missing_source(sandbox_id):
+        raise HTTPException(404)
+    source.get_sandbox = missing_source
+    replay = service.create_snapshot("source", CreateSnapshotRequest(name=None), snapshot_id="fork-snapshot", rootfs_only=True)
+    assert replay.status.state == "Ready"
+    assert repo.get(replay.id).restore_config.rootfs_only
+    assert runtime.calls == [(replay.id, "source")]
+
+
 def test_snapshot_service_rejects_unsupported_runtime_before_persisting(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()

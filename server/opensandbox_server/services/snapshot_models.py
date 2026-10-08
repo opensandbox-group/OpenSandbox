@@ -51,9 +51,14 @@ class SnapshotRestoreConfig:
 
     image: str | None = None
     backend: str | None = None
+    # Fork captures strip Docker runtime config; public snapshots keep it.
+    rootfs_only: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        values = asdict(self)
+        if not self.rootfs_only:
+            values.pop("rootfs_only")
+        return values
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> "SnapshotRestoreConfig":

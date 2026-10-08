@@ -604,7 +604,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self,
         request: CreateSandboxRequest,
     ) -> tuple[str, datetime, Optional[datetime]]:
-        sandbox_id = self.generate_sandbox_id()
+        sandbox_id = request._operation_sandbox_id or self.generate_sandbox_id()
         created_at = datetime.now(timezone.utc)
         expires_at = None
         if request.timeout is not None:

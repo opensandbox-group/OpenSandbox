@@ -51,6 +51,83 @@ tags:
   - name: Metrics
     description: Best-effort SDK telemetry ingestion for server-side aggregation
 paths:
+  /sandboxes/{sandboxId}/fork:
+    post:
+      tags: [Sandboxes]
+      operationId: forkSandbox
+      summary: Fork one independent sandbox from a running sandbox rootfs
+      description: |
+        Asynchronously capture the source rootfs and provision one independent copy.
+        Requires a Running source without user volume mounts. Supports Linux Docker
+        and standard single-replica, non-pooled Kubernetes BatchSandbox rootfs capture.
+        Does not copy memory, running commands, sockets, lifecycle hooks or volumes.
+        Capture may briefly freeze the source and uses existing snapshot consistency.
+        Successful operations retain the snapshot. Poll getFork for the result.
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Tenant-scoped retry key. Reusing it with another request returns 409.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForkSandboxRequest'
+      responses:
+        '202':
+          description: Durable fork operation accepted
+          headers:
+            Location:
+              description: URL for querying the fork operation
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForkOperation'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '401':
+          description: Missing or invalid credentials
+        '404':
+          description: Source sandbox not found
+        '409':
+          description: Source state, configuration or idempotency conflict
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '422':
+          description: Request validation failed
+        '501':
+          description: Unsupported fork runtime
+  /forks/{forkId}:
+    get:
+      tags: [Sandboxes]
+      operationId: getFork
+      summary: Get fork progress and result
+      parameters:
+        - name: forkId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Fork operation and cleanup progress
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ForkOperation'}
+        '401':
+          description: Missing or invalid credentials
+        '404':
+          description: Fork operation not found in the current tenant
   /sandboxes/{sandboxId}/networkpolicy:
     parameters:
       - $ref: '#/components/parameters/SandboxId'
@@ -1208,6 +1285,69 @@ components:
         X-Request-ID:
           $ref: '#/components/headers/XRequestId'
   schemas:
+    ForkSandboxRequest:
+      type: object
+      additionalProperties: false
+      required: [timeout]
+      properties:
+        timeout:
+          type: integer
+          minimum: 60
+          description: Target sandbox lifetime in seconds, subject to the server maximum.
+        overrides:
+          $ref: '#/components/schemas/ForkOverrides'
+    ForkOverrides:
+      type: object
+      additionalProperties: false
+      description: |
+        Omitted fields inherit source settings. Supplied fields replace the entire
+        field; null is rejected. Empty env or metadata clears user configuration.
+        Entrypoint defaults to tail -f /dev/null rather than the source command.
+      properties:
+        env:
+          type: object
+          additionalProperties: {type: string, nullable: true}
+        resourceLimits:
+          $ref: '#/components/schemas/ResourceLimits'
+        resourceRequests:
+          $ref: '#/components/schemas/ResourceLimits'
+        networkPolicy:
+          $ref: '#/components/schemas/NetworkPolicy'
+        metadata:
+          type: object
+          additionalProperties: {type: string}
+        entrypoint:
+          type: array
+          minItems: 1
+          items: {type: string}
+    ForkOperation:
+      type: object
+      required: [id, sourceSandboxId, status, createdAt, updatedAt, cleanupPending]
+      properties:
+        id: {type: string}
+        sourceSandboxId: {type: string}
+        snapshotId:
+          type: string
+          description: Persistent snapshot retained on success.
+        sandboxId:
+          type: string
+          description: Target sandbox ID, published once its resource exists.
+        status:
+          $ref: '#/components/schemas/ForkStatus'
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        cleanupPending:
+          type: boolean
+          description: Failed-operation resource cleanup is still being retried.
+    ForkStatus:
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [Pending, Snapshotting, Provisioning, Succeeded, Failed]
+        reason: {type: string}
+        message: {type: string}
     MetricsEvent:
       type: object
       description: |
