@@ -406,10 +406,7 @@ func sessionPairs(sessionDir string) []UpperDirPair {
 func ensurePrivateDir(path string) error {
 	info, err := os.Lstat(path)
 	if err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("path exists and is not a real directory")
-		}
-		return nil
+		return validatePrivateDir(path, info)
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -422,9 +419,27 @@ func ensurePrivateDir(path string) error {
 		if statErr != nil {
 			return statErr
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("path exists and is not a real directory")
-		}
+		return validatePrivateDir(path, info)
+	}
+	return nil
+}
+
+// validatePrivateDir refuses to trust a pre-existing directory that this
+// process cannot prove it owns. The cleanup registry is the sole proof of
+// ownership for the session subtrees reclaimStale removes, so adopting a
+// directory another user can write to would let that user plant records named
+// after their targets and turn execd into a confused deputy. A registry this
+// process created is always 0700 and owned by root or the effective user, so
+// these checks only reject paths execd never created.
+func validatePrivateDir(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("path exists and is not a real directory")
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("directory %s is writable by group or others (mode %#o); refusing to trust it", path, perm)
+	}
+	if uid, ok := dirOwnerUID(info); ok && uid != 0 && uid != os.Geteuid() {
+		return fmt.Errorf("directory %s is owned by uid %d, which is neither root nor the effective user %d; refusing to trust it", path, uid, os.Geteuid())
 	}
 	return nil
 }

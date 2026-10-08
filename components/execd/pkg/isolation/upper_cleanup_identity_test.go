@@ -244,3 +244,39 @@ func TestUpperManager_PreservesUnrecordedDirectories(t *testing.T) {
 		}
 	}
 }
+
+func TestUpperManager_RefusesTrustingWritableRegistry(t *testing.T) {
+	root := t.TempDir()
+	registry := filepath.Join(root, cleanupRegistryName)
+	if err := os.Mkdir(registry, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	// Mkdir is filtered through the process umask, so set the bits explicitly to
+	// reproduce the pre-created group/other-writable registry from the review.
+	if err := os.Chmod(registry, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewUpperManager(root, 1024); err == nil {
+		t.Fatal("NewUpperManager adopted a group/other-writable cleanup registry")
+	}
+}
+
+func TestUpperManager_AcceptsPrivateRegistry(t *testing.T) {
+	root := t.TempDir()
+	registry := filepath.Join(root, cleanupRegistryName)
+	if err := os.Mkdir(registry, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(registry, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := NewUpperManager(root, 1024)
+	if err != nil {
+		t.Fatalf("NewUpperManager rejected a 0700 registry created by execd: %v", err)
+	}
+	if _, _, _, err := mgr.Allocate(); err != nil {
+		t.Fatalf("Allocate on a reused private registry: %v", err)
+	}
+}
