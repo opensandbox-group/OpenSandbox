@@ -596,6 +596,139 @@ def test_forced_shutdown_cleans_create_that_finishes_after_warmup_loop_retired(
         pool.shutdown(False)
 
 
+def test_forced_shutdown_orphans_warmup_loop_until_stuck_stage_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for issue #2056: a warmup still in flight past the bounded
+    teardown wait must not get its event loop closed underneath it. The loop is
+    orphaned instead, the stuck warmup finishes and cleans up its uncommitted
+    sandbox, and the orphaned loop stops itself once nothing is left on it.
+    """
+    FakeSandbox.reset()
+    entered_preparer = threading.Event()
+    release_preparer = threading.Event()
+
+    def blocking_preparer(sandbox: FakeSandbox) -> None:
+        entered_preparer.set()
+        assert release_preparer.wait(timeout=5)
+
+    class StuckWarmupSandbox(FakeSandbox):
+        pass
+
+    monkeypatch.setattr(
+        sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05
+    )
+    pool = SandboxPoolSync(
+        pool_name="stuck-warmup-pool",
+        owner_id="owner-1",
+        max_idle=1,
+        warmup_concurrency=1,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        warmup_sandbox_preparer=blocking_preparer,  # type: ignore[arg-type]
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=StuckWarmupSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        assert entered_preparer.wait(timeout=2)
+        loop_thread = pool._warmup_loop_thread
+        loop = pool._warmup_loop
+        assert loop_thread is not None
+        assert loop is not None
+
+        started = time.monotonic()
+        pool.shutdown(graceful=False)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 2.0
+        assert pool.snapshot().lifecycle_state.value == "STOPPED"
+        assert pool._warmup_loop is None
+        assert not loop.is_closed()
+        assert loop_thread.is_alive()
+
+        release_preparer.set()
+
+        assert StuckWarmupSandbox.last_created is not None
+        stuck_sandbox = StuckWarmupSandbox.last_created
+        _eventually(lambda: stuck_sandbox.killed and stuck_sandbox.closed)
+        _eventually(lambda: not loop_thread.is_alive())
+        loop_thread.join(timeout=2)
+        assert not loop_thread.is_alive()
+        assert not loop.is_running()
+    finally:
+        release_preparer.set()
+        pool.shutdown(False)
+
+
+def test_restart_after_stuck_warmup_shutdown_closes_new_loop_normally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanently stuck warmup from an earlier run must not poison later
+    runs: token bookkeeping is scoped to the run generation, so a later run
+    still gets its loop closed by shutdown() even though the stale token from
+    the orphaned run never drains.
+    """
+    FakeSandbox.reset()
+    entered_preparer = threading.Event()
+    release_first_preparer = threading.Event()
+    preparer_calls = 0
+
+    def preparer(sandbox: FakeSandbox) -> None:
+        nonlocal preparer_calls
+        preparer_calls += 1
+        if preparer_calls == 1:
+            entered_preparer.set()
+            # Block without a timeout so this preparer cannot raise: a raised
+            # error would be recorded as a reconcile failure and put the pool
+            # into backoff, starving run 2's warmups.
+            release_first_preparer.wait()
+
+    monkeypatch.setattr(
+        sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05
+    )
+    pool = SandboxPoolSync(
+        pool_name="restart-after-stuck-pool",
+        owner_id="owner-1",
+        max_idle=1,
+        warmup_concurrency=1,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        warmup_sandbox_preparer=preparer,  # type: ignore[arg-type]
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FakeSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        assert entered_preparer.wait(timeout=2)
+        pool.shutdown(graceful=False)
+        assert pool._warmup_loop is None
+        # The stuck warmup keeps its token registered (its cleanup cannot run
+        # while the preparer holds the single warmup worker), so the restart
+        # below tears down a run whose generation owns no tokens of its own.
+        assert 1 in pool._warmup_tokens
+
+        pool.start()
+        loop_thread = pool._warmup_loop_thread
+        loop = pool._warmup_loop
+        assert loop_thread is not None
+        assert loop is not None
+
+        started = time.monotonic()
+        pool.shutdown(graceful=False)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 2.0
+        loop_thread.join(timeout=5)
+        assert not loop_thread.is_alive()
+        assert loop.is_closed()
+    finally:
+        release_first_preparer.set()
+        pool.shutdown(False)
+
+
 def test_graceful_shutdown_restart_does_not_reuse_stop_event() -> None:
     pool = _create_pool(max_idle=0)
     pool.start()

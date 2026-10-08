@@ -170,7 +170,10 @@ class SandboxPoolSync:
         self._warmup_loop_thread: threading.Thread | None = None
         self._warmup_futures: set[Future[None]] = set()
         self._next_warmup_token = 0
-        self._warmup_tokens: set[int] = set()
+        # Maps each in-flight warmup token to the run generation that submitted
+        # it, so teardown can tell its own run's warmups from tokens left over
+        # by an earlier orphaned run.
+        self._warmup_tokens: dict[int, int] = {}
         self._started_warmup_tokens: set[int] = set()
         self._sandbox_manager: SandboxManagerSync | None = None
         self._pool_connection_config: ConnectionConfigSync | None = None
@@ -691,7 +694,7 @@ class SandboxPoolSync:
                 self._warming_count += 1
                 self._next_warmup_token += 1
                 token = self._next_warmup_token
-                self._warmup_tokens.add(token)
+                self._warmup_tokens[token] = generation
             coroutine = self._run_warmup_async(
                 generation, leader_epoch, token, time.time_ns()
             )
@@ -718,12 +721,20 @@ class SandboxPoolSync:
     ) -> None:
         with self._warming_lock:
             self._started_warmup_tokens.add(token)
-        create_executor = self._create_executor
-        if create_executor is None:
+            create_executor = self._create_executor
+            warmup_executor = self._warmup_executor
+        if create_executor is None or warmup_executor is None:
             self._complete_warmup(
-                token, RuntimeError("warmup create executor is stopped")
+                token, RuntimeError("warmup stage executor is stopped")
             )
             return
+        # The executors are captured once because _stop_reconcile may null the
+        # instance attributes while this coroutine is still in flight (either
+        # tearing down this run or orphaning it when a warmup is stuck). Every
+        # stage below -- including the finally cleanup -- must keep using the
+        # executors this warmup started with so an uncommitted sandbox still
+        # gets terminated (issue #2056).
+        loop = asyncio.get_running_loop()
         sandbox: SandboxSync | None = None
         committed = False
         stage = "create"
@@ -736,7 +747,6 @@ class SandboxPoolSync:
             image=str(self._creation_spec.image),
         )
         try:
-            loop = asyncio.get_running_loop()
             with warmup_trace.phase(WARMUP_CREATE_SPAN):
                 # Keep the underlying create future independently observable. A
                 # forced shutdown can retire the warmup loop before a slow control-
@@ -754,7 +764,9 @@ class SandboxPoolSync:
                     raise
                 sandbox = created_sandbox
             warmup_trace.set_sandbox_id(sandbox.id)
-            await self._run_stage(self._ensure_pool_namespace_active)
+            await self._run_stage(
+                self._ensure_pool_namespace_active, executor=warmup_executor
+            )
             readiness_deadline = (
                 loop.time() + self._config.warmup_ready_timeout.total_seconds()
             )
@@ -777,12 +789,15 @@ class SandboxPoolSync:
                         readiness_deadline,
                         "warmup readiness",
                         health_span,
+                        executor=warmup_executor,
                     )
             preparer = self._config.warmup_sandbox_preparer
             if preparer is not None:
                 stage = "prepare"
                 with warmup_trace.phase(WARMUP_PREPARE_SPAN):
-                    await self._run_stage(lambda: preparer(sandbox))
+                    await self._run_stage(
+                        lambda: preparer(sandbox), executor=warmup_executor
+                    )
             post_check = self._config.warmup_post_prepare_health_check
             if post_check is not None:
                 stage = "post_prepare_readiness"
@@ -794,17 +809,23 @@ class SandboxPoolSync:
                         + self._config.warmup_post_prepare_health_check_timeout.total_seconds(),
                         "post-prepare readiness",
                         health_span,
+                        executor=warmup_executor,
                     )
             stage = "renew"
             with warmup_trace.phase(WARMUP_RENEW_SPAN):
-                await self._run_stage(lambda: sandbox.renew(self._config.idle_timeout))
+                await self._run_stage(
+                    lambda: sandbox.renew(self._config.idle_timeout),
+                    executor=warmup_executor,
+                )
             await self._run_stage(
-                lambda: self._ensure_pool_namespace_active_after_create(sandbox)
+                lambda: self._ensure_pool_namespace_active_after_create(sandbox),
+                executor=warmup_executor,
             )
             stage = "commit"
             with warmup_trace.phase(WARMUP_COMMIT_SPAN):
                 may_commit = await self._run_stage(
-                    lambda: self._can_commit_warmup(generation, leader_epoch)
+                    lambda: self._can_commit_warmup(generation, leader_epoch),
+                    executor=warmup_executor,
                 )
                 if not may_commit:
                     warmup_trace.end_dropped(stage, "leadership_lost")
@@ -812,13 +833,15 @@ class SandboxPoolSync:
                 await self._run_stage(
                     lambda: self._state_store.put_idle(
                         self._config.pool_name, sandbox.id
-                    )
+                    ),
+                    executor=warmup_executor,
                 )
                 if not self._can_commit_locally(generation, leader_epoch):
                     await self._run_stage(
                         lambda: self._state_store.remove_idle(
                             self._config.pool_name, sandbox.id
-                        )
+                        ),
+                        executor=warmup_executor,
                     )
                     warmup_trace.end_dropped(stage, "run_retired")
                     return
@@ -838,13 +861,19 @@ class SandboxPoolSync:
             try:
                 if sandbox is not None:
                     if committed:
-                        await self._run_stage(sandbox.close)
+                        await self._run_stage(sandbox.close, executor=warmup_executor)
                     else:
                         await self._run_stage(
-                            lambda: self._cleanup_uncommitted_warmup(sandbox)
+                            lambda: self._cleanup_uncommitted_warmup(sandbox),
+                            executor=warmup_executor,
                         )
             finally:
                 self._complete_warmup(token, None)
+                # If this run's warmup loop was orphaned by _stop_reconcile
+                # while this warmup was still in flight, stop the loop once
+                # nothing is left scheduled on it so its daemon thread can
+                # exit instead of parking until process exit.
+                loop.call_soon_threadsafe(self._maybe_stop_orphaned_warmup_loop, loop)
 
     async def _run_stage(
         self,
@@ -863,6 +892,16 @@ class SandboxPoolSync:
             finally:
                 raise
 
+    def _maybe_stop_orphaned_warmup_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        # Runs on the warmup loop itself after a warmup task has finished. A
+        # loop the pool still owns is stopped by _stop_reconcile; an orphaned
+        # loop stops itself here once its last task is done.
+        if self._warmup_loop is loop:
+            return
+        if asyncio.all_tasks(loop):
+            return
+        loop.stop()
+
     async def _wait_until_healthy_async(
         self,
         sandbox: SandboxSync,
@@ -870,6 +909,7 @@ class SandboxPoolSync:
         deadline: float,
         stage: str,
         trace_span: object = None,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         last_error: Exception | None = None
         loop = asyncio.get_running_loop()
@@ -884,7 +924,8 @@ class SandboxPoolSync:
                         health_check(sandbox)
                         if health_check is not None
                         else sandbox.is_healthy()
-                    )
+                    ),
+                    executor=executor,
                 )
                 if healthy:
                     annotate_health_span(
@@ -945,7 +986,7 @@ class SandboxPoolSync:
         with self._warming_lock:
             if token not in self._warmup_tokens:
                 return
-            self._warmup_tokens.remove(token)
+            del self._warmup_tokens[token]
             self._started_warmup_tokens.discard(token)
             self._warming_count = max(0, self._warming_count - 1)
         if error is not None and not isinstance(error, CancelledError):
@@ -1529,16 +1570,21 @@ class SandboxPoolSync:
             self._heartbeat_thread = None
             with self._warming_lock:
                 warmup_futures = tuple(self._warmup_futures)
+                generation = self._run_generation
             if not wait_for_warmup:
                 for future in warmup_futures:
                     future.cancel()
             deadline = time.monotonic() + _WARMUP_TERMINATION_TIMEOUT_SECONDS
             # Cancelling the thread-safe Future marks that wrapper done before the
             # coroutine's shielded cleanup has finished. Keep the dispatch loop
-            # alive until every warmup token reaches its terminal callback.
+            # alive until every warmup token of this run reaches its terminal
+            # callback.
             while time.monotonic() < deadline:
                 with self._warming_lock:
-                    if not self._warmup_tokens:
+                    if not any(
+                        token_generation == generation
+                        for token_generation in self._warmup_tokens.values()
+                    ):
                         break
                 time.sleep(0.01)
             for future in warmup_futures:
@@ -1546,33 +1592,61 @@ class SandboxPoolSync:
                     future.result(timeout=max(0.0, deadline - time.monotonic()))
                 except BaseException:
                     pass
-            loop = self._warmup_loop
-            loop_thread = self._warmup_loop_thread
-            self._warmup_loop = None
-            self._warmup_loop_thread = None
-            if loop is not None:
+            with self._warming_lock:
+                loop = self._warmup_loop
+                loop_thread = self._warmup_loop_thread
+                create_executor = self._create_executor
+                executor = self._warmup_executor
+                outstanding_tokens = frozenset(
+                    token
+                    for token, token_generation in self._warmup_tokens.items()
+                    if token_generation == generation
+                )
+                self._warmup_loop = None
+                self._warmup_loop_thread = None
+                self._create_executor = None
+                self._warmup_executor = None
+            if loop is not None and outstanding_tokens:
+                # issue #2056: a warmup coroutine of this run is still genuinely
+                # in flight once the bounded wait above gives up -- _run_stage's
+                # own cancellation handling deliberately blocks on its underlying
+                # executor call instead of abandoning it. Stopping or closing the
+                # loop here would destroy that still-pending asyncio Task ("Task
+                # was destroyed but it is pending!") and skip the warmup's own
+                # sandbox cleanup in its finally block. Orphan this run's warmup
+                # resources instead: the coroutine captured them at start, so it
+                # can finish and clean up after itself, and the loop stops itself
+                # once nothing is left scheduled on it. The loop thread is a
+                # daemon, and start() installs fresh resources for a new run.
+                logger.warning(
+                    f"Pool shutdown leaving warmup loop running for in-flight warmup: pool_name={self._config.pool_name} outstanding_warmups={len(outstanding_tokens)}"
+                )
+            elif loop is not None:
                 loop.call_soon_threadsafe(loop.stop)
-            if (
-                loop_thread is not None
-                and loop_thread is not threading.current_thread()
-            ):
-                loop_thread.join(timeout=5)
-            if loop is not None and not loop.is_running():
-                loop.close()
-            create_executor = self._create_executor
-            self._create_executor = None
-            if create_executor is not None:
-                create_executor.shutdown(wait=False, cancel_futures=True)
-                self._await_executor_threads(
-                    create_executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
-                )
-            executor = self._warmup_executor
-            self._warmup_executor = None
-            if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
-                self._await_executor_threads(
-                    executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
-                )
+                if (
+                    loop_thread is not None
+                    and loop_thread is not threading.current_thread()
+                ):
+                    loop_thread.join(timeout=5)
+                if loop is not None and not loop.is_running():
+                    loop.close()
+                if create_executor is not None:
+                    create_executor.shutdown(wait=False, cancel_futures=True)
+                    self._await_executor_threads(
+                        create_executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
+                    )
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    self._await_executor_threads(
+                        executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
+                    )
+            # else: refs are all None -- an earlier call already reclaimed this
+            # run's resources (or orphaned them). Idempotent bookkeeping. Kept
+            # inside _stop_lock: start() holds _stop_lock and _lifecycle_lock
+            # together, so a thread inside this section can always take
+            # _lifecycle_lock without inverting the order, and start()'s failure
+            # path re-enters this lock on the same thread.
+            self._release_primary_lock_best_effort()
             # Idempotent bookkeeping. Kept inside _stop_lock: start() holds
             # _stop_lock and _lifecycle_lock together, so a thread inside this
             # section can always take _lifecycle_lock without inverting the
