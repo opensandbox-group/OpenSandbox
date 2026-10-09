@@ -73,8 +73,13 @@ func httpStatusForWakeErr(err error) int {
 // 503, the writer swallows it, parks the request on the waker, and lets the
 // caller replay the request once on a fresh route. Nothing has been written
 // to the client at interception time, so replay is legal.
+//
+// The concrete *statusCapturingResponseWriter is embedded (not the
+// http.ResponseWriter interface) so Flush and Hijack are promoted:
+// ReverseProxy must keep flushing streaming responses (SSE) after every
+// copied event, which the interface embedding silently broke.
 type wakeReplay struct {
-	http.ResponseWriter
+	*statusCapturingResponseWriter
 
 	proxy  *Proxy
 	host   *sandboxHost
@@ -91,7 +96,7 @@ type wakeReplay struct {
 }
 
 func newWakeReplay(proxy *Proxy, sw *statusCapturingResponseWriter, host *sandboxHost, r *http.Request, target sandbox.EndpointTarget) *wakeReplay {
-	c := &wakeReplay{ResponseWriter: sw, proxy: proxy, host: host, r: r, target: target}
+	c := &wakeReplay{statusCapturingResponseWriter: sw, proxy: proxy, host: host, r: r, target: target}
 	c.copied = captureBodyForReplay(r)
 	return c
 }
@@ -104,22 +109,41 @@ func (c *wakeReplay) replayable() bool {
 	return c.copied != nil
 }
 
-// captureBodyForReplay buffers the request body up to the replay cap. Over
-// the cap the body keeps streaming through a passthrough reader and nil is
-// returned (not replayable).
+// captureBodyForReplay buffers the request body up to the replay cap.
+// Over the cap the body keeps streaming untouched and nil is returned (not
+// replayable). Content-Length short-circuits skip touching the body for the
+// common bodyless and obviously oversized requests.
 func captureBodyForReplay(r *http.Request) []byte {
-	if r.Body == nil {
+	if r.Body == nil || r.ContentLength == 0 {
 		return []byte{}
 	}
-	buf := make([]byte, wakeReplayBodyMax+1)
+	if r.ContentLength > wakeReplayBodyMax {
+		return nil
+	}
+	// An exact-size buffer when Content-Length is authoritative; one extra
+	// byte only for chunked bodies, so a full read proves the body exceeded
+	// the cap.
+	knownLength := r.ContentLength > 0
+	size := wakeReplayBodyMax + 1
+	if knownLength {
+		size = int(r.ContentLength)
+	}
+	buf := make([]byte, size)
 	n, err := io.ReadFull(r.Body, buf)
-	if err != nil {
-		// io.EOF or io.ErrUnexpectedEOF: the whole body fit in the buffer.
+	if err != nil || knownLength {
+		// Complete read: either the short-read EOF family, or a
+		// Content-Length body fully consumed.
 		body := buf[:n]
+		if !knownLength {
+			// Release the oversized scratch so a parked request retains only
+			// the captured bytes.
+			body = append([]byte(nil), buf[:n]...)
+		}
 		r.Body = bodyWithClose{Reader: bytes.NewReader(body), closeFn: r.Body.Close}
 		return body
 	}
-	// Larger than the cap: keep streaming the original body.
+	// Larger than the cap (unknown Content-Length): keep streaming the
+	// original body.
 	r.Body = bodyWithClose{
 		Reader:  io.MultiReader(bytes.NewReader(buf), r.Body),
 		closeFn: r.Body.Close,
@@ -154,15 +178,30 @@ func (c *wakeReplay) WriteHeader(code int) {
 		c.replayable() && c.stale.Load() && c.intercepted.CompareAndSwap(false, true) {
 		// Parking inside WriteHeader blocks the handler goroutine before any
 		// byte reached the client: the park holds no upstream connection.
+		// ReverseProxy's copyHeader has already copied the manufactured 503's
+		// headers into the underlying map; drop them so neither the replay's
+		// real response nor a wake-error answer inherits the stray
+		// Retry-After and duplicated power-by.
+		clear(c.Header())
 		c.wakeErr = c.proxy.waker.Wake(c.r.Context(), c.target)
 		return
 	}
-	c.ResponseWriter.WriteHeader(code)
+	c.statusCapturingResponseWriter.WriteHeader(code)
 }
 
 func (c *wakeReplay) Write(b []byte) (int, error) {
 	if c.intercepted.Load() {
 		return len(b), nil
 	}
-	return c.ResponseWriter.Write(b)
+	return c.statusCapturingResponseWriter.Write(b)
+}
+
+// Flush forwards to the capturing writer unless the stale 503 was
+// intercepted: a flush after a swallowed WriteHeader would implicitly commit
+// a 200 to the client while the request is parked.
+func (c *wakeReplay) Flush() {
+	if c.intercepted.Load() {
+		return
+	}
+	c.statusCapturingResponseWriter.Flush()
 }

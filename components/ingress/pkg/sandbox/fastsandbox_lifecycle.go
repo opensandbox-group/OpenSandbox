@@ -88,6 +88,9 @@ type SandboxLifecycle interface {
 	ProbeSandbox(ctx context.Context, target EndpointTarget) (SandboxProbe, error)
 	// ResumeSandbox flips the desired state back to Running. It is an
 	// asynchronous intent: convergence is observed through ProbeSandbox.
+	// request_id must be unique per checkpoint intent — a retry with a different
+	// expected checkpoint fence must carry a fresh request_id so FastPath-side
+	// request dedup cannot replay the rejected attempt's outcome.
 	ResumeSandbox(ctx context.Context, target EndpointTarget, expectedCheckpointID, requestID string) (ResumeOutcome, error)
 }
 
@@ -147,7 +150,12 @@ func (p *FastSandboxProvider) ResumeSandbox(ctx context.Context, target Endpoint
 			// Checkpoint fence: a re-pause raced in; restart within the budget.
 			return ResumeConflict, nil
 		case codes.Canceled:
-			return 0, errors.New("FastPath resume canceled")
+			// Usually the request context: a client disconnect mid-wake.
+			// Wrapping context.Canceled lets the proxy suppress the answer.
+			return 0, &fastPathResolutionError{
+				public: fmt.Errorf("%w: FastPath resume canceled", context.Canceled),
+				cause:  err,
+			}
 		default:
 			return 0, &fastPathResolutionError{
 				public: fmt.Errorf("%w: FastPath resume temporarily unavailable", ErrSandboxNotReady),
@@ -196,7 +204,8 @@ func mapFastPathLifecycleError(err error) error {
 	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.FailedPrecondition:
 		public = fmt.Errorf("%w: FastPath lifecycle temporarily unavailable", ErrSandboxNotReady)
 	case codes.Canceled:
-		public = errors.New("FastPath lifecycle canceled")
+		// Usually the request context: a client disconnect mid-probe.
+		public = fmt.Errorf("%w: FastPath lifecycle canceled", context.Canceled)
 	default:
 		public = fmt.Errorf("FastPath lifecycle failed: %s", status.Code(err))
 	}

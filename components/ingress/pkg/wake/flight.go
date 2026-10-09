@@ -45,8 +45,11 @@ type flight struct {
 	removeOnce sync.Once
 }
 
-func (f *flight) requestID() string {
-	return fmt.Sprintf("wake-%s-%d", f.target.SandboxID, f.epoch)
+func (f *flight) requestID(attempt int) string {
+	// Unique per checkpoint intent: a ResumeConflict retry changes the
+	// expected checkpoint fence, so FastPath request_id dedup (if any) must
+	// not replay the rejected attempt's outcome.
+	return fmt.Sprintf("wake-%s-%d-%d", f.target.SandboxID, f.epoch, attempt)
 }
 
 // wait blocks until the flight finishes, the caller's context is done, or
@@ -102,8 +105,10 @@ func (f *flight) run(checkpointID string) {
 // when the flight finished without reaching the poll phase.
 func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backoff *backoff, checkpointID *string) bool {
 	w := f.waker
+	attempt := 0
 	for {
-		outcome, err := w.lifecycle.ResumeSandbox(ctx, f.target, *checkpointID, f.requestID())
+		attempt++
+		outcome, err := w.lifecycle.ResumeSandbox(ctx, f.target, *checkpointID, f.requestID(attempt))
 		if err == nil && outcome != sandbox.ResumeConflict {
 			return true
 		}
@@ -119,15 +124,21 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 			// checkpoint; a sandbox that is no longer wakeable resolves the
 			// flight from its current phase.
 			probe, probeErr := w.lifecycle.ProbeSandbox(ctx, f.target)
-			if probeErr != nil {
-				f.finish(probeErr)
-				return false
-			}
-			if probe.Phase != sandbox.SandboxPhaseWakeable {
+			switch {
+			case probeErr == nil && probe.Phase != sandbox.SandboxPhaseWakeable:
 				f.finish(phaseOutcome(probe.Phase))
 				return false
+			case probeErr == nil:
+				*checkpointID = probe.CheckpointID
+			case errors.Is(probeErr, sandbox.ErrSandboxNotFound):
+				f.finish(probeErr)
+				return false
+			default:
+				// Transient probe failure right after a conflict: fall
+				// through to the backoff and retry the resume with the
+				// previous checkpoint; the fence fires again and the re-probe
+				// repeats.
 			}
-			*checkpointID = probe.CheckpointID
 		}
 		if !sleepBackoff(ctx, budget, backoff) {
 			f.finish(ErrBudgetExhausted)

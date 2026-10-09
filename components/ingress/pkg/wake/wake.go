@@ -175,17 +175,17 @@ func (w *Waker) Wake(ctx context.Context, target sandbox.EndpointTarget) error {
 	telemetry.RecordParkDelta(1)
 	waitErr := flight.wait(ctx)
 	telemetry.RecordParkDelta(-1)
-	telemetry.RecordParkWait(parkOutcome(waitErr, ctx), w.now().Sub(start))
+	telemetry.RecordParkWait(parkOutcome(waitErr), w.now().Sub(start))
 	return waitErr
 }
 
-func parkOutcome(waitErr error, ctx context.Context) string {
+func parkOutcome(waitErr error) string {
 	switch {
 	case waitErr == nil:
 		return "served"
 	case errors.Is(waitErr, ErrBudgetExhausted):
 		return "budget_exhausted"
-	case errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) || ctx.Err() != nil:
+	case errors.Is(waitErr, context.Canceled), errors.Is(waitErr, context.DeadlineExceeded):
 		return "canceled"
 	default:
 		return "error"

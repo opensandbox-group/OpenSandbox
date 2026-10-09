@@ -41,6 +41,7 @@ type scriptedLifecycle struct {
 	resumeOut   []sandbox.ResumeOutcome
 	resumeErrs  []error
 	resumeCalls int
+	resumeIDs   []string
 	lastReqID   string
 	lastCkpt    string
 	resumeHook  func() // optional; runs inside ResumeSandbox under lock
@@ -60,6 +61,7 @@ func (s *scriptedLifecycle) ProbeSandbox(context.Context, sandbox.EndpointTarget
 func (s *scriptedLifecycle) ResumeSandbox(_ context.Context, _ sandbox.EndpointTarget, checkpointID, requestID string) (sandbox.ResumeOutcome, error) {
 	s.mu.Lock()
 	s.resumeCalls++
+	s.resumeIDs = append(s.resumeIDs, requestID)
 	s.lastReqID = requestID
 	s.lastCkpt = checkpointID
 	call := s.resumeCalls - 1
@@ -138,7 +140,7 @@ func TestWakeParksUntilReadyAndResumesWithCheckpointFence(t *testing.T) {
 	require.Equal(t, 1, resumeCalls)
 	require.Equal(t, "ckpt-1", checkpoint)
 	scripted.mu.Lock()
-	require.Regexp(t, `^wake-sb-1-\d+$`, scripted.lastReqID)
+	require.Regexp(t, `^wake-sb-1-\d+-1$`, scripted.lastReqID)
 	scripted.mu.Unlock()
 }
 
@@ -262,6 +264,34 @@ func TestWakeConflictRestartsWithFreshCheckpoint(t *testing.T) {
 	resumeCalls, checkpoint := scripted.snapshot()
 	require.Equal(t, 2, resumeCalls)
 	require.Equal(t, "ckpt-2", checkpoint)
+}
+
+func TestWakeConflictWithTransientProbeRetriesInsteadOfFailing(t *testing.T) {
+	lifecycle := &scriptedLifecycle{
+		// owner detection, conflict re-probe (transient failure), conflict
+		// re-probe (fresh checkpoint), readiness poll.
+		probes: []probeCall{
+			pausedProbe("ckpt-1"),
+			{probe: sandbox.SandboxProbe{Phase: sandbox.SandboxPhaseNotReady}, err: fmt.Errorf("%w: probe down", sandbox.ErrSandboxNotReady)},
+			pausedProbe("ckpt-2"),
+			readyProbe(),
+		},
+		// First resume hits the fence, the retry after the transient probe
+		// conflicts again, the last one is accepted.
+		resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeConflict, sandbox.ResumeConflict, sandbox.ResumeAccepted},
+		resumeErrs: []error{nil, nil, nil},
+	}
+	waker, scripted := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 8, RetryInterval: time.Millisecond}, lifecycle)
+
+	require.NoError(t, waker.Wake(context.Background(), wakeTarget))
+	resumeCalls, checkpoint := scripted.snapshot()
+	require.Equal(t, 3, resumeCalls)
+	require.Equal(t, "ckpt-2", checkpoint)
+	// Each checkpoint intent carries a distinct request_id so FastPath-side
+	// dedup cannot replay a rejected fence.
+	scripted.mu.Lock()
+	require.NotEqual(t, scripted.resumeIDs[0], scripted.resumeIDs[2])
+	scripted.mu.Unlock()
 }
 
 func TestWakeTreatsAlreadyRunningAsJoined(t *testing.T) {

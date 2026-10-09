@@ -21,6 +21,7 @@ package activity
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,6 +78,9 @@ type RedisConfig struct {
 	// sandbox) per interval, so the write rate is independent of the
 	// per-sandbox request rate.
 	MinInterval time.Duration
+	// NowMillis overrides the observation clock; nil uses the wall clock.
+	// Must be set before construction, never swapped afterwards.
+	NowMillis func() int64
 
 	Logger logger.Logger
 }
@@ -95,10 +99,27 @@ type RedisRecorder struct {
 	ch        chan observation
 	stopped   atomic.Bool
 	nowMillis func() int64
+
+	// scriptSHA caches the loaded Lua script so each pipelined command
+	// carries only the SHA, not the ~200-byte source. nil until first
+	// loaded; a NOSCRIPT from Redis (restart, SCRIPT FLUSH) triggers a
+	// reload and one batch retry.
+	scriptMu  sync.Mutex
+	scriptSHA atomic.Value // string
 }
 
-func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig) *RedisRecorder {
-	r := &RedisRecorder{client: client, cfg: cfg, ch: make(chan observation, recordChanCap), nowMillis: func() int64 { return time.Now().UnixMilli() }}
+func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig) (*RedisRecorder, error) {
+	if cfg.TTL <= 0 {
+		return nil, errors.New("activity: TTL must be positive, or every write is rejected by Redis and the sweeper never sees activity")
+	}
+	if cfg.MinInterval < 0 {
+		return nil, errors.New("activity: MinInterval cannot be negative")
+	}
+	nowMillis := cfg.NowMillis
+	if nowMillis == nil {
+		nowMillis = func() int64 { return time.Now().UnixMilli() }
+	}
+	r := &RedisRecorder{client: client, cfg: cfg, ch: make(chan observation, recordChanCap), nowMillis: nowMillis}
 	for range recordWorkers {
 		go r.runWorker(ctx)
 	}
@@ -109,7 +130,7 @@ func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig
 	if cfg.MinInterval > 0 {
 		go wait.UntilWithContext(ctx, r.runCleanupThrottle, cfg.MinInterval*2)
 	}
-	return r
+	return r, nil
 }
 
 // runWorker drains observations into batches and flushes each batch as one
@@ -173,21 +194,31 @@ func (r *RedisRecorder) Record(namespace, sandboxID string) {
 // observations only make the recorded last-active slightly stale, which can
 // delay a pause by at most one interval and never accelerate one; the Lua
 // monotonic max keeps any racing order harmless.
+//
+// The compare-and-swap loop keeps the bound exact under concurrency: a
+// plain check-then-act would let every request for the same sandbox pass
+// once the interval window reopens, emitting one write per request instead
+// of one per interval.
 func (r *RedisRecorder) shouldRecord(obs observation) bool {
 	if r.cfg.MinInterval <= 0 {
 		return true
 	}
 	key := struct{ namespace, sandboxID string }{namespace: obs.namespace, sandboxID: obs.sandboxID}
 	now := time.UnixMilli(obs.atMillis)
-	prev, loaded := r.lastSent.LoadOrStore(key, now)
-	if !loaded {
-		return true
+	for {
+		prev, loaded := r.lastSent.LoadOrStore(key, now)
+		if !loaded {
+			return true
+		}
+		if now.Sub(prev.(time.Time)) < r.cfg.MinInterval {
+			return false
+		}
+		if r.lastSent.CompareAndSwap(key, prev, now) {
+			return true
+		}
+		// Lost the race to a concurrent writer; re-check against the value
+		// it stored.
 	}
-	if now.Sub(prev.(time.Time)) < r.cfg.MinInterval {
-		return false
-	}
-	r.lastSent.Store(key, now)
-	return true
 }
 
 // doRecordBatch flushes one batch as a single pipelined round trip. Every
@@ -196,17 +227,75 @@ func (r *RedisRecorder) shouldRecord(obs observation) bool {
 func (r *RedisRecorder) doRecordBatch(batch []observation) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
 	defer cancel()
-	pipe := r.client.Pipeline()
-	for _, obs := range batch {
-		pipe.Eval(
-			ctx,
-			monotonicMaxScript,
-			[]string{KeyPrefix + ":" + obs.sandboxID},
-			obs.atMillis,
-			int64(r.cfg.TTL/time.Second),
-		)
+	for attempt := 0; ; attempt++ {
+		sha, ok := r.loadedScriptSHA(ctx)
+		if !ok {
+			r.dropBatch(batch, errors.New("activity: script load failed"))
+			return
+		}
+		pipe := r.client.Pipeline()
+		for _, obs := range batch {
+			pipe.EvalSha(
+				ctx,
+				sha,
+				[]string{KeyPrefix + ":" + obs.sandboxID},
+				obs.atMillis,
+				int64(r.cfg.TTL/time.Second),
+			)
+		}
+		cmds, err := pipe.Exec(ctx)
+		if attempt == 0 && isNoScriptErr(cmds, err) {
+			// Redis lost the script (restart, SCRIPT FLUSH): reload once and
+			// replay the whole batch.
+			r.scriptMu.Lock()
+			r.scriptSHA.Store("")
+			r.scriptMu.Unlock()
+			continue
+		}
+		r.reportBatchOutcome(batch, cmds, err)
+		return
 	}
-	cmds, err := pipe.Exec(ctx)
+}
+
+// loadedScriptSHA returns the cached script SHA, loading it on first use or
+// after an invalidation. ok is false when Redis is unreachable; the caller
+// drops the batch, which can only delay a pause.
+func (r *RedisRecorder) loadedScriptSHA(ctx context.Context) (string, bool) {
+	r.scriptMu.Lock()
+	defer r.scriptMu.Unlock()
+	if sha, ok := r.scriptSHA.Load().(string); ok && sha != "" {
+		return sha, true
+	}
+	sha, err := r.client.ScriptLoad(ctx, monotonicMaxScript).Result()
+	if err != nil {
+		return "", false
+	}
+	r.scriptSHA.Store(sha)
+	return sha, true
+}
+
+func isNoScriptErr(cmds []redis.Cmder, err error) bool {
+	if err != nil && strings.Contains(err.Error(), "NOSCRIPT") {
+		return true
+	}
+	for _, cmd := range cmds {
+		if cmd.Err() != nil && strings.Contains(cmd.Err().Error(), "NOSCRIPT") {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RedisRecorder) dropBatch(batch []observation, err error) {
+	telemetry.RecordActivityWriteDropped(int64(len(batch)))
+	r.cfg.Logger.With(
+		logger.Field{Key: "dropped", Value: len(batch)},
+		logger.Field{Key: "batch", Value: len(batch)},
+		logger.Field{Key: "error", Value: err},
+	).Debugf("activity: redis batch dropped")
+}
+
+func (r *RedisRecorder) reportBatchOutcome(batch []observation, cmds []redis.Cmder, err error) {
 	dropped := 0
 	if err != nil {
 		dropped = len(batch)

@@ -105,6 +105,31 @@ func TestProbeSandboxWithoutLifecycleConfigurationFails(t *testing.T) {
 	require.ErrorIs(t, err, ErrLifecycleUnavailable)
 }
 
+func TestLifecycleCanceledWrapsContextCanceled(t *testing.T) {
+	// The wake path probes and resumes on the request context; a client
+	// disconnect surfaces as codes.Canceled. Wrapping context.Canceled lets
+	// the proxy suppress the answer to the gone connection.
+	lifecycle := &scriptedLifecycleRPCs{
+		getSandboxFunc: func(context.Context, *fastpathv2.GetSandboxRequest) (*fastpathv2.GetSandboxResponse, error) {
+			return nil, status.Error(codes.Canceled, "client disconnected")
+		},
+		resumeFunc: func(context.Context, *fastpathv2.ResumeSandboxRequest) (*fastpathv2.ResumeSandboxResponse, error) {
+			return nil, status.Error(codes.Canceled, "client disconnected")
+		},
+	}
+	provider := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	target := EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080}
+
+	_, err := provider.ProbeSandbox(context.Background(), target)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, ErrSandboxNotReady)
+
+	_, err = provider.ResumeSandbox(context.Background(), target, "ckpt", "req")
+	require.ErrorIs(t, err, context.Canceled)
+	detailed := err.(interface{ InternalCause() error })
+	require.Error(t, detailed.InternalCause())
+}
+
 func TestResumeSandboxMapsFenceOutcomes(t *testing.T) {
 	for _, test := range []struct {
 		name     string

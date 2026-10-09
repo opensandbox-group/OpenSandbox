@@ -131,6 +131,10 @@ func registerIngressMetrics() error {
 		"ingress.park.wait.duration",
 		metric.WithDescription("Per-parked-request wait duration by outcome (served, budget_exhausted, canceled, error)"),
 		metric.WithUnit("s"),
+		// Sized around the default 5s park budget: the interesting signal is
+		// a ~200ms same-node resume versus a near-exhaustion wait, which the
+		// SDK default second-scale buckets would collapse into one bucket.
+		metric.WithExplicitBucketBoundaries(0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10),
 	)
 	if err != nil {
 		return err

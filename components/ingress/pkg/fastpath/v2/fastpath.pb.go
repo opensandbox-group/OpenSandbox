@@ -1228,7 +1228,7 @@ const file_fastpath_proto_rawDesc = "" +
 	"\n" +
 	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\x12.\n" +
 	"\x13paused_unix_seconds\x18\x05 \x01(\x03R\x11pausedUnixSeconds\x12!\n" +
-	"\ffastlet_name\x18\x06 \x01(\tR\vfastletName\"\xe9\x02\n" +
+	"\ffastlet_name\x18\x06 \x01(\tR\vfastletName\"\xf5\x02\n" +
 	"\vSandboxInfo\x128\n" +
 	"\bidentity\x18\x01 \x01(\v2\x1c.fastpath.v2.SandboxIdentityR\bidentity\x12-\n" +
 	"\x12applied_generation\x18\x02 \x01(\x03R\x11appliedGeneration\x122\n" +
@@ -1239,7 +1239,7 @@ const file_fastpath_proto_rawDesc = "" +
 	"\x05state\x18\b \x01(\x0e2\x19.fastpath.v2.SandboxStateR\x05state\x12;\n" +
 	"\n" +
 	"checkpoint\x18\t \x01(\v2\x1b.fastpath.v2.CheckpointInfoR\n" +
-	"checkpoint\"}\n" +
+	"checkpointJ\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"}\n" +
 	"\x11GetSandboxRequest\x127\n" +
 	"\asandbox\x18\x01 \x01(\v2\x1d.fastpath.v2.SandboxReferenceR\asandbox\x12/\n" +
 	"\x13expected_generation\x18\x02 \x01(\x03R\x12expectedGeneration\"h\n" +

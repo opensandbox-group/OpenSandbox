@@ -142,8 +142,9 @@ func main() {
 	} else {
 		proxyOptions = append(proxyOptions, proxy.WithConnectObserver(connectObserver))
 	}
-	proxyOptions = append(proxyOptions, newActivityOption(ctx)...)
-	proxyOptions = append(proxyOptions, newWakeOption(fsbProvider)...)
+	activityRecorder, activityOptions := newActivityRecorder(ctx)
+	proxyOptions = append(proxyOptions, activityOptions...)
+	proxyOptions = append(proxyOptions, newWakeOption(fsbProvider, activityRecorder)...)
 
 	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
@@ -162,28 +163,33 @@ func main() {
 	}
 }
 
-// newActivityOption wires the OSEP-0024 auto-pause activity recorder so the
-// server-side idle sweeper sees live traffic. Fire-and-forget; never blocks
-// requests.
-func newActivityOption(ctx context.Context) []proxy.Option {
+// newActivityRecorder wires the OSEP-0024 auto-pause activity recorder so
+// the server-side idle sweeper sees live traffic. Fire-and-forget; never
+// blocks requests. The returned recorder (Noop when disabled) is also the
+// wake flights' activity writer, so a completed resume starts the idle
+// clock even when recording is disabled for request traffic.
+func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option) {
 	if !flag.ActivityEnabled {
-		return nil
+		return activity.Noop{}, nil
 	}
 	activityClient, err := activity.RedisClientFromDSN(flag.ActivityRedisDSN)
 	if err != nil {
 		log.Panicf("Failed to create Redis client for activity: %v", err)
 	}
-	recorder := activity.NewRedisRecorder(ctx, activityClient, activity.RedisConfig{
+	recorder, err := activity.NewRedisRecorder(ctx, activityClient, activity.RedisConfig{
 		TTL:         time.Duration(flag.ActivityTTLSeconds) * time.Second,
 		MinInterval: flag.ActivityMinInterval,
 		Logger:      proxy.Logger,
 	})
-	return []proxy.Option{proxy.WithActivityRecorder(recorder)}
+	if err != nil {
+		log.Panicf("Invalid activity configuration: %v", err)
+	}
+	return recorder, []proxy.Option{proxy.WithActivityRecorder(recorder)}
 }
 
 // newWakeOption wires the OSEP-0024 wake-on-access orchestrator: requests
 // routed to paused fast sandboxes park while a resume flight restores them.
-func newWakeOption(fsbProvider *sandbox.FastSandboxProvider) []proxy.Option {
+func newWakeOption(fsbProvider *sandbox.FastSandboxProvider, activityWriter wake.ActivityWriter) []proxy.Option {
 	if !flag.WakeEnabled {
 		return nil
 	}
@@ -196,7 +202,7 @@ func newWakeOption(fsbProvider *sandbox.FastSandboxProvider) []proxy.Option {
 		RetryInterval: flag.WakeRetryInterval,
 		RetryFactor:   flag.WakeRetryFactor,
 		RetryJitter:   flag.WakeRetryJitter,
-	}, fsbProvider, nil)
+	}, fsbProvider, activityWriter)
 	if err != nil {
 		log.Panicf("Failed to create waker: %v", err)
 	}

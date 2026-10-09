@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,19 +28,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestRecorder(t *testing.T, minInterval time.Duration) (*RedisRecorder, *miniredis.Miniredis, *int64) {
+func newTestRecorder(t *testing.T, minInterval time.Duration) (*RedisRecorder, *miniredis.Miniredis, *atomic.Int64) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
-	now := time.Now().UnixMilli()
-	recorder := NewRedisRecorder(context.Background(), client, RedisConfig{
+	var now atomic.Int64
+	now.Store(time.Now().UnixMilli())
+	recorder, err := NewRedisRecorder(context.Background(), client, RedisConfig{
 		TTL:         30 * time.Minute,
 		MinInterval: minInterval,
+		NowMillis:   now.Load,
 		Logger:      mustLogger(),
 	})
-	recorder.nowMillis = func() int64 { return now }
+	require.NoError(t, err)
 	return recorder, mr, &now
+}
+
+func TestNewRedisRecorderRejectsInvalidConfig(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = client.Close() })
+
+	_, err := NewRedisRecorder(context.Background(), client, RedisConfig{TTL: 0, Logger: mustLogger()})
+	require.ErrorContains(t, err, "TTL must be positive")
+
+	_, err = NewRedisRecorder(context.Background(), client, RedisConfig{TTL: time.Minute, MinInterval: -time.Second, Logger: mustLogger()})
+	require.ErrorContains(t, err, "cannot be negative")
 }
 
 func mustLogger() logger.Logger {
@@ -63,7 +77,7 @@ func TestActivityRecordWritesTimestampWithTTL(t *testing.T) {
 
 	recorder.Record("tenant-a", "sb-1")
 	value := waitForValue(t, mr, KeyPrefix+":sb-1")
-	require.Equal(t, strconv.FormatInt(*now, 10), value)
+	require.Equal(t, strconv.FormatInt(now.Load(), 10), value)
 
 	ttl := mr.TTL(KeyPrefix + ":sb-1")
 	require.Greater(t, ttl, 29*time.Minute)
@@ -71,12 +85,12 @@ func TestActivityRecordWritesTimestampWithTTL(t *testing.T) {
 
 func TestActivityMonotonicMaxNeverRegresses(t *testing.T) {
 	recorder, mr, now := newTestRecorder(t, 0)
-	base := *now
+	base := now.Load()
 
 	recorder.Record("tenant-a", "sb-1")
 	waitForValue(t, mr, KeyPrefix+":sb-1")
 
-	*now = base - 500 // an out-of-order older observation must not regress the key
+	now.Store(base - 500) // an out-of-order older observation must not regress the key
 	recorder.Record("tenant-a", "sb-1")
 	time.Sleep(100 * time.Millisecond)
 
@@ -87,12 +101,12 @@ func TestActivityMonotonicMaxNeverRegresses(t *testing.T) {
 
 func TestActivityCoalescesWritesPerSandbox(t *testing.T) {
 	recorder, mr, now := newTestRecorder(t, time.Second)
-	base := *now
+	base := now.Load()
 
 	recorder.Record("tenant-a", "sb-1")
 	waitForValue(t, mr, KeyPrefix+":sb-1")
 
-	*now = base + 500 // within the one-second min interval: dropped by coalescing
+	now.Store(base + 500) // within the one-second min interval: dropped by coalescing
 	recorder.Record("tenant-a", "sb-1")
 	time.Sleep(100 * time.Millisecond)
 
@@ -100,7 +114,7 @@ func TestActivityCoalescesWritesPerSandbox(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, strconv.FormatInt(base, 10), value)
 
-	*now = base + 1_500 // beyond the min interval: recorded
+	now.Store(base + 1_500) // beyond the min interval: recorded
 	recorder.Record("tenant-a", "sb-1")
 	for range 200 {
 		if value, _ := mr.Get(KeyPrefix + ":sb-1"); value == strconv.FormatInt(base+1_500, 10) {
@@ -124,9 +138,9 @@ func TestActivityBatchingFlushesEveryObservation(t *testing.T) {
 	recorder, mr, now := newTestRecorder(t, 0)
 	const sandboxes = 150 // spans multiple pipeline batches (batch size 64)
 
-	base := *now
+	base := now.Load()
 	for i := range sandboxes {
-		*now = base + int64(i)*(int64(i)+1)/2 // strictly increasing so every write wins the max
+		now.Store(base + int64(i)*(int64(i)+1)/2) // strictly increasing so every write wins the max
 		recorder.Record("tenant-a", fmt.Sprintf("sb-%d", i))
 	}
 

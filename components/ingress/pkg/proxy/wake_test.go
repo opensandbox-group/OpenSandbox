@@ -278,6 +278,65 @@ func TestProxyStaleRouteKeepsFiftyThreeForOversizedBody(t *testing.T) {
 	require.Zero(t, lifecycle.resumes)
 }
 
+func TestCaptureBodyForReplayShortCircuitsAndBuffers(t *testing.T) {
+	newRequest := func(body string, contentLength int64) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "http://ingress/exec", strings.NewReader(body))
+		r.ContentLength = contentLength
+		return r
+	}
+
+	t.Run("bodyless request skips reading", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "http://ingress/", nil)
+		r.ContentLength = 0
+		copied := captureBodyForReplay(r)
+		require.NotNil(t, copied)
+		require.Empty(t, copied)
+	})
+
+	t.Run("known length within cap is fully buffered", func(t *testing.T) {
+		r := newRequest("hello", 5)
+		copied := captureBodyForReplay(r)
+		require.Equal(t, "hello", string(copied))
+		payload, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, "hello", string(payload))
+	})
+
+	t.Run("exact cap length is replayable", func(t *testing.T) {
+		body := strings.Repeat("x", wakeReplayBodyMax)
+		r := newRequest(body, int64(len(body)))
+		copied := captureBodyForReplay(r)
+		require.Len(t, copied, wakeReplayBodyMax)
+	})
+
+	t.Run("known oversized length skips buffering and stays streaming", func(t *testing.T) {
+		body := strings.Repeat("x", wakeReplayBodyMax+10)
+		r := newRequest(body, int64(len(body)))
+		require.Nil(t, captureBodyForReplay(r))
+		payload, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, body, string(payload))
+	})
+
+	t.Run("chunked oversized body keeps streaming", func(t *testing.T) {
+		body := strings.Repeat("y", wakeReplayBodyMax+3)
+		r := newRequest(body, -1)
+		require.Nil(t, captureBodyForReplay(r))
+		payload, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, body, string(payload))
+	})
+
+	t.Run("chunked small body is buffered and scratch released", func(t *testing.T) {
+		r := newRequest("hello", -1)
+		copied := captureBodyForReplay(r)
+		require.Equal(t, "hello", string(copied))
+		payload, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, "hello", string(payload))
+	})
+}
+
 type hitCounter struct {
 	mu   sync.Mutex
 	next int
