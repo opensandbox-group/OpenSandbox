@@ -46,10 +46,13 @@ type flight struct {
 }
 
 func (f *flight) requestID(attempt int) string {
-	// Unique per checkpoint intent: a ResumeConflict retry changes the
-	// expected checkpoint fence, so FastPath request_id dedup (if any) must
-	// not replay the rejected attempt's outcome.
-	return fmt.Sprintf("wake-%s-%d-%d", f.target.SandboxID, f.epoch, attempt)
+	// Unique across attempts, replicas, and sandboxes: the fence attempt
+	// counter separates checkpoint intents, the per-process random prefix
+	// separates replicas (the epoch counter is process-local), and the
+	// namespace disambiguates same-named sandboxes so FastPath-side request
+	// dedup can never replay one caller's outcome to another.
+	return fmt.Sprintf("wake-%s-%s-%s-%d-%d",
+		f.target.Namespace, f.target.SandboxID, f.waker.processUnique, f.epoch, attempt)
 }
 
 // wait blocks until the flight finishes, the caller's context is done, or
@@ -109,7 +112,18 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 	for {
 		attempt++
 		outcome, err := w.lifecycle.ResumeSandbox(ctx, f.target, *checkpointID, f.requestID(attempt))
-		if err == nil && outcome != sandbox.ResumeConflict {
+
+		// "Not paused" (FailedPrecondition) is an unambiguous join — someone
+		// else already resumed past our fence — only when the fence
+		// referenced a real checkpoint. With an empty fence the same outcome
+		// also fires when the pause is still in progress, in which case
+		// joining a resume that does not exist would leave every parked
+		// request spinning until the budget: re-probe instead and decide
+		// from the current phase.
+		needsReprobe := outcome == sandbox.ResumeConflict ||
+			(outcome == sandbox.ResumeAlreadyRunning && *checkpointID == "")
+
+		if err == nil && !needsReprobe {
 			return true
 		}
 		if err != nil {
@@ -118,11 +132,10 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 				return false
 			}
 			// Transient RPC failure: retry within the remaining budget.
-		}
-		if outcome == sandbox.ResumeConflict {
-			// A re-pause raced in. Re-probe and restart with the fresh
-			// checkpoint; a sandbox that is no longer wakeable resolves the
-			// flight from its current phase.
+		} else {
+			// Fence conflict or ambiguous join: re-probe and restart with
+			// the fresh checkpoint; a sandbox that is no longer wakeable
+			// resolves the flight from its current phase.
 			probe, probeErr := w.lifecycle.ProbeSandbox(ctx, f.target)
 			switch {
 			case probeErr == nil && probe.Phase != sandbox.SandboxPhaseWakeable:
@@ -134,10 +147,9 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 				f.finish(probeErr)
 				return false
 			default:
-				// Transient probe failure right after a conflict: fall
-				// through to the backoff and retry the resume with the
-				// previous checkpoint; the fence fires again and the re-probe
-				// repeats.
+				// Transient probe failure: fall through to the backoff and
+				// retry the resume with the previous checkpoint; the fence
+				// fires again and the re-probe repeats.
 			}
 		}
 		if !sleepBackoff(ctx, budget, backoff) {

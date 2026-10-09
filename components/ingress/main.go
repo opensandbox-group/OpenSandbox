@@ -145,6 +145,11 @@ func main() {
 	activityRecorder, activityOptions := newActivityRecorder(ctx)
 	proxyOptions = append(proxyOptions, activityOptions...)
 	proxyOptions = append(proxyOptions, newWakeOption(fsbProvider, activityRecorder)...)
+	if flag.WakeEnabled && !flag.ActivityEnabled {
+		log.Printf("--wake-enabled without --activity-enabled: completed resumes are not recorded as activity, " +
+			"so the server-side idle sweeper will re-pause freshly resumed sandboxes after the idle threshold; " +
+			"enable activity recording for a stable wake loop")
+	}
 
 	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
@@ -166,8 +171,9 @@ func main() {
 // newActivityRecorder wires the OSEP-0024 auto-pause activity recorder so
 // the server-side idle sweeper sees live traffic. Fire-and-forget; never
 // blocks requests. The returned recorder (Noop when disabled) is also the
-// wake flights' activity writer, so a completed resume starts the idle
-// clock even when recording is disabled for request traffic.
+// wake flights' activity writer — but a Noop writes nothing, so running
+// --wake-enabled without --activity-enabled leaves resumed sandboxes
+// unrecorded (warned at startup).
 func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option) {
 	if !flag.ActivityEnabled {
 		return activity.Noop{}, nil

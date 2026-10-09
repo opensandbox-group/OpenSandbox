@@ -20,6 +20,8 @@ package wake
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -86,12 +88,20 @@ type Waker struct {
 	lot       *parkingLot
 	flights   flightRegistry
 	epoch     atomic.Uint64
-	now       func() time.Time
+	// processUnique disambiguates request_ids across replicas: the epoch
+	// counter is process-local, so two replicas could otherwise mint
+	// identical ids for the same sandbox.
+	processUnique string
+	now           func() time.Time
 }
 
 func NewWaker(cfg Config, lifecycle Lifecycle, activity ActivityWriter) (*Waker, error) {
 	if lifecycle == nil {
 		return nil, errors.New("wake: lifecycle client is required")
+	}
+	unique := make([]byte, 8)
+	if _, err := cryptorand.Read(unique); err != nil {
+		return nil, fmt.Errorf("wake: generate process-unique request id prefix: %w", err)
 	}
 	if cfg.ParkBudget <= 0 {
 		cfg.ParkBudget = DefaultParkBudget
@@ -109,11 +119,12 @@ func NewWaker(cfg Config, lifecycle Lifecycle, activity ActivityWriter) (*Waker,
 		cfg.RetryJitter = DefaultRetryJitter
 	}
 	return &Waker{
-		cfg:       cfg,
-		lifecycle: lifecycle,
-		activity:  activity,
-		lot:       newParkingLot(cfg.ParkMax),
-		now:       time.Now,
+		cfg:           cfg,
+		lifecycle:     lifecycle,
+		activity:      activity,
+		lot:           newParkingLot(cfg.ParkMax),
+		processUnique: hex.EncodeToString(unique),
+		now:           time.Now,
 	}, nil
 }
 

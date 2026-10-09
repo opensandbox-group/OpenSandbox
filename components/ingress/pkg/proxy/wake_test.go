@@ -16,6 +16,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -335,7 +336,28 @@ func TestCaptureBodyForReplayShortCircuitsAndBuffers(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "hello", string(payload))
 	})
+
+	t.Run("mid-body I/O failure is not marked replayable", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "http://ingress/exec", nil)
+		r.ContentLength = -1
+		r.Body = bodyWithClose{
+			Reader:  io.MultiReader(strings.NewReader("hello"), failingReader{}),
+			closeFn: func() error { return nil },
+		}
+		require.Nil(t, captureBodyForReplay(r))
+		// The consumed prefix stays in front of the original body so the
+		// forwarded request carries the full stream and the failure
+		// resurfaces downstream instead of shipping a truncated body.
+		payload, err := io.ReadAll(r.Body)
+		require.Equal(t, "hello", string(payload))
+		require.Error(t, err)
+		require.NotErrorIs(t, err, io.EOF)
+	})
 }
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
 
 type hitCounter struct {
 	mu   sync.Mutex

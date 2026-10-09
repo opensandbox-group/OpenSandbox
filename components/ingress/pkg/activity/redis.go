@@ -109,8 +109,17 @@ type RedisRecorder struct {
 }
 
 func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig) (*RedisRecorder, error) {
-	if cfg.TTL <= 0 {
-		return nil, errors.New("activity: TTL must be positive, or every write is rejected by Redis and the sweeper never sees activity")
+	if client == nil {
+		return nil, errors.New("activity: Redis client is required")
+	}
+	if cfg.Logger == nil {
+		return nil, errors.New("activity: Logger is required")
+	}
+	// The TTL is applied as whole seconds: a sub-second value would truncate
+	// to EX 0, which Redis rejects on every write — the sweeper would never
+	// see activity and could pause sandboxes in active use.
+	if cfg.TTL < time.Second {
+		return nil, errors.New("activity: TTL must be at least one second, or every write is rejected by Redis and the sweeper never sees activity")
 	}
 	if cfg.MinInterval < 0 {
 		return nil, errors.New("activity: MinInterval cannot be negative")

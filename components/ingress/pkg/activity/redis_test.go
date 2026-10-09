@@ -49,8 +49,19 @@ func TestNewRedisRecorderRejectsInvalidConfig(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	t.Cleanup(func() { _ = client.Close() })
 
-	_, err := NewRedisRecorder(context.Background(), client, RedisConfig{TTL: 0, Logger: mustLogger()})
-	require.ErrorContains(t, err, "TTL must be positive")
+	_, err := NewRedisRecorder(context.Background(), nil, RedisConfig{TTL: time.Minute, Logger: mustLogger()})
+	require.ErrorContains(t, err, "Redis client is required")
+
+	_, err = NewRedisRecorder(context.Background(), client, RedisConfig{TTL: time.Minute})
+	require.ErrorContains(t, err, "Logger is required")
+
+	_, err = NewRedisRecorder(context.Background(), client, RedisConfig{TTL: 0, Logger: mustLogger()})
+	require.ErrorContains(t, err, "TTL must be at least one second")
+
+	// A sub-second TTL would truncate to EX 0, which Redis rejects on every
+	// write.
+	_, err = NewRedisRecorder(context.Background(), client, RedisConfig{TTL: 500 * time.Millisecond, Logger: mustLogger()})
+	require.ErrorContains(t, err, "TTL must be at least one second")
 
 	_, err = NewRedisRecorder(context.Background(), client, RedisConfig{TTL: time.Minute, MinInterval: -time.Second, Logger: mustLogger()})
 	require.ErrorContains(t, err, "cannot be negative")

@@ -72,7 +72,10 @@ const (
 	// ResumeAccepted means this caller flipped the desired state to Running.
 	ResumeAccepted ResumeOutcome = iota
 	// ResumeAlreadyRunning means someone else already resumed; the caller
-	// joins the in-flight restore.
+	// joins the in-flight restore. Ambiguous with an empty expected
+	// checkpoint fence: the same "not paused" outcome also fires when the
+	// pause is still in progress, so callers must re-probe before treating
+	// it as a join.
 	ResumeAlreadyRunning
 	// ResumeConflict means the checkpoint fence fired (a re-pause raced in);
 	// the caller must re-probe and restart within its remaining budget.

@@ -113,6 +113,20 @@ func (c *wakeReplay) replayable() bool {
 // Over the cap the body keeps streaming untouched and nil is returned (not
 // replayable). Content-Length short-circuits skip touching the body for the
 // common bodyless and obviously oversized requests.
+//
+// The buffer grows on demand instead of reserving the cap upfront: with wake
+// enabled every fast-sandbox request passes through here, and a full-cap
+// reservation per in-flight request would pin memory that a bulk pause
+// event never intended to bound. A parked request still retains its
+// captured body until the park ends, so the worst case stays ParkMax
+// requests x wakeReplayBodyMax — bounded by parking admission, not by
+// eager allocation.
+//
+// Only a genuine EOF marks the capture complete: a mid-body I/O failure
+// (connection reset, TLS error) must not leave a truncated prefix marked as
+// replayable — the consumed bytes stay in front of the original body so the
+// forwarded request still carries the full stream and the failure resurfaces
+// downstream (loud, not silent truncation).
 func captureBodyForReplay(r *http.Request) []byte {
 	if r.Body == nil || r.ContentLength == 0 {
 		return []byte{}
@@ -120,35 +134,37 @@ func captureBodyForReplay(r *http.Request) []byte {
 	if r.ContentLength > wakeReplayBodyMax {
 		return nil
 	}
-	// An exact-size buffer when Content-Length is authoritative; one extra
-	// byte only for chunked bodies, so a full read proves the body exceeded
-	// the cap.
-	knownLength := r.ContentLength > 0
-	size := wakeReplayBodyMax + 1
-	if knownLength {
-		size = int(r.ContentLength)
-	}
-	buf := make([]byte, size)
-	n, err := io.ReadFull(r.Body, buf)
-	if err != nil || knownLength {
-		// Complete read: either the short-read EOF family, or a
-		// Content-Length body fully consumed.
-		body := buf[:n]
-		if !knownLength {
-			// Release the oversized scratch so a parked request retains only
-			// the captured bytes.
-			body = append([]byte(nil), buf[:n]...)
+	buf := make([]byte, 0, min(4096, wakeReplayBodyMax+1))
+	for {
+		if len(buf) == cap(buf) {
+			if len(buf) > wakeReplayBodyMax {
+				// More than the cap (unknown Content-Length): keep
+				// streaming what was read in front of the original body.
+				r.Body = bodyWithClose{Reader: io.MultiReader(bytes.NewReader(buf), r.Body), closeFn: r.Body.Close}
+				return nil
+			}
+			grown := make([]byte, len(buf), min(cap(buf)*2, wakeReplayBodyMax+1))
+			copy(grown, buf)
+			buf = grown
 		}
-		r.Body = bodyWithClose{Reader: bytes.NewReader(body), closeFn: r.Body.Close}
-		return body
+		n, err := r.Body.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			r.Body = bodyWithClose{Reader: io.MultiReader(bytes.NewReader(buf), r.Body), closeFn: r.Body.Close}
+			return nil
+		}
 	}
-	// Larger than the cap (unknown Content-Length): keep streaming the
-	// original body.
-	r.Body = bodyWithClose{
-		Reader:  io.MultiReader(bytes.NewReader(buf), r.Body),
-		closeFn: r.Body.Close,
+	// EOF: the whole body fit. Retain only the captured bytes, releasing the
+	// grown scratch.
+	body := buf
+	if cap(buf) > len(buf) {
+		body = append([]byte(nil), buf...)
 	}
-	return nil
+	r.Body = bodyWithClose{Reader: bytes.NewReader(body), closeFn: r.Body.Close}
+	return body
 }
 
 type bodyWithClose struct {

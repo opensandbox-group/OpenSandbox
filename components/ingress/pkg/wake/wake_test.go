@@ -140,7 +140,7 @@ func TestWakeParksUntilReadyAndResumesWithCheckpointFence(t *testing.T) {
 	require.Equal(t, 1, resumeCalls)
 	require.Equal(t, "ckpt-1", checkpoint)
 	scripted.mu.Lock()
-	require.Regexp(t, `^wake-sb-1-\d+-1$`, scripted.lastReqID)
+	require.Regexp(t, `^wake-tenant-a-sb-1-[0-9a-f]{16}-1-1$`, scripted.lastReqID)
 	scripted.mu.Unlock()
 }
 
@@ -264,6 +264,65 @@ func TestWakeConflictRestartsWithFreshCheckpoint(t *testing.T) {
 	resumeCalls, checkpoint := scripted.snapshot()
 	require.Equal(t, 2, resumeCalls)
 	require.Equal(t, "ckpt-2", checkpoint)
+}
+
+func TestWakeEmptyFenceAlreadyRunningReprobesInsteadOfJoining(t *testing.T) {
+	// A PAUSING sandbox carries no checkpoint yet, so the flight resumes
+	// with an empty fence. A FailedPrecondition then cannot distinguish
+	// "someone resumed" from "pause still in progress" — the flight must
+	// re-probe and retry with the fresh checkpoint instead of joining a
+	// resume that does not exist (which would spin parked requests until
+	// budget exhaustion).
+	lifecycle := &scriptedLifecycle{
+		// owner detection (empty checkpoint), ambiguous-join re-probe
+		// (fresh checkpoint), readiness poll.
+		probes:     []probeCall{pausedProbe(""), pausedProbe("ckpt-2"), readyProbe()},
+		resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAlreadyRunning, sandbox.ResumeAccepted},
+		resumeErrs: []error{nil, nil},
+	}
+	waker, scripted := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 8, RetryInterval: time.Millisecond}, lifecycle)
+
+	require.NoError(t, waker.Wake(context.Background(), wakeTarget))
+	resumeCalls, checkpoint := scripted.snapshot()
+	require.Equal(t, 2, resumeCalls)
+	require.Equal(t, "ckpt-2", checkpoint)
+}
+
+func TestWakeEmptyFenceAlreadyRunningJoinsWhenReady(t *testing.T) {
+	// Empty fence, but the re-probe shows the sandbox already Running: the
+	// ambiguous join resolves as served.
+	lifecycle := &scriptedLifecycle{
+		probes:     []probeCall{pausedProbe(""), readyProbe()},
+		resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAlreadyRunning},
+		resumeErrs: []error{nil},
+	}
+	waker, scripted := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 8, RetryInterval: time.Millisecond}, lifecycle)
+
+	require.NoError(t, waker.Wake(context.Background(), wakeTarget))
+	resumeCalls, _ := scripted.snapshot()
+	require.Equal(t, 1, resumeCalls)
+}
+
+func TestRequestIDsDifferAcrossReplicasAndSandboxes(t *testing.T) {
+	wakerA, scriptedA := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 8, RetryInterval: time.Millisecond}, &scriptedLifecycle{
+		probes:     []probeCall{pausedProbe("ckpt-1"), readyProbe()},
+		resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAccepted},
+		resumeErrs: []error{nil},
+	})
+	wakerB, scriptedB := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 8, RetryInterval: time.Millisecond}, &scriptedLifecycle{
+		probes:     []probeCall{pausedProbe("ckpt-1"), readyProbe()},
+		resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAccepted},
+		resumeErrs: []error{nil},
+	})
+
+	require.NoError(t, wakerA.Wake(context.Background(), wakeTarget))
+	require.NoError(t, wakerB.Wake(context.Background(), wakeTarget))
+	// Two replicas on their first flight for the same sandbox must not mint
+	// identical request ids.
+	require.NotEqual(t, scriptedA.resumeIDs[0], scriptedB.resumeIDs[0])
+	// The id carries the namespace so same-named sandboxes in different
+	// namespaces cannot collide.
+	require.Contains(t, scriptedA.resumeIDs[0], "tenant-a")
 }
 
 func TestWakeConflictWithTransientProbeRetriesInsteadOfFailing(t *testing.T) {
