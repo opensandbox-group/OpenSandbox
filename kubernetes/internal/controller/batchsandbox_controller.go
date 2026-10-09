@@ -215,7 +215,7 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Normal mode owns pod lifecycle except while a sandbox is fully paused. In Paused, the
 	// snapshot-backed runtime is quiesced and pods must stay absent until resume rewrites the
 	// template images and transitions back through Resuming.
-	if !poolStrategy.IsPooledMode() &&
+	if batchSbx.DeletionTimestamp == nil && !poolStrategy.IsPooledMode() &&
 		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused &&
 		!hasTerminalPodFailureCondition(batchSbx.Status.Conditions) {
 		// Bounded replacement of stuck provisioning pods; scale recreates them.
@@ -244,11 +244,13 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
 
-	if batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused {
+	// Deleting sandboxes must finish task cleanup even if they were paused.
+	skipTaskScheduling := batchSbx.DeletionTimestamp == nil && batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused
+	if skipTaskScheduling {
 		r.deleteTaskScheduler(ctx, batchSbx)
 	}
 
-	if taskStrategy.NeedTaskScheduling() && batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused {
+	if taskStrategy.NeedTaskScheduling() && !skipTaskScheduling {
 		ts, err := r.reconcileTasks(ctx, batchSbx, pods)
 		if err != nil {
 			aggErrors = append(aggErrors, err)

@@ -3119,7 +3119,7 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 			_, _ = utils.Run(cmd)
 		})
 
-		It("should delete pods when BatchSandbox is released with Delete recycle strategy", func() {
+		DescribeTable("should wait for allocated pods to disappear with Delete recycle strategy", func(poolDeletion string) {
 			const poolName = "test-pool-recycle-delete"
 			const batchSandboxName = "test-bs-recycle-delete"
 			const testNamespace = "default"
@@ -3127,15 +3127,16 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 
 			By("creating a Pool with explicit Delete recycle strategy")
 			poolYAML, err := renderTemplate("testdata/pool-with-recycle.yaml", map[string]interface{}{
-				"PoolName":     poolName,
-				"SandboxImage": utils.SandboxImage,
-				"Namespace":    testNamespace,
-				"BufferMax":    3,
-				"BufferMin":    2,
-				"PoolMax":      5,
-				"PoolMin":      2,
-				"RecycleType":  "Delete",
-				"Command":      `["sleep", "3600"]`,
+				"PoolName":       poolName,
+				"SandboxImage":   utils.SandboxImage,
+				"Namespace":      testNamespace,
+				"BufferMax":      3,
+				"BufferMin":      2,
+				"PoolMax":        5,
+				"PoolMin":        2,
+				"RecycleType":    "Delete",
+				"Command":        `["sleep", "3600"]`,
+				"PreStopSeconds": 20,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -3198,24 +3199,56 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying allocated pods are deleted with Delete recycle strategy")
+			By("waiting for allocated pods to start graceful termination")
 			Eventually(func(g Gomega) {
 				for _, podName := range allocatedPodNames {
 					cmd := exec.Command("kubectl", "get", "pod", podName, "-n", testNamespace,
 						"-o", "jsonpath={.metadata.deletionTimestamp}")
 					output, err := utils.Run(cmd)
-					if err != nil && strings.Contains(err.Error(), "not found") {
-						continue // pod already gone
-					}
 					g.Expect(err).NotTo(HaveOccurred())
 					g.Expect(output).NotTo(BeEmpty(), "pod %s should be terminating with Delete recycle strategy", podName)
 				}
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
 
+			if poolDeletion != "" {
+				By("deleting the Pool while the allocated pod is terminating")
+				cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace,
+					"--cascade="+poolDeletion, "--wait=false")
+				_, err = utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("verifying the BatchSandbox remains visible during pod termination")
+			Consistently(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 5*time.Second, time.Second).Should(Succeed())
+
+			By("waiting for the BatchSandbox to disappear after recycling")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+					"--ignore-not-found", "-o", "name")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(BeEmpty())
+			}, 2*time.Minute).Should(Succeed())
+			for _, podName := range allocatedPodNames {
+				cmd := exec.Command("kubectl", "get", "pod", podName, "-n", testNamespace,
+					"--ignore-not-found", "-o", "name")
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(output).To(BeEmpty(), "Pod %s outlived its BatchSandbox", podName)
+			}
+
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
-		})
+		},
+			Entry("while the Pool is active", ""),
+			Entry("after background Pool deletion", "background"),
+			Entry("during foreground Pool deletion", "foreground"),
+		)
 
 		It("should restart containers when BatchSandbox is released with Restart recycle strategy", func() {
 			const poolName = "test-pool-recycle-restart"

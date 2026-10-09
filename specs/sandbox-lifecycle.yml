@@ -645,13 +645,14 @@ paths:
     delete:
       tags: [Sandboxes]
       summary: Delete a sandbox
-      description: Delete a sandbox, terminating its execution. The sandbox will transition through Stopping state to Terminated.
+      description: |
+        Request sandbox deletion. Runtime cleanup may continue after the response.
+        For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
+        and return 404 once the resource is removed.
       responses:
         '204':
           description: |
-            Sandbox successfully deleted.
-
-            Sandbox has been scheduled for termination and will transition to Stopping state, then Terminated.
+            Sandbox deletion accepted. Runtime cleanup may still be in progress.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/XRequestId'

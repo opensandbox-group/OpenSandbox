@@ -446,7 +446,9 @@ export interface paths {
         post?: never;
         /**
          * Delete a sandbox
-         * @description Delete a sandbox, terminating its execution. The sandbox will transition through Stopping state to Terminated.
+         * @description Request sandbox deletion. Runtime cleanup may continue after the response.
+         *     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
+         *     and return 404 once the resource is removed.
          */
         delete: {
             parameters: {
@@ -460,11 +462,7 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /**
-                 * @description Sandbox successfully deleted.
-                 *
-                 *     Sandbox has been scheduled for termination and will transition to Stopping state, then Terminated.
-                 */
+                /** @description Sandbox deletion accepted. Runtime cleanup may still be in progress. */
                 204: {
                     headers: {
                         "X-Request-ID": components["headers"]["XRequestId"];

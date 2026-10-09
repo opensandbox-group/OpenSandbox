@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -34,51 +35,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+	taskscheduler "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/scheduler"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/fieldindex"
 )
-
-func TestExpiredSandboxStopsReconcileAfterForegroundDelete(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	sandbox := &sandboxv1alpha1.BatchSandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "expired-sandbox", Namespace: "default"},
-		Spec: sandboxv1alpha1.BatchSandboxSpec{
-			Replicas:   ptr.To(int32(1)),
-			ExpireTime: &metav1.Time{Time: time.Now().Add(-time.Minute)},
-			Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "main", Image: "example.com"}},
-			}},
-		},
-	}
-	deleted := false
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-				options := (&client.DeleteOptions{}).ApplyOptions(opts)
-				if options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
-					t.Fatal("expired sandbox deletion must use foreground propagation")
-				}
-				deleted = true
-				return nil
-			},
-			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				t.Fatal("reconcile created a resource after requesting sandbox deletion")
-				return nil
-			},
-		}).Build()
-	r := &BatchSandboxReconciler{Client: c, Scheme: scheme}
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)}); err != nil {
-		t.Fatal(err)
-	}
-	if !deleted {
-		t.Fatal("expired sandbox was not deleted")
-	}
-}
 
 func TestReconcileTasksSkipsDeletingObjectAfterTaskCleanup(t *testing.T) {
 	now := metav1.Now()
@@ -106,6 +65,191 @@ func TestReconcileTasksSkipsDeletingObjectAfterTaskCleanup(t *testing.T) {
 	}
 	if _, exists := r.taskSchedulers.Load(key); exists {
 		t.Fatal("task scheduler was recreated after task cleanup finalizer was removed")
+	}
+}
+
+func TestDeletingTaskSandboxOnlyCleansUpTasks(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase sandboxv1alpha1.BatchSandboxPhase
+		pause *bool
+	}{
+		{name: "running", phase: sandboxv1alpha1.BatchSandboxPhaseSucceed},
+		{name: "pending pause", phase: sandboxv1alpha1.BatchSandboxPhaseSucceed, pause: ptr.To(true)},
+		{name: "pending resume", phase: sandboxv1alpha1.BatchSandboxPhasePaused, pause: ptr.To(false)},
+		{name: "pausing", phase: sandboxv1alpha1.BatchSandboxPhasePausing, pause: ptr.To(true)},
+		{name: "resuming", phase: sandboxv1alpha1.BatchSandboxPhaseResuming, pause: ptr.To(false)},
+		{name: "paused", phase: sandboxv1alpha1.BatchSandboxPhasePaused, pause: ptr.To(true)},
+	}
+	for _, tt := range tests {
+		for _, expired := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/expired=%v", tt.name, expired), func(t *testing.T) {
+				now := metav1.Now()
+				sandbox := &sandboxv1alpha1.BatchSandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "deleting-task-sandbox",
+						Namespace:         "default",
+						Generation:        2,
+						DeletionTimestamp: &now,
+						Finalizers:        []string{finalizerTaskCleanup, "test.opensandbox.io/keep"},
+					},
+					Spec: sandboxv1alpha1.BatchSandboxSpec{
+						Pause:    tt.pause,
+						Replicas: ptr.To(int32(1)),
+						Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "example.com"}},
+						}},
+						TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{Spec: sandboxv1alpha1.TaskSpec{
+							Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep", "3600"}},
+						}},
+					},
+					Status: sandboxv1alpha1.BatchSandboxStatus{
+						Phase:                   tt.phase,
+						PauseObservedGeneration: 1,
+					},
+				}
+				if expired {
+					sandbox.Spec.ExpireTime = &metav1.Time{Time: time.Now().Add(-time.Minute)}
+				}
+				r := newTestReconciler(sandbox)
+				scheduler := &recordingTaskScheduler{tasks: []taskscheduler.Task{
+					fakeSchedulerTask{name: sandbox.Name + "-0", state: taskscheduler.RunningTaskState},
+				}}
+				key := client.ObjectKeyFromObject(sandbox)
+				r.taskSchedulers.Store(key.String(), scheduler)
+				t.Cleanup(func() { _ = durationStore.Pop(key.String()) })
+
+				for i := 0; i < 2; i++ {
+					if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var pods corev1.PodList
+				if err := r.List(context.Background(), &pods); err != nil {
+					t.Fatal(err)
+				}
+				if len(pods.Items) != 0 {
+					t.Fatalf("deleting task sandbox recreated %d pod(s)", len(pods.Items))
+				}
+				if scheduler.stopCalls != 2 || scheduler.scheduleCalls != 2 {
+					t.Fatal("deleting sandbox did not continue task cleanup on each reconcile")
+				}
+				updated := &sandboxv1alpha1.BatchSandbox{}
+				if err := r.Get(context.Background(), key, updated); err != nil {
+					t.Fatal(err)
+				}
+				if !controllerutil.ContainsFinalizer(updated, finalizerTaskCleanup) {
+					t.Fatal("task cleanup finalizer was removed before tasks finished")
+				}
+
+				scheduler.tasks = nil
+				if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+					t.Fatal(err)
+				}
+				var snapshots sandboxv1alpha1.SandboxSnapshotList
+				if err := r.List(context.Background(), &snapshots); err != nil {
+					t.Fatal(err)
+				}
+				if len(snapshots.Items) != 0 {
+					t.Fatalf("deleting task sandbox created %d snapshot(s)", len(snapshots.Items))
+				}
+				if err := r.Get(context.Background(), key, updated); err != nil {
+					t.Fatal(err)
+				}
+				if controllerutil.ContainsFinalizer(updated, finalizerTaskCleanup) {
+					t.Fatal("task cleanup finalizer remained after tasks finished")
+				}
+				if updated.Status.Phase != tt.phase {
+					t.Fatalf("deletion changed lifecycle phase to %s, want %s", updated.Status.Phase, tt.phase)
+				}
+			})
+		}
+	}
+}
+
+func TestUnavailablePoolWaitsForAllocatedPodDeletion(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		name := "terminating pool"
+		if missing {
+			name = "missing pool"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := metav1.Now()
+			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{
+				Name: "pool-1", Namespace: "default", UID: "pool-uid",
+				DeletionTimestamp: &now, Finalizers: []string{"test.opensandbox.io/keep"},
+			}}
+			sandbox := terminatingPoolSandbox("deleting-sandbox", pool.Name, &now)
+			setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{"allocated-pod"}})
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "allocated-pod", Namespace: pool.Namespace,
+					Finalizers: []string{"test.opensandbox.io/keep"},
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(pool, sandboxv1alpha1.GroupVersion.WithKind("Pool")),
+					},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			objects := []client.Object{sandbox, pod}
+			if !missing {
+				objects = append(objects, pool)
+			}
+			c := fake.NewClientBuilder().WithScheme(testscheme).
+				WithIndex(&sandboxv1alpha1.BatchSandbox{}, fieldindex.IndexNameForPoolRef, fieldindex.PoolRefIndexFunc).
+				WithObjects(objects...).Build()
+			readErr := apierrors.NewInternalError(fmt.Errorf("pod query failed"))
+			apiReader := interceptor.NewClient(c, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*corev1.Pod); ok && readErr != nil {
+						return readErr
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			r := &PoolReconciler{Client: c, APIReader: apiReader, Allocator: NewDefaultAllocator(c)}
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
+			if _, err := r.Reconcile(ctx, req); err == nil {
+				t.Fatal("pod query failure was treated as completed cleanup")
+			}
+			assertPoolFinalizerPresent(t, c, sandbox)
+			readErr = nil
+
+			for _, terminating := range []bool{false, true} {
+				if terminating {
+					if err := c.Delete(ctx, pod); err != nil {
+						t.Fatal(err)
+					}
+				}
+				result, err := r.Reconcile(ctx, req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.RequeueAfter != defaultRetryTime {
+					t.Fatalf("requeueAfter = %v, want %v while allocated pod exists", result.RequeueAfter, defaultRetryTime)
+				}
+				assertPoolFinalizerPresent(t, c, sandbox)
+			}
+
+			if err := c.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+				t.Fatal(err)
+			}
+			pod.Finalizers = nil
+			if err := c.Update(ctx, pod); err != nil {
+				t.Fatal(err)
+			}
+			result, err := r.Reconcile(ctx, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.RequeueAfter != 0 {
+				t.Fatalf("requeueAfter = %v after cleanup completed", result.RequeueAfter)
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(sandbox), &sandboxv1alpha1.BatchSandbox{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("sandbox removal error = %v, want NotFound after allocated pod disappears", err)
+			}
+		})
 	}
 }
 
@@ -219,24 +363,31 @@ func TestCleanupTerminatingSandboxesForUnavailablePool(t *testing.T) {
 	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	now := metav1.Now()
 	stranded := terminatingPoolSandbox("stranded", "missing-pool", &now)
+	released := terminatingPoolSandbox("released", "missing-pool", &now)
+	setSandboxAllocation(released, sandboxAllocation{Pods: []string{"historical-pod"}})
+	released.Annotations[annoAllocReleasedKey] = `{"pods":["historical-pod"]}`
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "historical-pod", Namespace: "default"}}
 	active := terminatingPoolSandbox("active", "missing-pool", nil)
 	otherPool := terminatingPoolSandbox("other-pool", "existing-pool", &now)
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithIndex(&sandboxv1alpha1.BatchSandbox{}, fieldindex.IndexNameForPoolRef, fieldindex.PoolRefIndexFunc).
-		WithObjects(stranded, active, otherPool).
+		WithObjects(stranded, released, pod, active, otherPool).
 		Build()
-	r := &PoolReconciler{Client: fakeClient, APIReader: fakeClient}
+	r := &PoolReconciler{Client: fakeClient, APIReader: fakeClient, Allocator: NewDefaultAllocator(fakeClient)}
 
-	poolUnavailable, err := r.cleanupTerminatingSandboxesForUnavailablePool(context.Background(), "default", "missing-pool", "")
+	cleanupComplete, err := r.cleanupTerminatingSandboxesForUnavailablePool(context.Background(), "default", "missing-pool", "")
 	if err != nil {
 		t.Fatalf("cleanupTerminatingSandboxesForUnavailablePool() error = %v", err)
 	}
-	if !poolUnavailable {
-		t.Fatal("cleanupTerminatingSandboxesForUnavailablePool() reported the missing Pool as available")
+	if !cleanupComplete {
+		t.Fatal("cleanup remained pending after all allocations were released or absent")
 	}
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
@@ -247,6 +398,12 @@ func TestCleanupTerminatingSandboxesForUnavailablePool(t *testing.T) {
 		}
 	} else if !apierrors.IsNotFound(err) {
 		t.Fatalf("get stranded sandbox: %v", err)
+	}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(released), &sandboxv1alpha1.BatchSandbox{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("sandbox with only historical released pods was not finalized: %v", err)
+	}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("historical released pod was removed: %v", err)
 	}
 
 	assertPoolFinalizerPresent(t, fakeClient, active)

@@ -32,10 +32,10 @@ func newDeleteRecycler() *deleteRecycler {
 }
 
 // TryRecycle drives the delete recycle state machine.
-// When the pod still exists, it returns Recycling with NeedDelete=true so the caller deletes the pod.
-// When the pod is gone (DeletionTimestamp set), it returns Succeeded.
+// An existing pod remains Recycling; NeedDelete is false once termination starts.
+// A nil pod means the caller confirmed its absence and recycling has succeeded.
 func (d *deleteRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.Pool, pod *corev1.Pod, spec *Spec) (*Status, error) {
-	if pod == nil || pod.DeletionTimestamp != nil {
+	if pod == nil {
 		return &Status{
 			State:   StateSucceeded,
 			Message: "delete recycler: pod is deleted",
@@ -43,7 +43,7 @@ func (d *deleteRecycler) TryRecycle(ctx context.Context, pool *sandboxv1alpha1.P
 	}
 	return &Status{
 		State:      StateRecycling,
-		Message:    "delete recycler: pod marked for deletion",
-		NeedDelete: true,
+		Message:    "delete recycler: waiting for pod deletion",
+		NeedDelete: pod.DeletionTimestamp == nil,
 	}, nil
 }

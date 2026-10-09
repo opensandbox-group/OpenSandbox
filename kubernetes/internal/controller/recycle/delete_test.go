@@ -41,9 +41,9 @@ func TestDeleteRecycler(t *testing.T) {
 			wantNeedDelete: false,
 		},
 		{
-			name:           "PodWithDeletionTimestamp_Succeeded",
+			name:           "PodWithDeletionTimestamp_Recycling",
 			pod:            &corev1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now}},
-			wantState:      StateSucceeded,
+			wantState:      StateRecycling,
 			wantNeedDelete: false,
 		},
 		{

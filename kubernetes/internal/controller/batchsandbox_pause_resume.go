@@ -185,6 +185,9 @@ func (r *BatchSandboxReconciler) hasReadyResumePod(ctx context.Context, bs *sand
 // dispatchPauseResume implements the 5-case dispatch table from the design doc.
 // Returns (result, handled, error). If handled=true, the caller should return immediately.
 func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) (ctrl.Result, bool, error) {
+	if bs.DeletionTimestamp != nil {
+		return ctrl.Result{}, false, nil
+	}
 	log := logf.FromContext(ctx)
 	generation := bs.Generation
 	pauseObservedGen := bs.Status.PauseObservedGeneration

@@ -141,11 +141,11 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 			controllerKey := req.NamespacedName.String()
 			poolScaleExpectations.DeleteExpectations(controllerKey)
 			r.Allocator.ClearPoolAllocation(ctx, req.Namespace, req.Name)
-			poolUnavailable, cleanupErr := r.cleanupTerminatingSandboxesForUnavailablePool(ctx, req.Namespace, req.Name, "")
+			cleanupComplete, cleanupErr := r.cleanupTerminatingSandboxesForUnavailablePool(ctx, req.Namespace, req.Name, "")
 			if cleanupErr != nil {
 				return ctrl.Result{}, cleanupErr
 			}
-			if !poolUnavailable {
+			if !cleanupComplete {
 				return ctrl.Result{RequeueAfter: defaultRetryTime}, nil
 			}
 			log.Info("Pool resource not found, cleaned up scale expectations", "pool", controllerKey)
@@ -167,11 +167,11 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		controllerKey := controllerutils.GetControllerKey(pool)
 		poolScaleExpectations.DeleteExpectations(controllerKey)
 		r.Allocator.ClearPoolAllocation(ctx, req.Namespace, req.Name)
-		poolUnavailable, cleanupErr := r.cleanupTerminatingSandboxesForUnavailablePool(ctx, req.Namespace, req.Name, pool.UID)
+		cleanupComplete, cleanupErr := r.cleanupTerminatingSandboxesForUnavailablePool(ctx, req.Namespace, req.Name, pool.UID)
 		if cleanupErr != nil {
 			return ctrl.Result{}, cleanupErr
 		}
-		if !poolUnavailable {
+		if !cleanupComplete {
 			return ctrl.Result{RequeueAfter: defaultRetryTime}, nil
 		}
 		log.Info("Pool resource is being deleted, cleaned up scale expectations", "pool", controllerKey)
@@ -249,10 +249,9 @@ func (r *PoolReconciler) confirmPoolUnavailable(ctx context.Context, poolKey cli
 	return latestPool.UID == expectedUID && !latestPool.DeletionTimestamp.IsZero(), nil
 }
 
-// cleanupTerminatingSandboxesForUnavailablePool releases Pool-owned finalizers
-// when the referenced Pool no longer exists or is itself terminating. At that
-// point there is no Pool lifecycle left to recycle allocations into, and keeping
-// the finalizer would strand deleting BatchSandboxes forever.
+// cleanupTerminatingSandboxesForUnavailablePool removes Pool-owned finalizers
+// once pending allocated pods are gone. It returns false while cleanup is pending
+// or the Pool becomes available again, so the caller retries.
 func (r *PoolReconciler) cleanupTerminatingSandboxesForUnavailablePool(ctx context.Context, namespace, poolName string, expectedPoolUID types.UID) (bool, error) {
 	log := logf.FromContext(ctx)
 	batchSandboxList := &sandboxv1alpha1.BatchSandboxList{}
@@ -263,6 +262,7 @@ func (r *PoolReconciler) cleanupTerminatingSandboxesForUnavailablePool(ctx conte
 		return false, fmt.Errorf("failed to list batch sandboxes for unavailable pool %s/%s: %w", namespace, poolName, err)
 	}
 
+	complete := true
 	var errs []error
 	for i := range batchSandboxList.Items {
 		sandbox := &batchSandboxList.Items[i]
@@ -289,9 +289,11 @@ func (r *PoolReconciler) cleanupTerminatingSandboxesForUnavailablePool(ctx conte
 		}
 		if removed {
 			log.Info("Removed stale pool allocation finalizer", "pool", poolName, "sandbox", sandbox.Name)
+		} else {
+			complete = false
 		}
 	}
-	return true, gerrors.Join(errs...)
+	return complete, gerrors.Join(errs...)
 }
 
 func (r *PoolReconciler) removePoolAllocationFinalizerIfUnavailable(
@@ -321,6 +323,31 @@ func (r *PoolReconciler) removePoolAllocationFinalizerIfUnavailable(
 		poolUnavailable, err = r.confirmPoolUnavailable(ctx, poolKey, expectedPoolUID)
 		if err != nil || !poolUnavailable {
 			return err
+		}
+
+		allocated, err := r.Allocator.GetSandboxAllocation(ctx, latestSandbox)
+		if err != nil {
+			return err
+		}
+		released, err := r.Allocator.GetSandboxReleased(ctx, latestSandbox)
+		if err != nil {
+			return err
+		}
+		releasedSet := sets.New(released...)
+		for _, podName := range allocated {
+			// Historical released pods may already belong to another sandbox.
+			if releasedSet.Has(podName) {
+				continue
+			}
+			pod := &corev1.Pod{}
+			err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: sandboxKey.Namespace, Name: podName}, pod)
+			if errors.IsNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("failed to verify allocated pod %s/%s: %w", sandboxKey.Namespace, podName, err)
+			}
+			return nil
 		}
 
 		base := latestSandbox.DeepCopy()
@@ -782,6 +809,9 @@ func (r *PoolReconciler) doRecycle(ctx context.Context, pool *sandboxv1alpha1.Po
 	if len(toRecycle) == 0 {
 		return nil, nil, nil
 	}
+	if r.APIReader == nil {
+		return nil, nil, fmt.Errorf("uncached API reader is not configured")
+	}
 
 	handler, err := recycle.NewHandler(r.Client, r.RestConfig, pool)
 	if err != nil {
@@ -830,7 +860,20 @@ func (r *PoolReconciler) runRecycleTasks(ctx context.Context, pool *sandboxv1alp
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			status, err := handler.TryRecycle(ctx, pool, podByName[localTask.podName], &recycle.Spec{ID: localTask.sandboxName})
+			pod := podByName[localTask.podName]
+			if pod == nil {
+				// Scheduling excludes terminating pods. Confirm absence before
+				// treating a missing entry as completed recycling.
+				pod = &corev1.Pod{}
+				err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: localTask.podName}, pod)
+				if errors.IsNotFound(err) {
+					pod = nil
+				} else if err != nil {
+					results[localIdx] = recycleResult{sandboxName: localTask.sandboxName, podName: localTask.podName, err: err}
+					return
+				}
+			}
+			status, err := handler.TryRecycle(ctx, pool, pod, &recycle.Spec{ID: localTask.sandboxName})
 			results[localIdx] = recycleResult{sandboxName: localTask.sandboxName, podName: localTask.podName, status: status, err: err}
 		}()
 	}
