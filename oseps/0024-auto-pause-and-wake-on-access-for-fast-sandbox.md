@@ -83,11 +83,12 @@ Idle-suspend with wake-on-request is the natural operating model for agent sandb
 - Activity recording must never add synchronous latency or failure modes to the proxy path: writes are fire-and-forget and dropped on error.
 - The wake path must not depend on Redis. It uses the FastPath connection the ingress already holds.
 - Multi-replica safety: activity state is shared through Redis; pause decisions are fenced by a per-sandbox distributed lock; resume decisions converge through FastPath's compare-and-set semantics without a coordinator.
-- If Redis is unavailable, the system must fail toward **not pausing** (liveness of workloads is never at risk); wake continues to work because it does not touch Redis.
+- If Redis is unavailable, the system must fail toward **not pausing** (liveness of workloads is never at risk); wake continues to work because it does not touch Redis. A missing activity key — from a dropped write or from Redis restart/eviction/flush — must be treated as **unknown activity, never as proof of idleness**: it may delay a pause, never accelerate one.
+- A request racing a pause on a route-cache hit must be recoverable: the stale-route path re-enters wake and retries replayable requests; requests that are not replayable are answered 503 rather than silently dropped.
 - A paused sandbox that has passed its expiry must never be resumed; wake fails fast with 404.
 - Budget exhaustion must not cancel an already-started resume: the restore is desired state and converges regardless; the request gets 503 with `Retry-After`, and later requests find a `Running` sandbox.
 - Concurrent requests to the same paused sandbox must produce at most one concurrent `ResumeSandbox` call per ingress replica (one flight), with all requests sharing its outcome.
-- The number of concurrently parked requests per ingress replica is bounded; overflow is shed with 503 rather than queued without bound.
+- The number of concurrently parked requests **and concurrent resume flights** per ingress replica is bounded by the same admission control: a new flight may not start without an acquired slot. Overflow is shed with 503 **before** any `ResumeSandbox` is issued.
 - No changes to public API routes, response models, or SDKs. `GET /sandboxes/{id}` already exposes `Pausing`/`Paused`/`Resuming`; this OSEP only makes those states reachable automatically.
 
 ## Proposal
@@ -114,7 +115,7 @@ sequenceDiagram
     rect rgb(245, 245, 245)
     Note over C,VM: idle phase (no ingress traffic for X)
     S->>R: read last_active
-    S->>S: gates: opt-in / Running / now - last_active >= X /<br/>not expired / lock / re-verify under lock
+    S->>S: gates: opt-in / Running / idle >= X (missing key =<br/>unknown, tombstoned) / not expired / lock / re-verify
     S->>FP: PauseSandbox (desired state, idempotent CAS)
     FP->>VM: checkpoint, then release runtime
     Note over FP,VM: Pausing -> Paused (CRD retained, footprint zero)
@@ -155,8 +156,8 @@ sequenceDiagram
 | --- | --- |
 | Sandbox paused while doing invisible background work | Opt-in only; documented limitation; wake-on-next-request recovers state; future execd/egress activity signals |
 | Pause/resume flapping under periodic "heartbeat" traffic with period ≈ X | Idle floor 30 s; flap metrics (pause followed by wake within a short window); operators tune X above workload period |
-| Wake storm: burst of requests to many paused sandboxes | Per-sandbox singleflight collapses fan-out; bounded parking lot sheds overflow with 503; resume RPC is a cheap CAS patch, the restore cost is per sandbox not per request |
-| Redis outage | Activity writes drop (no pause decisions get fresher data); sweeper skips runs when Redis is unreachable (fail toward *not pausing*); wake unaffected |
+| Wake storm: burst of requests to many paused sandboxes | Per-sandbox singleflight collapses fan-out; parking admission precedes flight creation, so the lot bounds concurrent **restores**, not just connections; resume RPC is a cheap CAS patch |
+| Redis outage or data loss (restart, eviction, flush) | Sweeper skips runs when Redis is unreachable; a missing activity key is treated as unknown and starts a tombstone, so data loss can only **delay** pauses, never accelerate them; wake does not use Redis |
 | Two server replicas race to pause the same sandbox | Distributed lock `SET NX EX` per sandbox; FastPath `PauseSandbox` is idempotent on replay, so a lost race is harmless |
 | Resume racing a re-pause | `expected_checkpoint_id` fence returns `Aborted` on checkpoint change; wake retries within its budget |
 | Requests parked too long on a slow restore (cross-node) | Budget Y bounds client wait; 503 + `Retry-After` on exhaustion; the in-flight restore is never canceled, so the retry succeeds quickly |
@@ -195,7 +196,7 @@ extensions:
 
 **Meaning:** the sandbox may be auto-paused after `X` consecutive seconds without ingress-observed traffic. Presence of a valid value opts the sandbox in. The key is validated in the HTTP API layer (`validate_extensions`, like `access.renew.extend.seconds`) and persisted under a fast-sandbox-reserved metadata key, hidden from public metadata/list — the same convention as the renew extension.
 
-- Missing key → never auto-paused; wake-on-access still applies (wake is not gated on the pause opt-in, because a manually paused sandbox accessed by traffic should wake regardless — see Caveats).
+- Missing `extensions` key → never auto-paused; wake-on-access still applies (wake is not gated on the pause opt-in, because a manually paused sandbox accessed by traffic should wake regardless — see Caveats).
 - Value out of range or non-integer → create fails with 400.
 - Constraint `X ≤ activity_ttl_seconds` (server config, default 1800). Larger values are rejected with 400 so that "activity key missing" can always imply "idle for at least X" (see below).
 
@@ -206,10 +207,11 @@ The park budget **Y** is not a sandbox field: it is `--wake-park-budget` on the 
 The ingress updates one key per sandbox as a side effect of proxying:
 
 - **Key**: `{activity_prefix}:{sandbox_id}` (default prefix `opensandbox:activity`), value = Unix milliseconds of the observation.
-- **Write**: `SET key <now_ms> EX <activity_ttl_seconds>`, issued asynchronously (buffered channel + background pipeline) after a request is routed — never inline on the hot path. Failures are logged and dropped.
+- **Write**: monotonic max update (Lua: overwrite only when the new timestamp is greater than the stored one), `EX <activity_ttl_seconds>`, issued asynchronously (buffered channel + background pipeline) after a request is routed — never inline on the hot path. Failures are logged and dropped. Monotonic max keeps the key at the latest observation even when buffered writes from different replicas arrive out of order.
 - **Coalescing**: at most one write per sandbox per `--activity-min-interval` (default 1 s). Second-granularity timestamps are sufficient; this bounds Redis write rate to ≤ 1 QPS per active sandbox regardless of request rate.
 - **Coverage**: every proxied request counts — exec and file calls on raw port 44772, user ports, health pings. Any port wakes the idle clock. The `access renew skip` sentinel header (OSEP-0009) does **not** suppress activity tracking: skipping a renewal is not skipping activity.
-- **TTL semantics**: the key expires `activity_ttl_seconds` after the last write. Because `X ≤ activity_ttl_seconds` is enforced at create time, a **missing key always implies inactivity for at least X** — the sweeper never needs to distinguish "expired key" from "never written".
+- **TTL semantics**: the key expires `activity_ttl_seconds` after the last write; `X ≤ activity_ttl_seconds` is enforced at create time, so a key that is present but stale by ≥ X is already idle **by value**. A **missing key is not a signal**: asynchronous writes can be dropped, and Redis can restart, evict, or flush while remaining reachable, so absence cannot distinguish "quiet for X" from "data lost". Missing keys are resolved by the sweeper's unknown-state tombstone below.
+- **Missing-key tombstone**: the first time the sweeper observes the activity key missing, it records `SET opensandbox:idlep:unknown:{sandbox_id} <now_ms> NX EX <activity_ttl_seconds + sweep_interval_seconds>`. The sandbox becomes idle-eligible only once the tombstone itself has existed for ≥ X — inactivity is measured from the first *observation* of unknown state. Redis data loss therefore can only **delay** a pause by up to one unknown window, never accelerate one. The tombstone is cleared when the activity key reappears and expires by TTL otherwise.
 - **Producers**: the ingress gateway (all sandbox traffic) and the server proxy path (`/sandboxes/{id}/proxy/{port}`, which bypasses the ingress) write the same keys, so both access paths keep sandboxes awake.
 
 On create and on every successful resume, the actor performing the operation (server for create/resume API, ingress for wake flights) writes an immediate activity observation, so the idle clock starts from the latest lifecycle transition rather than from nothing.
@@ -218,17 +220,17 @@ On create and on every successful resume, the actor performing the operation (se
 
 A server background task runs every `sweep_interval_seconds` (default 15 s):
 
-1. Enumerate candidates per tenant namespace with FastPath `ListSandboxes` (paginated with continue tokens, same handling as OSEP-0007; filtered to `Running` client-side). Then batch-read the candidates' activity keys from Redis (`MGET`) — the cheap shared read always happens before any per-sandbox FastPath `GetSandbox`. A missing key is itself the idle signal, which is why the sandbox list, not a Redis key scan, must be the enumeration source.
+1. Enumerate candidates per tenant namespace with FastPath `ListSandboxes` (paginated with continue tokens, same handling as OSEP-0007; filtered to `Running` client-side). Then batch-read the candidates' activity keys from Redis (`MGET`) — the cheap shared read always happens before any per-sandbox FastPath `GetSandbox`. The sandbox list, not a Redis key scan, must be the enumeration source: a sandbox whose activity key is absent is in the unknown state that needs tombstone handling, and a key scan would make it invisible.
 2. For each candidate, evaluate the gates **in order**; first failure drops the candidate silently for this sweep:
    - **Opt-in**: reserved metadata carries a valid `access.pause.after.idle.seconds` (read via FastPath `GetSandbox` — only fetched for candidates that already look idle, so the per-sweep RPC count stays low).
    - **State**: sandbox is `Running` (Runtime + DataPlane Ready). Anything else is skipped — `Pausing`/`Paused` need no action, `Resuming` is protected, terminal states are left to their own paths.
-   - **Idle**: `now − last_active ≥ X`. Missing activity key ⇒ idle (guaranteed by the TTL constraint, and by the immediate activity write on create and on every successful resume).
+   - **Idle**: activity key present and `now − last_active ≥ X` → idle; stale tombstone (`opensandbox:idlep:unknown:{sandbox_id}` aged ≥ X) → idle. Key missing with no tombstone or a fresh tombstone → **unknown, skip this sweep** (creating or keeping the tombstone). Never pausing from a missing key alone is the fail-safe invariant.
    - **Expiry**: `expires_at > now`. An expired sandbox is not paused; the expiry path owns it.
    - **Lock**: `SET opensandbox:idlep:lock:{sandbox_id} <replica> NX EX <lock_ttl>` (default 30 s). Failure means another replica is handling it — drop.
    - **Re-verify under lock**: re-read the activity key; if a newer observation appeared between the idle check and the lock (a request landed meanwhile), release interest and drop for this sweep.
 3. Issue `PauseSandbox` with an idempotent `request_id` (`idlepause-{sandbox_id}`) and the observed generation. Outcomes: accepted → record `paused_at`, increment metrics; `FailedPrecondition` (state changed under us) → drop, next sweep re-evaluates; lock released by TTL.
 
-**Idle-window semantics across replicas.** The window is defined over shared state, not per-replica local state. The **start point** is the shared `activity:{sandbox_id}` key: every ingress replica (and the server proxy path) overwrites the same key with its own observation time, last-write-wins, so the start is effectively the latest observation across all replicas modulo inter-replica clock skew. The **end point** is the evaluating replica's local `now` — the replica whose clock crosses the threshold first wins the lock and pauses, so the effective threshold is X ± max(writer skew, evaluator skew). Both skews are bounded by cluster NTP synchronization (typically tens of milliseconds) against an X floor of 30 s, and are therefore noise. The race that matters is not clock skew but the **async activity write**: a request can land on one ingress replica just after another replica's sweeper has judged the sandbox idle and before the activity write flushes. The lock-scoped re-verify above narrows this to sub-flush-latency races; the residual case is benign by construction — the in-flight request hits a `Pausing`/`Paused` sandbox and is served through the wake path (`Pausing` cancels the pause; `Paused` triggers resume + park), so the cost of a missed observation is one unnecessary pause/wake cycle (hundreds of milliseconds), never a lost request.
+**Idle-window semantics across replicas.** The window is defined over shared state, not per-replica local state. The **start point** is the shared `activity:{sandbox_id}` key: every ingress replica (and the server proxy path) applies a monotonic max update with its own observation time, so the start is the latest observation across all replicas (modulo each writer's clock skew against the others). The **end point** is the evaluating replica's local `now` — the replica whose clock crosses the threshold first wins the lock and pauses, so the effective threshold is X ± max(writer skew, evaluator skew). Both skews are bounded by cluster NTP synchronization (typically tens of milliseconds) against an X floor of 30 s, and are therefore noise. The race that matters is not clock skew but the **async activity write**: a request can land on one ingress replica just after another replica's sweeper has judged the sandbox idle and before the activity write flushes. The lock-scoped re-verify above narrows this to sub-flush-latency races; the residual case is a request racing the pause on a **route-cache hit**, which cannot see the pause at resolution time. That path is recovered by the stale-route re-entry specified in Wake-on-Access (wake + one retry for replayable requests); a request already streaming a response is covered by the long-lived-connection caveat instead.
 
 If Redis is unreachable the sweep is skipped entirely (no pauses). Pause failures of any kind leave the sandbox `Running` — the worst case of this subsystem is a missed pause, never a lost sandbox.
 
@@ -304,9 +306,11 @@ sequenceDiagram
 | Deletion in progress | Fail fast per current mapping |
 | `NotFound` | Fail fast 404 (unchanged) |
 
+**Stale-route re-entry (route-cache hits).** A request forwarded on a cached route does not resolve again, so a pause landing between the cache hit and the forward surfaces later as a stale upstream response (`X-Fast-Sandbox-Proxy-Error` — the existing stale-route signal). On that error the provider already invalidates the cache; it now additionally calls `GetSandbox` and re-enters the wake path when the state is `Paused`/`Pausing`/`Resuming`, retrying the request once after the flight resolves. **Replay rule**: retry only when no response bytes have been written to the client **and** the request is safely replayable — idempotent methods (`GET`/`HEAD`/`PUT`/`DELETE`) or a fully buffered body. Everything else (response already streaming, non-replayable body) keeps today's stale-route 503 and the client retries. A response already in progress is never truncated by the proxy; keeping streams alive across a pause is the long-lived-connection caveat, an opt-in concern, not a proxy guarantee.
+
 **Resume flight (singleflight).** Keyed by `(namespace, sandbox_id)` in a per-replica in-flight registry:
 
-- The first request for a paused sandbox starts the flight: call `ResumeSandbox` (asynchronous desired-state patch; `request_id = wake-{sandbox_id}-{flight_epoch}` for tracing), then poll `GetSandbox` until Runtime and DataPlane are Ready, then re-`ResolveEndpoint` (the route credential for the restored runtime did not exist before).
+- The first request for a paused sandbox starts the flight **after acquiring its parking slot** (see Parking): call `ResumeSandbox` (asynchronous desired-state patch; `request_id = wake-{sandbox_id}-{flight_epoch}` for tracing), then poll `GetSandbox` until Runtime and DataPlane are Ready, then re-`ResolveEndpoint` (the route credential for the restored runtime did not exist before).
 - Concurrent requests for the same sandbox join the flight and share its remaining budget and outcome — N parked requests, one resume RPC, one poll loop.
 - A `FailedPrecondition` ("not paused") from `ResumeSandbox` means someone else already resumed — treat as joined. An `Aborted` (checkpoint changed, i.e. a re-pause raced in) restarts the flight within the remaining budget.
 
@@ -315,7 +319,7 @@ sequenceDiagram
 - **Budget Y** (`--wake-park-budget`, default 5 s) starts when the flight starts; late joiners share the remaining budget (per-flight, not per-request). The budget bounds retries, not a committed resume.
 - Retry loop: exponential backoff starting at `--wake-retry-interval` (50 ms), factor 1.3, jitter 0.1, no attempt cap — the budget alone bounds the wait.
 - **Budget exhaustion** → respond `503` with `Retry-After: 1`. The flight itself is **never canceled**: `ResumeSandbox` is desired state that fast-sandbox converges regardless, and discarding an in-progress restore would only waste the work. The next request after exhaustion typically finds `Ready` and is served on the fast path.
-- **Parking lot capacity** (`--wake-park-max`, default 1024): a request occupies a slot only once it actually parks (not on first-attempt hits, which are the overwhelming majority). When the lot is full the request is shed with `503` immediately — bounding memory, file descriptors, and Envoy/upstream stream occupancy.
+- **Parking lot capacity** (`--wake-park-max`, default 1024): admission happens **before flight creation** — a request that would start a new resume flight acquires a slot first, and a full lot sheds it with `503` before any `ResumeSandbox` is issued, so the lot bounds concurrent **restores**, not just held connections. Joiners of an existing flight acquire a slot when they join (the restore is already committed; joining only waits). First-attempt hits — the overwhelming majority — never touch the lot, preserving fast-path headroom.
 - **Mechanics of holding a request.** The ingress is a Go `net/http` server with `httputil.ReverseProxy`; parking means the handler goroutine simply does not invoke the reverse proxy yet. After admission it blocks on a `select` over three signals — the flight's completion channel, the request context's `Done()` (client disconnected), and the remaining-budget timer — then either proceeds through the normal `serve` path (re-resolve, forward) or writes `503 + Retry-After`. Because parking happens before any upstream dial, a parked request holds no upstream connection: its cost is one goroutine plus the held client connection, which is why the lot can be large. The flight itself runs on a background context, never the request's — budget exhaustion or client disconnect must not cancel the resume. Clients experience the park as added latency: no status or body bytes are written during the wait, so Y must stay below typical client response-header timeouts.
 - **Protocol coverage**: parking applies to ordinary HTTP requests and to requests that arrive as WebSocket upgrades — the upgrade completes after wake, against the restored upstream. A connection that is *already established* is never parked mid-stream; only its next request would wake (see the long-connection caveat).
 
@@ -362,6 +366,7 @@ Ingress (flags, mirroring the `--renew-intent-*` family):
 --activity-redis-dsn                  (default redis://127.0.0.1:6379/0)
 --activity-key-prefix                 (default opensandbox:activity)
 --activity-min-interval               (default 1s; per-sandbox write coalescing)
+--activity-ttl-seconds                (default 1800; must match the server's activity_ttl_seconds)
 --wake-enabled                        (default false)
 --wake-park-budget                    (default 5s; park budget Y)
 --wake-park-max                       (default 1024; parking lot capacity)
@@ -374,7 +379,7 @@ Rules:
 
 - `idle_pause.enabled=false` and `--wake-enabled=false` reproduce today's behavior exactly (paused sandbox accessed through the gateway → 503).
 - Ingress-path pause automation requires Redis reachable from both ingress and server. Wake requires only FastPath reachability the ingress already has.
-- Timeout budget: `--wake-park-budget` (Y) must exceed `--fastpath-wait-timeout-millis` plus one `GetSandbox` RPC so at least one full probe completes inside the budget; the per-probe RPC timeout stays the existing `--fastpath-wait-timeout-millis` (default 2 s, provider max 5 min). Pause timing = X + at most one `sweep_interval_seconds` of detection lag; `activity_ttl_seconds` must remain ≥ the largest accepted X. Operators must also align everything in front of the ingress — LB/Envoy idle timeouts and client response-header timeouts — to exceed Y, otherwise middle layers will cut parked connections before this OSEP can answer `503 + Retry-After`.
+- Timeout budget: `--wake-park-budget` (Y) must exceed `--fastpath-wait-timeout-millis` plus one `GetSandbox` RPC so at least one full probe completes inside the budget; the per-probe RPC timeout stays the existing `--fastpath-wait-timeout-millis` (default 2 s, provider max 5 min). Pause timing = X + at most one `sweep_interval_seconds` of detection lag; `activity_ttl_seconds` must remain ≥ the largest accepted X, and the ingress `--activity-ttl-seconds` must be kept equal to the server value (both gate the same keys; a producer-side mismatch shortens key lifetime and at worst delays pauses via tombstones — it cannot corrupt decisions). Operators must also align everything in front of the ingress — LB/Envoy idle timeouts and client response-header timeouts — to exceed Y, otherwise middle layers will cut parked connections before this OSEP can answer `503 + Retry-After`.
 - Docker direct access remains unsupported as an observation point (no reverse proxy hop), same as OSEP-0009.
 
 Create request example (pause + renew composed):
@@ -431,7 +436,9 @@ Dashboards/alerts: wake P95 (target < 500 ms same-node), shed rate ≈ 0, flap r
 
 - **Unit Tests**
   - Extensions validation: range 30–86400, `X ≤ activity_ttl_seconds`, conflict behavior with other reserved keys.
-   - Idle decision function: boundary at exactly X; missing activity key ⇒ idle; activity key rewritten on wake; expiry and state gates.
+   - Idle decision function: boundary at exactly X; stale activity key ⇒ idle by value; missing key ⇒ unknown (tombstone created, sweep skipped); tombstone aged ≥ X ⇒ idle; activity reappearance clears the tombstone; expiry and state gates.
+   - Activity write: monotonic max — an older timestamp never overwrites a newer one.
+   - Parking admission: slot acquired before flight creation; full lot sheds before `ResumeSandbox`; first-attempt hits take no slot.
   - Singleflight registry: N concurrent arrivals → one flight, shared budget, late-joiner outcome; `Aborted` fence restart; "not paused" treated as joined.
   - Parking lot: slot taken only at park transition; shedding at capacity; budget exhaustion returns 503 + `Retry-After` without canceling the flight.
   - Backoff sequence with factor/jitter bounds.
@@ -441,7 +448,10 @@ Dashboards/alerts: wake P95 (target < 500 ms same-node), shed rate ≈ 0, flap r
   - Request arriving during `Pausing` cancels the pause (no completed checkpoint) and serves from the running sandbox.
   - Manual pause → access → wake (uniform semantics).
   - Paused + expired → access → 404, no resume.
-  - Redis down: no pauses occur; wake still works; proxy path unaffected.
+   - Redis down: no pauses occur; wake still works; proxy path unaffected.
+   - Redis data loss (`FLUSHALL`) with an active opted-in sandbox: no immediate pause; after continued silence the tombstone window elapses and the pause proceeds — delayed by ≥ X from first observation, never accelerated.
+   - Cached-route request racing a pause: stale upstream response → `GetSandbox` → wake → replayable request retried once and served; non-replayable request answered 503 without replay.
+   - Burst across more than `--wake-park-max` distinct paused sandboxes: concurrent restores bounded by lot capacity per replica; overflow shed before any `ResumeSandbox`.
   - Two server replicas: exactly one pause per idle episode (lock + idempotency).
   - Multi-replica ingress: activity from any replica keeps the sandbox awake.
   - OSEP-0009 composition: opted into both — renew intents and activity writes both flow; renew gate cooldown unchanged.
