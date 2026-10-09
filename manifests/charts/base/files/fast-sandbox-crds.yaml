@@ -284,7 +284,6 @@ spec:
                 - kata-clh
                 - kata-fc
                 - kata-dragonball
-                - boxlite
                 - firecracker
                 type: string
               sandboxResources:
