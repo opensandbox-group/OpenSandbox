@@ -45,7 +45,16 @@ from tests.base_e2e_test import (
 
 CLUSTER_ID = os.getenv("NODEAGENT_SMOKE_CLUSTER_ID", "nightly-smoke")
 DATA_ROOT = os.getenv("NODEAGENT_SMOKE_DATA_ROOT", "/var/lib/opensandbox/nodeagent-data")
-KIND_NODE = os.getenv("NODEAGENT_SMOKE_KIND_NODE", "opensandbox-e2e-control-plane")
+KIND_NODE = os.getenv("NODEAGENT_SMOKE_KIND_NODE", "")
+
+# Only scripts/nodeagent-k8s-smoke.sh deploys the node-agent file sink and
+# exports the kind node name to inspect; everywhere else (docker bridge,
+# mini-e2e) the required stack is absent, so skip instead of failing.
+pytestmark = pytest.mark.skipif(
+    not KIND_NODE,
+    reason="requires the node-agent full-stack smoke environment "
+    "(NODEAGENT_SMOKE_KIND_NODE from scripts/nodeagent-k8s-smoke.sh)",
+)
 
 COLLECT_TIMEOUT = timedelta(minutes=4)
 FINALIZE_TIMEOUT = timedelta(minutes=4)

@@ -66,6 +66,10 @@ k8s_e2e_kind_load_runtime_images
 k8s_e2e_write_server_helm_values
 k8s_e2e_helm_install_server
 
+# The server does not create its sandbox namespace: the mini-e2e flow creates
+# it as a side effect of the PVC seeding step, which this minimal flow skips.
+kubectl get namespace "${E2E_NAMESPACE}" >/dev/null 2>&1 || kubectl create namespace "${E2E_NAMESPACE}"
+
 docker build -f components/nodeagent/Dockerfile -t "${NODEAGENT_IMG}" "${REPO_ROOT}"
 kind load docker-image --name "${KIND_CLUSTER}" "${NODEAGENT_IMG}"
 
