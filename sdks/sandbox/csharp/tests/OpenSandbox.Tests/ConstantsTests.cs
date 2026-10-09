@@ -94,6 +94,6 @@ public class ConstantsTests
     [Fact]
     public void DefaultUserAgent_ShouldMatchPackageVersion()
     {
-        Constants.DefaultUserAgent.Should().Be("OpenSandbox-CSharp-SDK/1.1.0");
+        Constants.DefaultUserAgent.Should().Be("OpenSandbox-CSharp-SDK/1.1.1");
     }
 }

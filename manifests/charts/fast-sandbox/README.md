@@ -54,7 +54,7 @@ The following table lists the configurable parameters of the chart and their def
 | artifactStore.endpoint | string | `""` | S3-compatible endpoint (empty = AWS default) |
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.1.1-rc.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.1.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
 | controller.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |

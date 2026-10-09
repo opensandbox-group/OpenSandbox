@@ -68,7 +68,7 @@ class ConnectionConfig(BaseModel):
         default=False, description="Enable debug logging for HTTP requests"
     )
     user_agent: str = Field(
-        default="OpenSandbox-Python-SDK/1.1.0", description="User agent string"
+        default="OpenSandbox-Python-SDK/1.1.1", description="User agent string"
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"

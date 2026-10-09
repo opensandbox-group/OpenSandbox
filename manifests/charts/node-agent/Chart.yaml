@@ -16,8 +16,8 @@ apiVersion: v2
 name: opensandbox-node-agent
 description: Node-level sandbox data collection for OpenSandbox
 type: application
-version: 1.1.1-rc.1
-appVersion: "1.1.1-rc.1"
+version: 1.1.1
+appVersion: "1.1.1"
 
 # Kubernetes version constraints
 kubeVersion: ">=1.21.1-0"
