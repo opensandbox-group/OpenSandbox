@@ -80,6 +80,8 @@ helm upgrade --install "${NODEAGENT_RELEASE}" "${REPO_ROOT}/manifests/charts/nod
   --set image.pullPolicy=Never \
   --set config.clusterID="${NODEAGENT_CLUSTER_ID}" \
   --set config.endedStateRetention=1m \
+  --set sink.file.path="${NODEAGENT_DATA_ROOT}" \
+  --set hostPaths.fileData="${NODEAGENT_DATA_ROOT}" \
   --wait --timeout 180s
 
 nodeagent_daemonset="$(kubectl get daemonset -n "${SERVER_NAMESPACE}" \
