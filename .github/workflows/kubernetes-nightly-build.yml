@@ -227,7 +227,11 @@ jobs:
       # Catch event-loop cross-thread misuse in the pool warmup loop.
       PYTHONASYNCIODEBUG: "1"
       # Lifecycle-stress test round count (tests/python POOL_STRESS_ROUNDS).
-      POOL_STRESS_ROUNDS: "10"
+      # Keep this within what a single-node Kind on a 4-core runner can
+      # sustain: higher round counts saturate the node with Pending sandbox
+      # pods, and every failed create blocks the server for 180s
+      # (POD_READY_TIMEOUT), cascading into recovery-assertion timeouts.
+      POOL_STRESS_ROUNDS: "3"
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

@@ -324,9 +324,14 @@ class TestSandboxPoolSingleNodeE2ESync:
 
         assert not errors
         self.pool.start()
+        # The recovery wait must exceed the server-side create timeout (180s):
+        # a warmup submitted right after the stress can still be parked on a
+        # slow create that only fails with a 504 after 180s before a retry
+        # succeeds, so the default 2-minute window is not enough.
         _eventually(
             "pool remains usable after lifecycle stress",
             lambda: self.pool.snapshot().idle_count >= 1,
+            timeout=timedelta(minutes=5),
         )
 
     @pytest.mark.timeout(300)
