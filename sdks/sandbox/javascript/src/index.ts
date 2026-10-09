@@ -47,6 +47,7 @@ export type {
   CredentialListResponse,
   CredentialMatch,
   CredentialMatchScheme,
+  CredentialRequestHeaderSelector,
   CredentialMetadata,
   CredentialMutationSet,
   CredentialProxyConfig,

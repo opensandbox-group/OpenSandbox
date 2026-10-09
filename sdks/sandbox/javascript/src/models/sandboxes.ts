@@ -109,6 +109,12 @@ export interface Credential extends Record<string, unknown> {
 
 export type CredentialMatchScheme = "https" | "http";
 
+export interface CredentialRequestHeaderSelector {
+  name: string;
+  /** Required when writing a binding; omitted from sanitized metadata. */
+  value?: string;
+}
+
 export interface CredentialMatch extends Record<string, unknown> {
   /**
    * URL schemes to match. Defaults to HTTPS in the sidecar.
@@ -130,6 +136,8 @@ export interface CredentialMatch extends Record<string, unknown> {
    * Request paths to match.
    */
   paths?: string[];
+  /** One to four AND-combined request header routing predicates. */
+  requestHeaders?: CredentialRequestHeaderSelector[];
 }
 
 export type CredentialSubstitutionSurface = "path" | "query" | "header" | "body";

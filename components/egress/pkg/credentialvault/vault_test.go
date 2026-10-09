@@ -17,6 +17,7 @@ package credentialvault
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -93,6 +94,154 @@ func TestCredentialVaultCreateSanitizesAndRendersActiveSnapshot(t *testing.T) {
 	require.Equal(t, int64(1), payload.Revision)
 	require.Equal(t, []InjectionHeader{{Name: "Private-Token", Value: "secret-token"}}, payload.Bindings[0].Headers)
 	require.Contains(t, payload.Redactions, "secret-token")
+}
+
+func TestCredentialVaultRequestHeaderSelectorsAreSanitizedAndRemainPrivate(t *testing.T) {
+	request := testCredentialVaultRequest()
+	raw, err := json.Marshal(request)
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	bindings := payload["bindings"].([]any)
+	match := bindings[0].(map[string]any)["match"].(map[string]any)
+	match["requestHeaders"] = []any{
+		map[string]any{"name": "X-Tenant", "value": "  selector-private-marker\t"},
+	}
+	raw, err = json.Marshal(payload)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &request))
+
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	state, err := store.Create(request, pol)
+	require.NoError(t, err)
+	encodedState, err := json.Marshal(state)
+	require.NoError(t, err)
+	if !strings.Contains(string(encodedState), `"name":"X-Tenant"`) || strings.Contains(string(encodedState), "selector-private-marker") {
+		t.Fatal("sanitized state must expose selector names without selector values")
+	}
+
+	snapshot, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	encodedSnapshot, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	if !strings.Contains(string(encodedSnapshot), "selector-private-marker") {
+		t.Fatal("active snapshot must retain the canonical selector value")
+	}
+}
+
+func TestCredentialVaultRejectsInvalidRequestHeaderSelectors(t *testing.T) {
+	tests := []struct {
+		name      string
+		selectors []map[string]string
+	}{
+		{name: "invalid token", selectors: []map[string]string{{"name": "Bad Name", "value": "selector-private-marker"}}},
+		{name: "duplicate case insensitive name", selectors: []map[string]string{{"name": "X-Tenant", "value": "selector-private-marker"}, {"name": "x-tenant", "value": "selector-private-marker"}}},
+		{name: "reserved name", selectors: []map[string]string{{"name": "Host", "value": "selector-private-marker"}}},
+		{name: "empty value", selectors: []map[string]string{{"name": "X-Tenant", "value": " \t"}}},
+		{name: "empty array", selectors: []map[string]string{}},
+		{name: "too many selectors", selectors: []map[string]string{{"name": "A", "value": "selector-private-marker"}, {"name": "B", "value": "selector-private-marker"}, {"name": "C", "value": "selector-private-marker"}, {"name": "D", "value": "selector-private-marker"}, {"name": "E", "value": "selector-private-marker"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := testCredentialVaultRequest()
+			raw, err := json.Marshal(request)
+			require.NoError(t, err)
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(raw, &payload))
+			bindings := payload["bindings"].([]any)
+			match := bindings[0].(map[string]any)["match"].(map[string]any)
+			selectors := make([]any, 0, len(tc.selectors))
+			for _, selector := range tc.selectors {
+				selectors = append(selectors, selector)
+			}
+			match["requestHeaders"] = selectors
+			raw, err = json.Marshal(payload)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(raw, &request))
+			store := NewStore(nil, func() bool { return true })
+			pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+			_, err = store.Create(request, pol)
+			if err == nil {
+				t.Fatal("invalid request header selectors must be rejected")
+			}
+			for _, selector := range tc.selectors {
+				if selector["value"] != "" && strings.Contains(err.Error(), selector["value"]) {
+					t.Fatal("selector values must not appear in validation errors")
+				}
+			}
+		})
+	}
+}
+
+func TestCredentialVaultAllowsAuthorizationAndContentTypeSelectors(t *testing.T) {
+	for _, name := range []string{"Authorization", "Content-Type"} {
+		t.Run(name, func(t *testing.T) {
+			request := testCredentialVaultRequest()
+			request.Bindings[0].Match.RequestHeaders = []RequestHeaderSelector{{Name: name, Value: "selector-private-marker"}}
+			store := NewStore(nil, func() bool { return true })
+			pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+			_, err := store.Create(request, pol)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestBindingAmbiguityRequiresDifferentSharedRequestHeaderSelector(t *testing.T) {
+	base := Match{
+		Schemes: []string{"https"},
+		Hosts:   []string{"code.example.com"},
+		Methods: []string{"GET"},
+		Paths:   []string{"/api/*"},
+	}
+	binding := func(name string, selectors ...RequestHeaderSelector) Binding {
+		match := cloneMatch(base)
+		match.RequestHeaders = selectors
+		return Binding{Name: name, Match: match}
+	}
+	tests := []struct {
+		name    string
+		a       Binding
+		b       Binding
+		wantErr bool
+	}{
+		{
+			name:    "generic and selector overlap",
+			a:       binding("generic"),
+			b:       binding("selected", RequestHeaderSelector{Name: "X-Tenant", Value: "Alpha"}),
+			wantErr: true,
+		},
+		{
+			name:    "same value overlap",
+			a:       binding("a", RequestHeaderSelector{Name: "X-Tenant", Value: "Alpha"}),
+			b:       binding("b", RequestHeaderSelector{Name: "x-tenant", Value: "Alpha"}),
+			wantErr: true,
+		},
+		{
+			name:    "different names overlap",
+			a:       binding("a", RequestHeaderSelector{Name: "X-Tenant", Value: "Alpha"}),
+			b:       binding("b", RequestHeaderSelector{Name: "X-Region", Value: "Beta"}),
+			wantErr: true,
+		},
+		{
+			name: "different shared value disambiguates",
+			a:    binding("a", RequestHeaderSelector{Name: "X-Tenant", Value: "Alpha"}),
+			b:    binding("b", RequestHeaderSelector{Name: "x-tenant", Value: "Beta"}),
+		},
+		{
+			name: "exact and wildcard precedence remains valid",
+			a:    Binding{Name: "exact", Match: base},
+			b:    Binding{Name: "wildcard", Match: Match{Schemes: []string{"https"}, Hosts: []string{"*.example.com"}, Methods: []string{"GET"}, Paths: []string{"/api/*"}}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBindingAmbiguity(map[string]Binding{tc.a.Name: tc.a, tc.b.Name: tc.b})
+			if (err != nil) != tc.wantErr {
+				t.Fatal("overlapping binding validation did not match the expected outcome")
+			}
+		})
+	}
 }
 
 func TestCredentialVaultActiveSnapshotIfChanged(t *testing.T) {

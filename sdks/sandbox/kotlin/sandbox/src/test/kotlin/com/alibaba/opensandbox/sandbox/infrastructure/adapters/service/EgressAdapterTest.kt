@@ -25,6 +25,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialBinding
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialBindingMutationSet
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMatch
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMutationSet
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialRequestHeaderSelector
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSubstitution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultPatchRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CustomHeaderEntry
@@ -98,7 +99,8 @@ class EgressAdapterTest {
                             "schemes": ["https"],
                             "hosts": ["api.github.com"],
                             "methods": ["GET"],
-                            "paths": ["/repos/*"]
+                            "paths": ["/repos/*"],
+                            "requestHeaders": [{"name": "X-Tenant"}]
                           },
                           "auth": {"type": "bearer"}
                         }
@@ -114,6 +116,12 @@ class EgressAdapterTest {
                 .hosts("api.github.com")
                 .methods("GET")
                 .paths("/repos/*")
+                .requestHeaders(
+                    CredentialRequestHeaderSelector.builder()
+                        .name("X-Tenant")
+                        .value("selector-private-marker")
+                        .build(),
+                )
                 .build()
         val result =
             egressAdapter.create(
@@ -189,6 +197,12 @@ class EgressAdapterTest {
         assertEquals("dummy-bearer-token", firstCredential["source"]!!.jsonObject["value"]!!.jsonPrimitive.content)
 
         val bindings = payload["bindings"]!!.jsonArray
+        val selector = bindings[0].jsonObject["match"]!!.jsonObject["requestHeaders"]!!.jsonArray[0].jsonObject
+        assertTrue(
+            selector["name"]!!.jsonPrimitive.content == "X-Tenant" &&
+                selector["value"]!!.jsonPrimitive.content == "selector-private-marker",
+            "request selector was not serialized as a write predicate",
+        )
         assertEquals("bearer", bindings[0].jsonObject["auth"]!!.jsonObject["type"]!!.jsonPrimitive.content)
         assertEquals("basic", bindings[1].jsonObject["auth"]!!.jsonObject["type"]!!.jsonPrimitive.content)
         val apiKeyAuth = bindings[2].jsonObject["auth"]!!.jsonObject
@@ -212,6 +226,10 @@ class EgressAdapterTest {
         assertEquals("github-api", result.bindings.single().name)
         assertEquals("bearer", result.bindings.single().auth?.type)
         assertEquals(listOf("api.github.com"), result.bindings.single().match?.hosts)
+        assertTrue(
+            result.bindings.single().match?.requestHeaders?.single()?.value == null,
+            "metadata must not fabricate a selector value",
+        )
     }
 
     @Test

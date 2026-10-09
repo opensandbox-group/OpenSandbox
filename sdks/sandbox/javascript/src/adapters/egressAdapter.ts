@@ -127,6 +127,16 @@ function sanitizeCredentialMatch(
   if (methods) match.methods = methods;
   const paths = optionalStringArray(raw.paths, `${context}.paths`);
   if (paths) match.paths = paths;
+  if (raw.requestHeaders != null) {
+    match.requestHeaders = expectArray(
+      raw.requestHeaders,
+      `${context}.requestHeaders`,
+      (item, selectorContext) => {
+        const selector = expectObject(item, selectorContext);
+        return { name: expectString(selector.name, `${selectorContext}.name`) };
+      },
+    );
+  }
   return match;
 }
 

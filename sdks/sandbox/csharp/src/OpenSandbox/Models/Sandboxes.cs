@@ -214,6 +214,26 @@ public class CredentialMatch
     /// </summary>
     [JsonPropertyName("paths")]
     public IReadOnlyList<string>? Paths { get; set; }
+
+    /// <summary>
+    /// Gets or sets optional request header routing predicates. Values are required on writes and omitted from metadata.
+    /// </summary>
+    [JsonPropertyName("requestHeaders")]
+    public IReadOnlyList<CredentialRequestHeaderSelector>? RequestHeaders { get; set; }
+}
+
+/// <summary>
+/// One request header predicate for Credential Vault routing.
+/// </summary>
+public class CredentialRequestHeaderSelector
+{
+    /// <summary>Gets or sets the RFC 9110 field name.</summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>Required when writing a binding; omitted from sanitized metadata.</summary>
+    [JsonPropertyName("value")]
+    public string? Value { get; set; }
 }
 
 /// <summary>

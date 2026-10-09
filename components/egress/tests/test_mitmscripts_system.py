@@ -45,6 +45,7 @@ class _Log:
 class _Headers:
     def __init__(self, values: dict[str, str]) -> None:
         self._values = dict(values)
+        self._multiple: dict[str, list[str]] = {}
 
     def get(self, name: str, default: str = "") -> str:
         for key, value in self._values.items():
@@ -54,6 +55,13 @@ class _Headers:
 
     def items(self) -> list[tuple[str, str]]:
         return list(self._values.items())
+
+    def get_all(self, name: str) -> list[str]:
+        for key, values in self._multiple.items():
+            if key.lower() == name.lower():
+                return list(values)
+        value = self.get(name, "")
+        return [value] if value else []
 
     def __setitem__(self, name: str, value: str) -> None:
         self._values[name] = value
@@ -287,6 +295,136 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertEqual(("init", "/tmp/active.sock", 0.25), calls[0])
         self.assertEqual(("request", "GET", system.ACTIVE_VAULT_PATH), calls[1])
         self.assertEqual(("close", None, None), calls[-1])
+
+    def test_request_header_selectors_choose_one_same_scope_binding(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.headers["X-Tenant"] = "\tAlpha "
+        vault = system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "tenant-a",
+                    "match": {"hosts": ["code.example.com"], "methods": ["GET"], "paths": ["/api/*"], "requestHeaders": [{"name": "x-tenant", "value": "Alpha"}]},
+                    "headers": [],
+                    "substitutions": [],
+                },
+                {
+                    "name": "tenant-b",
+                    "match": {"hosts": ["code.example.com"], "methods": ["GET"], "paths": ["/api/*"], "requestHeaders": [{"name": "X-Tenant", "value": "Beta"}]},
+                    "headers": [],
+                    "substitutions": [],
+                },
+            ],
+            [],
+        )
+
+        selected = system._select_binding(flow, vault)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual("tenant-a", selected["name"])
+
+    def test_request_header_selector_compares_comma_value_as_one_field(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.headers["X-Tenant"] = "Alpha, Beta"
+        vault = system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "tenant-a",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/*"],
+                        "requestHeaders": [{"name": "X-Tenant", "value": "Alpha, Beta"}],
+                    },
+                    "headers": [],
+                    "substitutions": [],
+                }
+            ],
+            [],
+        )
+
+        selected = system._select_binding(flow, vault)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual("tenant-a", selected["name"])
+
+    def test_request_header_selector_mismatch_is_rejected_without_fallback(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        vault = system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "tenant-a",
+                    "match": {"hosts": ["code.example.com"], "methods": ["GET"], "paths": ["/api/*"], "requestHeaders": [{"name": "X-Tenant", "value": "Alpha"}]},
+                    "headers": [],
+                    "substitutions": [],
+                }
+            ],
+            [],
+        )
+
+        selected = system._select_binding(flow, vault)
+
+        self.assertIsNone(selected)
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+
+    def test_request_header_selector_rejects_repeated_field_lines(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.headers["X-Tenant"] = "Alpha"
+        flow.request.headers._multiple["X-Tenant"] = ["Alpha", "Alpha"]
+        vault = system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "tenant-a",
+                    "match": {"hosts": ["code.example.com"], "methods": ["GET"], "paths": ["/api/*"], "requestHeaders": [{"name": "X-Tenant", "value": "Alpha"}]},
+                    "headers": [],
+                    "substitutions": [],
+                }
+            ],
+            [],
+        )
+
+        selected = system._select_binding(flow, vault)
+
+        self.assertIsNone(selected)
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+
+    def test_request_header_selector_does_not_fall_back_below_host_precedence(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.headers["X-Tenant"] = "Beta"
+        vault = system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "exact",
+                    "match": {"hosts": ["code.example.com"], "methods": ["GET"], "paths": ["/api/*"], "requestHeaders": [{"name": "X-Tenant", "value": "Alpha"}]},
+                    "headers": [],
+                    "substitutions": [],
+                },
+                {
+                    "name": "wildcard",
+                    "match": {"hosts": ["*.example.com"], "methods": ["GET"], "paths": ["/api/*"], "requestHeaders": [{"name": "X-Tenant", "value": "Beta"}]},
+                    "headers": [],
+                    "substitutions": [],
+                },
+            ],
+            [],
+        )
+
+        selected = system._select_binding(flow, vault)
+
+        self.assertIsNone(selected)
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
 
     def test_fast_sandbox_mode_active_vault_cache_keyed_by_client_ip(self) -> None:
         system = _load_system_module()
@@ -1996,6 +2134,42 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
         self.assertNotIn("Private-Token", flow.request.headers._values)
+
+    def test_encoded_slash_compares_selector_eligible_outcomes(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.path = "/api/v8/projects/123%2fescape/variables"
+        flow.request.headers["X-Tenant"] = "Beta"
+        vault = system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "broad",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                        "requestHeaders": [{"name": "X-Tenant", "value": "Alpha"}],
+                    },
+                    "headers": [],
+                    "substitutions": [],
+                },
+                {
+                    "name": "encoded-only",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/projects/123%2f*"],
+                        "requestHeaders": [{"name": "X-Tenant", "value": "Beta"}],
+                    },
+                    "headers": [],
+                    "substitutions": [],
+                },
+            ],
+            [],
+        )
+
+        self.assertTrue(system._path_encoded_slash_changes_binding(flow, vault))
 
 
 class SystemAddonNpmScopedPackageTest(unittest.TestCase):

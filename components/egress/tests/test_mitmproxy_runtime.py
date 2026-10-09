@@ -78,6 +78,7 @@ class _VaultUnixServer:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._mode = "normal"
+        self._etag = '"runtime-v1"'
 
     def start(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -105,6 +106,7 @@ class _VaultUnixServer:
                 data += chunk
             with self._lock:
                 mode = self._mode
+                etag = self._etag
             if mode == "stall":
                 time.sleep(0.4)
             if mode == "server-error":
@@ -151,16 +153,16 @@ class _VaultUnixServer:
                     + body
                 )
                 return
-            if b'\r\nif-none-match: "runtime-v1"\r\n' in data.lower():
+            if (b"if-none-match: " + etag.lower().encode("ascii") + b"\r\n") in data.lower():
                 conn.sendall(
                     b"HTTP/1.1 304 Not Modified\r\n"
-                    b'etag: "runtime-v1"\r\n'
+                    b"etag: " + etag.encode("ascii") + b"\r\n"
                     b"content-length: 0\r\n\r\n"
                 )
                 return
             conn.sendall(
                 b"HTTP/1.1 200 OK\r\n"
-                b'etag: "runtime-v1"\r\n'
+                b"etag: " + etag.encode("ascii") + b"\r\n"
                 b"content-type: application/json\r\n"
                 b"content-length: "
                 + str(len(self.payload)).encode("ascii")
@@ -175,6 +177,11 @@ class _VaultUnixServer:
     def set_mode(self, mode: str) -> None:
         with self._lock:
             self._mode = mode
+
+    def set_payload(self, payload: bytes, etag: str) -> None:
+        with self._lock:
+            self.payload = payload
+            self._etag = f'"{etag}"'
 
     def stop(self) -> None:
         self._stop.set()
@@ -335,6 +342,24 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def _request_with_repeated_header_lines(self, name: str, values: list[str]) -> int:
+        body = SMALL_BODY
+        lines = [
+            "POST http://code.example.com/v1/chat/completions HTTP/1.1",
+            "Host: code.example.com",
+            f"Content-Length: {len(body)}",
+            "Connection: close",
+            *(f"{name}: {value}" for value in values),
+            "",
+            "",
+        ]
+        with socket.create_connection(("127.0.0.1", self._port), timeout=15) as sock:
+            sock.sendall("\r\n".join(lines).encode("ascii") + body)
+            response = http.client.HTTPResponse(sock)
+            response.begin()
+            response.read()
+            return response.status
+
     def _send_expect_continue(
         self,
         path: str,
@@ -476,6 +501,51 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         merged = "\n".join(self._log)
         self.assertIn("headers=Authorization", merged)
         self.assertNotIn("synthetic-token", merged)
+        self._assert_no_crash()
+
+    def test_repeated_selector_field_lines_are_rejected_by_real_mitmproxy(self) -> None:
+        payload = json.dumps(
+            {
+                "revision": 1,
+                "bindings": [
+                    {
+                        "name": "tenant-alpha",
+                        "match": {
+                            "schemes": ["http"],
+                            "hosts": ["code.example.com"],
+                            "methods": ["POST"],
+                            "paths": ["/v1/chat/*"],
+                            "requestHeaders": [{"name": "X-Tenant", "value": "Alpha"}],
+                        },
+                        "headers": [{"name": "Authorization", "value": "Bearer tenant-alpha"}],
+                    },
+                    {
+                        "name": "tenant-beta",
+                        "match": {
+                            "schemes": ["http"],
+                            "hosts": ["code.example.com"],
+                            "methods": ["POST"],
+                            "paths": ["/v1/chat/*"],
+                            "requestHeaders": [{"name": "X-Tenant", "value": "Beta"}],
+                        },
+                        "headers": [{"name": "Authorization", "value": "Bearer tenant-beta"}],
+                    },
+                ],
+                "redactions": ["Bearer tenant-alpha", "Bearer tenant-beta"],
+            }
+        ).encode("utf-8")
+        self._vault.set_payload(payload, "runtime-selectors")
+        self._upstream_hit.clear()
+        hits_before = self._upstream_hit_count()
+        try:
+            status = self._request_with_repeated_header_lines(
+                "X-Tenant", ["Alpha", "Alpha"]
+            )
+            self.assertEqual(403, status)
+            self.assertFalse(self._upstream_hit.wait(0.25))
+            self.assertEqual(hits_before, self._upstream_hit_count())
+        finally:
+            self._vault.set_payload(VAULT_PAYLOAD, "runtime-v1")
         self._assert_no_crash()
 
     def test_lookup_failures_deny_buffered_and_streamed_requests(self) -> None:

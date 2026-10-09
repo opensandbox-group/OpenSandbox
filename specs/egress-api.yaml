@@ -576,6 +576,41 @@ components:
           items:
             type: string
           default: ["/*"]
+        requestHeaders:
+          type: array
+          minItems: 1
+          maxItems: 4
+          description: >-
+            Optional routing selectors. Every predicate must match. Header names
+            are ASCII case-insensitive RFC 9110 field-name tokens and are not
+            trimmed. Values are compared case-sensitively after trimming only
+            outer SP and HTAB. Authorization and Content-Type are allowed;
+            Host, Content-Length, Transfer-Encoding, Connection, Upgrade, TE,
+            Trailer, Cookie, Proxy-Authorization, Proxy-Authenticate, Forwarded,
+            X-Forwarded-For, X-Forwarded-Host, and X-Forwarded-Proto are rejected.
+            A selected header must occur exactly once; missing or repeated field
+            lines do not match. A comma-containing single field is compared as
+            one value. Selectors route requests and do not authorize users or
+            processes.
+          items:
+            $ref: '#/components/schemas/CredentialRequestHeaderSelector'
+      additionalProperties: false
+    CredentialRequestHeaderSelector:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          pattern: "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$"
+          description: RFC 9110 field-name token; matching is ASCII case-insensitive.
+        value:
+          type: string
+          writeOnly: true
+          description: >-
+            Required on writes. Must not be empty after trimming outer SP and
+            HTAB. The remaining value is matched case-sensitively and is never
+            returned in binding metadata.
       additionalProperties: false
     CredentialAuth:
       oneOf:

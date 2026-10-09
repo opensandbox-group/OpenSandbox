@@ -52,7 +52,15 @@ public class EgressAdapterCredentialVaultTests
                         Hosts = ["api.example.com"],
                         Schemes = ["https"],
                         Methods = ["GET"],
-                        Paths = ["/v1/*"]
+                        Paths = ["/v1/*"],
+                        RequestHeaders =
+                        [
+                            new CredentialRequestHeaderSelector
+                            {
+                                Name = "X-Tenant",
+                                Value = "selector-private-marker"
+                            }
+                        ]
                     },
                     Auth = new CredentialAuth
                     {
@@ -89,6 +97,12 @@ public class EgressAdapterCredentialVaultTests
         root.GetProperty("bindings")[0].GetProperty("auth").GetProperty("substitutions")[0].GetProperty("placeholder").GetString().Should().Be("__api_token__");
         root.GetProperty("bindings")[0].GetProperty("auth").GetProperty("substitutions")[0].GetProperty("in")[1].GetString().Should().Be("body");
         root.GetProperty("bindings")[0].GetProperty("match").GetProperty("hosts")[0].GetString().Should().Be("api.example.com");
+        var selector = root.GetProperty("bindings")[0].GetProperty("match").GetProperty("requestHeaders")[0];
+        Assert.True(
+            selector.GetProperty("name").GetString() == "X-Tenant" &&
+            selector.GetProperty("value").GetString() == "selector-private-marker",
+            "request selector was not serialized as a write predicate");
+        Assert.True(state.Bindings[0].Match?.RequestHeaders?[0].Value is null, "metadata must not fabricate a selector value");
         state.Revision.Should().Be(3);
     }
 
@@ -206,7 +220,7 @@ public class EgressAdapterCredentialVaultTests
             {
               "name": "api-binding",
               "revision": 4,
-              "match": { "hosts": ["api.example.com"] },
+              "match": { "hosts": ["api.example.com"], "requestHeaders": [{ "name": "X-Tenant" }] },
               "auth": { "type": "apiKey", "name": "X-Test-Key" }
             }
           ]

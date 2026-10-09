@@ -128,6 +128,38 @@ class Credential private constructor(
 /**
  * Request match for a Credential Vault binding.
  */
+class CredentialRequestHeaderSelector private constructor(
+    val name: String,
+    val value: String?,
+) {
+    companion object {
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+
+    class Builder {
+        private var name: String? = null
+        private var value: String? = null
+
+        fun name(name: String): Builder {
+            require(name.isNotEmpty()) { "Credential request header name cannot be blank" }
+            this.name = name
+            return this
+        }
+
+        fun value(value: String): Builder {
+            this.value = value
+            return this
+        }
+
+        fun build(): CredentialRequestHeaderSelector =
+            CredentialRequestHeaderSelector(
+                name = name ?: throw IllegalArgumentException("Credential request header name must be specified"),
+                value = value,
+            )
+    }
+}
+
 class CredentialMatch private constructor(
     val schemes: List<Scheme>?,
     @Deprecated("Ignored; port is derived from schemes (HTTPS→443, HTTP→80)")
@@ -135,6 +167,7 @@ class CredentialMatch private constructor(
     val hosts: List<String>,
     val methods: List<String>?,
     val paths: List<String>?,
+    val requestHeaders: List<CredentialRequestHeaderSelector>?,
 ) {
     enum class Scheme {
         HTTPS,
@@ -151,6 +184,7 @@ class CredentialMatch private constructor(
         private var hosts: List<String>? = null
         private var methods: List<String>? = null
         private var paths: List<String>? = null
+        private var requestHeaders: List<CredentialRequestHeaderSelector>? = null
 
         fun schemes(schemes: List<Scheme>): Builder {
             require(schemes.isNotEmpty()) { "Credential match schemes cannot be empty when provided" }
@@ -200,6 +234,15 @@ class CredentialMatch private constructor(
 
         fun paths(vararg paths: String): Builder = paths(paths.toList())
 
+        fun requestHeaders(requestHeaders: List<CredentialRequestHeaderSelector>): Builder {
+            require(requestHeaders.isNotEmpty()) { "Credential match requestHeaders cannot be empty when provided" }
+            require(requestHeaders.size <= 4) { "Credential match supports at most four request headers" }
+            this.requestHeaders = requestHeaders.toList()
+            return this
+        }
+
+        fun requestHeaders(vararg requestHeaders: CredentialRequestHeaderSelector): Builder = requestHeaders(requestHeaders.toList())
+
         fun build(): CredentialMatch {
             val hostsValue = hosts ?: throw IllegalArgumentException("Credential match hosts must be specified")
             return CredentialMatch(
@@ -207,6 +250,7 @@ class CredentialMatch private constructor(
                 hosts = hostsValue,
                 methods = methods,
                 paths = paths,
+                requestHeaders = requestHeaders,
             )
         }
     }
