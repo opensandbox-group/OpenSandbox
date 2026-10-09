@@ -53,8 +53,20 @@ const (
 	routeCacheSweepInterval = time.Minute
 )
 
+// FastPathResolver is the FastPath v2 route-resolution RPC surface the
+// provider uses. It is the generated client in production and a fake in
+// tests.
 type FastPathResolver interface {
 	ResolveEndpoint(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error)
+}
+
+// FastPathLifecycle is the FastPath v2 lifecycle RPC surface used by
+// wake-on-access (OSEP-0024): state probing and resume. It is deliberately
+// separate from route resolution so deployments can inject an alternative
+// implementation of the lifecycle RPCs without touching the routing path.
+type FastPathLifecycle interface {
+	GetSandbox(context.Context, *fastpathv2.GetSandboxRequest, ...grpc.CallOption) (*fastpathv2.GetSandboxResponse, error)
+	ResumeSandbox(context.Context, *fastpathv2.ResumeSandboxRequest, ...grpc.CallOption) (*fastpathv2.ResumeSandboxResponse, error)
 }
 
 type fastPathResolutionError struct {
@@ -67,11 +79,12 @@ func (e *fastPathResolutionError) Unwrap() error        { return e.public }
 func (e *fastPathResolutionError) InternalCause() error { return e.cause }
 
 type FastSandboxProvider struct {
-	resolver    FastPathResolver
-	connection  *grpc.ClientConn
-	waitTimeout time.Duration
-	accessMode  fastpathv2.EndpointAccessMode
-	now         func() time.Time
+	resolver     FastPathResolver
+	lifecycleRPC FastPathLifecycle
+	connection   *grpc.ClientConn
+	waitTimeout  time.Duration
+	accessMode   fastpathv2.EndpointAccessMode
+	now          func() time.Time
 
 	mu    sync.RWMutex
 	cache map[EndpointTarget]EndpointInfo
@@ -101,15 +114,33 @@ func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMo
 }
 
 func NewFastSandboxProviderWithResolver(resolver FastPathResolver, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) *FastSandboxProvider {
+	// The generated FastPath client satisfies both surfaces; fakes that
+	// only resolve routes leave the lifecycle RPCs unconfigured.
+	var lifecycle FastPathLifecycle
+	if lifecycleRPC, ok := resolver.(FastPathLifecycle); ok {
+		lifecycle = lifecycleRPC
+	}
+	return newFastSandboxProvider(resolver, lifecycle, waitTimeout, accessMode)
+}
+
+// NewFastSandboxProviderWithLifecycle injects an explicit lifecycle RPC
+// implementation (for example an internal variant of GetSandbox and
+// ResumeSandbox) while keeping the stock route resolver.
+func NewFastSandboxProviderWithLifecycle(resolver FastPathResolver, lifecycle FastPathLifecycle, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) *FastSandboxProvider {
+	return newFastSandboxProvider(resolver, lifecycle, waitTimeout, accessMode)
+}
+
+func newFastSandboxProvider(resolver FastPathResolver, lifecycle FastPathLifecycle, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) *FastSandboxProvider {
 	if waitTimeout <= 0 {
 		waitTimeout = 2 * time.Second
 	}
 	return &FastSandboxProvider{
-		resolver:    resolver,
-		waitTimeout: waitTimeout,
-		accessMode:  accessMode,
-		now:         time.Now,
-		cache:       make(map[EndpointTarget]EndpointInfo),
+		resolver:     resolver,
+		lifecycleRPC: lifecycle,
+		waitTimeout:  waitTimeout,
+		accessMode:   accessMode,
+		now:          time.Now,
+		cache:        make(map[EndpointTarget]EndpointInfo),
 	}
 }
 

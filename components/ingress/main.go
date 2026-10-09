@@ -28,6 +28,7 @@ import (
 	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/activity"
 	"github.com/alibaba/opensandbox/ingress/pkg/flag"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
@@ -36,6 +37,7 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
+	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
 func main() {
@@ -78,12 +80,14 @@ func main() {
 	}
 
 	var sandboxProvider sandbox.Provider
+	var fsbProvider *sandbox.FastSandboxProvider
 	if providerType == sandbox.ProviderTypeFastSandbox {
-		sandboxProvider, err = sandbox.NewFastSandboxProvider(
+		fsbProvider, err = sandbox.NewFastSandboxProvider(
 			flag.FastPathEndpoint,
 			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 			flag.FastPathAccessMode,
 		)
+		sandboxProvider = fsbProvider
 	} else {
 		cfg := injection.ParseAndGetRESTConfigOrDie()
 		cfg.ContentType = runtime.ContentTypeProtobuf
@@ -91,7 +95,6 @@ func main() {
 		providerFactory := sandbox.NewProviderFactory(cfg, time.Second*30)
 		sandboxProvider, err = providerFactory.CreateProvider(providerType)
 		if err == nil && fastPathEnabled {
-			var fsbProvider *sandbox.FastSandboxProvider
 			fsbProvider, err = sandbox.NewFastSandboxProvider(
 				flag.FastPathEndpoint,
 				time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
@@ -133,12 +136,14 @@ func main() {
 		MinDistinctSignalTargets: flag.NetworkReadinessShadowMinSignalTargets,
 		DegradedFailureRatio:     flag.NetworkReadinessShadowDegradedFailureRatio,
 	})
-	proxyOptions := make([]proxy.Option, 0, 1)
+	proxyOptions := make([]proxy.Option, 0, 3)
 	if err != nil {
 		log.Printf("network readiness shadow assessment disabled (invalid configuration): %v", err)
 	} else {
 		proxyOptions = append(proxyOptions, proxy.WithConnectObserver(connectObserver))
 	}
+	proxyOptions = append(proxyOptions, newActivityOption(ctx)...)
+	proxyOptions = append(proxyOptions, newWakeOption(fsbProvider)...)
 
 	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
@@ -155,6 +160,51 @@ func main() {
 	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), mux); err != nil {
 		log.Panicf("Error starting http server: %v", err)
 	}
+}
+
+// newActivityOption wires the OSEP-0024 auto-pause activity recorder so the
+// server-side idle sweeper sees live traffic. Fire-and-forget; never blocks
+// requests.
+func newActivityOption(ctx context.Context) []proxy.Option {
+	if !flag.ActivityEnabled {
+		return nil
+	}
+	activityClient, err := activity.RedisClientFromDSN(flag.ActivityRedisDSN)
+	if err != nil {
+		log.Panicf("Failed to create Redis client for activity: %v", err)
+	}
+	recorder := activity.NewRedisRecorder(ctx, activityClient, activity.RedisConfig{
+		TTL:         time.Duration(flag.ActivityTTLSeconds) * time.Second,
+		MinInterval: flag.ActivityMinInterval,
+		Logger:      proxy.Logger,
+	})
+	return []proxy.Option{proxy.WithActivityRecorder(recorder)}
+}
+
+// newWakeOption wires the OSEP-0024 wake-on-access orchestrator: requests
+// routed to paused fast sandboxes park while a resume flight restores them.
+func newWakeOption(fsbProvider *sandbox.FastSandboxProvider) []proxy.Option {
+	if !flag.WakeEnabled {
+		return nil
+	}
+	if fsbProvider == nil {
+		log.Panic("Wake-on-access requires a Fast Sandbox provider (set --provider-type=fast-sandbox or --fastpath-endpoint)")
+	}
+	waker, err := wake.NewWaker(wake.Config{
+		ParkBudget:    flag.WakeParkBudget,
+		ParkMax:       flag.WakeParkMax,
+		RetryInterval: flag.WakeRetryInterval,
+		RetryFactor:   flag.WakeRetryFactor,
+		RetryJitter:   flag.WakeRetryJitter,
+	}, fsbProvider, nil)
+	if err != nil {
+		log.Panicf("Failed to create waker: %v", err)
+	}
+	if flag.WakeParkBudget <= time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond {
+		log.Printf("wake-park-budget (%v) should exceed the FastPath wait timeout (%v) plus one GetSandbox RPC so at least one probe fits inside the budget",
+			flag.WakeParkBudget, time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond)
+	}
+	return []proxy.Option{proxy.WithWaker(waker)}
 }
 
 func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observer, http.Handler, error) {

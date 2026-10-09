@@ -38,6 +38,18 @@ func InitFlags() {
 	flag.IntVar(&RenewIntentQueueMaxLen, "renew-intent-queue-max-len", 0, "Max renew-intent queue length (0 = no cap)")
 	flag.IntVar(&RenewIntentMinIntervalSec, "renew-intent-min-interval", 60, "Min seconds between publishing intents for the same sandbox (client-side throttle)")
 
+	// Activity tracking and wake-on-access (OSEP-0024).
+	flag.BoolVar(&ActivityEnabled, "activity-enabled", false, "Enable recording per-sandbox activity observations in Redis")
+	flag.StringVar(&ActivityRedisDSN, "activity-redis-dsn", "redis://127.0.0.1:6379/0", "Redis DSN for activity keys")
+	flag.DurationVar(&ActivityMinInterval, "activity-min-interval", 5*time.Second, "Min interval between activity writes for the same sandbox (per-replica write coalescing; N replicas produce at most N writes per sandbox per interval)")
+	flag.IntVar(&ActivityTTLSeconds, "activity-ttl-seconds", 1800, "TTL for activity keys; must match the server's activity_ttl_seconds and stay >= the largest accepted idle threshold")
+	flag.BoolVar(&WakeEnabled, "wake-enabled", false, "Enable wake-on-access: park requests routed to paused fast sandboxes while they resume")
+	flag.DurationVar(&WakeParkBudget, "wake-park-budget", 5*time.Second, "Park budget Y per wake flight; must exceed the FastPath wait timeout plus one GetSandbox RPC")
+	flag.IntVar(&WakeParkMax, "wake-park-max", 1024, "Parking lot capacity: max concurrently parked requests (and resume flights) per replica")
+	flag.DurationVar(&WakeRetryInterval, "wake-retry-interval", 50*time.Millisecond, "First readiness-poll interval of a wake flight")
+	flag.Float64Var(&WakeRetryFactor, "wake-retry-factor", 1.3, "Exponential growth factor of the wake poll interval")
+	flag.Float64Var(&WakeRetryJitter, "wake-retry-jitter", 0.1, "Relative jitter applied to the wake poll interval")
+
 	// Secure access (signed routes) and FastPath (Fast Sandbox) routing.
 	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "Verification keys for signed ingress routes and Fast Sandbox route scopes: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
 	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables Fast Sandbox routing")

@@ -18,7 +18,9 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/activity"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
+	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
 // Option configures optional proxy behavior without changing existing callers.
@@ -27,6 +29,8 @@ type Option func(*proxyOptions)
 type proxyOptions struct {
 	connectObserver           connectivity.Observer
 	webSocketMessageSizeLimit int64
+	activity                  activity.Recorder
+	waker                     *wake.Waker
 }
 
 // WithConnectObserver observes HTTP and WebSocket TCP connection attempts.

@@ -41,6 +41,35 @@ var (
 	RenewIntentMinIntervalSec int
 )
 
+// Activity tracking and wake-on-access (OSEP-0024 auto-pause): the ingress
+// records per-sandbox last-traffic observations in Redis, and requests that
+// hit a paused fast sandbox park while a resume flight restores it.
+var (
+	// ActivityEnabled turns on per-request activity recording.
+	ActivityEnabled bool
+	// ActivityRedisDSN is the Redis DSN for activity keys.
+	ActivityRedisDSN string
+	// ActivityMinInterval coalesces writes per sandbox.
+	ActivityMinInterval time.Duration
+	// ActivityTTLSeconds bounds how long an observation stays fresh; the
+	// server's idle threshold must never exceed it, and both sides must
+	// agree on this value.
+	ActivityTTLSeconds int
+
+	// WakeEnabled turns on pause detection, resume flights, and parking.
+	WakeEnabled bool
+	// WakeParkBudget is the per-flight park budget Y.
+	WakeParkBudget time.Duration
+	// WakeParkMax is the parking lot capacity per replica.
+	WakeParkMax int
+	// WakeRetryInterval is the first readiness-poll interval.
+	WakeRetryInterval time.Duration
+	// WakeRetryFactor grows the poll interval exponentially.
+	WakeRetryFactor float64
+	// WakeRetryJitter randomizes the poll interval relatively.
+	WakeRetryJitter float64
+)
+
 // Secure access (signed routes) and FastPath (Fast Sandbox) routing.
 var (
 	// SecureAccessKeys holds the shared verification keys for signed ingress

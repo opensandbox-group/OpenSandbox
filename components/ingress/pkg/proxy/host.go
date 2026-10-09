@@ -70,14 +70,28 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		return nil, ingressRouteErrHTTPStatus(err), err
 	}
 
-	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), sandbox.EndpointTarget{
+	target := sandbox.EndpointTarget{
 		RouteKind: pr.routeKind,
 		Namespace: pr.namespace,
 		SandboxID: pr.sandboxID,
 		Port:      pr.port,
-	})
+	}
+	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
 	if err != nil {
-		return nil, providerErrHTTPStatus(err), err
+		// OSEP-0024 wake-on-access: before answering 503 for a fast-sandbox
+		// target, check whether the sandbox is merely paused and park until
+		// it resumes. A nil wake error means the sandbox is ready to serve
+		// and the route is resolved again (the restore invalidated it).
+		if p.waker != nil && pr.routeKind == sandbox.RouteKindFastSandbox && errors.Is(err, sandbox.ErrSandboxNotReady) {
+			if wakeErr := p.waker.Wake(r.Context(), target); wakeErr == nil {
+				endpoint, err = p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+			} else {
+				return nil, httpStatusForWakeErr(wakeErr), fmt.Errorf("wake sandbox: %w", wakeErr)
+			}
+		}
+		if err != nil {
+			return nil, providerErrHTTPStatus(err), err
+		}
 	}
 
 	need := endpoint.AccessVerificationRequired()
