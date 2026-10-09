@@ -17,6 +17,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -229,5 +231,69 @@ func TestRunCancellationWithZeroCapacity(t *testing.T) {
 	// Exercise startup and shutdown with the actual SDK, without creating resources.
 	if err := run(ctx, time.UTC, 0, 0, time.Hour, "ubuntu:22.04"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestShutdownPoolWaitsForKill(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseKill := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/sandboxes/idle-1" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		close(requestStarted)
+		<-releaseKill
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		select {
+		case <-releaseKill:
+		default:
+			close(releaseKill)
+		}
+	})
+	store := opensandbox.NewInMemoryPoolStateStore()
+	pool, err := opensandbox.NewSandboxPoolBuilder().
+		PoolName("shutdown-test").MaxIdle(0).StateStore(store).
+		ConnectionConfig(opensandbox.ConnectionConfig{Domain: server.URL}).
+		CreationSpec(opensandbox.PoolCreationSpec{Image: "ubuntu:22.04"}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutIdle(context.Background(), "shutdown-test", "idle-1"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- shutdownPool(pool) }()
+	select {
+	case <-requestStarted:
+	case err := <-done:
+		t.Fatalf("cleanup returned before the kill request started: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("kill request did not start")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("cleanup returned while the kill request was pending: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseKill)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not finish after the kill response")
+	}
+	snapshot, err := pool.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.IdleCount != 0 {
+		t.Fatalf("remaining idle = %d, want 0", snapshot.IdleCount)
 	}
 }

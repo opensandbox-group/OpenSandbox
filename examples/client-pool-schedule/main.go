@@ -71,13 +71,7 @@ func run(ctx context.Context, location *time.Location, peak, offpeak int, interv
 		return err
 	}
 	defer func() {
-		// This example owns a single-process pool. Stop warmup before draining it,
-		// and use a fresh context because Ctrl+C has canceled the scheduler context.
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		shutdownErr := pool.Shutdown(cleanupCtx, true)
-		_, drainErr := pool.ReleaseAllIdle(cleanupCtx)
-		err = errors.Join(err, shutdownErr, drainErr)
+		err = errors.Join(err, shutdownPool(pool))
 	}()
 	log.Printf("pool started: target=%d timezone=%s", initialTarget, location)
 	return runSchedule(ctx, interval, func(now time.Time) error {
@@ -91,6 +85,19 @@ func run(ctx context.Context, location *time.Location, peak, offpeak int, interv
 		}
 		return nil
 	})
+}
+
+func shutdownPool(pool *opensandbox.DefaultSandboxPool) error {
+	// This example owns a single-process pool. Stop warmup before draining it,
+	// and use a fresh context because Ctrl+C has canceled the scheduler context.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	shutdownErr := pool.Shutdown(cleanupCtx, true)
+	drained, drainErr := pool.ReleaseAllIdleParallel(cleanupCtx, 4)
+	if drainErr == nil && drained > 0 {
+		log.Printf("drained %d idle sandboxes", drained)
+	}
+	return errors.Join(shutdownErr, drainErr)
 }
 
 // desiredMaxIdle is application policy, separate from the SDK's reconciliation.

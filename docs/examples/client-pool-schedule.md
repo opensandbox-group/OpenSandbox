@@ -37,10 +37,11 @@ Run `go run . -h` for all flags.
 
 ::: warning Sandbox resources
 This command creates real sandboxes when the scheduled target is positive. Use
-small targets while trying it out. Ctrl+C stops reconciliation, then drains and
-kills the example's remaining idle sandboxes. Sandboxes already acquired by your
-application remain the caller's responsibility. Cleanup is best effort; idle
-sandboxes also have a finite TTL.
+small targets while trying it out. Ctrl+C stops reconciliation, then drains the
+example's remaining idle sandboxes and waits for their best-effort kill requests
+to finish before exiting. Failed kills may leave sandboxes running until their
+TTL expires. Sandboxes already acquired by your application remain the caller's
+responsibility.
 :::
 
 ## How resizing works
@@ -91,4 +92,5 @@ go vet ./...
 ```
 
 Tests cover weekday and weekend boundaries, time-zone conversion, daylight-saving
-transitions, and target updates through the real SDK's in-memory state store.
+transitions, and target updates through the real SDK's in-memory state store. A
+local HTTP test server verifies that shutdown waits for pending kill requests.
