@@ -17,6 +17,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -416,6 +417,16 @@ func TestFormatContentDisposition(t *testing.T) {
 			filename: "report-报告.pdf",
 			want:     "attachment; filename=\"report-%E6%8A%A5%E5%91%8A.pdf\"; filename*=UTF-8''report-%E6%8A%A5%E5%91%8A.pdf",
 		},
+		{
+			name:     "Double quote in filename",
+			filename: `a"b.txt`,
+			want:     "attachment; filename=\"a%22b.txt\"; filename*=UTF-8''a%22b.txt",
+		},
+		{
+			name:     "Backslash in filename",
+			filename: `a\b.txt`,
+			want:     "attachment; filename=\"a%5Cb.txt\"; filename*=UTF-8''a%5Cb.txt",
+		},
 	}
 
 	for _, tt := range tests {
@@ -424,6 +435,22 @@ func TestFormatContentDisposition(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestDownloadFileContentDispositionParsesForQuotedFilename(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, `a"b.txt`)
+	require.NoError(t, os.WriteFile(target, []byte("demo"), 0o644))
+
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, params, err := mime.ParseMediaType(rec.Header().Get("Content-Disposition"))
+	require.NoError(t, err)
+	require.Equal(t, `a"b.txt`, params["filename"])
 }
 
 func writeTestFileWithLines(t *testing.T, lines []string) string {

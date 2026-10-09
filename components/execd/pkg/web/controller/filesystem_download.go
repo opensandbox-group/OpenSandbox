@@ -185,7 +185,8 @@ func (c *FilesystemController) serveLineRange(file *os.File, rawOffset, rawLimit
 func formatContentDisposition(filename string) string {
 	needsEncoding := false
 	for _, r := range filename {
-		if r > 127 {
+		// A quote closes, and a backslash escapes inside, the quoted-string below.
+		if r > 127 || r == '"' || r == '\\' {
 			needsEncoding = true
 			break
 		}
