@@ -1221,6 +1221,15 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 			}
 			Expect(len(podNamesList)).To(BeNumerically(">", 0), "Should have pods owned by BatchSandbox")
 
+			By("verifying the expired BatchSandbox remains visible during foreground cleanup")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.metadata.deletionTimestamp}{.metadata.finalizers}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("foregroundDeletion"))
+			}, 2*time.Minute).Should(Succeed())
+
 			By("waiting for BatchSandbox to expire and be deleted")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace)
@@ -1229,37 +1238,14 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 				g.Expect(err.Error()).To(ContainSubstring("not found"))
 			}, 2*time.Minute).Should(Succeed())
 
-			By("verifying pods are deleted")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods", "-n", testNamespace, "-o", "json")
+			By("verifying owned pods are already gone when the BatchSandbox disappears")
+			for _, podName := range podNamesList {
+				cmd := exec.Command("kubectl", "get", "pod", podName, "-n", testNamespace,
+					"--ignore-not-found", "-o", "name")
 				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				var currentPodList struct {
-					Items []struct {
-						Metadata struct {
-							Name              string  `json:"name"`
-							DeletionTimestamp *string `json:"deletionTimestamp"`
-							OwnerReferences   []struct {
-								Kind string `json:"kind"`
-								Name string `json:"name"`
-							} `json:"ownerReferences"`
-						} `json:"metadata"`
-					} `json:"items"`
-				}
-				err = json.Unmarshal([]byte(output), &currentPodList)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				// Verify no pods are owned by the deleted BatchSandbox or they have deletionTimestamp
-				for _, pod := range currentPodList.Items {
-					for _, owner := range pod.Metadata.OwnerReferences {
-						if owner.Kind == "BatchSandbox" && owner.Name == batchSandboxName {
-							g.Expect(pod.Metadata.DeletionTimestamp).NotTo(BeNil(),
-								"Pod %s owned by BatchSandbox should have deletionTimestamp set", pod.Metadata.Name)
-						}
-					}
-				}
-			}, 30*time.Second).Should(Succeed())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(output).To(BeEmpty(), "Pod %s outlived its BatchSandbox", podName)
+			}
 		})
 
 		It("should expire and return pooled BatchSandbox pods to pool", func() {

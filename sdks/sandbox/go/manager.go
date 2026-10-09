@@ -47,7 +47,8 @@ func (m *SandboxManager) PatchSandboxMetadata(ctx context.Context, sandboxID str
 	return m.lifecycle.PatchSandboxMetadata(ctx, sandboxID, patch)
 }
 
-// KillSandbox terminates a sandbox by ID.
+// KillSandbox requests irreversible termination of a sandbox by ID.
+// Returns when deletion is accepted; runtime cleanup may continue afterward.
 func (m *SandboxManager) KillSandbox(ctx context.Context, sandboxID string) error {
 	return m.lifecycle.DeleteSandbox(ctx, sandboxID)
 }

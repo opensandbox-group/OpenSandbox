@@ -170,7 +170,8 @@ class SandboxManager internal constructor(
     }
 
     /**
-     * Terminates a single sandbox.
+     * Requests irreversible sandbox termination. Returns when deletion is accepted;
+     * runtime cleanup may continue afterward.
      *
      * @param sandboxId Sandbox ID to terminate
      * @throws SandboxException if the operation fails
@@ -178,7 +179,7 @@ class SandboxManager internal constructor(
     fun killSandbox(sandboxId: String) {
         logger.info("Terminating sandbox: {}", sandboxId)
         sandboxService.killSandbox(sandboxId)
-        logger.info("Successfully terminated sandbox: {}", sandboxId)
+        logger.info("Sandbox deletion accepted: {}", sandboxId)
     }
 
     /**

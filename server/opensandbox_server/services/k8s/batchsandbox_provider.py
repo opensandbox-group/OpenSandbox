@@ -341,6 +341,7 @@ class BatchSandboxProvider(WorkloadProvider):
                         plural=self.plural,
                         name=sandbox_id,
                         grace_period_seconds=0,
+                        propagation_policy="Foreground",
                     )
                 except Exception as del_exc:
                     logger.warning(f"Failed to rollback BatchSandbox {sandbox_id}: {del_exc}")
@@ -596,6 +597,7 @@ class BatchSandboxProvider(WorkloadProvider):
             plural=self.plural,
             name=batchsandbox["metadata"]["name"],
             grace_period_seconds=0,
+            propagation_policy="Foreground",
         )
 
     def list_workloads(self, namespace: str, label_selector: str) -> List[Dict[str, Any]]:

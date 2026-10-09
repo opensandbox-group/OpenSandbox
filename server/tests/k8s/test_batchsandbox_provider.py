@@ -1123,6 +1123,7 @@ spec:
             plural="batchsandboxes",
             name="test-id",
             grace_period_seconds=0,
+            propagation_policy="Foreground",
         )
 
     def test_delete_workload_raises_when_not_found(self, mock_k8s_client):
@@ -2879,6 +2880,7 @@ spec:
             plural=provider.plural,
             name="test-id",
             grace_period_seconds=0,
+            propagation_policy="Foreground",
         )
 
     # ===== Volume Support Tests =====

@@ -357,7 +357,8 @@ interface Sandboxes {
     ): SandboxRenewResponse
 
     /**
-     * Terminates a sandbox and releases all associated resources.
+     * Requests irreversible sandbox termination. Returns when deletion is accepted;
+     * runtime cleanup may continue afterward.
      *
      * @param sandboxId Unique identifier of the sandbox
      */

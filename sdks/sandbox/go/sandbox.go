@@ -414,7 +414,8 @@ func (s *Sandbox) Resume(ctx context.Context, opts ...ReadyOptions) (*Sandbox, e
 	return ResumeSandbox(ctx, *s.config, s.id, opts...)
 }
 
-// Kill terminates the sandbox. This is irreversible.
+// Kill requests irreversible sandbox termination.
+// Returns when deletion is accepted; runtime cleanup may continue afterward.
 func (s *Sandbox) Kill(ctx context.Context) error {
 	if s.lifecycle.cache != nil {
 		s.lifecycle.cache.Invalidate(s.id)

@@ -746,7 +746,7 @@ class SandboxesAdapter(Sandboxes):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def kill_sandbox(self, sandbox_id: str) -> None:
-        """Permanently terminate a sandbox and clean up its resources."""
+        """Request termination; returns on accepted deletion. Cleanup may continue."""
         logger.info(f"Terminating sandbox: {sandbox_id}")
 
         try:
@@ -762,7 +762,7 @@ class SandboxesAdapter(Sandboxes):
 
             handle_api_error(response_obj, f"Kill sandbox {sandbox_id}")
 
-            logger.info(f"Successfully terminated sandbox: {sandbox_id}")
+            logger.info(f"Sandbox deletion accepted: {sandbox_id}")
 
         except Exception as e:
             logger.warning(f"Failed to terminate sandbox {sandbox_id}: {e}")

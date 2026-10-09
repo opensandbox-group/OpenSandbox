@@ -415,9 +415,8 @@ class SandboxSync:
 
     def kill(self) -> None:
         """
-        Send a termination signal to the remote sandbox instance.
-
-        This is an irreversible operation that stops the sandbox immediately.
+        Request irreversible termination of the remote sandbox. Returns when
+        deletion is accepted; runtime cleanup may continue afterward.
 
         Note: This method does NOT close the local resources. Use :meth:`close` or
         the sync context manager to clean up local resources.

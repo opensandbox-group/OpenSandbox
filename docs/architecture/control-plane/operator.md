@@ -37,7 +37,7 @@ Two contracts connect the reconcilers without coupling them:
 | `taskTemplate` | Optional process each replica runs after allocation, executed by an in-pod task executor |
 | `shardTaskPatches` | Per-replica variants of `taskTemplate` — heterogeneous tasks across one batch |
 | `taskResourcePolicyWhenCompleted` | What happens to sandbox resources when its task reaches Succeeded/Failed: `Retain` (default) keeps them until deletion, `Release` frees them immediately |
-| `expireTime` | Absolute deletion deadline, enforced by the controller |
+| `expireTime` | Absolute expiration time at which the controller begins foreground deletion |
 | `pause` | Pause/resume intent: `true` pauses, `false` resumes. The controller never clears the field; it acks progress via `status.pauseObservedGeneration`, which also gates re-entry |
 
 If `poolRef` is empty, the controller can still auto-select a pool using configurable profiles: predicate plugins (capacity, image, resource, node selector) filter candidates, then a scoring plugin (least-allocated by default) picks one (`internal/controller/poolassign/`).

@@ -129,12 +129,8 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if expireAt.Time.Before(now) {
 			if batchSbx.DeletionTimestamp == nil {
 				log.Info("batch sandbox expired, delete", "expireAt", expireAt)
-				if err := r.Delete(ctx, batchSbx); err != nil {
-					if errors.IsNotFound(err) {
-						return ctrl.Result{}, nil
-					}
-					return ctrl.Result{}, err
-				}
+				err := r.Delete(ctx, batchSbx, client.PropagationPolicy(metav1.DeletePropagationForeground))
+				return ctrl.Result{}, client.IgnoreNotFound(err)
 			}
 		} else {
 			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), expireAt.Time.Sub(now))

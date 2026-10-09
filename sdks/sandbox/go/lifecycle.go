@@ -266,7 +266,8 @@ func (c *LifecycleClient) PatchSandboxMetadata(ctx context.Context, id string, p
 	return &resp, nil
 }
 
-// DeleteSandbox deletes a sandbox, scheduling it for termination.
+// DeleteSandbox requests irreversible sandbox termination.
+// Returns when deletion is accepted; runtime cleanup may continue afterward.
 func (c *LifecycleClient) DeleteSandbox(ctx context.Context, id string) error {
 	return c.doRequest(ctx, "DELETE", "/sandboxes/"+url.PathEscape(id), nil, nil)
 }
