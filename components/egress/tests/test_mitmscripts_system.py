@@ -107,6 +107,12 @@ class _Response:
 class _Flow:
     def __init__(self) -> None:
         self.request = _Request()
+        # Default to a well-formed HTTPS flow whose ClientHello SNI matches the
+        # request host: no-SNI HTTPS now fails closed before injection, so the
+        # fixture must model the SNI a real TLS client sends. peername is left
+        # out on purpose so _flow_client_ip still yields None (no dispatch key)
+        # exactly as before this field existed.
+        self.client_conn = types.SimpleNamespace(sni="code.example.com")
         self.response = _Response()
         self.metadata: dict[str, Any] = {}
         self.error = None
@@ -2028,6 +2034,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%2forion-claude-plugin"
 
         system.requestheaders(flow)
@@ -2041,6 +2050,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%2Forion-claude-plugin"
 
         system.requestheaders(flow)
@@ -2054,6 +2066,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%5corion-claude-plugin"
 
         system.requestheaders(flow)
@@ -2072,6 +2087,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%252forion-claude-plugin"
 
         system.requestheaders(flow)
@@ -2593,6 +2611,172 @@ class SystemAddonTlsClientHelloTest(unittest.TestCase):
         data = self._client_hello_data("example.com")
         system.tls_clienthello(data)
         self.assertFalse(data.ignore_connection)
+
+
+class SystemAddonSniHostConsistencyTest(unittest.TestCase):
+    """Credentials must only be released onto a TLS session whose peer had to
+    prove ownership of a name the binding trusts.
+
+    The binding match runs on ``request.pretty_host`` (the Host / ``:authority``
+    header), which is pure client input and is never verified against the peer.
+    The ClientHello SNI is the name mitmproxy uses for upstream certificate
+    verification, so it is the only endpoint identity an attacker cannot forge.
+    """
+
+    def _make_system_with_vault(self):
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                }
+            ],
+            ["secret-token"],
+        )
+        return system
+
+    @staticmethod
+    def _with_sni(flow, sni):
+        flow.client_conn = types.SimpleNamespace(sni=sni, peername=("10.0.0.2", 51234))
+        return flow
+
+    def test_spoofed_host_header_on_foreign_sni_is_rejected(self) -> None:
+        """SNI evil.example.com + Host code.example.com must not leak the token."""
+        system = self._make_system_with_vault()
+        flow = self._with_sni(_Flow(), "evil.example.com")
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+        self.assertTrue(
+            any("endpoint identity" in message for message in system.ctx.log.messages)
+        )
+        self.assertFalse(
+            any("secret-token" in message for message in system.ctx.log.messages)
+        )
+
+    def test_matching_sni_injects_credential(self) -> None:
+        system = self._make_system_with_vault()
+        flow = self._with_sni(_Flow(), "code.example.com")
+
+        system.requestheaders(flow)
+
+        self.assertIsNone(getattr(flow.response, "status_code", None))
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_sni_is_normalized_before_comparison(self) -> None:
+        """Trailing dot and uppercase are the same name on the wire."""
+        system = self._make_system_with_vault()
+        flow = self._with_sni(_Flow(), "CODE.Example.com.")
+
+        system.requestheaders(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_wildcard_binding_accepts_covered_sni(self) -> None:
+        """A wildcard binding trusts every covered subdomain, so a Host that
+        differs from the SNI inside that scope stays injectable."""
+        system = self._make_system_with_vault()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api",
+                    "match": {
+                        "hosts": ["*.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                }
+            ],
+            ["secret-token"],
+        )
+        flow = self._with_sni(_Flow(), "mirror.example.com")
+
+        system.requestheaders(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_absent_sni_falls_back_to_host_header(self) -> None:
+        """Plaintext HTTP carries no SNI; there is no endpoint identity to
+        verify, so the binding decision stays as-is (egress allow rules remain
+        the only control)."""
+        system = self._make_system_with_vault()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                        "schemes": ["http"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                }
+            ],
+            ["secret-token"],
+        )
+        flow = self._with_sni(_Flow(), None)
+        flow.request.scheme = "http"
+        flow.request.port = 80
+
+        system.requestheaders(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_absent_sni_on_https_is_rejected(self) -> None:
+        """With ssl_insecure enabled, tls_clienthello keeps no-SNI TLS under
+        MITM, so such flows do reach requestheaders. A TLS session without SNI
+        has no endpoint identity, so a spoofed Host header must not unlock the
+        credential: fail closed rather than fall back to the Host header."""
+        system = self._make_system_with_vault()
+        # _Flow defaults to scheme="https" / port 443, i.e. a TLS request.
+        flow = self._with_sni(_Flow(), None)
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+        self.assertTrue(
+            any("endpoint identity" in message for message in system.ctx.log.messages)
+        )
+
+    def test_absent_sni_on_streamed_https_is_killed(self) -> None:
+        """Same fail-closed rule for large/chunked bodies, where a 403 cannot
+        be served and the flow is killed instead."""
+        system = self._make_system_with_vault()
+        flow = self._with_sni(_Flow(), None)
+        flow.request.stream = True
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.killed)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+    def test_streamed_request_with_foreign_sni_is_killed_not_403(self) -> None:
+        """mitmproxy cannot serve a 403 once a large body is streaming, so the
+        flow must be killed instead."""
+        system = self._make_system_with_vault()
+        flow = self._with_sni(_Flow(), "evil.example.com")
+        flow.request.stream = True
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.killed)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
 
 
 if __name__ == "__main__":
