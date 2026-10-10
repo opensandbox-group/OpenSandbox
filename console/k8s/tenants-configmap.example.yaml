@@ -1,0 +1,12 @@
+# 示例：与 Server 共用的 tenants ConfigMap 结构（勿提交真实 API Key）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensandbox-tenants
+  namespace: opensandbox-system
+data:
+  tenants.toml: |
+    [[tenants]]
+    name = "demo"
+    namespace = "demo"
+    api_keys = ["replace-with-dev-key"]
