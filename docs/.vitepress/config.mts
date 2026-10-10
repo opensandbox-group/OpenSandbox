@@ -266,6 +266,8 @@ export default defineConfig({
             { text: "Claude Code", link: "/examples/claude-code" },
             { text: "Gemini CLI", link: "/examples/gemini-cli" },
             { text: "Codex CLI", link: "/examples/codex-cli" },
+            { text: "DeepSeek Harness", link: "/examples/deepseek-harness" },
+            { text: "DeepSeek Harness Ubuntu", link: "/examples/deepseek-harness-ubuntu" },
             { text: "Apply Model Patches", link: "/examples/apply-patch" },
             { text: "OpenCode", link: "/examples/opencode" },
             { text: "Qwen Code", link: "/examples/qwen-code" },

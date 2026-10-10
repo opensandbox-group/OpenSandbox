@@ -1,0 +1,33 @@
+{
+  "name": "opensandbox-deepseek-harness-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "smoke": "node --import tsx smoke.ts",
+    "headless": "node --import tsx headless.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "node --import tsx e2e.ts"
+  },
+  "dependencies": {
+    "@opensandbox/deepseek-harness": "file:../../integrations/deepseek-harness",
+    "@alibaba-group/opensandbox": "1.1.0",
+    "@deepseek-ai/cordis": "4.0.5-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-anonymous-user-id": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-tools": "0.2.1-alpha.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
