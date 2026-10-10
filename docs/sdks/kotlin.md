@@ -514,6 +514,16 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
 `Sandbox.builder()...build()` reports create latency to `POST /v1/metrics/events` by default. Call `ConnectionConfig.builder().disableMetrics(true)` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
 
+::: warning API key and direct-mode data-plane requests
+The configured `apiKey` authenticates lifecycle/control-plane requests. Data-plane
+requests to execd and egress carry it only when `useServerProxy` is `true` (those
+requests pass the server's auth gate). In direct mode execd performs no
+authentication, so the SDK also strips an `OPEN-SANDBOX-API-KEY` header placed in
+`headers` — otherwise the key would be readable by code running inside the sandbox.
+In server-proxy mode an endpoint-scoped key wins over the connection-level key; a
+key supplied only via `headers` is preserved when no other key is configured.
+:::
+
 ### 2. Automatic retries
 
 The SDK retries transient failures automatically. `ConnectionConfig` installs a

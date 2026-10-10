@@ -810,7 +810,8 @@ class SandboxEndpoint(BaseModel):
         server's auth gate. In direct mode execd performs no auth and the
         key must never travel into the untrusted sandbox, so a key supplied
         via headers is stripped as well. In server-proxy mode an
-        endpoint-scoped key wins over the connection-level key.
+        endpoint-scoped key wins over the connection-level key; a key
+        supplied only via headers is preserved when nothing else replaces it.
         """
         headers = {
             "User-Agent": connection_config.user_agent,
@@ -825,15 +826,16 @@ class SandboxEndpoint(BaseModel):
             ),
             None,
         )
-        for name in [k for k in headers if k.lower() == API_KEY_HEADER.lower()]:
-            del headers[name]
-        if connection_config.use_server_proxy:
+        config_key = connection_config.get_api_key()
+        proxy = connection_config.use_server_proxy
+        if not proxy or endpoint_key is not None or config_key:
+            for name in [k for k in headers if k.lower() == API_KEY_HEADER.lower()]:
+                del headers[name]
+        if proxy:
             if endpoint_key is not None:
                 headers[endpoint_key[0]] = endpoint_key[1]
-            else:
-                api_key = connection_config.get_api_key()
-                if api_key:
-                    headers[API_KEY_HEADER] = api_key
+            elif config_key:
+                headers[API_KEY_HEADER] = config_key
         return headers
 
 

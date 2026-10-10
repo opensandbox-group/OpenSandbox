@@ -79,7 +79,7 @@ class HttpClientProvider(
             baseBuilder
                 .applyStandardTimeouts()
                 .addRetryInterceptor()
-                .addInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
+                .addNetworkInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
                 .addLoggingInterceptor()
                 .build()
         }
@@ -129,7 +129,7 @@ class HttpClientProvider(
                 .callTimeout(0, TimeUnit.MILLISECONDS)
                 .retryOnConnectionFailure(false)
                 .addInterceptor(ExtraHeadersInterceptor(getSseHeaders()))
-                .addInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
+                .addNetworkInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
                 .addLoggingInterceptor()
                 .build()
         }
@@ -218,8 +218,12 @@ class HttpClientProvider(
      * execd performs no authentication, so a key that arrived via the
      * connection's custom headers would travel straight into the untrusted
      * sandbox. Requests declared as server-proxy keep their headers: they
-     * pass the server's auth gate. Runs after [ExtraHeadersInterceptor],
-     * and OkHttp header lookup is case-insensitive.
+     * pass the server's auth gate.
+     *
+     * Installed as a network interceptor so it runs after every application
+     * interceptor — including the endpoint-header injectors that adapters
+     * append when cloning this client — and OkHttp header lookup is
+     * case-insensitive.
      */
     private class DataPlaneApiKeySanitizer(
         private val serverProxyDeclared: Boolean,

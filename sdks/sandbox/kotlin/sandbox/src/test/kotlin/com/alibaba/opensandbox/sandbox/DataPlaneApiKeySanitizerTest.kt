@@ -130,4 +130,31 @@ class DataPlaneApiKeySanitizerTest {
 
         assertEquals("trace-123", server.takeRequest().getHeader("X-Request-ID"))
     }
+
+    @Test
+    fun `key re-added by an interceptor appended after client cloning is still stripped in direct mode`() {
+        val config =
+            ConnectionConfig.builder()
+                .useServerProxy(false)
+                .build()
+
+        HttpClientProvider(config).use { provider ->
+            // Adapters clone the shared client and append interceptors that
+            // inject endpoint headers; the sanitizer runs at the network
+            // layer, after all application interceptors.
+            val cloned =
+                provider.httpClient.newBuilder()
+                    .addInterceptor { chain ->
+                        chain.proceed(
+                            chain.request().newBuilder()
+                                .header("OPEN-SANDBOX-API-KEY", "endpoint-key")
+                                .build(),
+                        )
+                    }
+                    .build()
+            execute(cloned)
+        }
+
+        assertNull(server.takeRequest().getHeader("OPEN-SANDBOX-API-KEY"))
+    }
 }

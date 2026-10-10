@@ -257,3 +257,28 @@ async def test_async_custom_header_key_yields_to_endpoint_key_in_proxy_mode() ->
     assert _headers(transport.request)["open-sandbox-api-key"] == "endpoint-scoped-key"
 
     await adapter._httpx_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_proxy_mode_preserves_key_supplied_only_via_custom_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPEN_SANDBOX_API_KEY", raising=False)
+    transport = _CaptureAsyncTransport()
+    adapter = FilesystemAdapter(
+        ConnectionConfig(
+            protocol="https",
+            transport=transport,
+            use_server_proxy=True,
+            headers={"OPEN-SANDBOX-API-KEY": "tenant-key-1"},
+        ),
+        SandboxEndpoint(endpoint=PROXY_FORM_ENDPOINT),
+    )
+
+    await adapter.write_files([WriteEntry(path="/tmp/a.txt", data="hello")])
+
+    # With no connection-level key configured, the header-supplied key is the
+    # only credential for the server's auth gate and must survive in proxy mode.
+    assert _headers(transport.request)["open-sandbox-api-key"] == "tenant-key-1"
+
+    await adapter._httpx_client.aclose()
