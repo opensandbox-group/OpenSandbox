@@ -46,6 +46,16 @@ export { CommandsAdapter } from "./adapters/commandsAdapter.js";
 export { IsolatedSessionsAdapter } from "./adapters/isolatedSessionsAdapter.js";
 export { EndpointCache } from "./core/endpointCache.js";
 
+// Cross-origin redirect protection helpers (advanced/testing).
+export {
+  createRedirectSafeFetch,
+  hasProtectedHeaders,
+  stripProtectedHeaders,
+  isSameOrigin,
+  PROTECTED_HEADER_PREFIXES,
+} from "./config/redirectFetch.js";
+export type { RedirectSafeFetchOptions } from "./config/redirectFetch.js";
+
 // Client-IP detection helpers (advanced/testing).
 export {
   detectOutboundIp,

@@ -342,6 +342,10 @@ export class IsolatedFilesystemAdapter implements SandboxFiles {
       method: "POST",
       headers: { ...(this.opts.headers ?? {}) },
       body: form,
+      // Uploads never follow redirects: the multipart body cannot always be
+      // replayed, and a redirect could otherwise replay credentials. A 3xx is
+      // surfaced below as a SandboxApiException with the original status.
+      redirect: "manual",
     });
 
     if (!res.ok) {
