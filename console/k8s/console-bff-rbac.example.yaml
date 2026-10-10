@@ -1,0 +1,31 @@
+# BFF 在集群内：node-agent 探活 + 租户 namespace Pod/Event + system namespace Deployment
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensandbox-console-bff
+  namespace: opensandbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opensandbox-console-bff-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opensandbox-console-bff-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opensandbox-console-bff-readonly
+subjects:
+  - kind: ServiceAccount
+    name: opensandbox-console-bff
+    namespace: opensandbox-system
