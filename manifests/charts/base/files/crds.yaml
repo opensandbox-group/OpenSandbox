@@ -117,9 +117,33 @@ spec:
                 description: ShardPatches indicates patching to the Template for BatchSandbox.
                 x-kubernetes-preserve-unknown-fields: true
               shardTaskPatches:
-                description: ShardTaskPatches indicates patching to the TaskTemplate
-                  for individual Task.
-                x-kubernetes-preserve-unknown-fields: true
+                description: ShardTaskPatches is a partial TaskTemplate patch for
+                  individual tasks.
+                items:
+                  description: TaskTemplatePatch is a partial TaskTemplateSpec.
+                  properties:
+                    spec:
+                      description: TaskSpecPatch is a partial TaskSpec.
+                      properties:
+                        process:
+                          description: ProcessTaskPatch is a partial ProcessTask.
+                          properties:
+                            args:
+                              items:
+                                type: string
+                              type: array
+                            command:
+                              items:
+                                type: string
+                              type: array
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        timeoutSeconds:
+                          format: int64
+                          type: integer
+                      type: object
+                  type: object
+                type: array
               taskResourcePolicyWhenCompleted:
                 default: Retain
                 description: |-
