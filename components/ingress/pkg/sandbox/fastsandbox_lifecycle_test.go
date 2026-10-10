@@ -82,8 +82,9 @@ func TestProbeSandboxMapsGRPCErrors(t *testing.T) {
 	lifecycle := &scriptedLifecycleRPCs{getSandboxFunc: func(context.Context, *fastpathv2.GetSandboxRequest) (*fastpathv2.GetSandboxResponse, error) {
 		return nil, status.Error(codes.NotFound, "no sandbox")
 	}}
-	provider := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
-	_, err := provider.ProbeSandbox(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080})
+	provider, err := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	require.NoError(t, err)
+	_, err = provider.ProbeSandbox(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080})
 	require.ErrorIs(t, err, ErrSandboxNotFound)
 
 	lifecycle.getSandboxFunc = func(context.Context, *fastpathv2.GetSandboxRequest) (*fastpathv2.GetSandboxResponse, error) {
@@ -117,10 +118,11 @@ func TestLifecycleCanceledWrapsContextCanceled(t *testing.T) {
 			return nil, status.Error(codes.Canceled, "client disconnected")
 		},
 	}
-	provider := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	provider, err := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	require.NoError(t, err)
 	target := EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080}
 
-	_, err := provider.ProbeSandbox(context.Background(), target)
+	_, err = provider.ProbeSandbox(context.Background(), target)
 	require.ErrorIs(t, err, context.Canceled)
 	require.NotErrorIs(t, err, ErrSandboxNotReady)
 
@@ -141,13 +143,17 @@ func TestResumeSandboxMapsFenceOutcomes(t *testing.T) {
 		{"already running joins", status.Error(codes.FailedPrecondition, "not paused"), ResumeAlreadyRunning, nil},
 		{"checkpoint conflict restarts", status.Error(codes.Aborted, "checkpoint changed"), ResumeConflict, nil},
 		{"not found", status.Error(codes.NotFound, "gone"), 0, ErrSandboxNotFound},
+		{"permission denied is permanent", status.Error(codes.PermissionDenied, "rbac"), 0, ErrSandboxLifecycleRejected},
+		{"unimplemented is permanent", status.Error(codes.Unimplemented, "old fastpath"), 0, ErrSandboxLifecycleRejected},
+		{"internal is permanent", status.Error(codes.Internal, "bug"), 0, ErrSandboxLifecycleRejected},
 		{"unavailable", status.Error(codes.Unavailable, "down"), 0, ErrSandboxNotReady},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			lifecycle := &scriptedLifecycleRPCs{resumeFunc: func(context.Context, *fastpathv2.ResumeSandboxRequest) (*fastpathv2.ResumeSandboxResponse, error) {
 				return &fastpathv2.ResumeSandboxResponse{}, test.err
 			}}
-			provider := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+			provider, err := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+			require.NoError(t, err)
 			outcome, err := provider.ResumeSandbox(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080}, "ckpt-1", "wake-sb-1")
 			if test.wantErr != nil {
 				require.ErrorIs(t, err, test.wantErr)
@@ -159,6 +165,19 @@ func TestResumeSandboxMapsFenceOutcomes(t *testing.T) {
 			require.Equal(t, "wake-sb-1", lifecycle.resumeRequests[0].GetRequestId())
 		})
 	}
+}
+
+func TestProbeUnknownErrorCodeClassifiesAsNotReady(t *testing.T) {
+	// Unknown codes keep the retryable classification but carry the
+	// sentinel so errors.Is can tell them apart from permanent rejections.
+	lifecycle := &scriptedLifecycleRPCs{getSandboxFunc: func(context.Context, *fastpathv2.GetSandboxRequest) (*fastpathv2.GetSandboxResponse, error) {
+		return nil, status.Error(codes.DataLoss, "???")
+	}}
+	provider, err := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	require.NoError(t, err)
+	_, err = provider.ProbeSandbox(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080})
+	require.ErrorIs(t, err, ErrSandboxNotReady)
+	require.NotErrorIs(t, err, ErrSandboxLifecycleRejected)
 }
 
 // TestLifecycleMatchesPythonWireFixtures pins the ingress lifecycle subset to
@@ -176,7 +195,8 @@ func TestLifecycleMatchesPythonWireFixtures(t *testing.T) {
 			require.NoError(t, proto.Unmarshal(responseBytes, response))
 			return response, nil
 		}}
-		provider := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+		provider, err := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+		require.NoError(t, err)
 		probe, err := provider.ProbeSandbox(context.Background(), target)
 		require.NoError(t, err)
 		require.Equal(t, SandboxPhaseWakeable, probe.Phase)
@@ -192,7 +212,8 @@ func TestLifecycleMatchesPythonWireFixtures(t *testing.T) {
 		lifecycle := &scriptedLifecycleRPCs{resumeFunc: func(context.Context, *fastpathv2.ResumeSandboxRequest) (*fastpathv2.ResumeSandboxResponse, error) {
 			return &fastpathv2.ResumeSandboxResponse{}, nil
 		}}
-		provider := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+		provider, err := NewFastSandboxProviderWithLifecycle(&fakeFastPathResolver{now: time.Now()}, lifecycle, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+		require.NoError(t, err)
 		outcome, err := provider.ResumeSandbox(context.Background(), target, "ckpt-1", "wake-sandbox-123-1")
 		require.NoError(t, err)
 		require.Equal(t, ResumeAccepted, outcome)

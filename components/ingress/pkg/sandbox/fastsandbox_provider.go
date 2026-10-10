@@ -125,9 +125,14 @@ func NewFastSandboxProviderWithResolver(resolver FastPathResolver, waitTimeout t
 
 // NewFastSandboxProviderWithLifecycle injects an explicit lifecycle RPC
 // implementation (for example an internal variant of GetSandbox and
-// ResumeSandbox) while keeping the stock route resolver.
-func NewFastSandboxProviderWithLifecycle(resolver FastPathResolver, lifecycle FastPathLifecycle, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) *FastSandboxProvider {
-	return newFastSandboxProvider(resolver, lifecycle, waitTimeout, accessMode)
+// ResumeSandbox) while keeping the stock route resolver. A nil lifecycle is
+// rejected: explicit injection with nothing behind it is a caller bug, and
+// surfacing it at construction beats a per-request not-ready 503.
+func NewFastSandboxProviderWithLifecycle(resolver FastPathResolver, lifecycle FastPathLifecycle, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) (*FastSandboxProvider, error) {
+	if lifecycle == nil {
+		return nil, errors.New("FastSandbox provider: explicit lifecycle must not be nil; use NewFastSandboxProviderWithResolver for resolver-only routing")
+	}
+	return newFastSandboxProvider(resolver, lifecycle, waitTimeout, accessMode), nil
 }
 
 func newFastSandboxProvider(resolver FastPathResolver, lifecycle FastPathLifecycle, waitTimeout time.Duration, accessMode fastpathv2.EndpointAccessMode) *FastSandboxProvider {

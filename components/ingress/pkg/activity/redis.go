@@ -21,6 +21,7 @@ package activity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,10 @@ const (
 	// measurement at X >= 30s).
 	recordPipeBatchSize = 64
 	recordPipeFlush     = 50 * time.Millisecond
+
+	// warnDropIntervalSeconds rate-limits the escalated Warn for dropped
+	// batches; between warnings the drops stay at Debug.
+	warnDropIntervalSeconds = 30
 
 	// KeyPrefix namespaces the per-sandbox activity keys. It is a fixed
 	// convention shared with the server's idle sweeper, not a configurable.
@@ -101,11 +106,15 @@ type RedisRecorder struct {
 	nowMillis func() int64
 
 	// scriptSHA caches the loaded Lua script so each pipelined command
-	// carries only the SHA, not the ~200-byte source. nil until first
+	// carries only the SHA, not the ~200-byte source. "" until first
 	// loaded; a NOSCRIPT from Redis (restart, SCRIPT FLUSH) triggers a
 	// reload and one batch retry.
-	scriptMu  sync.Mutex
 	scriptSHA atomic.Value // string
+	// scriptMu serializes ScriptLoad. Held only for the duration of the
+	// load attempt, never around a worker's batch flush.
+	scriptMu sync.Mutex
+	// lastWarnUnix rate-limits the escalated drop warnings.
+	lastWarnUnix atomic.Int64
 }
 
 func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig) (*RedisRecorder, error) {
@@ -139,19 +148,35 @@ func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig
 	if cfg.MinInterval > 0 {
 		go wait.UntilWithContext(ctx, r.runCleanupThrottle, cfg.MinInterval*2)
 	}
+	// Surface an unreachable Redis immediately: the recorder still starts
+	// (activity failures must never block the ingress), but a wrong DSN
+	// would otherwise only show up as a climbing writes_dropped counter.
+	if err := client.Ping(ctx).Err(); err != nil {
+		cfg.Logger.With(logger.Field{Key: "error", Value: err}).Warnf(
+			"activity: Redis is not reachable at startup; activity observations will be dropped until it recovers")
+	}
 	return r, nil
 }
 
 // runWorker drains observations into batches and flushes each batch as one
-// pipelined round trip.
+// pipelined round trip. On shutdown it counts every observation still queued
+// so the dropped-writes metric matches the documented contract.
 func (r *RedisRecorder) runWorker(ctx context.Context) {
 	for {
 		batch, ok := r.drainBatch(ctx)
 		if !ok {
-			return
+			break
 		}
 		if len(batch) > 0 {
 			r.doRecordBatch(batch)
+		}
+	}
+	for {
+		select {
+		case <-r.ch:
+			telemetry.RecordActivityWriteDropped(1)
+		default:
+			return
 		}
 	}
 }
@@ -237,9 +262,9 @@ func (r *RedisRecorder) doRecordBatch(batch []observation) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
-		sha, ok := r.loadedScriptSHA(ctx)
-		if !ok {
-			r.dropBatch(batch, errors.New("activity: script load failed"))
+		sha, err := r.loadedScriptSHA(ctx)
+		if err != nil {
+			r.dropBatch(batch, err)
 			return
 		}
 		pipe := r.client.Pipeline()
@@ -267,20 +292,39 @@ func (r *RedisRecorder) doRecordBatch(batch []observation) {
 }
 
 // loadedScriptSHA returns the cached script SHA, loading it on first use or
-// after an invalidation. ok is false when Redis is unreachable; the caller
-// drops the batch, which can only delay a pause.
-func (r *RedisRecorder) loadedScriptSHA(ctx context.Context) (string, bool) {
-	r.scriptMu.Lock()
+// after an invalidation. The error is non-nil (and the batch must be
+// dropped) when Redis is unreachable or another worker is already loading:
+// drops can only delay a pause, never accelerate one.
+func (r *RedisRecorder) loadedScriptSHA(ctx context.Context) (string, error) {
+	if sha, ok := r.scriptSHA.Load().(string); ok && sha != "" {
+		return sha, nil
+	}
+	// The load is a network round trip; never serialize the workers behind
+	// it. A concurrent loader wins and the losers wait briefly for its
+	// cached SHA — dropping the startup burst would be wasted work — and
+	// only give up when the load does not complete promptly.
+	if !r.scriptMu.TryLock() {
+		for range 50 {
+			time.Sleep(2 * time.Millisecond)
+			if sha, ok := r.scriptSHA.Load().(string); ok && sha != "" {
+				return sha, nil
+			}
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+		}
+		return "", errors.New("activity: concurrent script load did not complete promptly")
+	}
 	defer r.scriptMu.Unlock()
 	if sha, ok := r.scriptSHA.Load().(string); ok && sha != "" {
-		return sha, true
+		return sha, nil
 	}
 	sha, err := r.client.ScriptLoad(ctx, monotonicMaxScript).Result()
 	if err != nil {
-		return "", false
+		return "", fmt.Errorf("load monotonic-max script: %w", err)
 	}
 	r.scriptSHA.Store(sha)
-	return sha, true
+	return sha, nil
 }
 
 func isNoScriptErr(cmds []redis.Cmder, err error) bool {
@@ -295,13 +339,21 @@ func isNoScriptErr(cmds []redis.Cmder, err error) bool {
 	return false
 }
 
+// dropBatch records a fully dropped batch. Sustained drops mean the sweeper
+// is flying blind and will eventually pause sandboxes in active use, so the
+// first drop of a window is escalated to Warn; the rest stay Debug.
 func (r *RedisRecorder) dropBatch(batch []observation, err error) {
 	telemetry.RecordActivityWriteDropped(int64(len(batch)))
-	r.cfg.Logger.With(
-		logger.Field{Key: "dropped", Value: len(batch)},
-		logger.Field{Key: "batch", Value: len(batch)},
-		logger.Field{Key: "error", Value: err},
-	).Debugf("activity: redis batch dropped")
+	fields := []logger.Field{
+		{Key: "batch", Value: len(batch)},
+		{Key: "error", Value: err},
+	}
+	now := time.Now().Unix()
+	if last := r.lastWarnUnix.Load(); now-last >= warnDropIntervalSeconds && r.lastWarnUnix.CompareAndSwap(last, now) {
+		r.cfg.Logger.With(fields...).Warnf("activity: dropping activity writes — the idle sweeper is flying blind and may pause sandboxes in active use")
+		return
+	}
+	r.cfg.Logger.With(fields...).Debugf("activity: redis batch dropped")
 }
 
 func (r *RedisRecorder) reportBatchOutcome(batch []observation, cmds []redis.Cmder, err error) {
@@ -317,11 +369,17 @@ func (r *RedisRecorder) reportBatchOutcome(batch []observation, cmds []redis.Cmd
 	}
 	if dropped > 0 {
 		telemetry.RecordActivityWriteDropped(int64(dropped))
-		r.cfg.Logger.With(
-			logger.Field{Key: "dropped", Value: dropped},
-			logger.Field{Key: "batch", Value: len(batch)},
-			logger.Field{Key: "error", Value: err},
-		).Debugf("activity: redis pipeline partially dropped")
+		fields := []logger.Field{
+			{Key: "dropped", Value: dropped},
+			{Key: "batch", Value: len(batch)},
+			{Key: "error", Value: err},
+		}
+		now := time.Now().Unix()
+		if last := r.lastWarnUnix.Load(); now-last >= warnDropIntervalSeconds && r.lastWarnUnix.CompareAndSwap(last, now) {
+			r.cfg.Logger.With(fields...).Warnf("activity: dropping activity writes — the idle sweeper is flying blind and may pause sandboxes in active use")
+			return
+		}
+		r.cfg.Logger.With(fields...).Debugf("activity: redis pipeline partially dropped")
 	}
 }
 

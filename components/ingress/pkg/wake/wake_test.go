@@ -380,6 +380,23 @@ func TestWakeSurfacesResumeNotFound(t *testing.T) {
 	require.ErrorIs(t, err, sandbox.ErrSandboxNotFound)
 }
 
+func TestWakeEndsImmediatelyOnPermanentRejection(t *testing.T) {
+	// PermissionDenied-class failures cannot heal within a park budget; the
+	// flight must end at once instead of retrying until exhaustion.
+	rejected := fmt.Errorf("%w: PermissionDenied", sandbox.ErrSandboxLifecycleRejected)
+	lifecycle := &scriptedLifecycle{
+		probes:     []probeCall{pausedProbe("ckpt-1")},
+		resumeOut:  []sandbox.ResumeOutcome{0},
+		resumeErrs: []error{rejected},
+	}
+	waker, scripted := newTestWaker(t, Config{ParkBudget: 10 * time.Second, ParkMax: 8, RetryInterval: time.Millisecond}, lifecycle)
+
+	err := waker.Wake(context.Background(), wakeTarget)
+	require.ErrorIs(t, err, sandbox.ErrSandboxLifecycleRejected)
+	resumeCalls, _ := scripted.snapshot()
+	require.Equal(t, 1, resumeCalls) // no retry churn
+}
+
 func TestWakeJoinerSharesRemainingBudget(t *testing.T) {
 	ownerStart := time.Now()
 	ownerReleased := make(chan struct{})

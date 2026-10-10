@@ -359,6 +359,32 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
 
+func TestProxyReplayResolutionFailureCarriesRetryAfter(t *testing.T) {
+	// The replay's fresh resolution can still hit a not-ready route right
+	// after a resume; that 503 must keep the Retry-After invitation the
+	// other 503 branches carry.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(sandbox.FastSandboxProxyError, "stale_route")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer backend.Close()
+
+	provider := &scriptedWakeProvider{responses: []resolveAttempt{
+		{info: fsbInfo(backend.URL)},
+		{err: fmt.Errorf("%w: FastPath resolution temporarily unavailable", sandbox.ErrSandboxNotReady)},
+	}}
+	lifecycle := &fakeLifecycle{probes: []sandbox.SandboxProbe{{Phase: sandbox.SandboxPhaseReady}}}
+	p := newWakeTestProxy(t, provider, lifecycle, &recordingActivity{}, wake.Config{ParkBudget: time.Second, ParkMax: 8, RetryInterval: time.Millisecond})
+
+	request := httptest.NewRequest(http.MethodPost, "http://ingress/exec", strings.NewReader("hello"))
+	request.Header.Set(SandboxIngress, fsbScopeVector)
+	response := httptest.NewRecorder()
+	p.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusServiceUnavailable, response.Code)
+	require.Equal(t, "1", response.Header().Get("Retry-After"))
+}
+
 type hitCounter struct {
 	mu   sync.Mutex
 	next int

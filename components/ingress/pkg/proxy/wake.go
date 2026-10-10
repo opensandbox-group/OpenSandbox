@@ -59,6 +59,11 @@ func httpStatusForWakeErr(err error) int {
 		return 0
 	case errors.Is(err, sandbox.ErrSandboxNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, sandbox.ErrSandboxLifecycleRejected):
+		// FastPath permanently rejected the lifecycle call (auth,
+		// validation, server fault): retrying the same request cannot
+		// succeed, so answer 502 without the Retry-After invitation.
+		return http.StatusBadGateway
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return 0 // client is gone; nothing to answer
 	default:

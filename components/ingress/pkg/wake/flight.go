@@ -127,11 +127,17 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 			return true
 		}
 		if err != nil {
-			if errors.Is(err, sandbox.ErrSandboxNotFound) {
+			switch {
+			case errors.Is(err, sandbox.ErrSandboxNotFound),
+				errors.Is(err, sandbox.ErrSandboxLifecycleRejected):
+				// Terminal: the sandbox is gone, or FastPath rejected the
+				// call permanently (auth/validation/server fault) — retrying
+				// within the budget cannot succeed and would only burn it.
 				f.finish(err)
 				return false
+			default:
+				// Transient RPC failure: retry within the remaining budget.
 			}
-			// Transient RPC failure: retry within the remaining budget.
 		} else {
 			// Fence conflict or ambiguous join: re-probe and restart with
 			// the fresh checkpoint; a sandbox that is no longer wakeable
@@ -177,7 +183,7 @@ func (f *flight) pollUntilReady(ctx context.Context, budget *time.Timer, backoff
 				f.finish(fmt.Errorf("%w: sandbox became terminal while resuming", sandbox.ErrSandboxNotFound))
 				return
 			}
-		} else if errors.Is(err, sandbox.ErrSandboxNotFound) {
+		} else if errors.Is(err, sandbox.ErrSandboxNotFound) || errors.Is(err, sandbox.ErrSandboxLifecycleRejected) {
 			f.finish(err)
 			return
 		}

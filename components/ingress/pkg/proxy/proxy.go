@@ -219,7 +219,14 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(replay.copied))
 	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
 	if err != nil {
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), providerErrHTTPStatus(err))
+		status := providerErrHTTPStatus(err)
+		if status == http.StatusServiceUnavailable {
+			// A not-ready answer right after a resumed sandbox is exactly
+			// the window clients land in; keep the retry invitation every
+			// other 503 branch carries.
+			sw.Header().Set("Retry-After", "1")
+		}
+		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
 		return
 	}
 	host.info = endpoint

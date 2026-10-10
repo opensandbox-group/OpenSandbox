@@ -102,6 +102,23 @@ type SandboxLifecycle interface {
 // alternative was injected.
 var ErrLifecycleUnavailable = errors.New("FastPath lifecycle RPCs are not configured on this provider")
 
+// ErrSandboxLifecycleRejected indicates FastPath permanently rejected the
+// lifecycle call (auth, validation, unimplemented RPC, or a server-internal
+// failure). Retrying within a park budget cannot succeed; the flight must
+// end immediately and the answer must not invite a retry loop.
+var ErrSandboxLifecycleRejected = errors.New("FastPath permanently rejected the lifecycle request")
+
+// permanentLifecycleCodes are gRPC codes that will not heal within a park
+// budget: retrying them only burns the budget and invites clients into a
+// 503 + Retry-After loop.
+var permanentLifecycleCodes = map[codes.Code]bool{
+	codes.PermissionDenied: true,
+	codes.Unauthenticated:  true,
+	codes.InvalidArgument:  true,
+	codes.Unimplemented:    true,
+	codes.Internal:         true,
+}
+
 // ProbeSandbox inspects the sandbox lifecycle state over the provider's
 // existing FastPath connection.
 func (p *FastSandboxProvider) ProbeSandbox(ctx context.Context, target EndpointTarget) (SandboxProbe, error) {
@@ -140,19 +157,24 @@ func (p *FastSandboxProvider) ResumeSandbox(ctx context.Context, target Endpoint
 	rpcCtx, cancel := context.WithTimeout(ctx, p.waitTimeout)
 	defer cancel()
 	if _, err := p.lifecycleRPC.ResumeSandbox(rpcCtx, request); err != nil {
-		switch status.Code(err) {
-		case codes.NotFound:
+		switch {
+		case permanentLifecycleCodes[status.Code(err)]:
+			return 0, &fastPathResolutionError{
+				public: fmt.Errorf("%w: %s", ErrSandboxLifecycleRejected, status.Code(err)),
+				cause:  err,
+			}
+		case status.Code(err) == codes.NotFound:
 			return 0, &fastPathResolutionError{
 				public: fmt.Errorf("%w: sandbox not found", ErrSandboxNotFound),
 				cause:  err,
 			}
-		case codes.FailedPrecondition:
+		case status.Code(err) == codes.FailedPrecondition:
 			// "not paused": another actor already resumed; join instead of failing.
 			return ResumeAlreadyRunning, nil
-		case codes.Aborted:
+		case status.Code(err) == codes.Aborted:
 			// Checkpoint fence: a re-pause raced in; restart within the budget.
 			return ResumeConflict, nil
-		case codes.Canceled:
+		case status.Code(err) == codes.Canceled:
 			// Usually the request context: a client disconnect mid-wake.
 			// Wrapping context.Canceled lets the proxy suppress the answer.
 			return 0, &fastPathResolutionError{
@@ -201,16 +223,19 @@ func ClassifySandboxInfo(info *fastpathv2.SandboxInfo) SandboxProbe {
 
 func mapFastPathLifecycleError(err error) error {
 	var public error
-	switch status.Code(err) {
-	case codes.NotFound:
+	switch {
+	case permanentLifecycleCodes[status.Code(err)]:
+		public = fmt.Errorf("%w: %s", ErrSandboxLifecycleRejected, status.Code(err))
+	case status.Code(err) == codes.NotFound:
 		public = fmt.Errorf("%w: sandbox not found", ErrSandboxNotFound)
-	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.FailedPrecondition:
-		public = fmt.Errorf("%w: FastPath lifecycle temporarily unavailable", ErrSandboxNotReady)
-	case codes.Canceled:
+	case status.Code(err) == codes.Canceled:
 		// Usually the request context: a client disconnect mid-probe.
 		public = fmt.Errorf("%w: FastPath lifecycle canceled", context.Canceled)
+	case status.Code(err) == codes.Unavailable, status.Code(err) == codes.DeadlineExceeded,
+		status.Code(err) == codes.ResourceExhausted, status.Code(err) == codes.FailedPrecondition:
+		public = fmt.Errorf("%w: FastPath lifecycle temporarily unavailable", ErrSandboxNotReady)
 	default:
-		public = fmt.Errorf("FastPath lifecycle failed: %s", status.Code(err))
+		public = fmt.Errorf("%w: FastPath lifecycle failed: %s", ErrSandboxNotReady, status.Code(err))
 	}
 	return &fastPathResolutionError{public: public, cause: err}
 }
