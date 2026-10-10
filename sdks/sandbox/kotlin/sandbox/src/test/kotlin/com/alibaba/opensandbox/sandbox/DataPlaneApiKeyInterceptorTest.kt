@@ -27,13 +27,14 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 /**
- * Data-plane clients (httpClient, sseClient) must never carry a tenant API
- * key into the sandbox in direct mode: execd performs no authentication, so
- * a key set via the connection's custom headers would be readable by
- * untrusted sandbox code. Server-proxy requests pass the server's auth gate
- * and keep the key.
+ * Data-plane clients (httpClient, sseClient) follow the tenant API key
+ * contract of the client's useServerProxy declaration. In direct mode a key
+ * set via the connection's custom headers must be removed: execd performs no
+ * authentication, so the key would be readable by untrusted sandbox code.
+ * In server-proxy mode the server's auth gate requires the key, so the
+ * connection-level key is attached when no higher-precedence key is present.
  */
-class DataPlaneApiKeySanitizerTest {
+class DataPlaneApiKeyInterceptorTest {
     private lateinit var server: MockWebServer
 
     @BeforeEach
@@ -140,7 +141,7 @@ class DataPlaneApiKeySanitizerTest {
 
         HttpClientProvider(config).use { provider ->
             // Adapters clone the shared client and append interceptors that
-            // inject endpoint headers; the sanitizer runs at the network
+            // inject endpoint headers; the interceptor runs at the network
             // layer, after all application interceptors.
             val cloned =
                 provider.httpClient.newBuilder()
@@ -156,5 +157,62 @@ class DataPlaneApiKeySanitizerTest {
         }
 
         assertNull(server.takeRequest().getHeader("OPEN-SANDBOX-API-KEY"))
+    }
+
+    @Test
+    fun `httpClient attaches the connection API key in proxy mode when none is set`() {
+        val config =
+            ConnectionConfig.builder()
+                .apiKey("tenant-secret")
+                .useServerProxy(true)
+                .build()
+
+        HttpClientProvider(config).use { provider ->
+            execute(provider.httpClient)
+        }
+
+        assertEquals("tenant-secret", server.takeRequest().getHeader("OPEN-SANDBOX-API-KEY"))
+    }
+
+    @Test
+    fun `sseClient attaches the connection API key in proxy mode when none is set`() {
+        val config =
+            ConnectionConfig.builder()
+                .apiKey("tenant-secret")
+                .useServerProxy(true)
+                .build()
+
+        HttpClientProvider(config).use { provider ->
+            execute(provider.sseClient)
+        }
+
+        assertEquals("tenant-secret", server.takeRequest().getHeader("OPEN-SANDBOX-API-KEY"))
+    }
+
+    @Test
+    fun `endpoint-scoped key injected after client cloning wins over the connection key in proxy mode`() {
+        val config =
+            ConnectionConfig.builder()
+                .apiKey("connection-key")
+                .useServerProxy(true)
+                .build()
+
+        HttpClientProvider(config).use { provider ->
+            val cloned =
+                provider.httpClient.newBuilder()
+                    .addInterceptor { chain ->
+                        chain.proceed(
+                            chain.request().newBuilder()
+                                .header("OPEN-SANDBOX-API-KEY", "endpoint-key")
+                                .build(),
+                        )
+                    }
+                    .build()
+            execute(cloned)
+        }
+
+        val recorded = server.takeRequest()
+        assertEquals("endpoint-key", recorded.getHeader("OPEN-SANDBOX-API-KEY"))
+        assertEquals(1, recorded.headers.values("OPEN-SANDBOX-API-KEY").size)
     }
 }

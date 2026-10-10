@@ -79,7 +79,7 @@ class HttpClientProvider(
             baseBuilder
                 .applyStandardTimeouts()
                 .addRetryInterceptor()
-                .addNetworkInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
+                .addNetworkInterceptor(DataPlaneApiKeyInterceptor(config.useServerProxy, config.getApiKey()))
                 .addLoggingInterceptor()
                 .build()
         }
@@ -129,7 +129,7 @@ class HttpClientProvider(
                 .callTimeout(0, TimeUnit.MILLISECONDS)
                 .retryOnConnectionFailure(false)
                 .addInterceptor(ExtraHeadersInterceptor(getSseHeaders()))
-                .addNetworkInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
+                .addNetworkInterceptor(DataPlaneApiKeyInterceptor(config.useServerProxy, config.getApiKey()))
                 .addLoggingInterceptor()
                 .build()
         }
@@ -213,29 +213,37 @@ class HttpClientProvider(
     }
 
     /**
-     * Strips the tenant API key from data-plane requests in direct mode.
+     * Applies the tenant API key contract to data-plane requests, per the
+     * client's `useServerProxy` declaration.
      *
-     * execd performs no authentication, so a key that arrived via the
-     * connection's custom headers would travel straight into the untrusted
-     * sandbox. Requests declared as server-proxy keep their headers: they
-     * pass the server's auth gate.
+     * Direct mode: execd performs no authentication, so a key that arrived
+     * via the connection's custom headers must be removed — it would travel
+     * straight into the untrusted sandbox.
+     *
+     * Server-proxy mode: the request passes the server's auth gate, which
+     * requires the key (401 otherwise, see the server auth middleware). The
+     * connection-level key is attached when no key is already present, so an
+     * endpoint-scoped or header-supplied key always wins.
      *
      * Installed as a network interceptor so it runs after every application
      * interceptor — including the endpoint-header injectors that adapters
      * append when cloning this client — and OkHttp header lookup is
      * case-insensitive.
      */
-    private class DataPlaneApiKeySanitizer(
+    private class DataPlaneApiKeyInterceptor(
         private val serverProxyDeclared: Boolean,
+        private val apiKey: String,
     ) : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val request = chain.request()
-            if (serverProxyDeclared || request.header(API_KEY_HEADER) == null) {
-                return chain.proceed(request)
+            val hasKey = request.header(API_KEY_HEADER) != null
+            return when {
+                !serverProxyDeclared && hasKey ->
+                    chain.proceed(request.newBuilder().removeHeader(API_KEY_HEADER).build())
+                serverProxyDeclared && !hasKey && apiKey.isNotEmpty() ->
+                    chain.proceed(request.newBuilder().header(API_KEY_HEADER, apiKey).build())
+                else -> chain.proceed(request)
             }
-            return chain.proceed(
-                request.newBuilder().removeHeader(API_KEY_HEADER).build(),
-            )
         }
     }
 
