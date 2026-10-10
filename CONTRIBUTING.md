@@ -54,7 +54,7 @@ Different components have different requirements:
 
 #### For execd (Go)
 
-- **Go 1.24+**
+- **Go 1.25+**
 - **Make** - Build automation (optional)
 - **Docker** - For building container images
 
@@ -135,7 +135,7 @@ OpenSandbox/
 │   └── sandbox-lifecycle.yml # Lifecycle API spec
 ├── server/                   # Sandbox server (Python/FastAPI)
 ├── components/
-│   └── execd/                # Execution daemon (Go/Beego)
+│   └── execd/                # Execution daemon (Go/Gin)
 ├── examples/                 # Example integrations
 ├── docs/                     # Documentation
 ├── tests/                    # Cross-component tests
@@ -666,7 +666,7 @@ Browse [examples/](examples/) for real-world usage patterns:
 ### External Resources
 
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [Beego Documentation](https://beego.wiki/)
+- [Gin Documentation](https://gin-gonic.com/en/docs/)
 - [Jupyter Protocol](https://jupyter-client.readthedocs.io/en/stable/messaging.html)
 - [OpenAPI Specification](https://swagger.io/specification/)
 - [Docker API](https://docs.docker.com/engine/api/)
