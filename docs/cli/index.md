@@ -112,6 +112,8 @@ osb file cat <sandbox-id> /tmp/hello.txt -o raw
 osb sandbox kill <sandbox-id> -o json
 ```
 
+`kill` now returns `status: "deletion_requested"` instead of `terminated`; update scripts that match this value. It confirms request acceptance. To wait for deletion, see [cleanup completion](/architecture/control-plane/server#asynchronous-lifecycle-with-absolute-expiration).
+
 ## Common Tasks
 
 ### Create sandboxes
