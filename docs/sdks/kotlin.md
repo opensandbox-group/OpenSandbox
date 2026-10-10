@@ -517,11 +517,18 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
 ::: warning API key and direct-mode data-plane requests
 The configured `apiKey` authenticates lifecycle/control-plane requests. Data-plane
 requests to execd and egress carry it only when `useServerProxy` is `true` (those
-requests pass the server's auth gate). In direct mode execd performs no
+requests pass the server's auth gate); it is attached automatically when no
+higher-precedence key is present. In direct mode execd performs no
 authentication, so the SDK also strips an `OPEN-SANDBOX-API-KEY` header placed in
 `headers` — otherwise the key would be readable by code running inside the sandbox.
 In server-proxy mode an endpoint-scoped key wins over the connection-level key; a
 key supplied only via `headers` is preserved when no other key is configured.
+
+When a data-plane request is redirected to a different origin
+(scheme/host/port change), the SDK strips every `OPEN-SANDBOX-*` /
+`OPENSANDBOX-*` header — including endpoint-scoped credentials — before
+following the redirect, so credentials cannot be replayed to another host.
+Same-origin redirects and unrelated custom headers are unaffected.
 :::
 
 ### 2. Automatic retries

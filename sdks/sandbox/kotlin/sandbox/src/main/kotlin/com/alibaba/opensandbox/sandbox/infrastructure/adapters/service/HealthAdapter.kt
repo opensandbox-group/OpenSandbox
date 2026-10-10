@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.execd.HealthApi
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Health
@@ -31,6 +32,7 @@ internal class HealthAdapter(
     private val execdEndpoint: SandboxEndpoint,
 ) : Health {
     private val logger = LoggerFactory.getLogger(HealthAdapter::class.java)
+    private val execdBaseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
     private val client =
         (
             if (httpClientProvider.config.singleAttemptHealthChecks) {
@@ -42,14 +44,14 @@ internal class HealthAdapter(
             val builder = chain.request().newBuilder()
             execdEndpoint.headers.forEach { (key, value) -> builder.header(key, value) }
             chain.proceed(builder.build())
-        }.build()
+        }.addProtectedHeaderOriginGuard(execdBaseUrl).build()
 
     override fun ping(sandboxId: String): Boolean {
         logger.debug("Checking health for sandbox: {}", sandboxId)
 
         return try {
             RequestDeadline.execute(client) { boundedClient ->
-                HealthApi("${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}", boundedClient).ping()
+                HealthApi(execdBaseUrl, boundedClient).ping()
             }
             logger.debug("Health check successful for sandbox {}", sandboxId)
             true

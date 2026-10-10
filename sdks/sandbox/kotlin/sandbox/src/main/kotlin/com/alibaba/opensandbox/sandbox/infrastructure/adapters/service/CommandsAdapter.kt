@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.execd.CommandApi
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
@@ -125,12 +126,20 @@ internal class CommandsAdapter(
                 }
                 chain.proceed(requestBuilder.build())
             }
+            .addProtectedHeaderOriginGuard(execdBaseUrl)
             .build()
     private val commandApi =
         CommandApi(
             execdBaseUrl,
             execdApiClient,
         )
+
+    // The shared SSE client has no per-endpoint knowledge; clone it with the
+    // endpoint origin guard for streamed command execution.
+    private val sseGuardedClient =
+        httpClientProvider.sseClient.newBuilder()
+            .addProtectedHeaderOriginGuard(execdBaseUrl)
+            .build()
 
     override fun run(request: RunCommandRequest): Execution {
         if (request.argv == null && request.command.isEmpty()) {
@@ -317,7 +326,7 @@ internal class CommandsAdapter(
     ): Execution {
         val execution = Execution()
 
-        httpClientProvider.sseClient.newCall(httpRequest).execute().use { response ->
+        sseGuardedClient.newCall(httpRequest).execute().use { response ->
             ensureSuccessfulStreamingResponse(response, failureMessage)
 
             response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->
