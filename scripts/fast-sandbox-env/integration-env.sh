@@ -16,38 +16,22 @@
 # integration-env.sh — one-command fast-sandbox integration environment,
 # driven from the OpenSandbox repository.
 #
-# Builds the full OpenSandbox ecosystem on a bare-metal Linux KVM host
-# (fast-sandbox checked out at the commit pinned in
-# manifests/third-party/fast-sandbox.commit): two-node kind cluster with KVM
-# passthrough → Helm charts/base (sandbox.fast.io CRDs + component RBAC) +
-# charts/fast-sandbox (all-in-one control plane, janitor, node installer,
-# firecracker runtime readiness + DART) → RustFS artifact store → the firecracker-egress-pool
-# SandboxPool with the OpenSandbox egress sidecar attached through the
-# Sandbox Actions channel → the source-built OpenSandbox lifecycle server
-# (fsb runtime) and ingress gateway via charts/server and
-# charts/ingress-gateway → an end-to-end verify (create through the
-# published opensandbox CLI against the lifecycle server, execd /ping
-# through the signed gateway route, delete); then
-# pause/resume (checkpoint to the artifact store, capacity released,
-# resume) and a public-snapshot verify (snapshot a Running sandbox, watch
-# it to Ready, restore a NEW sandbox from the snapshotId and boot it).
+# On a bare-metal Linux KVM host it builds the full stack — fast-sandbox at
+# the commit pinned in manifests/third-party/fast-sandbox.commit, a two-node
+# kind cluster with KVM passthrough, the OpenSandbox Helm charts (base CRDs,
+# fast-sandbox control plane, server, ingress-gateway), a RustFS artifact
+# store, and the firecracker-egress-pool SandboxPool with the OpenSandbox
+# egress sidecar — then verifies end to end: sandbox create via the
+# opensandbox CLI, execd /ping through the signed gateway route, delete,
+# a pause/resume round trip, and a snapshot -> restore-from-snapshotId boot.
 #
-# All Kubernetes resources come from the OpenSandbox Helm charts
-# (manifests/charts), rendered with `helm template` and applied with plain
-# `kubectl apply` — helm is only a renderer here, the cluster keeps no helm
-# state, and re-runs keep the idempotent apply semantics. The only
-# env-owned manifests left are the kind cluster config and the SandboxPool
-# resource.
-#
-# The verify stages (template build, sandbox create/get/kill, pause/resume,
-# snapshot create/get/list/delete, renew) drive the lifecycle server through
-# the published opensandbox CLI ("osb"): the latest OSB_PACKAGE is installed
-# from PyPI into $WORK/tools/osb-venv on every up (uv is required — it
-# manages its own >=3.10 interpreter; OSB_BIN points at an existing binary
-# instead). Raw curl stays only where the CLI has no equivalent: the
-# networkpolicy replace PUT, the metadata merge-patch, the snapshot
-# re-entry HTTP-code fence, the gateway /ping probes, and kubectl-side CR
-# introspection.
+# All Kubernetes resources come from the charts via `helm template` + plain
+# `kubectl apply` (no helm release state); the only env-owned manifests are
+# the kind cluster config and the SandboxPool. The verify stages drive the
+# server through the published opensandbox CLI ("osb", installed fresh from
+# PyPI; OSB_BIN overrides); raw curl remains only for the calls the CLI
+# cannot express (networkpolicy replace PUT, metadata merge-patch, snapshot
+# re-entry fence) plus the gateway /ping probes.
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up       # full environment + pool + server/ingress + verify
@@ -57,10 +41,8 @@
 #   ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean   # down on failure
 #
 # Environment overrides (all optional):
-#   WORK                 workspace + logs        (default $PWD/.fast-sandbox-env)
-#   FSB_DIR              fast-sandbox checkout  (default $WORK/fast-sandbox —
-#                        env-owned clone; source pinned in manifests/third-party/fast-sandbox.commit)
-#   WORK                  workspace root        (default /data/fast-sandbox-env when /data exists, else $PWD/.fast-sandbox-env)
+#   WORK                 workspace root        (default /data/fast-sandbox-env when /data exists, else $PWD/.fast-sandbox-env)
+#   FSB_DIR              fast-sandbox checkout (default $WORK/fast-sandbox; source pinned in manifests/third-party/fast-sandbox.commit)
 #   KIND_CLUSTER / KIND_NODE_IMAGE / KIND_RETAIN / KIND_SINGLE
 #   DOCKER_MIRROR        comma list injected as docker.io containerd mirrors
 #   RUSTFS_PORT / RUSTFS_CONSOLE_PORT / RUSTFS_AK / RUSTFS_SK / RUSTFS_IMAGE / RC_IMAGE / RUSTFS_ENDPOINT
@@ -73,9 +55,7 @@
 #   POOL_MIN / POOL_MAX  pool capacity           (default 2/2; auto 1/1 when KIND_SINGLE=1)
 #   MAX_SANDBOXES_PER_POD per-fastlet sandbox capacity (default 8)
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
-#   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (default
-#                        opensandbox-cli, latest from PyPI; OSB_BIN uses a
-#                        preinstalled osb binary as-is)
+#   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
@@ -98,10 +78,8 @@ fi
 LOGS_DIR="$WORK/logs"
 GEN_DIR="$WORK/gen"
 
-# Env-owned fast-sandbox clone under $WORK (independent of any checkout
-# outside the workspace); FSB_DIR only relocates the clone. The source is
-# exactly the commit pinned in manifests/third-party/fast-sandbox.commit —
-# there is no ref override; to test a different source, bump the pin.
+# Env-owned fast-sandbox clone; the source is exactly the commit pinned in
+# manifests/third-party/fast-sandbox.commit (no ref override — bump the pin).
 FSB_DIR="${FSB_DIR:-$WORK/fast-sandbox}"
 FSB_REPO="$(sed -n 's/^repo:[[:space:]]*//p' "$OSB_ROOT/manifests/third-party/fast-sandbox.commit")"
 FSB_COMMIT="$(sed -n 's/^commit:[[:space:]]*//p' "$OSB_ROOT/manifests/third-party/fast-sandbox.commit")"
@@ -119,12 +97,9 @@ RESOURCE_NS="opensandbox-dataplane"
 RUSTFS_IMAGE="${RUSTFS_IMAGE:-rustfs/rustfs:latest}"
 RC_IMAGE="${RC_IMAGE:-rustfs/rc:latest}"
 RUSTFS_PORT="${RUSTFS_PORT:-19000}"
-# The container always LISTENS on 9000 (guest side of the publish map and
-# the port kind-network clients use via the container IP); RUSTFS_PORT only
-# moves the host-side 127.0.0.1 publish.
+# In-container ports are fixed (9000 S3 / 9001 console); these vars only move
+# the host-side 127.0.0.1 publishes (defaults avoid 9000/9001 collisions).
 RUSTFS_CONTAINER_PORT=9000
-# Console (human-only UI) listens on 9001 in-container; the host-side
-# publish defaults to 19001: 9000/9001 are common host-port collisions.
 RUSTFS_CONSOLE_PORT="${RUSTFS_CONSOLE_PORT:-19001}"
 RUSTFS_AK="${RUSTFS_AK:-integration-env}"
 RUSTFS_SK="${RUSTFS_SK:-integration-env-secret}"
@@ -136,9 +111,8 @@ RC_CONFIG_DIR="$WORK/rc-config"
 
 SBX_IMAGE="${SBX_IMAGE:-opensandbox/fsb-sandbox-golden:latest}"
 EXECD="${EXECD:-opensandbox/execd:latest}"
-# WARM_IMAGES=1 preheats the pool instead of the default on-demand flow
-# (warmImages reference the template id: the exact per-template index key).
-# (first sandbox create on each node pulls the artifact set through DART).
+# WARM_IMAGES=1 preheats pool warmImages (keyed by template id); the default
+# is the on-demand first-sandbox pull through DART.
 WARM_IMAGES="${WARM_IMAGES:-0}"
 
 POOL_NAME="${POOL_NAME:-firecracker-egress-pool}"
@@ -166,22 +140,18 @@ IMG_EGRESS="${EGRESS_IMAGE:-docker.io/opensandbox/egress:latest}"
 image_repo() { printf '%s' "${1%:*}"; }
 image_tag() { printf '%s' "${1##*:}"; }
 
-# --- OpenSandbox server + ingress gateway (source-built) ----------------------
-# Fixed shape of this environment: no knobs, the full stack always runs.
+# --- OpenSandbox server + ingress gateway (source-built; always deployed) ------
 
 OSB_NS="opensandbox-system"
 IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
 IMG_INGRESS="${INGRESS_IMAGE:-docker.io/opensandbox/ingress:env}"
-# FastPath v2 of this cluster's all-in-one control plane (in-cluster DNS).
 FASTPATH_ENDPOINT="fast-sandbox-fastpath.opensandbox-system.svc:9090"
 SERVER_API_KEY="fast-sandbox-env"
-# Shared f1.* route-scope signing key (server [ingress.secure_access] and
-# ingress --secure-access-keys), generated once per workdir so re-applies
-# keep previously issued routes verifiable.
+# Per-workdir f1.* route-scope signing key: re-applies must keep old routes
+# verifiable.
 SIGNING_KEY_FILE="$WORK/opensandbox-signing-key"
-# Host-side publish (kind extraPortMappings on the control-plane node, bound
-# to 127.0.0.1 only): Service NodePorts -> server :80 / gateway :28888.
-# Overridable because host port collisions are environment-specific.
+# Host publish via kind extraPortMappings (loopback only; overridable on
+# port collisions).
 SERVER_HOST_PORT="${SERVER_HOST_PORT:-18080}"
 GATEWAY_HOST_PORT="${GATEWAY_HOST_PORT:-18081}"
 SERVER_NODEPORT=30880
@@ -190,9 +160,7 @@ GATEWAY_ADDRESS="127.0.0.1:$GATEWAY_HOST_PORT"
 SERVER_URL="http://127.0.0.1:$SERVER_HOST_PORT"
 GATEWAY_URL="http://127.0.0.1:$GATEWAY_HOST_PORT"
 
-# Node labels: the firecracker-runtime readiness loop applies both itself
-# (sandbox.fast.io/kvm is hardcoded by the SandboxTemplate reconciler;
-# fast-sandbox.io/firecracker-node gates the fastlet scheduling).
+# Applied by the firecracker-runtime readiness loop itself (never manually).
 KVM_NODE_LABEL="sandbox.fast.io/kvm"
 FC_NODE_LABEL="fast-sandbox.io/firecracker-node"
 
@@ -204,9 +172,7 @@ KIND_VERSION="${KIND_VERSION:-v0.24.0}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.31.0}"
 HELM_VERSION="${HELM_VERSION:-v3.16.4}"
 
-# The verify stages drive the lifecycle server through the published
-# opensandbox CLI ("osb"): OSB_BIN uses an existing binary; otherwise the
-# latest OSB_PACKAGE release is installed from PyPI into a dedicated venv.
+# opensandbox CLI for the verify stages; installed by ensure_osb.
 OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
@@ -309,17 +275,12 @@ rc() {
 
 on_error() {
 	local rc=$? task="$1"
-	# ERR is inherited by command substitutions and subshells. They must
-	# propagate the error, not tear down resources owned by the main process.
-	# Command substitutions normally clear errexit, so returning here would
-	# let a failed child continue and potentially report success.
+	# Subshells inherit ERR: propagate the error instead of tearing down
+	# main-process resources; ignore SIGPIPE (cancelled runners).
 	trap - ERR
 	[[ "$BASHPID" == "$ENV_PID" ]] || exit "$rc"
-	# A cancelled runner may have closed the output pipe. Logging must not
-	# kill the handler before cleanup or replace the original exit status.
 	trap '' PIPE
-	# Dump while the cluster is still live; --auto-clean teardown destroys
-	# the evidence (pod logs, events) if it runs first.
+	# Dump before --auto-clean teardown destroys the evidence.
 	failure_dump "$task" || true
 	if [[ "$AUTO_CLEAN" == 1 ]]; then
 		log "$ACTION failed at $task; --auto-clean: running down" || true
@@ -440,13 +401,12 @@ ensure_osb() {
 			die "osb is required (SKIP_TOOL_INSTALL=1: install opensandbox-cli manually or set OSB_BIN)"
 		fi
 		command -v uv >/dev/null 2>&1 \
-			|| die "uv is required to install the opensandbox CLI (it manages its own >=3.10 interpreter; or set OSB_BIN)"
+			|| die "uv is required to install the opensandbox CLI (or set OSB_BIN)"
 		log "installing the latest $OSB_PACKAGE into $OSB_VENV (uv)"
 		: > "$LOGS_DIR/osb-install.log"
 		rm -rf "$OSB_VENV"
-		# The venv is rebuilt fresh on every up, at its final path: venv
-		# console-script shebangs embed the interpreter's absolute path, so
-		# creating elsewhere and moving breaks them (bad interpreter).
+		# Fresh venv at its final path: venv console-script shebangs embed the
+		# interpreter's absolute path, so create-elsewhere-and-move breaks them.
 		uv venv --python 3.12 "$OSB_VENV" >>"$LOGS_DIR/osb-install.log" 2>&1 \
 			|| { tail -n 20 "$LOGS_DIR/osb-install.log" >&2 || true; die "uv venv --python 3.12 failed (full log: $LOGS_DIR/osb-install.log; or set OSB_BIN)"; }
 		uv pip install --python "$OSB_VENV/bin/python" --upgrade "$OSB_PACKAGE" \
@@ -481,8 +441,7 @@ preflight() {
 	local cgver
 	cgver="$(docker info --format '{{.CgroupVersion}}' 2>/dev/null || true)"
 	log "docker cgroup version=$cgver"
-	# kind requires cgroup v2: on v1 hosts kubelet fails to create the
-	# kubepods cgroup regardless of the docker cgroup driver.
+	# kind requires cgroup v2; v1 hosts fail kubepods cgroup creation.
 	if [[ "$cgver" == "1" ]]; then
 		die "docker cgroup Version is 1; kind requires cgroup v2. Enable it with the kernel cmdline 'systemd.unified_cgroup_hierarchy=1' and reboot"
 	fi
@@ -500,9 +459,7 @@ preflight() {
 		fi
 		log "disk headroom: $target has $((avail_kb / 1024 / 1024 / 1024))G free"
 	done
-	# Fail fast on busy host ports instead of dying at the docker bind or
-	# kind create. RustFS culprits: a leftover RustFS container; 8080/8081 are
-	# published by the kind node for the server / ingress gateway.
+	# Fail fast on busy host ports instead of a cryptic docker/kind bind error.
 	local port
 	for port in "$RUSTFS_PORT" "$RUSTFS_CONSOLE_PORT" "$SERVER_HOST_PORT" "$GATEWAY_HOST_PORT"; do
 		if host_port_busy "$port"; then
@@ -534,10 +491,8 @@ sysctl_restore() {
 
 # --- stage: fast-sandbox checkout @ master ---------------------------------------------
 
-# Scratch Go sources compiled inside the fast-sandbox module (gen-registry
-# imports internal/registryconfig). The directory lives inside the checkout
-# so `go run` resolves the module; it is removed before every dirty check
-# and on down.
+# Scratch Go tool run inside the fast-sandbox module (imports
+# internal/registryconfig); removed before dirty checks and on down.
 FSB_GEN_DIR="$FSB_DIR/.fast-sandbox-env-gen"
 
 ensure_fsb() {
@@ -548,8 +503,7 @@ ensure_fsb() {
 	rm -rf "$FSB_GEN_DIR"
 	[[ -z "$(git -C "$FSB_DIR" status --porcelain)" ]] \
 		|| die "fast-sandbox checkout at $FSB_DIR has local changes; delete it to re-clone or point FSB_DIR at a clean checkout"
-	# A raw SHA fetch needs allow-reachable-sha1-in-want (GitHub supports
-	# it); fall back to a full ref fetch for other remotes.
+	# Raw SHA fetch needs allow-reachable-sha1-in-want; full fetch otherwise.
 	if ! git -C "$FSB_DIR" fetch -q origin "$FSB_COMMIT" 2>/dev/null; then
 		git -C "$FSB_DIR" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' \
 			|| die "git fetch failed for $FSB_REPO"
@@ -571,29 +525,23 @@ ensure_fsb() {
 
 build_images() {
 	log "building fast-sandbox images (pinned commit, firecracker scope) via manifests/release/build-fast-sandbox.sh"
-	# Same checkout, same defaults (fast-sandbox/<component>:dev) as the
-	# standalone builder, so the env and the published build path cannot
-	# drift. boxlite / sandbox-action-fixture / sandbox-proxy are never
-	# built.
+	# Same checkout and defaults as the standalone builder: env and published
+	# build paths cannot drift.
 	FSB_SRC_DIR="$FSB_DIR" "$OSB_ROOT/manifests/release/build-fast-sandbox.sh" \
 		|| die "fast-sandbox image build failed"
 	log "building the OpenSandbox egress image ($IMG_EGRESS)"
-	# Build context is the OpenSandbox repo root: the Dockerfile COPYs
-	# components/egress/* and components/internal paths.
+	# Context is the repo root (COPYs components/egress + components/internal).
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 		-f "$OSB_ROOT/components/egress/Dockerfile" -t "$IMG_EGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "egress image build failed"
 	log "building the OpenSandbox server image ($IMG_SERVER)"
-	# The server Dockerfile is self-contained under server/ (uv sync
-	# against the lockfile); context is the server directory.
+	# Context is server/ (self-contained Dockerfile).
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 		-f "$OSB_ROOT/server/Dockerfile" -t "$IMG_SERVER" "$OSB_ROOT/server" >/dev/null \
 		|| die "server image build failed"
 	log "building the OpenSandbox ingress image ($IMG_INGRESS)"
-	# Like egress, the ingress Dockerfile COPYs components/ingress and
-	# components/internal paths, so the context is the repo root.
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 		-f "$OSB_ROOT/components/ingress/Dockerfile" -t "$IMG_INGRESS" "$OSB_ROOT" >/dev/null \
@@ -627,12 +575,9 @@ stateroot_xfs_up() {
 		return 0
 	}
 	if findmnt -no FSTYPE "$XFS_MOUNT_POINT" 2>/dev/null | grep -qx xfs; then
-		# Leftover from a run that died before teardown (concurrency cancel,
-		# runner restart): jails/snapshots still occupy the StateRoot, and
-		# once free space drops under the agent's 10GiB min-free floor the
-		# readiness check strips the kvm node label and template builds stop
-		# scheduling. By this point the leftover-cluster check has already
-		# run down(), so no live workload holds these files.
+		# Leftover from a run killed before teardown: scrub, and recreate the
+		# image if still below the agent's min-free floor (it strips the kvm
+		# node label and template builds stop scheduling).
 		stateroot_scrub
 		if (( $(stateroot_free_gib) >= XFS_MIN_FREE_GIB )); then
 			pass "XFS StateRoot ready (reflink CoW rootfs, scrubbed)"
@@ -664,10 +609,8 @@ stateroot_xfs_up() {
 	fi
 }
 
-# Purge the per-node runtime caches inside the mounted StateRoot (shared by
-# down() and the reuse branch of stateroot_xfs_up). snapshots/ is the big
-# one: publish/pull staging dirs plus committed snapshot state are never
-# swept at runtime and leak across interrupted runs.
+# Purge per-node runtime caches in the mounted StateRoot (shared by down()
+# and the reuse branch of stateroot_xfs_up); snapshots/ leaks across runs.
 stateroot_scrub() {
 	local node_dir
 	for node_dir in "$XFS_MOUNT_POINT"/*/; do
@@ -708,11 +651,8 @@ render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 		log "single-node topology (KIND_SINGLE=1: no worker, no peer traffic)"
 	fi
 	if [[ -n "${DOCKER_MIRROR:-}" ]]; then
-		# Mirrors are host-specific, so they are opt-in (DOCKER_MIRROR)
-		# rather than baked into the committed manifest: build the
-		# containerdConfigPatches block in a scratch file (one endpoint
-		# ARRAY — repeated endpoint keys would override each other in
-		# TOML) and insert it before `nodes:` with a two-file awk pass.
+		# Host-specific, hence opt-in; one TOML endpoint ARRAY (repeated
+		# endpoint keys would override each other).
 		local block_file="$GEN_DIR/docker-mirror-block.yaml" mirror trimmed endpoints=""
 		IFS=',' read -ra mirrors <<<"$DOCKER_MIRROR"
 		for mirror in "${mirrors[@]}"; do
@@ -735,11 +675,9 @@ render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 		rm -f "$block_file"
 		log "docker.io containerd mirrors injected: $endpoints"
 	fi
-	# Publish the lifecycle server and the ingress gateway on the host
-	# through NodePorts + extraPortMappings on the control-plane node (the
-	# standard kind pattern). The mappings exist only when the cluster is
-	# created with them; reusing a cluster built without them means the
-	# services stay cluster-internal.
+	# extraPortMappings publish the server/gateway on the host; they exist
+	# only at cluster creation, so a cluster reused without them stays
+	# cluster-internal.
 	local ports_file="$GEN_DIR/osb-ports-block.yaml"
 	{
 		echo '  extraPortMappings:'
@@ -780,8 +718,7 @@ kind_up() {
 			local rc=$?
 			tail -40 "$LOGS_DIR/kind-create.log" >&2 || true
 			log "kind create failed (full log: $LOGS_DIR/kind-create.log)" || true
-			# Return through ERR so diagnostics and --auto-clean run as well.
-			return "$rc"
+			return "$rc"	# through ERR, so diagnostics + --auto-clean run
 		}
 		pass "kind cluster created"
 	fi
@@ -791,9 +728,8 @@ kind_up() {
 		log "node $node: /dev/kvm visible"
 	done
 	if [[ "$KIND_SINGLE" != "1" ]]; then
-		# Multi-node kind keeps the control-plane tainted (NoSchedule),
-		# which would strand half the topology: agent / fastlet / builder
-		# must schedule on BOTH nodes for the P2P peer traffic to happen.
+		# Untaint the control plane: agent/fastlet/builder must schedule on
+		# BOTH nodes for P2P peer traffic.
 		kubectl taint nodes --all node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
 		log "control-plane taint removed (both nodes schedulable for the P2P topology)"
 	fi
@@ -804,7 +740,7 @@ kind_up() {
 
 rustfs_up() {
 	docker rm -f "$RUSTFS_CONTAINER" >/dev/null 2>&1 || true
-	# RustFS runs as UID/GID 10001 and needs ownership of the bind-mounted store.
+	# RustFS runs as UID/GID 10001 and owns the bind-mounted store.
 	sudo_ rm -rf "$RUSTFS_DATA"
 	mkdir -p "$RUSTFS_DATA"
 	sudo_ chown -R 10001:10001 "$RUSTFS_DATA"
@@ -812,9 +748,8 @@ rustfs_up() {
 	chmod 700 "$RC_CONFIG_DIR"
 	local net
 	net="$(kind_network)"
-	# Joining the kind network avoids docker-proxy/hairpin reachability
-	# issues: pods and the node container talk to the container IP directly,
-	# while 127.0.0.1 publishing keeps host-side rc/curl working.
+	# On the kind network: pods reach the container IP directly (no
+	# docker-proxy/hairpin issues); 127.0.0.1 publishes serve the host.
 	docker run -d --name "$RUSTFS_CONTAINER" --network "$net" \
 		-p 127.0.0.1:"$RUSTFS_PORT":"$RUSTFS_CONTAINER_PORT" -p 127.0.0.1:"$RUSTFS_CONSOLE_PORT":9001 \
 		-e RUSTFS_ACCESS_KEY="$RUSTFS_AK" -e RUSTFS_SECRET_KEY="$RUSTFS_SK" \
@@ -848,9 +783,8 @@ resolve_rustfs_endpoint() {
 		ips="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{$v.IPAddress}} {{end}}' "$RUSTFS_CONTAINER")"
 		ip="$(printf '%s' "$ips" | tr ' ' '\n' | grep -A1 -x "^$net$" | tail -1)"
 		[[ -n "$ip" ]] || die "could not find the RustFS IP on network $net (inspect: $ips)"
-		# Container port, NOT the host-published RUSTFS_PORT: kind-network
-		# clients reach the container directly and the S3 API listens on
-		# the fixed container port regardless of the host mapping.
+		# Container port, not the host publish: kind-network clients hit the
+		# container IP directly.
 		RUSTFS_ENDPOINT="http://$ip:$RUSTFS_CONTAINER_PORT"
 		log "RustFS endpoint (kind network IP): $RUSTFS_ENDPOINT"
 	fi
@@ -870,8 +804,8 @@ resolve_rustfs_endpoint() {
 	pass "RustFS reachable from the kind network"
 }
 
-# gen_registry compiles the agent registry via fast-sandbox's registryconfig
-# package; the optional write pair covers checkpoint/snapshot publication.
+# gen_registry builds the agent registry JSON via fast-sandbox's
+# registryconfig package; the write pair covers checkpoint publication.
 gen_registry() { # host username password endpoint [write-username write-password] > registry.json
 	mkdir -p "$FSB_GEN_DIR"
 	cat > "$FSB_GEN_DIR/gen-registry.go" <<'EOF'
@@ -913,16 +847,13 @@ EOF
 }
 
 credentials_up() {
-	# The platform namespace exists even if the control plane has not been
-	# applied yet (resume after a partial up).
+	# Namespaces exist even after a partial up (resume support).
 	kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	local host
 	host="${RUSTFS_ENDPOINT#http://}"
 	host="${host#https://}"
-	# Publish credentials: SecretKeyRef'd by the builder Pod (template
-	# stage); builder Pods run next to their SandboxTemplate in the
-	# dataplane namespace.
+	# Publish credentials for the builder Pod (dataplane namespace).
 	kubectl -n "$RESOURCE_NS" create secret generic sandbox-oss-credentials \
 		--from-literal=accessKeyId="$RUSTFS_AK" \
 		--from-literal=secretAccessKey="$RUSTFS_SK" \
@@ -937,10 +868,8 @@ credentials_up() {
 	kubectl -n "$NS" create secret generic fast-sandbox-agent-registry \
 		--from-file=registry.json="$WORK/agent-registry.json" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
-	# The fast-sandbox-artifact-store ConfigMap (store + live endpoint) is
+	# Pull credentials for the fastlet; the artifact-store ConfigMap is
 	# rendered by charts/fast-sandbox at install time.
-	# Pull credentials for the fastlet (pool-compiled registry); fastlets
-	# run in the dataplane namespace.
 	kubectl -n "$RESOURCE_NS" create secret docker-registry registry-rustfs \
 		--docker-server="$host" --docker-username="$RUSTFS_AK" --docker-password="$RUSTFS_SK" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -956,9 +885,8 @@ credentials_up() {
 
 # --- stage: control plane -------------------------------------------------------------------
 
-# The charts are rendered with `helm template` and applied with kubectl:
-# helm stays a renderer, the cluster keeps no helm release state, and
-# re-runs keep the plain idempotent `kubectl apply` semantics.
+# helm is only a renderer; the cluster keeps no helm release state, so
+# re-runs stay plain idempotent `kubectl apply`.
 helm_render() { # release chart ns out [set-args...]
 	local release="$1" chart="$2" ns="$3" out="$4"
 	shift 4
@@ -972,13 +900,8 @@ apply_ns() { # ns -> ensure the namespace exists (idempotent)
 }
 
 control_plane_up() {
-	# The OpenSandbox Helm charts are the source of truth: charts/base ships
-	# the sandbox.opensandbox.io + sandbox.fast.io CRDs, the component RBAC
-	# and the namespaces; charts/fast-sandbox ships the all-in-one control
-	# plane (reconcilers + FastPath), the janitor, the node installer and
-	# the runtime-agent. This replaces the fast-sandbox checkout's
-	# config/crd + config/all-in-one kustomize applies and the env-owned
-	# node manifests.
+	# Charts are the source of truth (CRDs + RBAC + control plane), replacing
+	# the fast-sandbox checkout's kustomize applies and env-owned node manifests.
 	apply_ns "$NS"
 	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml"
 	kubectl apply -f "$GEN_DIR/fsb-base.yaml" >/dev/null
@@ -1036,17 +959,13 @@ dart_roster_ready() { # pod expected-members
 }
 
 runtime_up() {
-	# The firecracker-runtime DaemonSet + dart headless Service ship with
-	# the charts/fast-sandbox release (artifact-store endpoint was pinned
-	# at install time; the registry Secret lands in credentials_up before
-	# this stage).
+	# DaemonSet + dart Service ship with charts/fast-sandbox; credentials land
+	# in credentials_up before this stage.
 	wait_for "firecracker-runtime DaemonSet ready" 120 \
 		kubectl -n "$NS" rollout status daemonset/firecracker-runtime --timeout=10s
 
-	# Every runtime pod must have its node-local DART child answering on the
-	# admin plane, and agent /v1/health must report p2pUp=true (a missing
-	# P2P daemon only degrades pulls to direct S3, so this is a positive
-	# wiring assertion of the default P2P data plane, not a readiness gate).
+	# Positive wiring assertions: DART admin plane up, agent p2pUp=true
+	# (a missing P2P daemon only degrades pulls to direct S3).
 	local pod uid node pods
 	pods="$(runtime_pods)"
 	for pod in $pods; do
@@ -1060,9 +979,8 @@ runtime_up() {
 				"curl -fsS --noproxy '*' --unix-socket /run/fast-sandbox/firecracker/runtime.sock -H 'Content-Type: application/json' -d '{\"podUid\":\"$uid\",\"namespace\":\"$NS\"}' http://firecracker-agent/v1/health | grep -q '\"p2pUp\":true'"
 		log "dart: $node dart pid=$(kubectl exec -n "$NS" "$pod" -- sh -c 'pgrep -x dart')"
 	done
-	# P2P roster: every daemon must see every other runtime pod as a peer
-	# before any pull, so the second node's pull can be served by the
-	# first node's dart instead of the origin.
+	# P2P roster: every daemon must see every peer before any pull, so later
+	# nodes are fed by peers instead of the origin.
 	local expected_members
 	expected_members="$(printf '%s' "$pods" | wc -w | tr -d ' ')"
 	for pod in $pods; do
@@ -1070,10 +988,7 @@ runtime_up() {
 		wait_for "dart roster full on $node ($expected_members members)" 90 \
 			dart_roster_ready "$pod" "$expected_members"
 	done
-	# Node readiness: the readiness loop verifies each host, installs the
-	# Firecracker assets and applies the scheduling labels +
-	# FirecrackerReady condition itself (the old manual kubectl label step
-	# is gone).
+	# The readiness loop applies labels + FirecrackerReady itself.
 	for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
 		wait_for "node $node labeled + FirecrackerReady" 120 \
 			runtime_node_labeled "$node"
@@ -1100,11 +1015,9 @@ wait_succeeded() { # description attempts probe probe_failed
 	pass "$description"
 }
 
-# The template build is driven through the opensandbox CLI (the server
-# /templates API behind it): the server persists the catalog row and
-# projects it onto a SandboxTemplate CRD in $NS. The build itself still
-# runs in fast-sandbox (controller -> builder Pod), so the builder image
-# must be in the cluster.
+# Template build via the CLI (server /templates API behind it): the row is
+# projected onto a SandboxTemplate CRD; the build runs in fast-sandbox, so
+# the builder image must be in the cluster.
 TEMPLATE_ID=""
 
 _template_phase() {
@@ -1190,10 +1103,9 @@ egress_containers_ready() {
 	done
 }
 
-# Protocol cross-verification: GET /_fastlet/v1/actions/status must echo
-# the shared apiVersion, ready=true, and a non-empty instanceId. The egress
-# Handler binds Pod loopback only (127.0.0.1:18080), so the probe runs
-# inside the egress container (the image ships curl).
+# GET /_fastlet/v1/actions/status must echo the shared apiVersion, ready=true
+# and a non-empty instanceId; the handler binds Pod loopback only, so the
+# probe runs inside the egress container.
 egress_status_ready() {
 	local pod out
 	pod="$(first_pool_pod)"
@@ -1220,10 +1132,8 @@ warm_images_ready() {
 render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
 	local src="$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml" out="$GEN_DIR/firecracker-egress-pool.yaml"
 	mkdir -p "$GEN_DIR"
-	# Tokens are quoted in the template (valid YAML); the substitution
-	# replaces the quotes too, so rendered scalars keep their natural types
-	# (poolMin stays an integer). awk keeps this portable across sed
-	# flavors; image tags never contain awk-special replacement chars.
+	# Quoted tokens in the template keep rendered scalars' natural types
+	# (poolMin stays an integer); awk for sed portability.
 	awk -v fastlet="$IMG_FASTLET" -v egress="$IMG_EGRESS" \
 		-v pool_min="$POOL_MIN" -v pool_max="$POOL_MAX" \
 		-v max_per_pod="$MAX_SANDBOXES_PER_POD" \
@@ -1263,10 +1173,9 @@ pool_up() {
 	fi
 }
 
-# p2p_evidence asserts the P2P outcome from the DART block counters: the
-# published artifact set (rootfs/vmstate/memory) is pulled once per 4MiB
-# block from the origin cluster-wide, and when more than one node served
-# traffic the second node must have been fed by the first node's peer.
+# Assert the P2P outcome from DART block counters: the artifact set is
+# pulled ~once per 4MiB block from the origin cluster-wide, and extra nodes
+# must be fed by peers, not the origin.
 p2p_evidence() { # description
 	local description="$1"
 	local pods pod manifest_ref manifest_key build_dir expected_blocks=0 stat_json
@@ -1317,9 +1226,7 @@ dart_source_counters() { # pod -> "<source> <value>" lines
 
 # --- stage: OpenSandbox server + ingress gateway --------------------------------
 
-# The f1.* route-scope signing key is generated once per workdir (not per
-# up run): a re-apply of the manifests must keep the key stable, or
-# previously issued routes would stop verifying against the gateway.
+# Per-workdir key (not per-run): re-applies must keep old routes verifiable.
 osb_signing_key() {
 	if [[ ! -s "$SIGNING_KEY_FILE" ]]; then
 		openssl rand -base64 32 | tr -d '\n' > "$SIGNING_KEY_FILE"
@@ -1327,10 +1234,8 @@ osb_signing_key() {
 	cat "$SIGNING_KEY_FILE"
 }
 
-# render_server_config writes the lifecycle server's config.toml (fsb
-# runtime) with the workdir's tokens substituted. The gateway-mode ingress
-# section is NOT part of it: charts/server appends its own [ingress] block
-# rendered from server.gateway.* values (see opensandbox_up).
+# Server config.toml (fsb runtime) with workdir tokens; the gateway [ingress]
+# block is appended by charts/server from server.gateway.* values.
 render_server_config() { # > $GEN_DIR/osb-server-config.toml
 	mkdir -p "$GEN_DIR"
 	awk -v api_key="$SERVER_API_KEY" \
@@ -1358,10 +1263,8 @@ type = "kubernetes"
 execd_image = "@EXECD_IMAGE@"
 
 [kubernetes]
-# One block serves both backends: CR reads and the
-# fsb (fast-sandbox) settings. Sandboxes are created in the pool's
-# namespace so poolRef resolves; execd comes from runtime.execd_image
-# above (the server injects it into server-created SandboxTemplates).
+# One block for CR reads + fsb settings; sandboxes live in the pool's
+# namespace (poolRef resolves) and get the execd image injected by the server.
 namespace = "@FSB_NAMESPACE@"
 fastpath_endpoint = "@FASTPATH_ENDPOINT@"
 fastpath_resource_pool = "@POOL_NAME@"
@@ -1378,8 +1281,7 @@ opensandbox_up() {
 	kind load docker-image "$IMG_INGRESS" --name "$KIND_CLUSTER" >/dev/null
 	render_server_config
 	apply_ns "$OSB_NS"
-	# charts/server: fsb RBAC (sandbox.fast.io reads + SandboxTemplate
-	# management) is built in; the config carries the fsb runtime wiring.
+	# charts/server has the fsb RBAC built in; the config carries the wiring.
 	helm_render opensandbox-server "$OSB_ROOT/manifests/charts/server" "$OSB_NS" \
 		"$GEN_DIR/osb-server.yaml" \
 		--set server.image.repository="$(image_repo "$IMG_SERVER")" \
@@ -1398,8 +1300,7 @@ opensandbox_up() {
 		--set "server.gateway.secureAccess.keys[0].key_id=a" \
 		--set "server.gateway.secureAccess.keys[0].key=$(osb_signing_key)"
 	kubectl apply -f "$GEN_DIR/osb-server.yaml" >/dev/null
-	# charts/ingress-gateway: fast-sandbox provider resolving through
-	# FastPath, verifying the same signing key the server signs with.
+	# fast-sandbox provider via FastPath, same signing key as the server.
 	helm_render opensandbox-ingress-gateway "$OSB_ROOT/manifests/charts/ingress-gateway" "$OSB_NS" \
 		"$GEN_DIR/osb-ingress-gateway.yaml" \
 		--set gateway.image.repository="$(image_repo "$IMG_INGRESS")" \
@@ -1421,8 +1322,8 @@ opensandbox_up() {
 		kubectl -n "$OSB_NS" rollout status deploy/opensandbox-server --timeout=10s
 	wait_for "ingress gateway deployment ready" 180 \
 		kubectl -n "$OSB_NS" rollout status deploy/opensandbox-ingress-gateway --timeout=10s
-	# The gateway fails startup without a FastPath gRPC connection, so a
-	# ready deployment already proves control-plane reachability.
+	# A ready gateway proves FastPath reachability: it fails startup without
+	# the gRPC connection.
 	wait_for "server /health on 127.0.0.1:$SERVER_HOST_PORT" 60 \
 		curl -fsS -m 5 "$SERVER_URL/health"
 	wait_for "gateway /status.ok on 127.0.0.1:$GATEWAY_HOST_PORT" 60 \
@@ -1430,9 +1331,8 @@ opensandbox_up() {
 	pass "server + ingress gateway up (fsb runtime, gateway routes signed with key 'a')"
 }
 
-# server_api wraps the lifecycle API with the configured API key. It stays
-# only for the calls the CLI cannot express (networkpolicy replace PUT,
-# metadata merge-patch, snapshot re-entry HTTP-code fence).
+# Raw curl, kept for the calls the CLI cannot express (networkpolicy
+# replace PUT, metadata merge-patch, snapshot re-entry fence).
 server_api() { # method path [json-body]
 	local method="$1" path="$2" body="${3:-}"
 	if [[ -n "$body" ]]; then
@@ -1443,9 +1343,8 @@ server_api() { # method path [json-body]
 	fi
 }
 
-# osb_api wraps the published opensandbox CLI pointed at the lifecycle
-# server. --no-color keeps -o json output parseable (plain JSON on stdout);
-# global flags precede the subcommand.
+# opensandbox CLI pointed at the lifecycle server; --no-color keeps
+# -o json parseable.
 osb_api() {
 	"$OSB_BIN" --no-color --domain "127.0.0.1:$SERVER_HOST_PORT" --protocol http \
 		--api-key "$SERVER_API_KEY" --request-timeout 60 "$@"
@@ -1480,23 +1379,17 @@ verify_policy_updated() {
 	[[ "$(printf '%s' "$out" | jq -r '.policy.egress[0].target // empty')" == "github.com" ]]
 }
 
-# opensandbox_verify drives the full wire-up end to end: opensandbox CLI
-# create (fsb) -> FastPath -> fastlet -> firecracker sandbox (golden image
-# with execd, egress attached) -> signed gateway route -> ingress
-# ResolveEndpoint -> fastlet-proxy -> guest execd /ping -> delete.
-# verify_one_sandbox creates one sandbox through the opensandbox CLI and
-# polls execd /ping through the signed gateway route until 200 (wall-clock
-# budget; every route poll is a CLI call, ~0.5s of interpreter startup):
-# availability is measured from the client, not from the CR status chain.
-# The CR state is sampled once at ping time to show observation lag.
+# Full wire-up: CLI create (fsb) -> FastPath -> fastlet -> firecracker
+# sandbox -> signed gateway route -> fastlet-proxy -> guest execd /ping ->
+# delete. One sandbox per call; availability is measured from the client
+# (poll /ping until 200, wall-clock budget — each route poll is a CLI call,
+# ~0.5s startup), not from CR status.
 verify_one_sandbox() { # <label> <ping-budget-ms>
 	local label="$1" budget="$2" created t0 t1 t2 route code deadline
 	local policy_file="$GEN_DIR/verify-policy.json"
 	t0="$(now_ms)"
-	# Default egress policy on every verify sandbox: the create carries it
-	# into the egress action binding (SET_BINDING -> nft rules in the fastlet
-	# Pod netns), so the policy chain is exercised on every create, not just
-	# the network. /ping itself is inbound through the gateway and unaffected.
+	# Egress policy rides on every create (binding -> nft rules), so the
+	# chain is exercised each time; /ping is inbound and unaffected.
 	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "example.com"}, {action: "allow", target: "*.opensandbox.ai"}]}' \
 		> "$policy_file"
 	log "verify ($label): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
@@ -1509,10 +1402,7 @@ verify_one_sandbox() { # <label> <ping-budget-ms>
 	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "create response carried no id"
 	t1="$(now_ms)"
-	# Availability = execd /ping 200 through the signed gateway route
-	# (127.0.0.1:8081 -> ingress -> ResolveEndpoint -> fastlet-proxy -> guest
-	# execd :44772). The route comes from the CLI; each attempt costs ~0.5s
-	# of interpreter startup, so the budget is wall-clock, not attempt-count.
+	# Availability = /ping 200 through the signed gateway route (port 44772).
 	deadline=$(( t1 + budget * 1000000 ))
 	while :; do
 		route="$(osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json 2>/dev/null \
@@ -1528,9 +1418,7 @@ verify_one_sandbox() { # <label> <ping-budget-ms>
 		sleep 0.2
 	done
 	t2="$(now_ms)"
-	# The jq filter lives in a variable first: its literal parentheses
-	# inside the single-quoted program trip older bash's $( ) parser when
-	# embedded in a command substitution directly.
+	# jq filter in a variable: literal parens trip older bash's $( ) parser.
 	local state raw raw_filter
 	raw_filter='{rt:.status.runtime.state,dp:.status.dataPlane.state,infra:[.status.infraComponents[]?|{n:.name,s:.state}],bind:[.status.actionBindings[]?|{h:.handler,s:.state}],ready:(.status.conditions[]?|select(.type=="Ready")|.status)}'
 	state="$(osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty')"
@@ -1540,25 +1428,20 @@ verify_one_sandbox() { # <label> <ping-budget-ms>
 	log "verify ($label): CR at ping: server=$state raw=${raw:-unreachable}"
 	pass "execd /ping 200 through the signed gateway route (44772)"
 	wait_for "egress policy enforcing (networkPolicy -> egress action binding -> nft)" 120 verify_policy_enforced
-	# Exercise the policy UPDATE path: PUT -> UpdateSandbox(ReplaceActionBindings)
-	# -> fastlet re-SET_BINDING -> egress hot-swaps the nft rules. Raw PUT:
-	# the CLI only exposes merge-style egress patches.
+	# Policy UPDATE path (raw PUT: the CLI only has merge-style patches).
 	local put_body
 	put_body="$(jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "github.com"}]}')"
 	server_api PUT "/sandboxes/$VERIFY_ID/networkpolicy" "$put_body" >/dev/null \
 		|| fail "PUT networkpolicy failed for $VERIFY_ID: $(printf '%s' "$put_body" | head -c 200)"
 	wait_for "policy update converged (PUT -> ReplaceActionBindings -> egress)" 120 verify_policy_updated
-	# The policy waits burn a few seconds: sample the CR state again to show
-	# whether an early Failed observation converged to Running.
+	# Re-sample the CR state: an early Failed observation may converge late.
 	local state_final
 	state_final="$(osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty')"
 	log "verify ($label): $VERIFY_ID CR state final: ${state_final:-unknown}"
 }
 
-# verify_lifecycle_ops exercises the remaining sandbox lifecycle surface
-# against the live stack on one sandbox: get, list, metadata merge-patch
-# (upsert + null-delete; raw API — the CLI has no metadata command), and
-# renew via the CLI (TTL-based, so the assertion is "expiration advanced").
+# Remaining lifecycle surface on one sandbox: get, list, metadata merge-patch
+# (raw API — no CLI command), renew via the CLI (TTL-based).
 verify_lifecycle_ops() { # <sandbox-id>
 	local id="$1" out expected_expires renewed_expires
 	out="$(osb_api sandbox get "$id" -o json 2>/dev/null)" || fail "osb sandbox get $id failed"
@@ -1572,8 +1455,7 @@ verify_lifecycle_ops() { # <sandbox-id>
 		|| fail "list does not contain $id: $(printf '%s' "$out" | jq -c '.pagination')"
 	pass "lifecycle: osb sandbox list (contains the verify sandbox)"
 
-	# JSON Merge Patch (RFC 7396): non-null upserts, null deletes. Stays on
-	# the raw API; visibility is checked through the CLI.
+	# JSON Merge Patch (RFC 7396): non-null upserts, null deletes.
 	server_api PATCH "/sandboxes/$id/metadata" '{"env":"verify","stage":"lifecycle-ops"}' >/dev/null \
 		|| fail "PATCH metadata upsert failed"
 	out="$(osb_api sandbox get "$id" -o json 2>/dev/null)"
@@ -1588,8 +1470,7 @@ verify_lifecycle_ops() { # <sandbox-id>
 		|| fail "metadata delete not visible: $(printf '%s' "$out" | jq -c '.metadata')"
 	pass "lifecycle: PATCH metadata (upsert + null-delete via JSON Merge Patch)"
 
-	# Renew through the CLI takes a TTL (not an absolute expiresAt): assert
-	# the expiration advanced and is visible on the next GET.
+	# CLI renew takes a TTL: assert the expiration advanced and is visible.
 	expected_expires="$(osb_api sandbox get "$id" -o json 2>/dev/null | jq -r '.expires_at')"
 	out="$(osb_api sandbox renew "$id" --timeout 2h -o json 2>"$WORK/last-renew.err")" \
 		|| fail "osb sandbox renew failed: $(head -c 400 "$WORK/last-renew.err" 2>/dev/null)"
@@ -1603,11 +1484,9 @@ verify_lifecycle_ops() { # <sandbox-id>
 }
 
 opensandbox_verify() {
-	# Cold create first: on cold fastlets it pulls the golden image through
-	# DART (the slowest path, generous budget). Then warm creates: the second
-	# may still pull on the OTHER node (served by the first node's DART
-	# peer); once both nodes cache the set, the remaining creates must be
-	# sub-second.
+	# Cold create pulls the golden image through DART (slowest; generous
+	# budget). Warm creates: the second may still pull on the other node via
+	# its DART peer; after both nodes cache the set, creates are sub-second.
 	local ids=() id label index
 	verify_one_sandbox "cold #1" 600000
 	ids+=("$VERIFY_ID")
@@ -1675,7 +1554,7 @@ pause_resume_verify() {
 	# store before the state is reported; the dump itself keeps serving.
 	wait_for "poll GET until Paused (checkpoint durable, capacity released)" 240 sandbox_paused
 	t2="$(now_ms)"
-	log "verify (pause): $VERIFY_ID pause POST->Paused (checkpoint durable) $(( (t2 - t1) / 1000000 ))ms"
+	log "verify (pause): $VERIFY_ID pause->Paused (checkpoint durable) $(( (t2 - t1) / 1000000 ))ms"
 	if execd_ping_ok; then
 		fail "paused sandbox still serves /ping through the gateway"
 	fi
@@ -1698,13 +1577,13 @@ pause_resume_verify() {
 
 # --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore) ----------
 
-# Ready when the server watcher has converged the snapshot row from the
-# fast-sandbox SandboxSnapshot CR (Succeeded + template index published).
+# Ready once the server watcher converges the row from the SandboxSnapshot
+# CR (Succeeded + template index published).
 snapshot_ready() { # <snapshot-id>
 	[[ "$(osb_api snapshot get "$1" -o json 2>/dev/null | jq -r '.status.state // empty')" == "Ready" ]]
 }
 
-# Terminal (Ready or Failed): the fastlet pause-window fence resolves an
+# Terminal (Ready or Failed): the pause-window fence resolves any
 # accepted-but-conflicting snapshot one way or the other.
 snapshot_terminal() { # <snapshot-id>
 	local state
@@ -1713,14 +1592,9 @@ snapshot_terminal() { # <snapshot-id>
 }
 
 snapshot_verify() {
-	# Full public-snapshot round trip on the live stack: create a sandbox,
-	# POST a snapshot (202 + Creating), let the server watcher converge the
-	# row from the SandboxSnapshot CR, restore a NEW sandbox from the
-	# snapshotId (the published template index becomes its rootfs artifact
-	# set), and prove the restored sandbox boots by execd /ping through the
-	# signed gateway route. Also covers: re-entry rejection while the dump
-	# window holds the sandbox, source-sandbox survival across the pause
-	# window, and a second (terminal-fenced) snapshot of the same sandbox.
+	# Full round trip on the live stack: snapshot a Running sandbox, watch it
+	# to Ready, restore a NEW sandbox from the snapshotId and boot it. Also
+	# covers re-entry fencing, source-sandbox survival, and a repeat snapshot.
 	local created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
@@ -1736,9 +1610,8 @@ snapshot_verify() {
 	t1="$(now_ms)"
 	log "verify (snapshot): source sandbox $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
 
-	# 1. Snapshot create: accepted + Creating; the dump holds the runtime
-	# pause window, artifacts publish after it; the server row converges
-	# from the SandboxSnapshot CR via its watcher.
+	# 1. Snapshot create returns Creating; the row converges from the
+	# SandboxSnapshot CR via the server watcher.
 	log "verify (snapshot): osb snapshot create $source_id --name env-verify"
 	t1="$(now_ms)"
 	out="$(osb_api snapshot create "$source_id" --name env-verify -o json 2>/dev/null)" \
@@ -1748,11 +1621,9 @@ snapshot_verify() {
 	[[ "$(printf '%s' "$out" | jq -r '.status')" == "Creating" ]] \
 		|| fail "snapshot create did not return Creating: $(printf '%s' "$out" | head -c 300)"
 
-	# 2. Re-entry: a second snapshot POST while the first holds the dump
-	# window is fenced by FastPath (FailedPrecondition -> 409) once the CR
-	# is cache-visible; with watcher cache lag the POST is accepted (202)
-	# and the fastlet pause window — the authoritative fence — resolves the
-	# extra snapshot to a terminal phase after the first completes.
+	# 2. Re-entry during the dump window: FastPath fences with 409 once the
+	# CR is cache-visible; with cache lag it is accepted (202) and the
+	# pause window resolves it to a terminal phase later.
 	reentry_out="$(curl -sS -m 60 -w '\n%{http_code}' -X POST \
 		-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" -H "Content-Type: application/json" \
 		-d '{"name":"env-verify-reentry"}' "$SERVER_URL/sandboxes/$source_id/snapshots" 2>/dev/null || true)"
@@ -1778,25 +1649,21 @@ snapshot_verify() {
 	log "verify (snapshot): $SNAPSHOT_ID snapshot create->Ready $(( (t2 - t1) / 1000000 ))ms"
 	pass "snapshot: create -> Creating -> watcher -> Ready"
 
-	# 3. Source survival: the pause window must be released and the sandbox
-	# back to serving after the snapshot reached its terminal phase.
+	# 3. Source survival: Running + /ping again after the terminal phase.
 	VERIFY_ID="$source_id"
 	wait_for "source sandbox Running again after the snapshot" 120 sandbox_running
 	wait_for "source sandbox execd /ping 200 after the snapshot" 100 execd_ping_ok
 	pass "snapshot: source sandbox survived (Running + /ping 200)"
 
-	# 3b. An accepted re-entry snapshot (fence cache lag) must reach a
-	# terminal phase once the first snapshot releases the pause window — a
-	# stuck non-terminal snapshot would block every future snapshot of the
-	# sandbox through the re-entry fence.
+	# 3b. An accepted re-entry snapshot must reach a terminal phase; a stuck
+	# one would block all future snapshots via the re-entry fence.
 	if [[ -n "$SNAPSHOT_EXTRA" ]]; then
 		wait_for "re-entry snapshot $SNAPSHOT_EXTRA reaches a terminal phase" 150 snapshot_terminal "$SNAPSHOT_EXTRA"
 		log "verify (snapshot): re-entry snapshot $SNAPSHOT_EXTRA terminal: $(osb_api snapshot get "$SNAPSHOT_EXTRA" -o json 2>/dev/null | jq -r '.status.state')"
 		pass "snapshot: accepted re-entry snapshot resolved to a terminal phase"
 	fi
 
-	# 4. Second snapshot after the first is terminal: a fresh id, fenced in
-	# by re-entry only while non-terminal.
+	# 4. Second snapshot once the first is terminal: fresh id.
 	t3="$(now_ms)"
 	out="$(osb_api snapshot create "$source_id" --name env-verify-2 -o json 2>/dev/null)" \
 		|| fail "second snapshot create failed for $source_id"
@@ -1823,9 +1690,8 @@ snapshot_verify() {
 	fi
 	pass "snapshot: list scoped by sandboxId contains the snapshots (Ready)"
 
-	# 6. Restore: the snapshot row resolves to the published template index
-	# key (osb-snap-<uuid hex>); the restored sandbox boots that artifact
-	# set. The resource flags restate the pool profile (firecracker pool).
+	# 6. Restore: the row resolves to the published template index key; the
+	# resource flags restate the pool profile (firecracker pool).
 	local restored
 	log "verify (snapshot): osb sandbox create --snapshot-id $SNAPSHOT_ID (pool profile restated)"
 	t3="$(now_ms)"
@@ -1842,8 +1708,7 @@ snapshot_verify() {
 	log "verify (snapshot): restored $restore_id create->Running $(( (t4 - t3) / 1000000 ))ms"
 	pass "snapshot: restore -> sandbox boots the published artifact set -> execd /ping OK"
 
-	# 7. Cleanup: restored sandbox, source sandbox, then the snapshot rows
-	# (the server forwards artifact deletion through DeleteSandboxSnapshot).
+	# 7. Cleanup; the server forwards artifact deletion per snapshot row.
 	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
 		|| log "verify cleanup: kill $restore_id failed"
 	wait_for "restored sandbox deleted" 120 verify_sandbox_gone
@@ -1967,22 +1832,17 @@ down() {
 	docker rm -f "$RUSTFS_CONTAINER" >/dev/null 2>&1 || true
 	[[ -z "$(docker ps -a --filter "name=$RUSTFS_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "RustFS container still present"
-	# The OpenSandbox server + ingress gateway live entirely inside the kind
-	# cluster and are torn down with it; only the signing key outlives it here.
+	# Server/gateway die with the cluster; only the signing key outlives it.
 	rm -f "$WORK/agent-registry.json" "$SIGNING_KEY_FILE"
 	rm -rf "$GEN_DIR" "$FSB_GEN_DIR"
-	# RustFS object store (owned by UID/GID 10001); leaving it
-	# behind pollutes the host and breaks later docker build contexts.
+	# RustFS data is owned by UID/GID 10001; leftovers pollute the host and
+	# later docker build contexts.
 	sudo_ rm -rf "$RUSTFS_DATA"
 	sudo_ rm -rf "$RC_CONFIG_DIR"
 	sysctl_restore
 	stateroot_xfs_down
-	# Purge the per-node runtime caches the environment owns (each kind
-	# node binds its own host subdirectory at /var/lib/fast-sandbox — see
-	# manifests/cluster/kind-cluster.yaml). The pull layer treats a
-	# committed cache as FINAL (idempotent, never refreshed), so a rebuilt
-	# SandboxTemplate would otherwise keep being ignored when the StateRoot
-	# survives teardown (e.g. XFS_STATEROOT=0 plain directories).
+	# A committed DART cache is FINAL (never refreshed): purge it, or a
+	# rebuilt SandboxTemplate stays ignored when the StateRoot survives.
 	stateroot_scrub
 	pass "host cleanup complete"
 }
