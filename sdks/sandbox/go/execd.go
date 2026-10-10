@@ -359,7 +359,7 @@ func (e *ExecdClient) UploadFiles(ctx context.Context, entries []UploadFileEntry
 		req.Header.Set(e.client.authHeader, e.client.apiKey)
 	}
 
-	resp, err := e.client.httpClient.Do(req)
+	resp, err := e.client.transferHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("opensandbox: do request: %w", err)
 	}
@@ -479,7 +479,7 @@ func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, range
 			req.Header.Set("Range", rangeHeader)
 		}
 
-		r, err := e.client.httpClient.Do(req)
+		r, err := e.client.transferHTTPClient().Do(req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}

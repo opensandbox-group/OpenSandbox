@@ -42,7 +42,9 @@ type ConnectionConfig struct {
 
 	// RequestTimeout is the timeout for non-streaming HTTP requests.
 	// Zero means DefaultRequestTimeout (30s); there is currently no way to
-	// select "no timeout".
+	// select "no timeout". It does not cap SSE streams or file uploads and
+	// downloads, which bound only the wait for response headers; use the
+	// context to limit those.
 	RequestTimeout time.Duration
 
 	// Headers are custom HTTP headers added to all requests.

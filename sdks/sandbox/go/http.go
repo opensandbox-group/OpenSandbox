@@ -55,6 +55,12 @@ type Client struct {
 	// timeout (see streamHTTPClient).
 	streamClient *http.Client
 	streamOnce   sync.Once
+
+	// transferClient is a dedicated HTTP client for file uploads and downloads,
+	// created lazily. Like streamClient it has no overall request timeout, but
+	// it keeps connection pooling (see transferHTTPClient).
+	transferClient *http.Client
+	transferOnce   sync.Once
 }
 
 func (c *Client) cloneWithBaseURL(baseURL string) *Client {
@@ -117,6 +123,28 @@ func (c *Client) streamHTTPClient() *http.Client {
 		c.streamClient = &sc
 	})
 	return c.streamClient
+}
+
+// transferHTTPClient returns the HTTP client for file uploads and downloads.
+//
+// http.Client.Timeout covers the whole exchange, including sending the request
+// body and reading the response body, so the shared httpClient would cut off
+// any transfer that takes longer than the request timeout. Like
+// streamHTTPClient, this client has no overall timeout and bounds only the wait
+// for response headers; callers can still bound a transfer through ctx. Unlike
+// streams, transfers keep connection pooling.
+func (c *Client) transferHTTPClient() *http.Client {
+	c.transferOnce.Do(func() {
+		tc := *c.httpClient // shallow copy: keep Jar, CheckRedirect, etc.
+		tc.Timeout = 0
+		if tr, ok := c.httpClient.Transport.(*http.Transport); ok && tr != nil && tr.ResponseHeaderTimeout == 0 {
+			clone := tr.Clone()
+			clone.ResponseHeaderTimeout = streamResponseHeaderTimeout
+			tc.Transport = clone
+		}
+		c.transferClient = &tc
+	})
+	return c.transferClient
 }
 
 // Option configures a Client.
