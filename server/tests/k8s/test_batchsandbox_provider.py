@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -55,6 +56,21 @@ from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
 )
 from opensandbox_server.services.k8s.volume_helper import apply_volumes_to_pod_spec
+
+
+class _CapturingHandler(logging.Handler):
+    """Collect records directly on the target logger.
+
+    The app's dictConfig disables propagation, so pytest's caplog cannot see
+    app records; attach our own (same pattern as test_renew_intent_restart.py).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
 
 
 def _app_config_with_template(template_file_path: str) -> AppConfig:
@@ -136,6 +152,52 @@ class TestBatchSandboxProvider:
 
         assert provider.template_manager._template is not None
 
+    def test_init_warns_when_template_opts_into_restartable_policy(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  template:\n    spec:\n      restartPolicy: Always\n"
+        )
+
+        handler = _CapturingHandler()
+        provider_logger = logging.getLogger(
+            "opensandbox_server.services.k8s.batchsandbox_provider"
+        )
+        provider_logger.addHandler(handler)
+        try:
+            BatchSandboxProvider(
+                mock_k8s_client, _app_config_with_template(str(template_file))
+            )
+        finally:
+            provider_logger.removeHandler(handler)
+
+        assert any(
+            "restartPolicy=Always" in record.getMessage() for record in handler.records
+        )
+
+    @pytest.mark.parametrize("restart_policy", [None, "Never"])
+    def test_init_stays_silent_without_restartable_template_policy(
+        self, mock_k8s_client, tmp_path, restart_policy
+    ):
+        template_spec = f"    spec:\n      restartPolicy: {restart_policy}\n" if restart_policy else "    spec: {}\n"
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(f"spec:\n  template:\n{template_spec}")
+
+        handler = _CapturingHandler()
+        provider_logger = logging.getLogger(
+            "opensandbox_server.services.k8s.batchsandbox_provider"
+        )
+        provider_logger.addHandler(handler)
+        try:
+            BatchSandboxProvider(
+                mock_k8s_client, _app_config_with_template(str(template_file))
+            )
+        finally:
+            provider_logger.removeHandler(handler)
+
+        assert handler.records == []
+
     def test_init_sets_crd_constants_correctly(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
 
@@ -195,9 +257,44 @@ class TestBatchSandboxProvider:
         assert body["spec"]["expireTime"] == "2025-12-31T10:00:00+00:00"
         assert "template" in body["spec"]
         assert body["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+        assert body["spec"]["template"]["spec"]["restartPolicy"] == "Never"
         assert "initContainers" in body["spec"]["template"]["spec"]
         assert "containers" in body["spec"]["template"]["spec"]
         assert "volumes" in body["spec"]["template"]["spec"]
+
+    def test_create_workload_template_restart_policy_wins_over_never_default(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      restartPolicy: Always
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        assert body["spec"]["template"]["spec"]["restartPolicy"] == "Always"
 
     def test_create_workload_injects_platform_node_selector(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -244,6 +341,10 @@ class TestBatchSandboxProvider:
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         pod_spec = body["spec"]["template"]["spec"]
+
+        # dockur/windows relies on container restart for multi-phase install;
+        # the windows profile must keep Always despite the Never default.
+        assert pod_spec["restartPolicy"] == "Always"
 
         # windows profile should enforce requested arch, but not force os=windows.
         node_selector = pod_spec.get("nodeSelector", {})
