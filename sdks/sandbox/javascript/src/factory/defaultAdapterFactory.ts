@@ -15,6 +15,7 @@
 import { createExecdClient } from "../openapi/execdClient.js";
 import { createEgressClient } from "../openapi/egressClient.js";
 import { createLifecycleClient } from "../openapi/lifecycleClient.js";
+import { createRedirectSafeFetch } from "../config/redirectFetch.js";
 
 import { CommandsAdapter } from "../adapters/commandsAdapter.js";
 import { EgressAdapter } from "../adapters/egressAdapter.js";
@@ -77,7 +78,10 @@ export class DefaultAdapterFactory implements AdapterFactory {
       baseUrl: opts.lifecycleBaseUrl,
       apiKey: opts.connectionConfig.apiKey,
       headers: opts.connectionConfig.headers,
-      fetch: opts.connectionConfig.fetch,
+      fetch: createRedirectSafeFetch(
+        opts.lifecycleBaseUrl,
+        opts.connectionConfig.fetch,
+      ),
     });
     const sandboxes = new SandboxesAdapter(lifecycleClient, {
       ttlMs: opts.connectionConfig.endpointCacheTtlMs,
@@ -94,29 +98,37 @@ export class DefaultAdapterFactory implements AdapterFactory {
       opts.connectionConfig.useServerProxy,
       opts.connectionConfig.apiKey,
     );
+    const execdFetch = createRedirectSafeFetch(
+      opts.execdBaseUrl,
+      opts.connectionConfig.fetch,
+    );
+    const execdSseFetch = createRedirectSafeFetch(
+      opts.execdBaseUrl,
+      opts.connectionConfig.sseFetch,
+    );
     const execdClient = createExecdClient({
       baseUrl: opts.execdBaseUrl,
       headers,
-      fetch: opts.connectionConfig.fetch,
+      fetch: execdFetch,
     });
 
     const health = new HealthAdapter(execdClient);
     const metrics = new MetricsAdapter(execdClient);
     const files = new FilesystemAdapter(execdClient, {
       baseUrl: opts.execdBaseUrl,
-      fetch: opts.connectionConfig.fetch,
+      fetch: execdFetch,
       headers,
     });
     const commands = new CommandsAdapter(execdClient, {
       baseUrl: opts.execdBaseUrl,
-      fetch: opts.connectionConfig.sseFetch,
+      fetch: execdSseFetch,
       headers,
     });
 
     const isolated = new IsolatedSessionsAdapter({
       baseUrl: opts.execdBaseUrl,
-      fetch: opts.connectionConfig.fetch,
-      sseFetch: opts.connectionConfig.sseFetch,
+      fetch: execdFetch,
+      sseFetch: execdSseFetch,
       headers,
     });
 
@@ -136,14 +148,18 @@ export class DefaultAdapterFactory implements AdapterFactory {
       opts.connectionConfig.useServerProxy,
       opts.connectionConfig.apiKey,
     );
+    const egressFetch = createRedirectSafeFetch(
+      opts.egressBaseUrl,
+      opts.connectionConfig.fetch,
+    );
     const egressClient = createEgressClient({
       baseUrl: opts.egressBaseUrl,
       headers,
-      fetch: opts.connectionConfig.fetch,
+      fetch: egressFetch,
     });
     const egress = new EgressAdapter(egressClient, {
       baseUrl: opts.egressBaseUrl,
-      fetch: opts.connectionConfig.fetch,
+      fetch: egressFetch,
       headers,
     });
     return {
@@ -157,7 +173,10 @@ export class DefaultAdapterFactory implements AdapterFactory {
       baseUrl: opts.lifecycleBaseUrl,
       apiKey: opts.connectionConfig.apiKey,
       headers: opts.connectionConfig.headers,
-      fetch: opts.connectionConfig.fetch,
+      fetch: createRedirectSafeFetch(
+        opts.lifecycleBaseUrl,
+        opts.connectionConfig.fetch,
+      ),
     });
     return {
       egress: new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId),

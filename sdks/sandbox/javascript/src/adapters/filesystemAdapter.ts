@@ -524,6 +524,10 @@ export class FilesystemAdapter implements SandboxFiles {
         body: stream as any,
         // Node fetch (undici) requires duplex for streaming request bodies.
         duplex: "half" as any,
+        // Uploads never follow redirects: the multipart body cannot always be
+        // replayed, and a redirect could otherwise replay credentials. A 3xx is
+        // surfaced below as a SandboxApiException with the original status.
+        redirect: "manual" as RequestRedirect,
       } as any);
 
       if (!res.ok) {
@@ -568,6 +572,8 @@ export class FilesystemAdapter implements SandboxFiles {
         ...(this.opts.headers ?? {}),
       },
       body: form,
+      // Uploads never follow redirects (see the streaming path above).
+      redirect: "manual",
     });
 
     if (!res.ok) {

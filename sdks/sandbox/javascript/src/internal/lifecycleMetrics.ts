@@ -14,6 +14,7 @@
 
 import { DEFAULT_USER_AGENT } from "../core/constants.js";
 import type { ConnectionConfig } from "../config/connection.js";
+import { createRedirectSafeFetch } from "../config/redirectFetch.js";
 
 const DISABLE_METRICS_ENV = "OPENSANDBOX_DISABLE_METRICS";
 
@@ -97,12 +98,17 @@ export function reportSandboxCreateMetric(
         connectionConfig.userAgent || DEFAULT_USER_AGENT;
     }
 
-    void connectionConfig
-      .fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      })
+    // Report through the redirect-safe transport so the API key is never
+    // replayed if the lifecycle endpoint redirects cross-origin.
+    const fetchImpl = createRedirectSafeFetch(
+      connectionConfig.getBaseUrl(),
+      connectionConfig.fetch,
+    );
+    void fetchImpl(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    })
       .then(async (res) => {
         // Drain body to allow connection reuse; ignore status.
         try {

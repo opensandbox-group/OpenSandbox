@@ -495,3 +495,4 @@ release the underlying agent.
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.
 - If you pass `ReadableStream` or `AsyncIterable` for `writeFiles`, the browser will fall back to **buffering in memory** before upload.
 - Reason: browsers do not support streaming `multipart/form-data` bodies with custom boundaries (required by the execd upload API).
+- Redirects: same-origin redirects keep request headers, while cross-origin redirects drop `OPEN-SANDBOX-*` / `OPENSANDBOX-*` headers so credentials are never replayed. File uploads never follow redirects. Browsers cannot inspect a manual redirect target, so a request carrying protected headers fails closed when a redirect is received; Node.js is unaffected. See [Redirects and protected headers](/sdks/javascript#redirects-and-protected-headers).

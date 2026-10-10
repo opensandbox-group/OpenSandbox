@@ -505,6 +505,27 @@ const config2 = new ConnectionConfig({
 });
 ```
 
+#### Redirects and protected headers
+
+The SDK strips OpenSandbox credentials before following a cross-origin redirect.
+Same-origin redirects preserve request headers, while cross-origin redirects remove
+every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-`
+(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`. An
+origin is the combination of scheme, host, and port, so changing any of those values
+is cross-origin. Other custom headers are not stripped automatically. Requests that
+do not carry any protected header keep the runtime's default redirect behavior.
+
+File uploads never follow redirects, because a streamed or in-memory multipart body
+cannot always be replayed. A redirect response from an upload is surfaced as a
+`SandboxApiException` with the original status code.
+
+::: warning Browser limitation
+Browsers do not expose the target of a `redirect: "manual"` response, so the SDK
+cannot inspect it before following. For a request that carries protected headers, the
+SDK fails closed (throws a `SandboxApiException`) instead of risking a cross-origin
+credential replay. Node.js is unaffected.
+:::
+
 ### 2. Sandbox Creation Configuration
 
 `Sandbox.create()` allows configuring the sandbox environment.
