@@ -15,8 +15,9 @@
 package model
 
 type CreatePTYSessionRequest struct {
-	Cwd     string `json:"cwd,omitempty"`
-	Command string `json:"command,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+	Cwd         string `json:"cwd,omitempty"`
+	Command     string `json:"command,omitempty"`
 }
 
 type CreatePTYSessionResponse struct {
@@ -24,7 +25,9 @@ type CreatePTYSessionResponse struct {
 }
 
 type PTYSessionStatusResponse struct {
-	SessionID    string `json:"session_id"`
-	Running      bool   `json:"running"`
-	OutputOffset int64  `json:"output_offset"`
+	SessionID       string `json:"session_id"`
+	Running         bool   `json:"running"`
+	OutputOffset    int64  `json:"output_offset"`
+	LaunchAttempted bool   `json:"launch_attempted"`
+	LaunchFailed    bool   `json:"launch_failed"`
 }
