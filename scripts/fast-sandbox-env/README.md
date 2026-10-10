@@ -25,8 +25,8 @@ not a supported shape of this script.
 
 Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25,
 cgroup v2, and `sudo` for the XFS StateRoot loop mount and sysctl bump.
-The CLI install needs `uv` (it manages its own ≥ 3.10 interpreter) or
-Python 3 ≥ 3.10 (or set `OSB_BIN` to a preinstalled `osb` binary).
+The CLI install requires `uv` (it manages its own ≥ 3.10 interpreter), or
+set `OSB_BIN` to a preinstalled `osb` binary.
 Full operational notes (topology, latency characteristics, production
 caveats): `fast-sandbox/docs/guides/firecracker-integration-env.md`.
 

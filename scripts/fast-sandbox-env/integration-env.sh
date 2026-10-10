@@ -42,11 +42,12 @@
 # The verify stages (template build, sandbox create/get/kill, pause/resume,
 # snapshot create/get/list/delete, renew) drive the lifecycle server through
 # the published opensandbox CLI ("osb"): the latest OSB_PACKAGE is installed
-# from PyPI into $WORK/tools/osb-venv on every up (uv when available, else a
-# python3 venv; or OSB_BIN points at an existing binary). Raw curl stays
-# only where the CLI has no equivalent: the networkpolicy replace PUT, the
-# metadata merge-patch, the snapshot re-entry HTTP-code fence, the gateway
-# /ping probes, and kubectl-side CR introspection.
+# from PyPI into $WORK/tools/osb-venv on every up (uv is required — it
+# manages its own >=3.10 interpreter; OSB_BIN points at an existing binary
+# instead). Raw curl stays only where the CLI has no equivalent: the
+# networkpolicy replace PUT, the metadata merge-patch, the snapshot
+# re-entry HTTP-code fence, the gateway /ping probes, and kubectl-side CR
+# introspection.
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up       # full environment + pool + server/ingress + verify
@@ -438,37 +439,19 @@ ensure_osb() {
 		if [[ "$SKIP_TOOL_INSTALL" == 1 ]] && [[ ! -x "$OSB_VENV/bin/osb" ]]; then
 			die "osb is required (SKIP_TOOL_INSTALL=1: install opensandbox-cli manually or set OSB_BIN)"
 		fi
-		local installer
-		if command -v uv >/dev/null 2>&1; then
-			# Preferred: uv resolves a managed interpreter (>=3.10) even when
-			# the system python3 is ancient (e.g. 3.6 on the CI runner), and
-			# downloads one when missing.
-			installer=uv
-		elif command -v python3 >/dev/null 2>&1; then
-			installer=python3
-		else
-			die "uv or python3 (>=3.10) is required to install the opensandbox CLI (or set OSB_BIN)"
-		fi
-		log "installing the latest $OSB_PACKAGE into $OSB_VENV ($installer)"
+		command -v uv >/dev/null 2>&1 \
+			|| die "uv is required to install the opensandbox CLI (it manages its own >=3.10 interpreter; or set OSB_BIN)"
+		log "installing the latest $OSB_PACKAGE into $OSB_VENV (uv)"
 		: > "$LOGS_DIR/osb-install.log"
-		rm -rf "$OSB_VENV.tmp"
-		# Build in .tmp and swap only on success, so a failed install keeps
-		# the previous venv usable.
-		if [[ "$installer" == "uv" ]]; then
-			uv venv --python 3.12 "$OSB_VENV.tmp" >>"$LOGS_DIR/osb-install.log" 2>&1 \
-				|| { tail -n 20 "$LOGS_DIR/osb-install.log" >&2 || true; die "uv venv --python 3.12 failed (full log: $LOGS_DIR/osb-install.log; or set OSB_BIN)"; }
-			uv pip install --python "$OSB_VENV.tmp/bin/python" --upgrade "$OSB_PACKAGE" \
-				>>"$LOGS_DIR/osb-install.log" 2>&1 \
-				|| { tail -n 20 "$LOGS_DIR/osb-install.log" >&2 || true; die "uv pip install --upgrade $OSB_PACKAGE failed (index unreachable? full log: $LOGS_DIR/osb-install.log; or set OSB_BIN)"; }
-		else
-			python3 -m venv "$OSB_VENV.tmp" >>"$LOGS_DIR/osb-install.log" 2>&1 \
-				|| { tail -n 20 "$LOGS_DIR/osb-install.log" >&2 || true; die "python3 -m venv failed (python3-venv missing? full log: $LOGS_DIR/osb-install.log; or set OSB_BIN)"; }
-			"$OSB_VENV.tmp/bin/pip" install --quiet --disable-pip-version-check \
-				--upgrade "$OSB_PACKAGE" >>"$LOGS_DIR/osb-install.log" 2>&1 \
-				|| { tail -n 20 "$LOGS_DIR/osb-install.log" >&2 || true; die "pip install --upgrade $OSB_PACKAGE failed (index unreachable? full log: $LOGS_DIR/osb-install.log; or set OSB_BIN)"; }
-		fi
 		rm -rf "$OSB_VENV"
-		mv "$OSB_VENV.tmp" "$OSB_VENV"
+		# The venv is rebuilt fresh on every up, at its final path: venv
+		# console-script shebangs embed the interpreter's absolute path, so
+		# creating elsewhere and moving breaks them (bad interpreter).
+		uv venv --python 3.12 "$OSB_VENV" >>"$LOGS_DIR/osb-install.log" 2>&1 \
+			|| { tail -n 20 "$LOGS_DIR/osb-install.log" >&2 || true; die "uv venv --python 3.12 failed (full log: $LOGS_DIR/osb-install.log; or set OSB_BIN)"; }
+		uv pip install --python "$OSB_VENV/bin/python" --upgrade "$OSB_PACKAGE" \
+			>>"$LOGS_DIR/osb-install.log" 2>&1 \
+			|| { tail -n 20 "$LOGS_DIR/osb-install.log" >&2 || true; die "uv pip install --upgrade $OSB_PACKAGE failed (index unreachable? full log: $LOGS_DIR/osb-install.log; or set OSB_BIN)"; }
 		OSB_BIN="$OSB_VENV/bin/osb"
 	fi
 	log "osb version: $("$OSB_BIN" --version 2>/dev/null | tail -n1 || echo unknown)"
