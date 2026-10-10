@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/stretchr/testify/require"
 )
 
@@ -296,4 +297,90 @@ func TestBuildMitmdumpArgsExtraCAWhitespaceOnlyOmitted(t *testing.T) {
 	for _, a := range args {
 		require.NotContains(t, a, "ssl_verify_upstream_trusted_ca")
 	}
+}
+
+func TestBuildMitmdumpEnvHandsOffLiveAdmissionBundle(t *testing.T) {
+	cfg := &RevisionIPCConfig{
+		SocketPath:          "/run/opensandbox/revision/receiver.sock",
+		SessionToken:        "0123456789abcdef0123456789abcdef",
+		ControlGeneration:   "control-a",
+		SubjectGeneration:   "subject-a",
+		MaxSnapshotBytes:    4096,
+		LiveAdmission:       true,
+		TLSCapacity:         64,
+		RequestCapacity:     256,
+		DrainTimeoutSeconds: 5,
+	}
+	require.NoError(t, validateRevisionIPCConfig(cfg))
+	env := buildMitmdumpEnv(
+		[]string{
+			"PATH=/usr/bin",
+			revisionIPCTLSCapacityEnv + "=1",
+			revisionIPCDrainTimeoutSecondsEnv + "=999",
+		},
+		"/home/mitmproxy",
+		cfg,
+	)
+	require.Contains(t, env, revisionIPCTLSCapacityEnv+"=64")
+	require.Contains(t, env, revisionIPCRequestCapacityEnv+"=256")
+	require.Contains(t, env, revisionIPCDrainTimeoutSecondsEnv+"=5")
+	require.NotContains(t, env, revisionIPCDrainTimeoutSecondsEnv+"=999")
+}
+
+func TestRevisionIPCConfigRejectsInvalidLiveAdmission(t *testing.T) {
+	base := RevisionIPCConfig{
+		SocketPath:        "/run/opensandbox/revision/receiver.sock",
+		SessionToken:      "0123456789abcdef0123456789abcdef",
+		ControlGeneration: "control-a",
+		SubjectGeneration: "subject-a",
+		MaxSnapshotBytes:  4096,
+	}
+	cases := []RevisionIPCConfig{}
+	for _, mutate := range []func(*RevisionIPCConfig){
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.TLSCapacity = true, 0 },
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.RequestCapacity = true, -1 },
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.DrainTimeoutSeconds = true, 0 },
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.DrainTimeoutSeconds = true, 301 },
+	} {
+		candidate := base
+		mutate(&candidate)
+		cases = append(cases, candidate)
+	}
+	for _, candidate := range cases {
+		require.Error(t, validateRevisionIPCConfig(&candidate))
+	}
+	// A disabled bundle never carries budgets: validation stays clean without them.
+	require.NoError(t, validateRevisionIPCConfig(&base))
+}
+
+func TestRevisionIPCConfigRejectsSslInsecureOnlyForLiveAdmission(t *testing.T) {
+	base := RevisionIPCConfig{
+		SocketPath:          "/run/opensandbox/revision/receiver.sock",
+		SessionToken:        "0123456789abcdef0123456789abcdef",
+		ControlGeneration:   "control-a",
+		SubjectGeneration:   "subject-a",
+		MaxSnapshotBytes:    4096,
+		LiveAdmission:       true,
+		TLSCapacity:         64,
+		RequestCapacity:     256,
+		DrainTimeoutSeconds: 30,
+	}
+	for _, truthy := range []string{"1", "true", "TRUE", "on", "yes"} {
+		t.Run("insecure-"+truthy, func(t *testing.T) {
+			t.Setenv(constants.EnvMitmproxySslInsecure, truthy)
+			require.Error(t, validateRevisionIPCConfig(&base))
+		})
+	}
+	for _, safe := range []string{"", "0", "false", "off", "bogus"} {
+		t.Run("safe-"+safe, func(t *testing.T) {
+			t.Setenv(constants.EnvMitmproxySslInsecure, safe)
+			require.NoError(t, validateRevisionIPCConfig(&base))
+		})
+	}
+	// The installation-only receiver keeps the legacy escape hatch.
+	t.Setenv(constants.EnvMitmproxySslInsecure, "true")
+	legacy := base
+	legacy.LiveAdmission = false
+	require.NoError(t, validateRevisionIPCConfig(&legacy))
+	require.NoError(t, validateRevisionIPCConfig(nil))
 }

@@ -35,7 +35,7 @@ import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
-from revision_publication import InstallationReceiver
+from revision_publication import InstallationReceiver, LiveReceiver
 from revision_receiver import Receiver, Revision, RevisionError
 
 
@@ -253,7 +253,7 @@ class Server:
 
     def __init__(
         self,
-        receiver: Receiver | InstallationReceiver,
+        receiver: Receiver | InstallationReceiver | LiveReceiver,
         socket_path: str,
         session_token: str,
         *,
@@ -266,7 +266,7 @@ class Server:
             and request_timeout > 0
         )
         if (
-            type(receiver) not in (Receiver, InstallationReceiver)
+            type(receiver) not in (Receiver, InstallationReceiver, LiveReceiver)
             or not os.path.isabs(socket_path)
             or not _valid_token(session_token)
             or type(max_snapshot_bytes) is not int

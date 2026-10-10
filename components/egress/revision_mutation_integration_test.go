@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -84,16 +85,18 @@ type revisionChildReport struct {
 func (c *revisionIPCChild) stop() {
 	c.once.Do(func() {
 		c.stops++
-		_ = c.running.Cmd.Process.Signal(syscall.SIGTERM)
-		reaped := make(chan struct{})
-		go func() { _ = c.running.Cmd.Wait(); close(reaped) }()
-		timer := time.NewTimer(time.Second)
-		defer timer.Stop()
-		select {
-		case <-reaped:
-		case <-timer.C:
-			_ = c.running.Cmd.Process.Kill()
-			<-reaped
+		if c.running.Cmd.ProcessState == nil {
+			_ = c.running.Cmd.Process.Signal(syscall.SIGTERM)
+			reaped := make(chan struct{})
+			go func() { _ = c.running.Cmd.Wait(); close(reaped) }()
+			timer := time.NewTimer(time.Second)
+			defer timer.Stop()
+			select {
+			case <-reaped:
+			case <-timer.C:
+				_ = c.running.Cmd.Process.Kill()
+				<-reaped
+			}
 		}
 		_ = c.input.Close()
 	})
@@ -150,17 +153,41 @@ func revisionIntegrationServer(t *testing.T) *policyServer {
 	t.Setenv(constants.EnvMitmproxyTransparent, "true")
 	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com"}]}`)
 	require.NoError(t, err)
-	return &policyServer{proxy: &stubProxy{updated: pol}, mitmGate: mitmproxy.NewHealthGate(), credentialVault: credentialvault.NewStore(nil, func() bool { return true })}
+	s := &policyServer{proxy: &stubProxy{updated: pol}, mitmGate: mitmproxy.NewHealthGate(), credentialVault: credentialvault.NewStore(nil, func() bool { return true })}
+	return s
+}
+
+// revisionIntegrationInitRecovery initializes the recovery owner the way the
+// production sidecar bootstrap does; the real capture path is what fresh
+// launches and watcher restarts must pass.
+func revisionIntegrationInitRecovery(t *testing.T, s *policyServer) {
+	t.Helper()
+	inputs := policyCandidateInputs(t)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revisionRecovery == nil {
+		require.NoError(t, s.initRevisionRecoveryLocked(inputs))
+	}
 }
 
 func revisionIntegrationLaunch(t *testing.T, s *policyServer) (*mitmTransparent, *revisionIPCChild, *mitmproxy.RevisionIPCConfig) {
 	t.Helper()
+	return revisionIntegrationLaunchConfig(t, s, func(*revisionruntime.ProcessSessionConfig) {})
+}
+
+func revisionIntegrationLaunchConfig(
+	t *testing.T, s *policyServer, adjust func(*revisionruntime.ProcessSessionConfig),
+) (*mitmTransparent, *revisionIPCChild, *mitmproxy.RevisionIPCConfig) {
+	t.Helper()
+	revisionIntegrationInitRecovery(t, s)
 	parent, err := os.MkdirTemp("/tmp", "osri-owner-")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(parent)) })
+	sessionConfig := revisionruntime.ProcessSessionConfig{ParentDir: parent, UID: os.Getuid(), GID: os.Getgid(), SubjectGeneration: "integration-subject", MaxSnapshotBytes: 65536}
+	adjust(&sessionConfig)
 	var child *revisionIPCChild
 	owner := &revisionLaunchOwner{
-		config: revisionruntime.ProcessSessionConfig{ParentDir: parent, UID: os.Getuid(), GID: os.Getgid(), SubjectGeneration: "integration-subject", MaxSnapshotBytes: 65536},
+		config: sessionConfig,
 		newSession: func(config revisionruntime.ProcessSessionConfig) (revisionProcessSession, error) {
 			session, err := newRevisionProcessSession(config)
 			if err == nil {
@@ -176,10 +203,9 @@ func revisionIntegrationLaunch(t *testing.T, s *policyServer) (*mitmTransparent,
 			}
 			return &revisionObservedSession{revisionProcessSession: session}, nil
 		},
-		snapshot: func(ctx context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error) {
-			snapshot, epoch, err := s.revisionBootstrapSnapshot(ctx)
-			return snapshot, epoch, nil, err
-		},
+		// Same snapshot source as production: captureRevisionBootstrap enforces
+		// the sticky recovery latch and issues fenceable tickets.
+		snapshot: s.captureRevisionBootstrap,
 		stop: func(r *mitmproxy.Running) {
 			assert.Same(t, child.running, r)
 			child.stop()
@@ -209,7 +235,27 @@ func integrationVaultRequest(secret string) credentialvault.CreateRequest {
 	}
 }
 
+// revisionIntegrationCreateRendered commits a vault through the real
+// Prepare/ActiveSnapshot/Commit path so the rendered snapshot exists for the
+// production capture path (plain Store.Create leaves the snapshot unrendered).
+func revisionIntegrationCreateRendered(t *testing.T, s *policyServer, secret string) {
+	t.Helper()
+	mutation, err := s.credentialVault.PrepareCreate(integrationVaultRequest(secret), s.effectivePolicy())
+	require.NoError(t, err)
+	_, err = mutation.ActiveSnapshot(context.Background())
+	require.NoError(t, err)
+	_, err = s.credentialVault.CommitCandidate(mutation)
+	require.NoError(t, err)
+}
+
 func assertRevisionChildSnapshot(t *testing.T, child *revisionIPCChild, snapshot credentialvault.ActiveSnapshot) revisionChildReport {
+	t.Helper()
+	return assertRevisionChildSnapshotAdmission(t, child, snapshot, true)
+}
+
+func assertRevisionChildSnapshotAdmission(
+	t *testing.T, child *revisionIPCChild, snapshot credentialvault.ActiveSnapshot, admissionDisabled bool,
+) revisionChildReport {
 	t.Helper()
 	report := child.exchange(t, map[string]string{"command": "inspect"})
 	payload, err := credentialvault.MarshalDecisionSnapshot(snapshot, 0)
@@ -221,7 +267,7 @@ func assertRevisionChildSnapshot(t *testing.T, child *revisionIPCChild, snapshot
 	require.Equal(t, report.Digest, report.Active.Digest)
 	require.Equal(t, snapshot.Revision, report.Active.VaultRevision)
 	require.Zero(t, report.Active.PolicyEpoch)
-	require.True(t, report.AdmissionDisabled)
+	require.Equal(t, admissionDisabled, report.AdmissionDisabled)
 	return report
 }
 
@@ -296,13 +342,30 @@ func TestRevisionVaultMutationIPCChildLostCommitReply(t *testing.T) {
 }
 
 func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
-	for _, fault := range []string{"unresolved", "stale-finalization"} {
-		t.Run(fault, func(t *testing.T) {
+	for _, tc := range []struct {
+		fault    string
+		deleteOp bool
+	}{
+		{fault: "unresolved"},                 // committed rotate, lost reply + unresolved readback
+		{fault: "unresolved", deleteOp: true}, // committed delete, lost reply + unresolved readback
+		{fault: "stale-finalization"},
+	} {
+		name := tc.fault
+		if tc.deleteOp {
+			name = "unresolved-delete"
+		}
+		t.Run(name, func(t *testing.T) {
+			fault := tc.fault
 			s := revisionIntegrationServer(t)
-			_, err := s.credentialVault.Create(integrationVaultRequest("private-retained"), s.effectivePolicy())
-			require.NoError(t, err)
+			revisionIntegrationCreateRendered(t, s, "private-retained")
+			var err error
 			m, child, oldConfig := revisionIntegrationLaunch(t, s)
 			oldSession := m.revisionSession
+			// A ready ticket captured before any detach proves the latch
+			// invalidates outstanding bootstrap tickets.
+			_, _, staleTicket, ticketErr := s.captureRevisionBootstrap(context.Background())
+			require.NoError(t, ticketErr)
+			require.NotNil(t, staleTicket)
 			stopEntered := make(chan struct{})
 			releaseStop := make(chan struct{})
 			var releaseOnce sync.Once
@@ -322,7 +385,7 @@ func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
 			closeBeforeDiscard := false
 			oldSession.(*revisionObservedSession).beforeClose = func() {
 				closeAfterReap = child.running.Cmd.ProcessState != nil
-				_, candidateErr := candidate.Sanitized()
+				_, candidateErr := candidate.ActiveSnapshot(context.Background())
 				closeBeforeDiscard = candidateErr == nil || fault == "stale-finalization" && candidateErr == credentialvault.ErrCandidateClosed
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -334,7 +397,11 @@ func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
 				defer close(finished)
 				_, mutationErr := s.mutateRevisionVault(ctx, m, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
 					var err error
-					candidate, err = store.PreparePatch(credentialvault.MutationRequest{Credentials: &credentialvault.CredentialMutationSet{Replace: integrationVaultRequest("private-unpublished").Credentials}}, pol)
+					if tc.deleteOp {
+						candidate, err = store.PrepareDelete()
+					} else {
+						candidate, err = store.PreparePatch(credentialvault.MutationRequest{Credentials: &credentialvault.CredentialMutationSet{Replace: integrationVaultRequest("private-unpublished").Credentials}}, pol)
+					}
 					if err == nil && fault == "stale-finalization" {
 						// Deterministically advance the public mutation tag after prepare.
 						_, err = store.Patch(credentialvault.MutationRequest{Credentials: &credentialvault.CredentialMutationSet{Replace: integrationVaultRequest("private-retained").Credentials}}, pol)
@@ -348,7 +415,13 @@ func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
 				report := child.exchange(t, map[string]string{"command": "inspect"})
 				require.Equal(t, 1, report.Counts.Dropped)
 				require.NotNil(t, report.Active)
-				require.Equal(t, int64(2), report.Active.VaultRevision)
+				if tc.deleteOp {
+					// The delete committed remotely: the child reports revision 0.
+					require.Equal(t, int64(0), report.Active.VaultRevision)
+				} else {
+					// The rotate committed remotely: the child reports revision 2.
+					require.Equal(t, int64(2), report.Active.VaultRevision)
+				}
 				require.True(t, child.exchange(t, map[string]string{"command": "release"}).Ready) // deliver failed readbacks until the actual deadline
 			}
 			select {
@@ -369,7 +442,7 @@ func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
 				m.mu.Unlock()
 			}
 			require.True(t, lifecycleLocked, "lifecycle barrier must cover child cleanup")
-			_, err = candidate.Sanitized()
+			_, err = candidate.ActiveSnapshot(context.Background())
 			if fault == "unresolved" {
 				require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
 				require.NoError(t, err, "candidate must remain alive until child is reaped")
@@ -387,7 +460,7 @@ func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
 			go func() {
 				s.mu.Lock()
 				defer s.mu.Unlock()
-				_, candidateErr := candidate.Sanitized()
+				_, candidateErr := candidate.ActiveSnapshot(context.Background())
 				_, sessionErr := oldSession.MitmproxyConfig()
 				cleanupSeen <- candidateErr == credentialvault.ErrCandidateClosed && sessionErr == revision.ErrClosed && child.running.Cmd.ProcessState != nil
 			}()
@@ -405,17 +478,52 @@ func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
 			require.NoDirExists(t, filepath.Dir(oldConfig.SocketPath))
 			_, err = oldSession.MitmproxyConfig()
 			require.ErrorIs(t, err, revision.ErrClosed)
-			_, err = candidate.Sanitized()
+			_, err = candidate.ActiveSnapshot(context.Background())
 			require.ErrorIs(t, err, credentialvault.ErrCandidateClosed)
 			prior, err := s.credentialVault.ActiveSnapshot()
-			require.NoError(t, err)
+			require.NoError(t, err, "public Store must retain the prior vault even when the remote outcome was a committed delete")
 			require.True(t, prior.Bindings[0].Headers[0].Value == "private-retained", "public Store must retain the prior credential")
-			_, fresh, freshConfig := revisionIntegrationLaunch(t, s)
-			require.NotEqual(t, oldConfig.ControlGeneration, freshConfig.ControlGeneration)
-			require.True(t, oldConfig.SessionToken != freshConfig.SessionToken, "fresh session must rotate authentication token")
-			report := assertRevisionChildSnapshot(t, fresh, prior)
-			require.Equal(t, int64(1), report.Active.DecisionEpoch)
-			require.Equal(t, freshConfig.ControlGeneration, report.Active.ControlGeneration)
+
+			// The terminal detach latched sticky recovery BEFORE stopping the
+			// child: the same sidecar must not restart from prior state.
+			require.Equal(t, revisionRecoveryExternalEffectsUnknown, s.revisionRecovery.reason)
+			s.mu.Lock()
+			recoveryErr := s.revisionRecovery.recoveryErrorLocked()
+			s.mu.Unlock()
+			require.ErrorIs(t, recoveryErr, errRevisionRecoveryRequired)
+
+			// Fresh capture is rejected, so no new child can be bootstrapped
+			// and the old credential can never be reauthorized.
+			_, _, freshTicket, captureErr := s.captureRevisionBootstrap(context.Background())
+			require.ErrorIs(t, captureErr, errRevisionRecoveryRequired)
+			require.Nil(t, freshTicket)
+
+			// A ticket captured before the detach is invalidated by the latch:
+			// it can never publish readiness into a new generation.
+			s.mu.Lock()
+			validateErr := s.validateRevisionBootstrapLocked(staleTicket)
+			s.mu.Unlock()
+			require.ErrorIs(t, validateErr, errRevisionRecoveryRequired)
+
+			// The watcher restart path reaches the same latch: launch is never
+			// attempted and backoff stops instead of spinning.
+			m.restartWithBackoffUsing(context.Background(), s.mitmGate, mitmLaunchDependencies{
+				launch: func(mitmproxy.Config) (*mitmproxy.Running, error) {
+					t.Error("watcher must not launch after the recovery latch")
+					return nil, revision.ErrInvalid
+				},
+				listen: func(context.Context, string, time.Duration) error {
+					t.Error("watcher must not listen after the recovery latch")
+					return nil
+				},
+				retry: func(context.Context, <-chan struct{}, time.Duration) bool {
+					t.Error("watcher must not retry after the recovery latch")
+					return false
+				},
+			})
+			require.Nil(t, m.running)
+			require.Nil(t, m.revisionSession)
+			require.True(t, s.mitmGate.MitmPending())
 			require.Equal(t, 1, child.stops)
 		})
 	}
@@ -423,8 +531,7 @@ func TestRevisionVaultMutationIPCChildRecovery(t *testing.T) {
 
 func TestRevisionVaultMutationIPCChildLostPrepareReplyAborts(t *testing.T) {
 	s := revisionIntegrationServer(t)
-	_, err := s.credentialVault.Create(integrationVaultRequest("private-retained"), s.effectivePolicy())
-	require.NoError(t, err)
+	revisionIntegrationCreateRendered(t, s, "private-retained")
 	prior, err := s.credentialVault.ActiveSnapshot()
 	require.NoError(t, err)
 	m, child, _ := revisionIntegrationLaunch(t, s)
@@ -446,6 +553,123 @@ func TestRevisionVaultMutationIPCChildLostPrepareReplyAborts(t *testing.T) {
 	require.Same(t, running, m.running)
 	require.False(t, s.mitmGate.MitmPending())
 	require.Zero(t, child.stops)
+	// A known prepare rejection is provably uncommitted: the same sidecar can
+	// still capture a fresh bootstrap and no recovery latch was recorded.
+	require.Equal(t, revisionRecoveryNone, s.revisionRecovery.reason)
+	_, _, ticket, captureErr := s.captureRevisionBootstrap(context.Background())
+	require.NoError(t, captureErr)
+	require.NotNil(t, ticket)
+}
+
+// An actual child exit does not weaken the detach path: a mutation that finds
+// the dead session still latches recovery, and capture/stale-ticket/watcher
+// restarts stay fenced; the old credential is never reauthorized.
+func TestRevisionVaultMutationIPCChildExitLatchesRecovery(t *testing.T) {
+	s := revisionIntegrationServer(t)
+	revisionIntegrationCreateRendered(t, s, "private-retained")
+	var err error
+	m, child, _ := revisionIntegrationLaunch(t, s)
+	_, _, staleTicket, ticketErr := s.captureRevisionBootstrap(context.Background())
+	require.NoError(t, ticketErr)
+	require.NotNil(t, staleTicket)
+
+	child.stop()
+	require.NotNil(t, child.running.Cmd.ProcessState, "the real child must have exited before the mutation")
+
+	_, err = s.mutateRevisionVault(mutationContext(t), m, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+		return store.PreparePatch(credentialvault.MutationRequest{Credentials: &credentialvault.CredentialMutationSet{Replace: integrationVaultRequest("private-unpublished").Credentials}}, pol)
+	})
+	require.ErrorIs(t, err, revision.ErrTransportUnavailable)
+	require.Equal(t, revisionRecoveryExternalEffectsUnknown, s.revisionRecovery.reason)
+	require.True(t, s.mitmGate.MitmPending())
+	prior, err := s.credentialVault.ActiveSnapshot()
+	require.NoError(t, err, "public Store must retain the prior credential")
+	require.Equal(t, "private-retained", prior.Bindings[0].Headers[0].Value)
+
+	_, _, ticket, captureErr := s.captureRevisionBootstrap(context.Background())
+	require.ErrorIs(t, captureErr, errRevisionRecoveryRequired)
+	require.Nil(t, ticket)
+	s.mu.Lock()
+	require.ErrorIs(t, s.validateRevisionBootstrapLocked(staleTicket), errRevisionRecoveryRequired)
+	s.mu.Unlock()
+
+	m.restartWithBackoffUsing(context.Background(), s.mitmGate, mitmLaunchDependencies{
+		launch: func(mitmproxy.Config) (*mitmproxy.Running, error) {
+			t.Error("watcher must not launch after the recovery latch")
+			return nil, revision.ErrInvalid
+		},
+		listen: func(context.Context, string, time.Duration) error {
+			t.Error("watcher must not listen after the recovery latch")
+			return nil
+		},
+		retry: func(context.Context, <-chan struct{}, time.Duration) bool {
+			t.Error("watcher must not retry after the recovery latch")
+			return false
+		},
+	})
+	require.Nil(t, m.running)
+	require.True(t, s.mitmGate.MitmPending())
+}
+
+// The same exit must also travel the production watcher path: an actual
+// process termination reaches recordExit, which latches sticky recovery
+// before the queued exitEvent reaches watchMitmproxy. The watcher then owns
+// the session cleanup, and its restart attempt dies inside
+// captureRevisionBootstrap — no fresh launch, no reauthorized credential.
+func TestRevisionVaultMutationIPCChildExitWatcherSticksRecovery(t *testing.T) {
+	s := revisionIntegrationServer(t)
+	revisionIntegrationCreateRendered(t, s, "private-retained")
+	m, child, _ := revisionIntegrationLaunch(t, s)
+	m.restartCh = make(chan exitEvent, 64)
+	m.shutdownCh = make(chan struct{})
+	m.watchDone = make(chan struct{})
+	m.revisionOwner.server = s
+	runtimeQuarantineFixture(s)
+	_, _, staleTicket, ticketErr := s.captureRevisionBootstrap(context.Background())
+	require.NoError(t, ticketErr)
+	require.NotNil(t, staleTicket)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.watchMitmproxy(ctx, s.mitmGate)
+
+	// Actual process termination; the production OnExit sequence is
+	// recordExit (which latches recovery) then the queued exitEvent.
+	require.NoError(t, child.running.Cmd.Process.Kill())
+	_ = child.running.Cmd.Wait()
+	m.recordExit(1)
+	m.restartCh <- exitEvent{gen: 1, err: errors.New("killed")}
+
+	// The watcher drains the exit: the session is detached and closed, the
+	// gate stays pending, and every restart attempt dies inside the latched
+	// capture (the real launch dependency is never reached). Reads take the
+	// same s.mu -> m.mu order the watcher itself uses.
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		m.mu.Lock()
+		drained := m.running == nil && m.revisionSession == nil &&
+			s.revisionRecovery.reason == revisionRecoveryUnknown
+		m.mu.Unlock()
+		s.mu.Unlock()
+		return drained && s.mitmGate.MitmPending()
+	}, 5*time.Second, 5*time.Millisecond, "watcher must drain the exit and keep the recovery latch")
+
+	cancel()
+	select {
+	case <-m.watchDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not terminate after cancellation")
+	}
+
+	prior, err := s.credentialVault.ActiveSnapshot()
+	require.NoError(t, err, "public Store must retain the prior credential")
+	require.Equal(t, "private-retained", prior.Bindings[0].Headers[0].Value)
+	_, _, ticket, captureErr := s.captureRevisionBootstrap(context.Background())
+	require.ErrorIs(t, captureErr, errRevisionRecoveryRequired)
+	require.Nil(t, ticket)
+	s.mu.Lock()
+	require.ErrorIs(t, s.validateRevisionBootstrapLocked(staleTicket), errRevisionRecoveryRequired)
+	s.mu.Unlock()
 }
 
 // No socket required: verify the fixture's real child cleanup and KILL fallback
@@ -480,5 +704,43 @@ func TestRevisionIPCChildStopReapsProcess(t *testing.T) {
 			}
 			require.Equal(t, expected, status.Signal())
 		})
+	}
+}
+
+func TestRevisionVaultMutationIPCChildLiveAdmission(t *testing.T) {
+	s := revisionIntegrationServer(t)
+	m, child, config := revisionIntegrationLaunchConfig(t, s, func(cfg *revisionruntime.ProcessSessionConfig) {
+		cfg.LiveAdmission = true
+		cfg.TLSCapacity = 64
+		cfg.RequestCapacity = 256
+		cfg.DrainTimeoutSeconds = 1
+	})
+	// The live receiver is admission-enabled end to end: the launcher bundle
+	// reaches the child, which must select the live joint publication owner.
+	require.True(t, config.LiveAdmission)
+	require.Equal(t, 64, config.TLSCapacity)
+	require.Equal(t, 256, config.RequestCapacity)
+	require.Equal(t, 1, config.DrainTimeoutSeconds)
+	assertRevisionChildSnapshotAdmission(t, child, credentialvault.ActiveSnapshot{}, false)
+
+	for index, step := range []string{"create", "delete", "recreate"} {
+		_, err := s.mutateRevisionVault(mutationContext(t), m, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			if step == "delete" {
+				return store.PrepareDelete()
+			}
+			return store.PrepareCreate(integrationVaultRequest("private-live-secret"), pol)
+		})
+		require.NoError(t, err)
+		snapshot, err := s.credentialVault.ActiveSnapshot()
+		if step == "delete" {
+			require.ErrorIs(t, err, credentialvault.ErrNotFound)
+		} else {
+			require.NoError(t, err)
+		}
+		report := assertRevisionChildSnapshotAdmission(t, child, snapshot, false)
+		require.Equal(t, index+2, report.Counts.Prepare)
+		require.Equal(t, index+2, report.Counts.Commit)
+		require.Equal(t, int64(index+2), report.Active.DecisionEpoch)
+		require.False(t, s.mitmGate.MitmPending())
 	}
 }

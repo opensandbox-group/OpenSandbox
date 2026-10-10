@@ -37,6 +37,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/internal/safego"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -203,6 +204,10 @@ type policyServer struct {
 	atomicPolicyFile          atomicPolicyFileStore
 	mitmGate                  *mitmproxy.HealthGate
 	credentialVaultRequireTLS bool
+	// mitm is the sidecar's mitmdump lifecycle owner, attached after
+	// startMitmproxyTransparentIfEnabled. Guarded by mu; only the
+	// experimental revision runtime consults it.
+	mitm *mitmTransparent
 
 	// One-way health projection; reason, base and tickets remain owned under mu.
 	revisionRecoveryRequired atomic.Bool
@@ -259,7 +264,7 @@ func (s *policyServer) handleCredentialVault(w http.ResponseWriter, r *http.Requ
 	}
 	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) &&
 		(r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
-		http.Error(w, "credential vault writes are unavailable while the experimental revision runtime is enabled", http.StatusServiceUnavailable)
+		s.handleCredentialVaultWriteRevision(w, r)
 		return
 	}
 	switch r.Method {
@@ -409,6 +414,144 @@ func (s *policyServer) handleCredentialVaultDelete(w http.ResponseWriter, r *htt
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// revisionMutationTimeout bounds one live Vault mutation transaction, including
+// indeterminate-outcome reconciliation. The transaction holds the policy
+// barrier for its full duration, so the bound also bounds that stall.
+const revisionMutationTimeout = 10 * time.Second
+
+// setRevisionMitm attaches the sidecar's mitmdump lifecycle owner for the
+// experimental revision runtime. Call once after the transparent mitmproxy is
+// started; nil keeps revision-gated writes unavailable.
+func (s *policyServer) setRevisionMitm(m *mitmTransparent) {
+	s.mu.Lock()
+	s.mitm = m
+	s.mu.Unlock()
+}
+
+// revisionMitmLocked returns the attached mitmdump lifecycle owner. The caller
+// must hold s.mu.
+func (s *policyServer) revisionMitmLocked() *mitmTransparent {
+	return s.mitm
+}
+
+// revisionMitmAttached reports whether a mitmdump lifecycle owner exists.
+func (s *policyServer) revisionMitmAttached() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mitm != nil
+}
+
+// handleCredentialVaultWriteRevision serves POST/PATCH/DELETE while the
+// experimental revision runtime is enabled. Every write installs the rendered
+// candidate on the mitmdump receiver and acknowledges only the exact confirmed
+// identity before the public Store is finalized; a failed, canceled, or
+// indeterminate transaction leaves the prior acknowledged revision active.
+func (s *policyServer) handleCredentialVaultWriteRevision(w http.ResponseWriter, r *http.Request) {
+	if !s.revisionMitmAttached() {
+		// Fail closed before the readiness wait: without a mitmdump lifecycle
+		// owner no write can be acknowledged, so it must not be attempted.
+		http.Error(w, "credential vault mutation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.credentialVault.Ready(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		return
+	}
+	if s.credentialVaultRequireTLS && !credentialVaultWriteTransportAllowed(r) {
+		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
+		return
+	}
+	var state credentialvault.State
+	var err error
+	switch r.Method {
+	case http.MethodPost:
+		var req credentialvault.CreateRequest
+		if err := credentialvault.ReadJSON(r, &req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid credential vault request: %v", err), http.StatusBadRequest)
+			return
+		}
+		state, err = s.mutateRevisionVaultRequest(r, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			return store.PrepareCreate(req, pol)
+		})
+	case http.MethodPatch:
+		var req credentialvault.MutationRequest
+		if err := credentialvault.ReadJSON(r, &req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid credential vault mutation request: %v", err), http.StatusBadRequest)
+			return
+		}
+		if req.ExpectedRevision == nil {
+			http.Error(w, "expectedRevision is required while the experimental revision runtime is enabled", http.StatusBadRequest)
+			return
+		}
+		state, err = s.mutateRevisionVaultRequest(r, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			return store.PreparePatch(req, pol)
+		})
+	default:
+		_, err = s.mutateRevisionVaultRequest(r, func(store *credentialvault.Store, _ *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			return store.PrepareDelete()
+		})
+	}
+	if err != nil {
+		writeRevisionMutationError(w, err)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		writeJSON(w, http.StatusCreated, state)
+	case http.MethodDelete:
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeJSON(w, http.StatusOK, state)
+	}
+}
+
+// mutateRevisionVaultRequest runs one mutation transaction with a bounded
+// deadline derived from the request context, so client cancellation and sidecar
+// shutdown interrupt an unresolved reconciliation.
+func (s *policyServer) mutateRevisionVaultRequest(
+	r *http.Request,
+	prepare func(*credentialvault.Store, *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error),
+) (credentialvault.State, error) {
+	ctx, cancel := context.WithTimeout(r.Context(), revisionMutationTimeout)
+	defer cancel()
+	var m *mitmTransparent
+	s.mu.Lock()
+	m = s.revisionMitmLocked()
+	s.mu.Unlock()
+	if m == nil {
+		return credentialvault.State{}, revision.ErrTransportUnavailable
+	}
+	return s.mutateRevisionVault(ctx, m, prepare)
+}
+
+// writeRevisionMutationError maps transaction outcomes to fixed, secret-free
+// responses. Validation, conflict, and not-found failures keep the legacy
+// credential vault semantics; every operational or unknown outcome fails
+// closed with 503 and preserves the prior acknowledged revision.
+func writeRevisionMutationError(w http.ResponseWriter, err error) {
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, errRevisionRecoveryRequired):
+		http.Error(w, "revision recovery required", http.StatusServiceUnavailable)
+	case errors.Is(err, revision.ErrTransportUnavailable),
+		errors.Is(err, revision.ErrClosed),
+		errors.Is(err, revision.ErrIndeterminate),
+		errors.Is(err, revision.ErrBusy),
+		errors.Is(err, revision.ErrPrepareRejected):
+		http.Error(w, "credential vault mutation unavailable", http.StatusServiceUnavailable)
+	case errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, context.Canceled):
+		http.Error(w, "credential vault mutation did not complete", http.StatusServiceUnavailable)
+	case errors.Is(err, revision.ErrInvalid):
+		http.Error(w, "invalid credential vault mutation", http.StatusBadRequest)
+	case errors.Is(err, errRevisionExpectedRevision):
+		http.Error(w, errRevisionExpectedRevision.Error(), http.StatusConflict)
+	default:
+		credentialvault.WriteError(w, err)
+	}
 }
 
 func (s *policyServer) handleCredentialVaultCredentials(w http.ResponseWriter) {

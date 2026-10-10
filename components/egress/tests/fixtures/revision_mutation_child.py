@@ -33,10 +33,21 @@ def emit(value):
 
 def main():
     config = json.loads(sys.stdin.readline())
-    backend = InstallationReceiver(
-        config["ControlGeneration"], config["SubjectGeneration"],
-        max_snapshot_bytes=config["MaxSnapshotBytes"],
-    )
+    if config.get("LiveAdmission"):
+        from revision_publication import LiveReceiver
+
+        backend = LiveReceiver(
+            config["ControlGeneration"], config["SubjectGeneration"],
+            max_snapshot_bytes=config["MaxSnapshotBytes"],
+            capacity=config["TLSCapacity"],
+            request_capacity=config["RequestCapacity"],
+            drain_timeout_seconds=config["DrainTimeoutSeconds"],
+        )
+    else:
+        backend = InstallationReceiver(
+            config["ControlGeneration"], config["SubjectGeneration"],
+            max_snapshot_bytes=config["MaxSnapshotBytes"],
+        )
     lock = threading.Lock()
     state = {"fault": "none", "dropped": 0, "prepare": 0, "commit": 0, "abort": 0, "readback": 0}
     readback_entered = threading.Event()

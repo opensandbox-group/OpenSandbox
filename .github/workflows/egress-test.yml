@@ -119,6 +119,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+      - name: Run live vault binding image regression
+        run: |
+          docker build -f components/egress/Dockerfile \
+            -t opensandbox-egress:live-vault-ci .
+          python components/egress/scripts/test_live_vault_image.py \
+            --image opensandbox-egress:live-vault-ci --artifacts /tmp/live-vault-image-evidence
+
+      - name: Upload live vault image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-vault-image-evidence
+          path: /tmp/live-vault-image-evidence
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Run mitmscripts unit and runtime tests
         working-directory: components/egress
         run: |

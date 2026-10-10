@@ -201,6 +201,11 @@ func main() {
 	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
 		mitmGate.MarkStackReady()
 	}
+	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) && mitm != nil {
+		// Attach the live mitmdump lifecycle owner before serving revision-gated
+		// Vault writes; until then such writes fail closed with 503.
+		policyHandler.setRevisionMitm(mitm)
+	}
 	if mitm != nil {
 		mitm.watchMitmproxy(ctx, mitmGate)
 	}

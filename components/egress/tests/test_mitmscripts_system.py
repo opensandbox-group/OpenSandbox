@@ -1194,7 +1194,10 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertEqual("[REDACTED]", flow.response.headers.get("x-token-echo"))
         self.assertEqual("upstream body includes secret-token", flow.response.body)
         self.assertFalse(flow.response.set_text_called)
-        self.assertFalse(hasattr(system, "response"))
+        # The response hook exists only to release live request handles; in the
+        # legacy path it is a no-op and never touches response content.
+        system.response(flow)
+        self.assertEqual("upstream body includes secret-token", flow.response.body)
 
     def test_responseheaders_uses_injected_flow_redactions(self) -> None:
         system = _load_system_module()
@@ -2597,3 +2600,46 @@ class SystemAddonTlsClientHelloTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnixSocketHTTPConnectionLeakTest(unittest.TestCase):
+    """A failed connect must close the freshly created socket, not leak it."""
+
+    def test_failed_connect_leaves_no_socket_and_no_resource_warning(self) -> None:
+        import gc
+        import warnings
+
+        system = _load_system_module()
+        connection = system.UnixSocketHTTPConnection("/nonexistent/live-vault.sock", timeout=0.1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with self.assertRaises(OSError):
+                connection.connect()
+            self.assertIsNone(connection.sock)
+            connection = None
+            gc.collect()
+        leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual([], [str(w.message) for w in leaked])
+
+    def test_successful_connect_uses_the_unix_socket(self) -> None:
+        import gc
+        import warnings
+
+        system = _load_system_module()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = os.path.join(temporary.name, "receiver.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(path)
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        connection = system.UnixSocketHTTPConnection(path, timeout=2)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            connection.connect()
+            self.assertIsNotNone(connection.sock)
+            connection.close()
+            connection = None
+            gc.collect()
+        leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual([], [str(w.message) for w in leaked])

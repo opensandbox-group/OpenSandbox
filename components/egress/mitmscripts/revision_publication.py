@@ -15,7 +15,9 @@
 """Sidecar-only joint revision publication for OSEP-0023.
 
 InstallationReceiver adapts this owner to IPC with admissions disabled for its
-entire lifetime. Neither owner supplies live hooks, drain or public mutation ACK.
+entire lifetime. LiveReceiver adapts it with live connection and request
+admission for the experimental sidecar runtime. Neither owner supplies live
+hooks or a public mutation ACK by itself.
 """
 
 from __future__ import annotations
@@ -195,4 +197,57 @@ class InstallationReceiver:
         return self._publisher.acquire()
 
     def close(self) -> None:
+        self._publisher.close()
+
+
+class LiveReceiver:
+    """Receiver-shaped IPC backend with live connection and request admission.
+
+    Exclusively owns a fresh Publisher with real admission budgets, unlike
+    InstallationReceiver which permanently disables admission. Commit publishes
+    both views and the registry records fences and retirement deadlines for
+    newly uncovered connections; the transport owner that consumes
+    ``registry`` must drain those connections before a public mutation is
+    acknowledged. The IPC wire acknowledgement alone proves installation only.
+    """
+
+    def __init__(
+        self, control_generation: str, subject_generation: str, *,
+        max_snapshot_bytes: int, capacity: int,
+        request_capacity: int | None = None, drain_timeout_seconds: int = 30,
+    ) -> None:
+        self._publisher = RevisionPublisher(
+            control_generation, subject_generation,
+            max_snapshot_bytes=max_snapshot_bytes, capacity=capacity,
+            request_capacity=request_capacity,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
+
+    @property
+    def registry(self) -> BoundConnectionRegistry:
+        """Admission and cleanup APIs; publication stays IPC-owned."""
+        return self._publisher.registry
+
+    def prepare(self, revision: Revision, payload: bytes) -> Revision:
+        return self._publisher.prepare(revision, payload)
+
+    def commit(self, revision: Revision) -> Revision:
+        # Newly uncovered transports stay in the registry with their retirement
+        # deadlines; the transport owner closes them through the registry.
+        self._publisher.commit(revision)
+        # Do not read back: another commit may already have installed a successor.
+        return revision
+
+    def abort(self, revision: Revision) -> Revision:
+        return self._publisher.abort(revision)
+
+    def readback(self) -> Revision | None:
+        return self._publisher.readback()
+
+    def acquire(self) -> Snapshot | None:
+        return self._publisher.acquire()
+
+    def close(self) -> None:
+        # Returned memberships remain in the registry for the transport owner's
+        # terminal cleanup; the process is exiting either way.
         self._publisher.close()

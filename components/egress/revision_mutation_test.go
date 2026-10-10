@@ -137,6 +137,8 @@ func TestRevisionVaultMutationReconcilesExactAttempt(t *testing.T) {
 				require.ErrorIs(t, err, revision.ErrPrepareRejected)
 				_, err = s.credentialVault.Sanitized()
 				require.ErrorIs(t, err, credentialvault.ErrNotFound)
+				// An exact-previous reconcile is provably uncommitted: no latch.
+				require.True(t, s.revisionRecovery == nil || s.revisionRecovery.reason == revisionRecoveryNone)
 			}
 			require.Equal(t, 1, session.updateCalls)
 			require.Equal(t, 1, session.reconcileUpdateCalls)
@@ -344,6 +346,8 @@ func TestRevisionVaultMutationKnownPrepareRejectionPreservesGeneration(t *testin
 	require.Same(t, session, m.revisionSession)
 	require.Zero(t, session.closeCalls)
 	require.False(t, s.mitmGate.MitmPending())
+	// A known prepare rejection is provably uncommitted: no recovery latch.
+	require.True(t, s.revisionRecovery == nil || s.revisionRecovery.reason == revisionRecoveryNone)
 }
 
 func TestRevisionVaultMutationCancellationBeforeSendPreservesGeneration(t *testing.T) {
@@ -359,6 +363,8 @@ func TestRevisionVaultMutationCancellationBeforeSendPreservesGeneration(t *testi
 	require.Zero(t, session.updateCalls)
 	require.Zero(t, session.closeCalls)
 	require.NotNil(t, m.running)
+	// Cancellation before any IPC send is provably uncommitted: no latch.
+	require.True(t, s.revisionRecovery == nil || s.revisionRecovery.reason == revisionRecoveryNone)
 }
 
 func TestRevisionVaultMutationCleanupHoldsPolicyAndLifecycleBarriers(t *testing.T) {
@@ -583,22 +589,16 @@ func TestRevisionRecoveryCleanupFailure(t *testing.T) {
 			require.NotContains(t, err.Error(), "private-cleanup-secret")
 			require.Equal(t, []string{"stop", "close"}, events)
 			require.True(t, s.mitmGate.MitmPending())
-			if kind == "legacy-cleanup-failed" {
-				require.Nil(t, s.revisionRecovery, "legacy helper cannot acquire a new owner")
-				return
-			}
+			// Every terminal detach latches the unknown-effects recovery first,
+			// even without a prior recovery owner; a later cleanup failure can
+			// never replace that first classification.
+			require.NotNil(t, s.revisionRecovery)
+			require.Equal(t, revisionRecoveryExternalEffectsUnknown, s.revisionRecovery.reason)
 			_, epoch, ticket, captureErr := s.captureRevisionBootstrap(context.Background())
 			require.Zero(t, epoch)
-			if kind == "clean" {
-				require.NoError(t, captureErr, "ordinary clean terminal failure remains eligible for fresh bootstrap")
-				require.NotNil(t, ticket)
-				require.Equal(t, revisionRecoveryNone, s.revisionRecovery.reason)
-			} else {
-				require.ErrorIs(t, captureErr, errRevisionRecoveryRequired)
-				require.Nil(t, ticket)
-				require.Equal(t, revisionRecoverySessionCleanupFailed, s.revisionRecovery.reason)
-				require.NotContains(t, captureErr.Error(), "private-cleanup-secret")
-			}
+			require.ErrorIs(t, captureErr, errRevisionRecoveryRequired)
+			require.Nil(t, ticket)
+			require.NotContains(t, captureErr.Error(), "private-cleanup-secret")
 		})
 	}
 }

@@ -50,6 +50,11 @@
 #      TCP-layer enforcement (deny/allow rules) still applies to these flows.
 #   5. Owns the authenticated revision receiver only when the Go launcher hands
 #      off a complete per-process internal session. The default remains disabled.
+#      When that session also carries the live admission bundle, TLS decisions
+#      and request admission run against the installed immutable decision
+#      snapshot (credential_bound.py): unbound HTTPS passes through opaquely,
+#      bound hosts are decrypted only with a registry admission, and requests
+#      are authorized per revision with bounded drain on removal.
 #
 # User-defined addons can be loaded alongside this script via
 # OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT (comma-separated for multiple scripts).
@@ -75,6 +80,7 @@ FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
 FLOW_BINDING_KEY = "opensandbox_credential_binding"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
 FLOW_REJECTION_KEY = "opensandbox_credential_rejected"
+FLOW_REQUEST_HANDLE_KEY = "opensandbox_credential_request_handle"
 HEADER_SUBSTITUTION_DENYLIST = {
     "host",
     "content-length",
@@ -140,6 +146,7 @@ class ActiveVaultLookupError(Exception):
 _vault_cache: ActiveVault | None = None
 _revision_receiver: Any | None = None
 _revision_server: Any | None = None
+_live_runtime: Any | None = None
 
 # Operator-only diagnostics; no public interception mode is enabled here.
 _tls_shadow_enabled = os.environ.get(
@@ -209,33 +216,50 @@ def _revision_configuration() -> tuple[str, str, str, str, int] | None:
 
 
 def load(_loader: Any) -> None:
-    """Start one admission-disabled joint owner when the launcher enables it."""
-    global _revision_receiver, _revision_server
-    if _revision_receiver is not None or _revision_server is not None:
+    """Start the revision receiver the launcher selected for this process."""
+    global _revision_receiver, _revision_server, _live_runtime
+    if _revision_receiver is not None or _revision_server is not None or _live_runtime is not None:
         _fatal_revision_runtime()
     configuration = _revision_configuration()
     if configuration is None:
         return
     socket_path, token, control, subject, limit = configuration
-    receiver = server = None
+    # The live credential-bound mode never runs with insecure upstream
+    # verification: check the effective option before the receiver starts.
+    # The installation-only receiver keeps the legacy escape hatch.
+    if _live_admission_requested() and getattr(ctx.options, "ssl_insecure", False):
+        _fatal_revision_runtime()
+    receiver = server = runtime = None
     try:
         from revision_ipc import Server
-        from revision_publication import InstallationReceiver
 
-        receiver = InstallationReceiver(
-            control,
-            subject,
-            max_snapshot_bytes=limit,
-        )
-        server = Server(
-            receiver,
-            socket_path,
-            token,
-            max_snapshot_bytes=limit,
-            request_timeout=1,
-        )
-        server.start()
+        if _live_admission_requested():
+            import credential_bound
+
+            runtime, server = credential_bound.configure(
+                socket_path, token, control, subject, limit
+            )
+            receiver = runtime.registry
+        else:
+            from revision_publication import InstallationReceiver
+
+            receiver = InstallationReceiver(
+                control,
+                subject,
+                max_snapshot_bytes=limit,
+            )
+            server = Server(
+                receiver,
+                socket_path,
+                token,
+                max_snapshot_bytes=limit,
+                request_timeout=1,
+            )
+            server.start()
     except Exception:  # noqa: BLE001 - configuration may contain credentials
+        if runtime is not None:
+            with suppress(Exception):
+                runtime.close()
         if server is not None:
             with suppress(Exception):
                 server.close()
@@ -245,14 +269,47 @@ def load(_loader: Any) -> None:
         _fatal_revision_runtime()
     _revision_receiver = receiver
     _revision_server = server
+    _live_runtime = runtime
+
+
+def _live_admission_requested() -> bool:
+    """True when the launcher supplied any live admission budget variable."""
+    try:
+        import credential_bound
+
+        return credential_bound.live_admission_requested()
+    except Exception:  # noqa: BLE001 - only the launcher bundle matters here
+        return False
+
+
+def configure(updated: set) -> None:
+    """Option-change hook: ssl_insecure is fatal while live admission is on.
+
+    mitmproxy invokes this hook on every option change; toggling
+    ssl_insecure true while the live receiver is requested or enabled is a
+    fatal configuration error, never a runtime fallback.
+    """
+    if "ssl_insecure" not in updated:
+        return
+    if _live_runtime is None and not _live_admission_requested():
+        return
+    if getattr(ctx.options, "ssl_insecure", False):
+        _fatal_revision_runtime()
 
 
 def done() -> None:
     """Fence the receiver and remove only its owned socket during addon exit."""
-    global _revision_receiver, _revision_server
+    global _revision_receiver, _revision_server, _live_runtime
     server = _revision_server
+    runtime = _live_runtime
     _revision_receiver = None
     _revision_server = None
+    _live_runtime = None
+    if runtime is not None:
+        try:
+            runtime.close()
+        except Exception:  # noqa: BLE001 - never expose session-bearing details
+            ctx.log.warn("credential proxy: revision runtime cleanup failed")
     if server is not None:
         try:
             server.close()
@@ -267,13 +324,26 @@ class UnixSocketHTTPConnection(http_client.HTTPConnection):
 
     def connect(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self.timeout)
-        sock.connect(self.socket_path)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(self.socket_path)
+        except Exception:
+            # A failed connect must not leak the freshly created socket.
+            sock.close()
+            raise
         self.sock = sock
 
 
 def tls_clienthello(data: ClientHelloData) -> None:
-    """Re-check ignore_hosts patterns against SNI hostname.
+    """Decide TLS interception for this ClientHello.
+
+    Live credential-bound mode (OSEP-0023 experimental sidecar): classify
+    against the installed immutable decision snapshot. Unbound SNI, ECH-hidden
+    or no-SNI traffic passes through opaquely; a bound host is decrypted only
+    with a registry admission; any deny outcome terminates the connection
+    instead of decrypting or tunneling an unknown state.
+
+    Legacy mode: re-check ignore_hosts patterns against the SNI hostname.
 
     In transparent mode, mitmproxy checks ignore_hosts against the
     destination IP:port before the TLS handshake.  If the check fails at
@@ -290,6 +360,11 @@ def tls_clienthello(data: ClientHelloData) -> None:
     MITM remains possible and the escape hatch keeps working. TCP-layer
     enforcement (deny/allow rules) still applies.
     """
+    live = _live_runtime
+    if live is not None:
+        _tls_clienthello_live(live, data)
+        return
+
     sni = data.client_hello.sni
     if not sni:
         if not ctx.options.ssl_insecure:
@@ -307,6 +382,74 @@ def tls_clienthello(data: ClientHelloData) -> None:
                 return
         except re.error:
             pass
+
+
+def _clienthello_ech_hidden(client_hello: Any) -> bool | None:
+    """Inspect the actual ClientHello extension list for ECH (0xfe0d).
+
+    mitmproxy 11 exposes ``ClientHello.extensions`` as ``list[(int, bytes)]``;
+    GREASE ECH values are treated as ECH-bearing because the inner name stays
+    hidden either way. Returns True when the extension is present, False when
+    the extension list is valid and empty of it, and None when the extension
+    data is absent or malformed — uninspectable input must deny, never be
+    silently treated as ECH-free.
+    """
+    try:
+        extensions = client_hello.extensions
+    except Exception:  # noqa: BLE001 - never trust uninspectable hello data
+        return None
+    if not isinstance(extensions, (list, tuple)):
+        return None
+    for extension in extensions:
+        if not (
+            isinstance(extension, tuple)
+            and len(extension) == 2
+            and type(extension[0]) is int
+            and isinstance(extension[1], (bytes, bytearray))
+        ):
+            return None
+        if extension[0] == 0xFE0D:
+            return True
+    return False
+
+
+def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
+    # The live credential-bound mode must never run with insecure upstream
+    # verification; deny the handshake outright instead of trusting an
+    # unverified origin identity with a credential.
+    if ctx.options.ssl_insecure:
+        ctx.log.warn("credential proxy: tls decision deny reason=ssl_insecure")
+        import credential_bound
+
+        credential_bound.terminate_handshake(data.context.client)
+        return
+    # ECH hides the inner name: inspect the real extension list before any
+    # outer-SNI matching so hidden names can never select a credential.
+    ech_hidden = _clienthello_ech_hidden(data.client_hello)
+    if ech_hidden is None:
+        ctx.log.warn("credential proxy: tls decision deny reason=malformed_extensions")
+        import credential_bound
+
+        credential_bound.terminate_handshake(data.context.client)
+        return
+    sni = data.client_hello.sni
+    if live.static_ignored(sni):
+        data.ignore_connection = True
+        return
+    result = live.admit_tls(sni, ech_hidden=ech_hidden)
+    if result.action == "passthrough":
+        data.ignore_connection = True
+        return
+    if result.action == "deny":
+        # Fail closed: bootstrapping, generation mismatch, invalid or
+        # unadmittable SNI, or an exhausted registry terminate the connection.
+        # A deny never degrades into opaque tunneling or decrypt-all.
+        ctx.log.warn(f"credential proxy: tls decision deny reason={result.reason}")
+        import credential_bound
+
+        credential_bound.terminate_handshake(data.context.client)
+        return
+    live.track(result.token, data.context.client)
 
 
 def _load_active_vault(client_ip: str | None = None) -> ActiveVault | None:
@@ -1131,6 +1274,119 @@ def _flow_client_ip(flow: http.HTTPFlow) -> str | None:
         return None
 
 
+def _connection_sni(flow: http.HTTPFlow) -> str | None:
+    """Normalized SNI of the transport that carried this request, if any."""
+    sni = getattr(getattr(flow, "client_conn", None), "sni", None)
+    if not isinstance(sni, str) or not sni:
+        return None
+    return sni.lower().removesuffix(".")
+
+
+_H1_AUTHORITY_FORBIDDEN_RE = re.compile(r"[\x00-\x20\x7f,@/\\?#%]")
+
+
+def _parse_h1_authority(value: Any) -> tuple[str, int] | None:
+    """Parse one Host/absolute-target authority into (normalized host, port).
+
+    Strict HTTP/1 identity semantics for the live credential-bound mode: no
+    whitespace, controls, comma, userinfo, slash, backslash, query, fragment
+    or percent-encoded authority; at most one optional numeric port. DNS
+    names normalize like vault hosts (ASCII lowercase with one optional
+    trailing root dot). Returns None on any violation.
+    """
+    if type(value) is not str or not value or not value.isascii():
+        return None
+    if _H1_AUTHORITY_FORBIDDEN_RE.search(value):
+        return None
+    if value.count(":") > 1:
+        return None
+    host, separator, port_text = value.partition(":")
+    port = 443
+    if separator:
+        if (
+            not port_text
+            or not port_text.isdecimal()
+            or (port_text[0] == "0" and len(port_text) > 1)
+            or len(port_text) > 5
+        ):
+            return None
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+    host = host.lower().removesuffix(".")
+    if (
+        not host
+        or _active_vault_host_is_ip(host)
+        or not _active_vault_host_is_fqdn(host)
+    ):
+        return None
+    return host, port
+
+
+def _live_h1_authority(flow: http.HTTPFlow) -> str | None:
+    """Validate the HTTP/1 identity of one decrypted live request.
+
+    Returns the normalized authority host, or None when the request must be
+    denied: a non-HTTP/1 version (HTTP/2 is outside this phase's scope),
+    CONNECT authority-form inside a decrypted stream, a non-443 target,
+    missing/duplicate/malformed Host, or an absolute-target authority that
+    disagrees with Host. Transparent-mode ``data.host`` may be an IP, so the
+    transport destination is never compared here — only HTTP identity.
+    """
+    request = flow.request
+    version = (request.http_version or "").upper()
+    if version not in ("HTTP/1.0", "HTTP/1.1"):
+        return None
+    if (request.method or "").upper() == "CONNECT":
+        return None
+    if int(request.port or 0) != 443:
+        return None
+    try:
+        hosts = request.headers.get_all("host")
+    except Exception:  # noqa: BLE001 - a headers object without get_all denies
+        return None
+    if not isinstance(hosts, (list, tuple)) or len(hosts) != 1:
+        return None
+    parsed = _parse_h1_authority(hosts[0])
+    if parsed is None:
+        return None
+    host, port = parsed
+    if port != 443:
+        return None
+    # Prefer the raw wire authority bytes: request.authority applies IDNA
+    # decoding, which would turn valid ASCII punycode into Unicode before
+    # the strict ASCII parse. Fake requests without .data fall back to the
+    # property value.
+    authority: Any = None
+    data = getattr(request, "data", None)
+    raw_authority = getattr(data, "authority", None) if data is not None else None
+    if isinstance(raw_authority, (bytes, bytearray, memoryview)):
+        try:
+            authority = bytes(raw_authority).decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    elif raw_authority is not None:
+        authority = raw_authority
+    elif data is None:
+        authority = getattr(request, "authority", None)
+    if authority:
+        try:
+            absolute = _parse_h1_authority(authority)
+        except Exception:  # noqa: BLE001 - an unparseable authority denies
+            return None
+        if absolute is None or absolute != (host, port):
+            return None
+    return host
+
+
+def _finish_live_request(flow: http.HTTPFlow) -> None:
+    """Release one admitted request handle on any terminal flow path."""
+    handle = flow.metadata.pop(FLOW_REQUEST_HANDLE_KEY, None)
+    live = _live_runtime
+    if handle is not None and live is not None:
+        live.finish_request(handle)
+
+
 def _observe_tls_shadow(
     flow: http.HTTPFlow, vault: ActiveVault | None, *, lookup_failed: bool = False
 ) -> None:
@@ -1161,7 +1417,14 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     Header injection must happen here, before the upstream connection is
     made: with ``stream_large_bodies=1m`` the ``request`` hook fires only
     after a body above 1 MiB has been streamed upstream.
+
+    In live credential-bound mode the vault comes from the admitted decision
+    snapshot (see :func:`_requestheaders_live`) instead of the pull cache.
     """
+    live = _live_runtime
+    if live is not None:
+        _requestheaders_live(live, flow)
+        return
     try:
         vault = _load_active_vault(_flow_client_ip(flow))
     except ActiveVaultLookupError as exc:
@@ -1176,7 +1439,115 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     _observe_tls_shadow(flow, vault)
     if vault is None:
         return
+    _apply_vault_binding(flow, vault)
 
+
+def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
+    """Authorize one request against the admitted revision snapshot.
+
+    Phase 3 scope: only HTTPS carries live admission; plain HTTP receives no
+    injected credentials in this mode. Every request on a decrypted connection
+    must acquire request admission; a fenced connection (removed host, drained
+    revision) is rejected and never falls back to the retired snapshot.
+    """
+    if (flow.request.scheme or "").lower() != "https":
+        return
+    # Per-request defense: insecure upstream verification must never be
+    # effective in live mode. Deny instead of injecting into or tunneling a
+    # bound request toward an unverified origin.
+    if getattr(ctx.options, "ssl_insecure", False):
+        _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
+        ctx.log.warn("credential proxy: request denied reason=ssl_insecure")
+        return
+    token = live.token_for(getattr(flow, "client_conn", None))
+    admission = None if token is None else live.acquire_request(token)
+    handle = None
+    if admission is not None and admission.action == "allow":
+        handle = admission.handle
+        flow.metadata[FLOW_REQUEST_HANDLE_KEY] = handle
+    if handle is None:
+        reason = "no_connection_admission" if admission is None else admission.reason
+        status_code = 403 if reason == "connection_fenced" else 503
+        _reject_request(flow, b"credential proxy unavailable\n", status_code=status_code)
+        if flow.response is not None:
+            # Fenced transports stop accepting new requests: tell HTTP/1.1
+            # keepalive clients this connection is finished.
+            flow.response.headers["connection"] = "close"
+        ctx.log.warn(f"credential proxy: request denied reason={reason}")
+        return
+
+    # HTTP/1 identity gate, applied to every decrypted request before any
+    # binding selection: the validated authority must equal both the
+    # connection SNI and the immutable admission token SNI, so a credential
+    # can only reach the verified TLS peer. Cross-authority requests on
+    # out-of-scope paths are denied just the same.
+    authority_host = _live_h1_authority(flow)
+    connection_sni = _connection_sni(flow)
+    if (
+        authority_host is None
+        or connection_sni is None
+        or authority_host != connection_sni
+        or authority_host != token.sni
+    ):
+        _reject_request(
+            flow,
+            b"request authority does not match the intercepted destination\n",
+            status_code=403,
+        )
+        ctx.log.warn("credential proxy: rejected invalid or cross-authority request")
+        return
+
+    try:
+        vault = _live_snapshot_vault(admission.snapshot)
+    except ActiveVaultLookupError:
+        flow.metadata.pop(FLOW_REQUEST_HANDLE_KEY, None)
+        live.finish_request(handle)
+        _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
+        ctx.log.warn("credential proxy: admitted snapshot failed validation; request denied")
+        return
+    _observe_tls_shadow(flow, vault)
+    if vault is None:
+        return
+    _apply_vault_binding(flow, vault, live=live)
+
+
+def _live_snapshot_vault(snapshot: Any) -> ActiveVault | None:
+    """Convert an admitted immutable snapshot into the binding view.
+
+    Returns None for an authoritative snapshot without rendered bindings
+    (no credential can match). Raises ActiveVaultLookupError for any payload
+    that does not exactly reconstruct the validated envelope, which fails the
+    request closed instead of forwarding it uncredentialed by accident.
+    """
+    try:
+        payload = json.loads(snapshot.payload)
+    except Exception:  # noqa: BLE001 - payload bytes may contain credentials
+        raise ActiveVaultLookupError("admitted snapshot could not be decoded") from None
+    if not isinstance(payload, dict):
+        raise ActiveVaultLookupError("admitted snapshot must be an object")
+    revision = snapshot.revision.vault_revision
+    if type(revision) is not int or payload.get("vaultRevision") != revision:
+        raise ActiveVaultLookupError("admitted snapshot revision disagreement")
+    state = payload.get("state")
+    bindings = payload.get("fullRenderedBindings")
+    if state == "active-empty":
+        if bindings:
+            raise ActiveVaultLookupError("admitted snapshot state disagreement")
+        return None
+    if state != "active" or not isinstance(bindings, list) or not bindings:
+        raise ActiveVaultLookupError("admitted snapshot has no rendered bindings")
+    redactions = payload.get("redactions", [])
+    if not isinstance(redactions, list):
+        raise ActiveVaultLookupError("admitted snapshot redactions are invalid")
+    return _parse_active_vault(
+        {"revision": revision, "bindings": bindings, "redactions": redactions}
+    )
+
+
+def _apply_vault_binding(
+    flow: http.HTTPFlow, vault: ActiveVault, live: Any | None = None
+) -> None:
+    """Shared binding selection, ambiguity checks and credential injection."""
     # Requests outside credential binding scope are ordinary egress traffic.
     # Leave them untouched, including paths whose encoding would be ambiguous
     # for credential injection, because no secret is at risk.
@@ -1293,6 +1664,23 @@ def responseheaders(flow: http.HTTPFlow) -> None:
     transfer_encoding = flow.response.headers.get("transfer-encoding", "").lower()
     if "text/event-stream" in content_type or "chunked" in transfer_encoding:
         flow.response.stream = True
+
+
+def response(flow: http.HTTPFlow) -> None:
+    """Credential proxy: release the admitted request once its response completes."""
+    _finish_live_request(flow)
+
+
+def error(flow: http.HTTPFlow) -> None:
+    """Credential proxy: release the admitted request when its flow fails."""
+    _finish_live_request(flow)
+
+
+def client_disconnected(client_conn: Any) -> None:
+    """Release the transport's live admission on confirmed disconnect."""
+    live = _live_runtime
+    if live is not None:
+        live.client_disconnected(client_conn)
 
 
 def _redact_response_headers(flow: http.HTTPFlow) -> None:

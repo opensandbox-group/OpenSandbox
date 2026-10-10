@@ -29,6 +29,9 @@ ARG CXXFLAGS=
 ARG CGO_CFLAGS=
 ARG CGO_CXXFLAGS=
 ARG CGO_LDFLAGS=
+# Optional module proxy for restricted build networks; empty keeps Go's
+# environment (proxy.golang.org) untouched.
+ARG GOPROXY=
 
 # Copy only go mod/sum first for better caching
 COPY components/egress/go.mod components/egress/go.sum ./components/egress/
@@ -38,7 +41,7 @@ COPY components/internal ./components/internal
 WORKDIR /workspace/components/egress
 
 # Static-ish build (no cgo by default) to simplify runtime deps.
-RUN go mod download
+RUN test -z "${GOPROXY}" || go env -w GOPROXY="${GOPROXY}"; go mod download
 
 # Pre-download internal-module deps for the supervisor build below.
 RUN cd /workspace/components/internal && go mod download
@@ -77,8 +80,16 @@ RUN cd /workspace/components/internal && \
 
 FROM debian:bookworm-slim
 
+# Optional Debian mirror host for restricted build networks (e.g.
+# mirrors.aliyun.com); empty keeps the default deb.debian.org sources.
+ARG APT_MIRROR=
+
 # iptables is needed for DNS REDIRECT; ca-certificates for TLS to upstream resolvers
-RUN apt-get update \
+RUN if [ -n "${APT_MIRROR}" ]; then \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
+    fi \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         iptables \
         iproute2 \

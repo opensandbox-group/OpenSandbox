@@ -529,3 +529,66 @@ If you have existing bindings that use `ports` to narrow scope, migrate them to 
 | `schemes: ["http", "https"], ports: [443]` | `schemes: ["https"]` |
 | `schemes: ["http", "https"], ports: [80]` | `schemes: ["http"]` |
 | `schemes: ["https"], ports: [443]` | `schemes: ["https"]` (remove `ports`) |
+
+## Experimental Live Credential-Bound Admission (OSEP-0023)
+
+::: warning Experimental boundary
+The live credential-bound loop is an internal sidecar experiment, not a
+supported deployment mode. It is documented here to bound what the current
+implementation actually does; no public configuration surface is added.
+:::
+
+When the experimental revision runtime is enabled, the sidecar installs an
+immutable decision snapshot into the mitmproxy child over a private
+authenticated IPC channel and admits traffic per connection and per request:
+
+- **Decisions come only from the installed snapshot.** Unbound HTTPS passes
+  through opaquely; bound hosts are decrypted only with a registry admission.
+  Unknown, bootstrapping, or mismatched state denies — the mode never falls
+  back to decrypt-all or dynamic pass-through.
+- **Sticky recovery, no same-sidecar restart.** Any terminal outcome with
+  unknown external effects (a mutation whose remote result cannot be
+  confirmed, a session cleanup failure, an unexpected child exit) latches a
+  permanent recovery-required state: readiness drops, outstanding bootstrap
+  tickets are invalidated, nft writes are quiesced, and quarantine contains.
+  The same sidecar cannot bootstrap a fresh revision session afterwards;
+  recovery requires replacing the whole sidecar.
+- **Request admission and cutover.** A vault mutation is applied to the live
+  receiver first and published publicly only after exact confirmation.
+  In-flight requests finish on their admitted revision; new requests on a
+  connection whose host was removed are fenced immediately (403), and the
+  retired transport is force-closed at the drain deadline. Deleting the vault
+  affects new requests and new connections; a retired connection can never be
+  revived by re-adding the host. Already-admitted requests may finish only
+  inside the bounded drain window — deletion does not recall requests the
+  remote origin already received or revoke credentials already delivered
+  remotely.
+- **Drain accounting.** Retired transports carry a bounded retirement
+  deadline (default 30 seconds, internal range 1–300). The drain sweep pages
+  expired transports and closes them; a failed close is retried on the next
+  sweep rather than extending the deadline.
+- **ECH is opaque pass-through.** A ClientHello carrying the
+  `encrypted_client_hello` extension (0xfe0d), including GREASE forms, is
+  forwarded untouched as an opaque tunnel without decryption;
+  uninspectable ClientHello data denies. The implementation does
+  not decrypt the inner ClientHello and does not guarantee that an
+  ECH-enabled origin handshake succeeds.
+- **HTTP/1 authority gate.** On a decrypted connection every request must
+  carry exactly one syntactically strict `Host` header equal to the
+  intercepted SNI and the admission binding (port omitted or 443). A
+  conflicting absolute-form target, a CONNECT authority-form inside the
+  stream, missing/duplicate/malformed Host values, and HTTP/2 requests are
+  rejected before any credential can be injected.
+- **`ssl_insecure` is refused in live mode.** The launcher and the addon
+  reject an insecure-upstream configuration when the live admission bundle is
+  active; the legacy installation-only receiver keeps its existing behavior.
+- **Scope.** This mode is scoped to the internal sidecar profile:
+  Docker DNS + nft enforcement, exact-host HTTPS on port 443, HTTP/1.1
+  origin-form or matching absolute-form requests, and inline credentials
+  injected as headers. HTTP/2, the fast-sandbox profile, dynamic policy
+  reloads, and recovery across a complete sidecar replacement are out of
+  scope. Dynamic DNS learning and Kubernetes deployments are not covered by
+  this experiment's evidence.
+
+The task-level acceptance record for this experiment lives in
+[Live Vault Acceptance](/guides/live-vault-acceptance).

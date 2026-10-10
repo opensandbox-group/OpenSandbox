@@ -185,7 +185,7 @@ func TestSidecarRevisionLaunchOwnerDefaultsOffBeforeRuntimeLookup(t *testing.T) 
 	require.Nil(t, owner)
 }
 
-func TestExperimentalRevisionRuntimeRejectsVaultWrites(t *testing.T) {
+func TestExperimentalRevisionRuntimeRejectsVaultWritesWithoutMitm(t *testing.T) {
 	t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
 	server := &policyServer{
 		credentialVault: credentialvault.NewStore(nil, func() bool { return true }),
@@ -196,7 +196,7 @@ func TestExperimentalRevisionRuntimeRejectsVaultWrites(t *testing.T) {
 			response := httptest.NewRecorder()
 			server.handleCredentialVault(response, request)
 			require.Equal(t, http.StatusServiceUnavailable, response.Code)
-			require.Contains(t, response.Body.String(), "writes are unavailable")
+			require.Contains(t, response.Body.String(), "mutation unavailable")
 		})
 	}
 	_, err := server.credentialVault.Sanitized()

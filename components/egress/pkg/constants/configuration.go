@@ -96,6 +96,13 @@ const (
 	// EnvExperimentalRevisionRuntime enables the internal OSEP-0023
 	// per-mitmdump revision bootstrap path. It is not a public interception mode.
 	EnvExperimentalRevisionRuntime = "OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME"
+	// OSEP-0023 live admission budgets, handed to the mitmdump child with the
+	// revision session bundle. Decrypted-connection and admitted-request caps,
+	// plus the credential transition drain timeout in seconds (1..300).
+	// Operator-owned tuning only; not a public sandbox-user API.
+	EnvRevisionTLSCapacity         = "OPENSANDBOX_EGRESS_REVISION_TLS_CAPACITY"
+	EnvRevisionRequestCapacity     = "OPENSANDBOX_EGRESS_REVISION_REQUEST_CAPACITY"
+	EnvRevisionDrainTimeoutSeconds = "OPENSANDBOX_EGRESS_REVISION_DRAIN_TIMEOUT_SECONDS"
 	// EnvMitmproxyExtraPorts (EXPERIMENTAL): extra TCP dports to intercept,
 	// appended to the always-on 80,443. Comma-separated. May change or be
 	// removed without notice.
@@ -132,6 +139,10 @@ const (
 	DefaultMaxEgressRules        = 4096
 	DefaultDNSUpstreamTimeoutSec = 2
 	OpenSandboxRootDir           = "/opt/opensandbox"
+	// OSEP-0023 live admission defaults (experimental sidecar only).
+	DefaultRevisionTLSCapacity         = 1024
+	DefaultRevisionRequestCapacity     = 4096
+	DefaultRevisionDrainTimeoutSeconds = 30
 )
 
 func EnvIntOrDefault(key string, defaultVal int) int {
@@ -141,6 +152,21 @@ func EnvIntOrDefault(key string, defaultVal int) int {
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil {
+		return defaultVal
+	}
+	return v
+}
+
+// EnvIntRange returns the env int only when it parses into [min, max];
+// otherwise it returns defaultVal. Operator-owned budgets use this to reject
+// silently-clamped nonsense rather than guessing a replacement value.
+func EnvIntRange(key string, defaultVal, minValue, maxValue int) int {
+	s := strings.TrimSpace(os.Getenv(key))
+	if s == "" {
+		return defaultVal
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < minValue || v > maxValue {
 		return defaultVal
 	}
 	return v
