@@ -1477,9 +1477,15 @@ verify_lifecycle_ops() { # <sandbox-id>
 	renewed_expires="$(printf '%s' "$out" | jq -r '.expires_at')"
 	[[ -n "$renewed_expires" && "$renewed_expires" != "null" && "$renewed_expires" != "$expected_expires" ]] \
 		|| fail "renewed expiresAt did not advance: $expected_expires -> $renewed_expires"
-	out="$(osb_api sandbox get "$id" -o json 2>/dev/null)"
-	[[ "$(printf '%s' "$out" | jq -r '.expires_at')" == "$renewed_expires" ]] \
-		|| fail "renewed expiresAt not visible: expected $renewed_expires got $(printf '%s' "$out" | jq -r '.expires_at')"
+	local got_expires
+	got_expires="$(osb_api sandbox get "$id" -o json 2>/dev/null | jq -r '.expires_at')"
+	# Same instant, two renderings (renew panel str() vs RFC3339 dump):
+	# compare epoch seconds, falling back to string equality.
+	if [[ "$got_expires" != "$renewed_expires" ]] \
+		&& [[ "$(date -u -d "$renewed_expires" +%s 2>/dev/null || true)" \
+			!= "$(date -u -d "$got_expires" +%s 2>/dev/null || true)" ]]; then
+		fail "renewed expiresAt not visible: expected $renewed_expires got $got_expires"
+	fi
 	pass "lifecycle: osb sandbox renew 2h ($expected_expires -> $renewed_expires)"
 }
 
