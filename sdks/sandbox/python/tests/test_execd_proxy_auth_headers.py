@@ -188,3 +188,72 @@ def test_sync_execd_request_never_carries_api_key_in_direct_mode() -> None:
     assert "open-sandbox-api-key" not in _headers(transport.request)
 
     adapter._httpx_client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_strips_custom_header_key_in_direct_mode() -> None:
+    transport = _CaptureAsyncTransport()
+    adapter = FilesystemAdapter(
+        ConnectionConfig(
+            api_key="tenant-key-1",
+            protocol="http",
+            transport=transport,
+            use_server_proxy=False,
+            headers={"OPEN-SANDBOX-API-KEY": "tenant-key-1"},
+        ),
+        SandboxEndpoint(endpoint=DIRECT_ENDPOINT),
+    )
+
+    await adapter.write_files([WriteEntry(path="/tmp/a.txt", data="hello")])
+
+    # A key supplied via custom headers is still a tenant credential: in
+    # direct mode it must not travel into the untrusted sandbox either.
+    assert "open-sandbox-api-key" not in _headers(transport.request)
+
+    await adapter._httpx_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_endpoint_key_wins_in_proxy_mode() -> None:
+    transport = _CaptureAsyncTransport()
+    adapter = FilesystemAdapter(
+        ConnectionConfig(
+            api_key="tenant-key-1",
+            protocol="https",
+            transport=transport,
+            use_server_proxy=True,
+        ),
+        SandboxEndpoint(
+            endpoint=PROXY_FORM_ENDPOINT,
+            headers={"OPEN-SANDBOX-API-KEY": "endpoint-scoped-key"},
+        ),
+    )
+
+    await adapter.write_files([WriteEntry(path="/tmp/a.txt", data="hello")])
+
+    assert _headers(transport.request)["open-sandbox-api-key"] == "endpoint-scoped-key"
+
+    await adapter._httpx_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_custom_header_key_yields_to_endpoint_key_in_proxy_mode() -> None:
+    transport = _CaptureAsyncTransport()
+    adapter = FilesystemAdapter(
+        ConnectionConfig(
+            protocol="https",
+            transport=transport,
+            use_server_proxy=True,
+            headers={"open-sandbox-api-key": "connection-key"},
+        ),
+        SandboxEndpoint(
+            endpoint=PROXY_FORM_ENDPOINT,
+            headers={"OPEN-SANDBOX-API-KEY": "endpoint-scoped-key"},
+        ),
+    )
+
+    await adapter.write_files([WriteEntry(path="/tmp/a.txt", data="hello")])
+
+    assert _headers(transport.request)["open-sandbox-api-key"] == "endpoint-scoped-key"
+
+    await adapter._httpx_client.aclose()

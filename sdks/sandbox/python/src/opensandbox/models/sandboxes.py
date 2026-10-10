@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from opensandbox.config import ConnectionConfig
     from opensandbox.config.connection_sync import ConnectionConfigSync
 
+API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
+
 
 class SandboxImageAuth(BaseModel):
     """
@@ -806,17 +808,32 @@ class SandboxEndpoint(BaseModel):
         The API key is attached only when the client declared server-proxy
         mode (``ConnectionConfig.use_server_proxy``): such requests pass the
         server's auth gate. In direct mode execd performs no auth and the
-        key must never travel into the untrusted sandbox.
+        key must never travel into the untrusted sandbox, so a key supplied
+        via headers is stripped as well. In server-proxy mode an
+        endpoint-scoped key wins over the connection-level key.
         """
         headers = {
             "User-Agent": connection_config.user_agent,
             **connection_config.headers,
             **self.headers,
         }
+        endpoint_key = next(
+            (
+                (k, v)
+                for k, v in self.headers.items()
+                if k.lower() == API_KEY_HEADER.lower()
+            ),
+            None,
+        )
+        for name in [k for k in headers if k.lower() == API_KEY_HEADER.lower()]:
+            del headers[name]
         if connection_config.use_server_proxy:
-            api_key = connection_config.get_api_key()
-            if api_key:
-                headers["OPEN-SANDBOX-API-KEY"] = api_key
+            if endpoint_key is not None:
+                headers[endpoint_key[0]] = endpoint_key[1]
+            else:
+                api_key = connection_config.get_api_key()
+                if api_key:
+                    headers[API_KEY_HEADER] = api_key
         return headers
 
 
