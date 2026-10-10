@@ -23,10 +23,21 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxStatus
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.OffsetDateTime
 
 class SandboxInfoCompatibilityTest {
+    @Test
+    fun `SandboxInfo retains the Kotlin default argument constructor`() {
+        assertTrue(
+            SandboxInfo::class.java.constructors.any {
+                it.parameterCount == 13 &&
+                    it.parameterTypes.last().name == "kotlin.jvm.internal.DefaultConstructorMarker"
+            },
+        )
+    }
+
     @Test
     fun `SandboxInfo retains the pre-allocation JVM constructor`() {
         val constructor =

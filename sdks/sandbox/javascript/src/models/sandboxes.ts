@@ -446,6 +446,8 @@ export interface AllocationSummary extends Record<string, unknown> {
 
 export interface SandboxInfo extends Record<string, unknown> {
   id: SandboxId;
+  /** Runtime-recorded registry digest; may identify an index or manifest. */
+  resolvedImageDigest?: string | null;
   image?: ImageSpec;
   snapshotId?: string;
   platform?: PlatformSpec;
@@ -558,6 +560,8 @@ export interface CreateSandboxFromTemplateRequest extends Record<string, unknown
 
 export interface CreateSandboxResponse extends Record<string, unknown> {
   id: SandboxId;
+  /** Runtime-recorded registry digest, when available. */
+  resolvedImageDigest?: string | null;
   status: SandboxStatus;
   platform?: PlatformSpec;
   metadata?: Record<string, string>;

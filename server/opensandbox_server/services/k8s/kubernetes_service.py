@@ -73,6 +73,7 @@ from opensandbox_server.services.k8s.status_helpers import (
     _is_unschedulable_status,
     _normalize_create_status,
 )
+from opensandbox_server.services.k8s.image_identity import workload_image_digest
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     _extract_platform_from_workload,
@@ -1209,6 +1210,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
                 response = CreateSandboxResponse(
                     id=sandbox_id,
+                    resolved_image_digest=await asyncio.to_thread(
+                        workload_image_digest, workload, self.workload_provider
+                    ),
                     status=SandboxStatus(
                         state=status_info["state"],
                         reason=status_info["reason"],
@@ -1322,7 +1326,10 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             logger.error(f"Error getting sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("get sandbox", e) from e
 
-    def list_sandbox_objects(self) -> list[Sandbox]:
+    def list_sandbox_objects(
+        self, *, workloads_by_id: dict[str, Any] | None = None
+    ) -> list[Sandbox]:
+        """Collect objects, deferring digest reads when a caller will paginate them."""
         workloads = self.workload_provider.list_workloads(
             namespace=self._resolve_namespace(),
             label_selector=SANDBOX_ID_LABEL,
@@ -1334,12 +1341,31 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 owner = _workload_labels(workload).get(SANDBOX_TENANT_LABEL)
                 if owner is not None and owner != tenant.name:
                     continue
-            sandboxes.append(_build_sandbox_from_workload(workload, self.workload_provider))
+            sandbox = _build_sandbox_from_workload(
+                workload, self.workload_provider, resolve_image_digest=workloads_by_id is None
+            )
+            sandboxes.append(sandbox)
+            if workloads_by_id is not None:
+                workloads_by_id[sandbox.id] = workload
         return sandboxes
+
+    def resolve_list_image_digests(
+        self, sandboxes: list[Sandbox], workloads_by_id: dict[str, Any]
+    ) -> None:
+        """Enrich only the returned page using the workloads from this list request."""
+        for sandbox in sandboxes:
+            workload = workloads_by_id.get(sandbox.id)
+            if workload is not None:
+                sandbox.resolved_image_digest = workload_image_digest(workload, self.workload_provider)
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
-            return _build_list_sandboxes_response(self.list_sandbox_objects(), request)
+            workloads_by_id: dict[str, Any] = {}
+            response = _build_list_sandboxes_response(
+                self.list_sandbox_objects(workloads_by_id=workloads_by_id), request
+            )
+            self.resolve_list_image_digests(response.items, workloads_by_id)
+            return response
             
         except Exception as e:
             logger.error(f"Error listing sandboxes: {e}")

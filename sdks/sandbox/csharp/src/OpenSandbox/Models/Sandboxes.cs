@@ -741,6 +741,10 @@ public class AllocationSummary
 /// </summary>
 public class SandboxInfo
 {
+    /// <summary>Runtime-recorded registry digest; may identify an index or manifest.</summary>
+    [JsonPropertyName("resolvedImageDigest")]
+    public string? ResolvedImageDigest { get; set; }
+
     /// <summary>
     /// Gets or sets the sandbox ID.
     /// </summary>
@@ -1000,6 +1004,10 @@ public class SandboxLifecycle
 /// </summary>
 public class CreateSandboxResponse
 {
+    /// <summary>Runtime-recorded registry digest, when available.</summary>
+    [JsonPropertyName("resolvedImageDigest")]
+    public string? ResolvedImageDigest { get; set; }
+
     /// <summary>
     /// Gets or sets the sandbox ID.
     /// </summary>

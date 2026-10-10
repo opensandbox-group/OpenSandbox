@@ -1287,6 +1287,9 @@ components:
           type: string
           description: Unique sandbox identifier
 
+        resolvedImageDigest:
+          $ref: '#/components/schemas/ResolvedImageDigest'
+
         status:
           $ref: '#/components/schemas/SandboxStatus'
           description: Current lifecycle status and detailed state information
@@ -1424,6 +1427,9 @@ components:
           type: string
           description: Unique sandbox identifier
 
+        resolvedImageDigest:
+          $ref: '#/components/schemas/ResolvedImageDigest'
+
         image:
           $ref: '#/components/schemas/ImageSpec'
           description: |
@@ -1560,6 +1566,19 @@ components:
           description: Timestamp of the last state transition
 
       required: [state]
+    ResolvedImageDigest:
+      type: [string, 'null']
+      readOnly: true
+      pattern: '^sha256:[0-9a-f]{64}$'
+      description: |
+        Registry artifact digest independently observed from runtime metadata for
+        the primary sandbox container, distinct from the existing image reference
+        and from image/config IDs. May identify a multi-platform index or a
+        platform manifest; platform-manifest identity is not guaranteed.
+        Optional: absent or null when unavailable, ambiguous, or unsupported,
+        including Pool and snapshot-backed sandboxes. May become available after
+        creation. Does not attest to current filesystem contents or provide fencing.
+
     ImageSpec:
       type: object
       required: [uri]

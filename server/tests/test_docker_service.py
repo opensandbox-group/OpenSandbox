@@ -164,6 +164,8 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
     }
     mock_client.api.create_container.return_value = {"Id": "cid"}
     mock_client.containers.get.return_value = MagicMock()
+    digest = "sha256:" + "a" * 64
+    mock_client.containers.get.return_value.image.attrs = {"RepoDigests": ["python@" + digest]}
     mock_docker.from_env.return_value = mock_client
 
     service = DockerSandboxService(config=_app_config())
@@ -187,7 +189,9 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
             },
         ),
     ):
-        await service.create_sandbox(request)
+        response = await service.create_sandbox(request)
+
+    assert response.resolved_image_digest == digest
 
     host_config = mock_client.api.create_container.call_args.kwargs["host_config"]
     assert "no-new-privileges=true" in host_config.get("security_opt", [])
@@ -4745,7 +4749,10 @@ def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
     test_list_sandboxes_skips_concurrently_deleted_sandbox)."""
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
-    _wire_list_mocks(mock_client, [_mock_container("sbx-1", entrypoint=["python", "app.py"])])
+    container = _mock_container("sbx-1", entrypoint=["python", "app.py"])
+    digest = "sha256:" + "a" * 64
+    container.image.attrs = {"RepoDigests": ["python@" + digest]}
+    _wire_list_mocks(mock_client, [container])
     mock_docker.from_env.return_value = mock_client
 
     service = DockerSandboxService(config=_app_config())
@@ -4766,6 +4773,9 @@ def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
     assert item.entrypoint == ["python", "app.py"]
     assert item.image is not None
     assert item.image.uri == "python:3.11"
+    assert item.resolved_image_digest == digest
+    mock_client.containers.list.return_value = [container]
+    assert service.get_sandbox("sbx-1").resolved_image_digest == digest
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")

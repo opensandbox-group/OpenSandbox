@@ -392,6 +392,9 @@ internal sealed class SandboxesAdapter : ISandboxes
 
         return new SandboxInfo
         {
+            ResolvedImageDigest = element.TryGetProperty("resolvedImageDigest", out var digest) && digest.ValueKind != JsonValueKind.Null
+                ? digest.GetString()
+                : null,
             Id = element.GetProperty("id").GetString() ?? throw new SandboxApiException("Missing id in response"),
             Image = element.TryGetProperty("image", out var image) && image.ValueKind == JsonValueKind.Object
                 ? new ImageSpec
@@ -438,6 +441,9 @@ internal sealed class SandboxesAdapter : ISandboxes
 
         return new CreateSandboxResponse
         {
+            ResolvedImageDigest = element.TryGetProperty("resolvedImageDigest", out var digest) && digest.ValueKind != JsonValueKind.Null
+                ? digest.GetString()
+                : null,
             Id = element.GetProperty("id").GetString() ?? throw new SandboxApiException("Missing id in response"),
             Status = new SandboxStatus
             {

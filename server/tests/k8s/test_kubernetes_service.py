@@ -127,8 +127,14 @@ class TestKubernetesSandboxServiceCreate:
         }
         k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.5:8080"
         k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
-        
-        response = await k8s_service.create_sandbox(create_sandbox_request)
+
+        digest = "sha256:" + "a" * 64
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.workload_image_digest",
+            return_value=digest,
+        ):
+            response = await k8s_service.create_sandbox(create_sandbox_request)
+        assert response.resolved_image_digest == digest
         
         assert response.id is not None
         assert response.status.state == "Running"

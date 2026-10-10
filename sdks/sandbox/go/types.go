@@ -231,6 +231,8 @@ type SandboxInfo struct {
 	CreatedAt  time.Time          `json:"createdAt"`
 	Platform   *PlatformSpec      `json:"platform,omitempty"`
 	Allocation *AllocationSummary `json:"allocation,omitempty"`
+	// ResolvedImageDigest is the runtime-recorded registry digest (index or manifest), when available.
+	ResolvedImageDigest string `json:"resolvedImageDigest,omitempty"`
 }
 
 type SnapshotState string

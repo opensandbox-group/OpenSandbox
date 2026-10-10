@@ -709,6 +709,9 @@ class SandboxInfo(BaseModel):
     """
 
     id: str = Field(description="Unique identifier of the sandbox")
+    resolved_image_digest: str | None = Field(
+        default=None, description="Runtime-recorded registry digest; may identify an index or manifest."
+    )
     status: SandboxStatus = Field(description="Current status of the sandbox")
     entrypoint: list[str] = Field(
         description="Command line arguments used to start the sandbox"
@@ -748,6 +751,9 @@ class SandboxCreateResponse(BaseModel):
     """
 
     id: str = Field(description="Unique identifier of the newly created sandbox")
+    resolved_image_digest: str | None = Field(
+        default=None, description="Runtime-recorded registry digest, when available."
+    )
     platform: PlatformSpec | None = Field(
         default=None, description="Effective platform used for sandbox provisioning."
     )

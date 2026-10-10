@@ -976,6 +976,7 @@ export interface components {
         CreateSandboxResponse: {
             /** @description Unique sandbox identifier */
             id: string;
+            resolvedImageDigest?: components["schemas"]["ResolvedImageDigest"];
             /** @description Current lifecycle status and detailed state information */
             status: components["schemas"]["SandboxStatus"];
             /** @description Custom metadata from creation request */
@@ -1063,6 +1064,7 @@ export interface components {
         Sandbox: {
             /** @description Unique sandbox identifier */
             id: string;
+            resolvedImageDigest?: components["schemas"]["ResolvedImageDigest"];
             /**
              * @description Container image specification used to provision this sandbox.
              *     Present when the sandbox was created directly from a container image.
@@ -1173,6 +1175,16 @@ export interface components {
              */
             lastTransitionAt?: string;
         };
+        /**
+         * @description Registry artifact digest independently observed from runtime metadata for
+         *     the primary sandbox container, distinct from the existing image reference
+         *     and from image/config IDs. May identify a multi-platform index or a
+         *     platform manifest; platform-manifest identity is not guaranteed.
+         *     Optional: absent or null when unavailable, ambiguous, or unsupported,
+         *     including Pool and snapshot-backed sandboxes. May become available after
+         *     creation. Does not attest to current filesystem contents or provide fencing.
+         */
+        ResolvedImageDigest: string | null;
         /**
          * @description Container image specification for sandbox provisioning.
          *

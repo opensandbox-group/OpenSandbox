@@ -231,6 +231,7 @@ export default defineConfig({
               link: "/guides/egress-sse-truncation",
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
+            { text: "Resolved Image Identity", link: "/guides/image-identity" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             {
               text: "Node Agent Configuration",

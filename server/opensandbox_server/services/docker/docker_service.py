@@ -70,6 +70,7 @@ from opensandbox_server.services.docker.networking import (
 )
 from opensandbox_server.services.docker.container_ops import DockerContainerOpsMixin
 from opensandbox_server.services.docker.metadata import DockerMetadataStore
+from opensandbox_server.services.image_identity import docker_image_digest
 from opensandbox_server.services.docker.port_allocator import (
     MAX_PORT_PUBLISH_ATTEMPTS,
     allocate_port_bindings,
@@ -590,6 +591,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         return Sandbox(
             id=resolved_id,
             image=image_spec,
+            resolved_image_digest=None if snapshot_id else docker_image_digest(container),
             snapshotId=snapshot_id,
             platform=platform_spec,
             status=status_info,
@@ -1016,6 +1018,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         effective_platform = self._resolve_platform_for_container(created_container, labels)
         return CreateSandboxResponse(
             id=sandbox_id,
+            resolved_image_digest=None if request.snapshot_id else docker_image_digest(created_container),
             status=status_info,
             metadata=request.metadata,
             extensions=extract_extensions_from_mapping(labels),

@@ -50,6 +50,14 @@ class Sandbox:
             from the creation request. For snapshot-created sandboxes, this is restored
             from the snapshot.
         created_at (datetime.datetime): Sandbox creation timestamp
+        resolved_image_digest (None | str | Unset): Registry artifact digest independently observed from runtime
+            metadata for
+            the primary sandbox container, distinct from the existing image reference
+            and from image/config IDs. May identify a multi-platform index or a
+            platform manifest; platform-manifest identity is not guaranteed.
+            Optional: absent or null when unavailable, ambiguous, or unsupported,
+            including Pool and snapshot-backed sandboxes. May become available after
+            creation. Does not attest to current filesystem contents or provide fencing.
         image (ImageSpec | Unset): Container image specification for sandbox provisioning.
 
             Supports public registry images and private registry images with authentication.
@@ -79,6 +87,7 @@ class Sandbox:
     status: SandboxStatus
     entrypoint: list[str]
     created_at: datetime.datetime
+    resolved_image_digest: None | str | Unset = UNSET
     image: ImageSpec | Unset = UNSET
     snapshot_id: str | Unset = UNSET
     platform: PlatformSpec | Unset = UNSET
@@ -96,6 +105,12 @@ class Sandbox:
         entrypoint = self.entrypoint
 
         created_at = self.created_at.isoformat()
+
+        resolved_image_digest: None | str | Unset
+        if isinstance(self.resolved_image_digest, Unset):
+            resolved_image_digest = UNSET
+        else:
+            resolved_image_digest = self.resolved_image_digest
 
         image: dict[str, Any] | Unset = UNSET
         if not isinstance(self.image, Unset):
@@ -133,6 +148,8 @@ class Sandbox:
                 "createdAt": created_at,
             }
         )
+        if resolved_image_digest is not UNSET:
+            field_dict["resolvedImageDigest"] = resolved_image_digest
         if image is not UNSET:
             field_dict["image"] = image
         if snapshot_id is not UNSET:
@@ -167,6 +184,15 @@ class Sandbox:
         entrypoint = cast(list[str], d.pop("entrypoint"))
 
         created_at = isoparse(d.pop("createdAt"))
+
+        def _parse_resolved_image_digest(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        resolved_image_digest = _parse_resolved_image_digest(d.pop("resolvedImageDigest", UNSET))
 
         _image = d.pop("image", UNSET)
         image: ImageSpec | Unset
@@ -217,6 +243,7 @@ class Sandbox:
             status=status,
             entrypoint=entrypoint,
             created_at=created_at,
+            resolved_image_digest=resolved_image_digest,
             image=image,
             snapshot_id=snapshot_id,
             platform=platform,

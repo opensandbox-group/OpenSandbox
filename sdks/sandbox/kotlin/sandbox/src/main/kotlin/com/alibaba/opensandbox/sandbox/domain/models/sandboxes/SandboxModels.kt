@@ -730,6 +730,10 @@ class SandboxInfo(
     val extensions: Map<String, String>? = null,
     val allocation: SandboxAllocation? = null,
 ) {
+    /** Runtime-recorded registry digest; may identify an index or manifest. */
+    var resolvedImageDigest: String? = null
+        internal set
+
     constructor(
         id: String,
         status: SandboxStatus,
@@ -795,7 +799,11 @@ class SandboxCreateResponse(
     val id: String,
     val platform: PlatformSpec? = null,
     val extensions: Map<String, String>? = null,
-)
+) {
+    /** Runtime-recorded registry digest, when available. */
+    var resolvedImageDigest: String? = null
+        internal set
+}
 
 /**
  * Lifecycle state of a snapshot.

@@ -664,6 +664,9 @@ class CreateSandboxResponse(BaseModel):
     Contains essential information without image and updatedAt.
     """
     id: str = Field(..., description="Unique sandbox identifier")
+    resolved_image_digest: Optional[str] = Field(
+        None, alias="resolvedImageDigest", description="Runtime-recorded registry digest; may identify an index or manifest."
+    )
     status: SandboxStatus = Field(..., description="Current lifecycle status and detailed state information")
     metadata: Optional[Dict[str, str]] = Field(None, description="Custom metadata from creation request")
     extensions: Optional[Dict[str, str]] = Field(
@@ -707,6 +710,9 @@ class Sandbox(BaseModel):
     This is the complete representation of the sandbox resource.
     """
     id: str = Field(..., description="Unique sandbox identifier")
+    resolved_image_digest: Optional[str] = Field(
+        None, alias="resolvedImageDigest", description="Runtime-recorded registry digest; may identify an index or manifest."
+    )
     image: Optional[ImageSpec] = Field(None, description="Container image specification used to provision this sandbox")
     snapshot_id: Optional[str] = Field(
         None,

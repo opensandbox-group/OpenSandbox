@@ -47,6 +47,14 @@ class CreateSandboxResponse:
         entrypoint (list[str]): Entry process specification for the sandbox. For image-created sandboxes,
             this is copied from the creation request. For snapshot-created sandboxes,
             this is restored from the snapshot.
+        resolved_image_digest (None | str | Unset): Registry artifact digest independently observed from runtime
+            metadata for
+            the primary sandbox container, distinct from the existing image reference
+            and from image/config IDs. May identify a multi-platform index or a
+            platform manifest; platform-manifest identity is not guaranteed.
+            Optional: absent or null when unavailable, ambiguous, or unsupported,
+            including Pool and snapshot-backed sandboxes. May become available after
+            creation. Does not attest to current filesystem contents or provide fencing.
         metadata (CreateSandboxResponseMetadata | Unset): Custom metadata from creation request
         extensions (CreateSandboxResponseExtensions | Unset): Opaque extension data restored from provider-specific
             storage
@@ -70,6 +78,7 @@ class CreateSandboxResponse:
     status: SandboxStatus
     created_at: datetime.datetime
     entrypoint: list[str]
+    resolved_image_digest: None | str | Unset = UNSET
     metadata: CreateSandboxResponseMetadata | Unset = UNSET
     extensions: CreateSandboxResponseExtensions | Unset = UNSET
     platform: PlatformSpec | Unset = UNSET
@@ -84,6 +93,12 @@ class CreateSandboxResponse:
         created_at = self.created_at.isoformat()
 
         entrypoint = self.entrypoint
+
+        resolved_image_digest: None | str | Unset
+        if isinstance(self.resolved_image_digest, Unset):
+            resolved_image_digest = UNSET
+        else:
+            resolved_image_digest = self.resolved_image_digest
 
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
@@ -111,6 +126,8 @@ class CreateSandboxResponse:
                 "entrypoint": entrypoint,
             }
         )
+        if resolved_image_digest is not UNSET:
+            field_dict["resolvedImageDigest"] = resolved_image_digest
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
         if extensions is not UNSET:
@@ -137,6 +154,15 @@ class CreateSandboxResponse:
         created_at = isoparse(d.pop("createdAt"))
 
         entrypoint = cast(list[str], d.pop("entrypoint"))
+
+        def _parse_resolved_image_digest(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        resolved_image_digest = _parse_resolved_image_digest(d.pop("resolvedImageDigest", UNSET))
 
         _metadata = d.pop("metadata", UNSET)
         metadata: CreateSandboxResponseMetadata | Unset
@@ -171,6 +197,7 @@ class CreateSandboxResponse:
             status=status,
             created_at=created_at,
             entrypoint=entrypoint,
+            resolved_image_digest=resolved_image_digest,
             metadata=metadata,
             extensions=extensions,
             platform=platform,

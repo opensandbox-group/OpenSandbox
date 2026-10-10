@@ -524,6 +524,10 @@ class SandboxModelConverter:
 
         return SandboxCreateResponse(
             id=str(api_response.id),
+            resolved_image_digest=(
+                None if isinstance(getattr(api_response, "resolved_image_digest", None), Unset)
+                else getattr(api_response, "resolved_image_digest", None)
+            ),
             platform=platform,
             extensions=SandboxModelConverter._additional_properties_to_dict(
                 getattr(api_response, "extensions", None)
@@ -597,6 +601,10 @@ class SandboxModelConverter:
 
         return SandboxInfo(
             id=api_sandbox.id,
+            resolved_image_digest=(
+                None if isinstance(getattr(api_sandbox, "resolved_image_digest", None), Unset)
+                else getattr(api_sandbox, "resolved_image_digest", None)
+            ),
             status=SandboxModelConverter._convert_sandbox_status(api_sandbox.status),
             image=domain_image_spec,
             snapshot_id=(

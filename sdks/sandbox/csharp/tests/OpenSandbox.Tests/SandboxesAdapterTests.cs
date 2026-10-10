@@ -26,6 +26,24 @@ namespace OpenSandbox.Tests;
 
 public class SandboxesAdapterTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public async Task GetSandboxAsync_ShouldPreserveOptionalResolvedImageDigest(string? digest)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            id = "sbx-1", resolvedImageDigest = digest,
+            image = new { uri = "python:3.11" },
+            status = new { state = "Running" },
+            entrypoint = new[] { "python" }, createdAt = "2026-10-09T00:00:00Z"
+        });
+        var adapter = CreateAdapterWithJsonResponse(payload);
+        var info = await adapter.GetSandboxAsync("sbx-1");
+        info.ResolvedImageDigest.Should().Be(digest);
+        info.Image!.Uri.Should().Be("python:3.11");
+    }
+
     [Fact]
     public async Task GetSandboxEndpointAsync_ShouldIncludeUseServerProxyQueryParam()
     {
@@ -81,6 +99,7 @@ public class SandboxesAdapterTests
 
         sandbox.ExpiresAt.Should().BeNull();
         sandbox.Allocation.Should().BeNull();
+        sandbox.ResolvedImageDigest.Should().BeNull();
         sandbox.Platform.Should().NotBeNull();
         sandbox.Platform!.Arch.Should().Be("amd64");
         sandbox.Extensions.Should().ContainKey("opensandbox.extensions.custom-label")
@@ -171,6 +190,7 @@ public class SandboxesAdapterTests
         var payload = """
         {
           "id": "sbx-2",
+          "resolvedImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "status": { "state": "Pending" },
           "platform": { "os": "linux", "arch": "arm64" },
           "extensions": { "opensandbox.extensions.custom-label": "中文数据" },
@@ -188,6 +208,7 @@ public class SandboxesAdapterTests
         });
 
         response.ExpiresAt.Should().BeNull();
+        response.ResolvedImageDigest.Should().Be("sha256:" + new string('a', 64));
         response.Platform.Should().NotBeNull();
         response.Platform!.Arch.Should().Be("arm64");
         response.Extensions.Should().ContainKey("opensandbox.extensions.custom-label")

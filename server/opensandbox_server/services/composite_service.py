@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -68,9 +69,14 @@ class CompositeSandboxService(SandboxService, ExtensionService):
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
-            objects = self._kubernetes.list_sandbox_objects() + self._fsb.list_sandbox_objects()
+            workloads_by_id: dict[str, Any] = {}
+            objects = self._kubernetes.list_sandbox_objects(
+                workloads_by_id=workloads_by_id
+            ) + self._fsb.list_sandbox_objects()
             objects.sort(key=lambda sandbox: sandbox.id)
-            return _build_list_sandboxes_response(objects, request)
+            response = _build_list_sandboxes_response(objects, request)
+            self._kubernetes.resolve_list_image_digests(response.items, workloads_by_id)
+            return response
         except HTTPException:
             raise
         except Exception as exc:

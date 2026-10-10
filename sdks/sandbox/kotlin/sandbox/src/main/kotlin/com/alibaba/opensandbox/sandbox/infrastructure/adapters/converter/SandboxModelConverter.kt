@@ -360,7 +360,7 @@ internal object SandboxModelConverter {
                 },
             metadata = metadata,
             extensions = extensions,
-        )
+        ).also { it.resolvedImageDigest = this.resolvedImageDigest }
     }
 
     /**
@@ -410,7 +410,7 @@ internal object SandboxModelConverter {
             id = this.id,
             platform = this.platform?.toDomainPlatformSpec(),
             extensions = this.extensions,
-        )
+        ).also { it.resolvedImageDigest = this.resolvedImageDigest }
     }
 
     fun ApiPaginationInfo.toPaginationInfo(): PaginationInfo {
