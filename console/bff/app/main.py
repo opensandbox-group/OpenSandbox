@@ -1,0 +1,80 @@
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import get_settings
+from app.lifecycle import LifecycleClient, bind_http_client
+from app.routes import admin, auth, pools, sandboxes, snapshots
+
+
+def _validate_config() -> None:
+    settings = get_settings()
+    if not settings.tenants_toml_path:
+        raise RuntimeError("TENANTS_TOML_PATH is required")
+    if not settings.bff_session_secret or not settings.bff_admin_token:
+        raise RuntimeError("BFF_SESSION_SECRET and BFF_ADMIN_TOKEN are required")
+    # Reject wildcard CORS before the process serves credentialed cookies.
+    _ = settings.cors_origins_list
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _validate_config()
+    settings = get_settings()
+    client = httpx.AsyncClient(timeout=settings.bff_http_timeout_seconds)
+    bind_http_client(client)
+    try:
+        yield
+    finally:
+        bind_http_client(None)
+        await client.aclose()
+
+
+app = FastAPI(title="OpenSandbox Console BFF", version="0.1.0", lifespan=lifespan)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/api/version")
+async def version() -> dict:
+    client = LifecycleClient(get_settings())
+    return await client.get_version()
+
+
+settings = get_settings()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+api = FastAPI()
+api.include_router(auth.router)
+api.include_router(sandboxes.router)
+api.include_router(snapshots.router)
+api.include_router(pools.router)
+api.include_router(admin.router)
+app.mount("/api", api)

@@ -1,0 +1,5 @@
+.venv/
+.env
+tenants.local.toml
+__pycache__/
+*.pyc

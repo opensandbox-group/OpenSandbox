@@ -207,6 +207,7 @@ export default defineConfig({
           text: "Guides",
           items: [
             { text: "Overview", link: "/guides/" },
+            { text: "Developer Console", link: "/guides/developer-console" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
             {
               text: "Chained Upstream Proxy",
