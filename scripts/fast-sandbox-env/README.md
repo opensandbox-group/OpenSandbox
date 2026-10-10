@@ -14,13 +14,19 @@ janitor, node installer, runtime-agent + DART), `server` and
 `ingress-gateway`. The only env-owned manifests left are the kind cluster
 config and the SandboxPool resource.
 
-The last `up` stage creates one sandbox through the server API, reaches
-the in-sandbox execd `/ping` through the signed gateway route, and deletes
-it again. The environment is all-or-nothing: running fast-sandbox without
-the OpenSandbox layers is not a supported shape of this script.
+The last `up` stages drive the server through the opensandbox CLI (`osb`,
+installed fresh from PyPI into the workspace unless `OSB_BIN` is set):
+create a sandbox from the golden-image template, reach the in-sandbox
+execd `/ping` through the signed gateway route, and delete it again. Raw
+HTTP calls remain only where the CLI has no equivalent (networkpolicy
+replace, metadata merge-patch, snapshot re-entry fence). The environment
+is all-or-nothing: running fast-sandbox without the OpenSandbox layers is
+not a supported shape of this script.
 
 Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25,
 cgroup v2, and `sudo` for the XFS StateRoot loop mount and sysctl bump.
+Python 3 ≥ 3.10 is needed to install the CLI (or set `OSB_BIN` to a
+preinstalled `osb` binary).
 Full operational notes (topology, latency characteristics, production
 caveats): `fast-sandbox/docs/guides/firecracker-integration-env.md`.
 
@@ -37,6 +43,8 @@ caveats): `fast-sandbox/docs/guides/firecracker-integration-env.md`.
 After `up`, point any OpenSandbox SDK at `http://127.0.0.1:18080` with the
 `OPEN-SANDBOX-API-KEY: fast-sandbox-env` header; sandbox endpoints are
 signed `f1.*` header routes served by the gateway at `http://127.0.0.1:18081`.
+The installed CLI works against the same stack, e.g.
+`OPEN_SANDBOX_DOMAIN=127.0.0.1:18080 OPEN_SANDBOX_API_KEY=fast-sandbox-env osb sandbox list`.
 
 The `up` verify stages are also available as Python SDK e2e tests
 (template create → gateway ping → networkpolicy convergence, lifecycle
@@ -168,3 +176,4 @@ Before upgrading an existing environment, run `down` with the previous script.
 | `RUSTFS_AK` / `RUSTFS_SK` | `integration-env` / `integration-env-secret` | local S3 credentials |
 | `RUSTFS_ENDPOINT` | auto-discovered kind-network IP on port `9000` | endpoint used by the fast-sandbox and OpenSandbox components |
 | `XFS_STATEROOT` / `XFS_SIZE` | `1` / `24G` | reflink StateRoot on/off, virtual size |
+| `OSB_PACKAGE` / `OSB_BIN` | `opensandbox-cli` / — | opensandbox CLI for the verify stages: latest from PyPI into the workspace venv, or a preinstalled `osb` binary |

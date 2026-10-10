@@ -25,8 +25,9 @@
 # SandboxPool with the OpenSandbox egress sidecar attached through the
 # Sandbox Actions channel → the source-built OpenSandbox lifecycle server
 # (fsb runtime) and ingress gateway via charts/server and
-# charts/ingress-gateway → an end-to-end verify (create through the server
-# API, execd /ping through the signed gateway route, delete); then
+# charts/ingress-gateway → an end-to-end verify (create through the
+# published opensandbox CLI against the lifecycle server, execd /ping
+# through the signed gateway route, delete); then
 # pause/resume (checkpoint to the artifact store, capacity released,
 # resume) and a public-snapshot verify (snapshot a Running sandbox, watch
 # it to Ready, restore a NEW sandbox from the snapshotId and boot it).
@@ -37,6 +38,15 @@
 # state, and re-runs keep the idempotent apply semantics. The only
 # env-owned manifests left are the kind cluster config and the SandboxPool
 # resource.
+#
+# The verify stages (template build, sandbox create/get/kill, pause/resume,
+# snapshot create/get/list/delete, renew) drive the lifecycle server through
+# the published opensandbox CLI ("osb"): the latest OSB_PACKAGE is installed
+# from PyPI into $WORK/tools/osb-venv on every up (or OSB_BIN points at an
+# existing binary). Raw curl stays only where the CLI has no equivalent:
+# the networkpolicy replace PUT, the metadata merge-patch, the snapshot
+# re-entry HTTP-code fence, the gateway /ping probes, and kubectl-side CR
+# introspection.
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up       # full environment + pool + server/ingress + verify
@@ -62,6 +72,9 @@
 #   POOL_MIN / POOL_MAX  pool capacity           (default 2/2; auto 1/1 when KIND_SINGLE=1)
 #   MAX_SANDBOXES_PER_POD per-fastlet sandbox capacity (default 8)
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
+#   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (default
+#                        opensandbox-cli, latest from PyPI; OSB_BIN uses a
+#                        preinstalled osb binary as-is)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
@@ -189,6 +202,13 @@ SKIP_LEFTOVER_CLEAN="${SKIP_LEFTOVER_CLEAN:-0}"
 KIND_VERSION="${KIND_VERSION:-v0.24.0}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.31.0}"
 HELM_VERSION="${HELM_VERSION:-v3.16.4}"
+
+# The verify stages drive the lifecycle server through the published
+# opensandbox CLI ("osb"): OSB_BIN uses an existing binary; otherwise the
+# latest OSB_PACKAGE release is installed from PyPI into a dedicated venv.
+OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
+OSB_BIN="${OSB_BIN:-}"
+OSB_VENV="$WORK/tools/osb-venv"
 
 # Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
 FSB_GOPROXY="${FSB_GOPROXY:-direct}"
@@ -408,6 +428,33 @@ ensure_tool() { # name
 			;;
 	esac
 	command -v "$name" >/dev/null 2>&1 || die "$name installation failed"
+}
+
+ensure_osb() {
+	if [[ -n "$OSB_BIN" ]]; then
+		[[ -x "$OSB_BIN" ]] || die "OSB_BIN=$OSB_BIN is not executable"
+		log "using osb from OSB_BIN: $OSB_BIN"
+	else
+		if [[ "$SKIP_TOOL_INSTALL" == 1 ]] && [[ ! -x "$OSB_VENV/bin/osb" ]]; then
+			die "osb is required (SKIP_TOOL_INSTALL=1: install opensandbox-cli manually or set OSB_BIN)"
+		fi
+		command -v python3 >/dev/null 2>&1 \
+			|| die "python3 (>=3.10) is required to install the opensandbox CLI (or set OSB_BIN)"
+		if [[ ! -x "$OSB_VENV/bin/pip" ]]; then
+			log "creating the osb venv at $OSB_VENV"
+			rm -rf "$OSB_VENV.tmp"
+			python3 -m venv "$OSB_VENV.tmp" \
+				|| die "python3 -m venv failed (python3-venv missing? install it or set OSB_BIN)"
+			rm -rf "$OSB_VENV"
+			mv "$OSB_VENV.tmp" "$OSB_VENV"
+		fi
+		log "installing the latest $OSB_PACKAGE into $OSB_VENV"
+		"$OSB_VENV/bin/pip" install --quiet --disable-pip-version-check --upgrade "$OSB_PACKAGE" \
+			|| die "pip install --upgrade $OSB_PACKAGE failed (PyPI unreachable? fix the index or set OSB_BIN)"
+		OSB_BIN="$OSB_VENV/bin/osb"
+	fi
+	log "osb version: $("$OSB_BIN" --version 2>/dev/null | tail -n1 || echo unknown)"
+	pass "opensandbox CLI ready ($OSB_BIN)"
 }
 
 host_port_busy() { # port -> 0 when something already listens on 127.0.0.1:<port>
@@ -1033,7 +1080,7 @@ runtime_up() {
 	pass "firecracker-runtime healthy + DART roster=$expected_members + nodes FirecrackerReady"
 }
 
-# --- stage (server-driven): SandboxTemplate golden image -----------------------
+# --- stage (opensandbox CLI): SandboxTemplate golden image ---------------------
 
 wait_succeeded() { # description attempts probe probe_failed
 	local description="$1" attempts="$2" probe="$3" probe_failed="$4" attempt=0
@@ -1052,14 +1099,15 @@ wait_succeeded() { # description attempts probe probe_failed
 	pass "$description"
 }
 
-# The template build is driven through the OpenSandbox server's /templates
-# API: the server persists the catalog row and projects it onto
-# a SandboxTemplate CRD in $NS. The build itself still runs in fast-sandbox
-# (controller -> builder Pod), so the builder image must be in the cluster.
+# The template build is driven through the opensandbox CLI (the server
+# /templates API behind it): the server persists the catalog row and
+# projects it onto a SandboxTemplate CRD in $NS. The build itself still
+# runs in fast-sandbox (controller -> builder Pod), so the builder image
+# must be in the cluster.
 TEMPLATE_ID=""
 
 _template_phase() {
-	server_api GET "/templates/$TEMPLATE_ID" 2>/dev/null | jq -r '.status.phase // empty'
+	osb_api template get "$TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'
 }
 
 template_succeeded() {
@@ -1070,7 +1118,7 @@ template_failed() {
 	local phase message
 	phase="$(_template_phase)"
 	[[ "$phase" == "Failed" ]] || return 1
-	message="$(server_api GET "/templates/$TEMPLATE_ID" 2>/dev/null | jq -r '.status.message // empty')"
+	message="$(osb_api template get "$TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.message // empty')"
 	log "template Failed: ${message:-<no message>}"
 	return 0
 }
@@ -1082,30 +1130,29 @@ template_up() {
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
-	local body created
-	body="$(jq -n --arg image "$SBX_IMAGE" --arg publish "s3://$RUSTFS_BUCKET/publish" '{
-		image: $image,
-		publish: $publish,
-		format: "native",
-		resourceLimits: {cpu: "1", memory: "512Mi", disk: "2Gi"},
-		readiness: {warmupSeconds: 15},
-		metadata: {origin: "fast-sandbox-env"}
-	}')"
-	log "verify: creating the golden-image template via the server API (image=$SBX_IMAGE)"
-	created="$(server_api POST /templates "$body" 2>/dev/null)" \
-		|| fail "POST /templates failed against $SERVER_URL: $(curl -sS -m 60 -X POST \
-			-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" -H "Content-Type: application/json" \
-			-d "$body" "$SERVER_URL/templates" 2>&1 | head -c 400)"
-	TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.templateId')"
+	local created
+	local -a tmpl_args=(
+		template create
+		--image "$SBX_IMAGE"
+		--publish "s3://$RUSTFS_BUCKET/publish"
+		--format native
+		--resource cpu=1 --resource memory=512Mi --resource disk=2Gi
+		--warmup-seconds 15
+		--metadata origin=fast-sandbox-env
+	)
+	log "verify: creating the golden-image template via the opensandbox CLI (image=$SBX_IMAGE)"
+	created="$(osb_api "${tmpl_args[@]}" -o json 2>/dev/null)" \
+		|| fail "template create failed against $SERVER_URL: $(osb_api "${tmpl_args[@]}" 2>&1 >/dev/null | head -c 400)"
+	TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
 	printf '%s' "$TEMPLATE_ID" > "$WORK/template-id"
 	[[ -n "$TEMPLATE_ID" && "$TEMPLATE_ID" != "null" ]] || fail "template create response carried no templateId"
 	log "template id=$TEMPLATE_ID"
 	wait_succeeded "template phase=Succeeded" 300 template_succeeded template_failed
 	local manifest_ref
-	manifest_ref="$(server_api GET "/templates/$TEMPLATE_ID" | jq -r '.status.manifestRef // empty')"
+	manifest_ref="$(osb_api template get "$TEMPLATE_ID" -o json | jq -r '.status.manifest_ref // empty')"
 	[[ -n "$manifest_ref" ]] || fail "template manifestRef is empty"
 	log "template manifestRef: $manifest_ref"
-	pass "SandboxTemplate Succeeded + artifacts published (via server API)"
+	pass "SandboxTemplate Succeeded + artifacts published (via opensandbox CLI)"
 }
 
 # --- stage: SandboxPool (egress attached, P2P spread) --------------------------------------------
@@ -1223,7 +1270,7 @@ p2p_evidence() { # description
 	local description="$1"
 	local pods pod manifest_ref manifest_key build_dir expected_blocks=0 stat_json
 	local origin_total=0 peer_total=0 cache_total=0 size source value active_nodes=0 node_total
-	manifest_ref="$(server_api GET "/templates/$TEMPLATE_ID" 2>/dev/null | jq -r '.status.manifestRef // empty')"
+	manifest_ref="$(osb_api template get "$TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')"
 	manifest_key="${manifest_ref#s3://$RUSTFS_BUCKET/}"
 	build_dir="$(dirname "$manifest_key")"
 	local object
@@ -1382,7 +1429,9 @@ opensandbox_up() {
 	pass "server + ingress gateway up (fsb runtime, gateway routes signed with key 'a')"
 }
 
-# server_api wraps the lifecycle API with the configured API key.
+# server_api wraps the lifecycle API with the configured API key. It stays
+# only for the calls the CLI cannot express (networkpolicy replace PUT,
+# metadata merge-patch, snapshot re-entry HTTP-code fence).
 server_api() { # method path [json-body]
 	local method="$1" path="$2" body="${3:-}"
 	if [[ -n "$body" ]]; then
@@ -1391,6 +1440,14 @@ server_api() { # method path [json-body]
 	else
 		curl -fsS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" "$SERVER_URL$path"
 	fi
+}
+
+# osb_api wraps the published opensandbox CLI pointed at the lifecycle
+# server. --no-color keeps -o json output parseable (plain JSON on stdout);
+# global flags precede the subcommand.
+osb_api() {
+	"$OSB_BIN" --no-color --domain "127.0.0.1:$SERVER_HOST_PORT" --protocol http \
+		--api-key "$SERVER_API_KEY" --request-timeout 60 "$@"
 }
 
 # The server assigns the sandbox id (CreateSandboxRequest carries none);
@@ -1405,7 +1462,7 @@ SNAPSHOT_ID2=""
 SNAPSHOT_EXTRA=""
 
 verify_sandbox_gone() {
-	! server_api GET "/sandboxes/$VERIFY_ID" >/dev/null 2>&1
+	! osb_api sandbox get "$VERIFY_ID" -o json >/dev/null 2>&1
 }
 
 verify_policy_enforced() {
@@ -1422,57 +1479,52 @@ verify_policy_updated() {
 	[[ "$(printf '%s' "$out" | jq -r '.policy.egress[0].target // empty')" == "github.com" ]]
 }
 
-# opensandbox_verify drives the full wire-up end to end: server API create
-# (fsb) -> FastPath -> fastlet -> firecracker sandbox (golden image with
-# execd, egress attached) -> signed gateway route -> ingress ResolveEndpoint
-# -> fastlet-proxy -> guest execd /ping -> delete.
-# verify_one_sandbox creates one sandbox through the server API and polls
-# execd /ping through the signed gateway route at 10ms intervals until 200:
+# opensandbox_verify drives the full wire-up end to end: opensandbox CLI
+# create (fsb) -> FastPath -> fastlet -> firecracker sandbox (golden image
+# with execd, egress attached) -> signed gateway route -> ingress
+# ResolveEndpoint -> fastlet-proxy -> guest execd /ping -> delete.
+# verify_one_sandbox creates one sandbox through the opensandbox CLI and
+# polls execd /ping through the signed gateway route until 200 (wall-clock
+# budget; every route poll is a CLI call, ~0.5s of interpreter startup):
 # availability is measured from the client, not from the CR status chain.
 # The CR state is sampled once at ping time to show observation lag.
 verify_one_sandbox() { # <label> <ping-budget-ms>
-	local label="$1" budget="$2" body created t0 t1 t2 route code attempt=0
+	local label="$1" budget="$2" created t0 t1 t2 route code deadline
+	local policy_file="$GEN_DIR/verify-policy.json"
 	t0="$(now_ms)"
 	# Default egress policy on every verify sandbox: the create carries it
 	# into the egress action binding (SET_BINDING -> nft rules in the fastlet
 	# Pod netns), so the policy chain is exercised on every create, not just
 	# the network. /ping itself is inbound through the gateway and unaffected.
-	body="$(jq -n --arg template "$TEMPLATE_ID" '{
-		templateId: $template,
-		timeout: 3600,
-		networkPolicy: {
-			defaultAction: "deny",
-			egress: [
-				{action: "allow", target: "example.com"},
-				{action: "allow", target: "*.opensandbox.ai"}
-			]
-		},
-		metadata: {origin: "fast-sandbox-env-verify"}
-	}')"
-	log "verify ($label): creating a sandbox via the server API (templateId=$TEMPLATE_ID)"
-	created="$(server_api POST /sandboxes "$body" 2>/dev/null)" \
-		|| fail "POST /sandboxes failed against $SERVER_URL: $(curl -sS -m 60 -X POST \
-			-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" -H "Content-Type: application/json" \
-			-d "$body" "$SERVER_URL/sandboxes" 2>&1 | head -c 400)"
+	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "example.com"}, {action: "allow", target: "*.opensandbox.ai"}]}' \
+		> "$policy_file"
+	log "verify ($label): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+		--metadata origin=fast-sandbox-env-verify \
+		--network-policy-file "$policy_file" \
+		--skip-health-check -o json 2>/dev/null)" \
+		|| fail "osb sandbox create failed against $SERVER_URL: $(osb_api sandbox create \
+			--template "$TEMPLATE_ID" --timeout 1h --skip-health-check 2>&1 >/dev/null | head -c 400)"
 	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "create response carried no id"
 	t1="$(now_ms)"
 	# Availability = execd /ping 200 through the signed gateway route
 	# (127.0.0.1:8081 -> ingress -> ResolveEndpoint -> fastlet-proxy -> guest
-	# execd :44772). Poll at 10ms; no waiting on CR status convergence.
+	# execd :44772). The route comes from the CLI; each attempt costs ~0.5s
+	# of interpreter startup, so the budget is wall-clock, not attempt-count.
+	deadline=$(( t1 + budget * 1000000 ))
 	while :; do
-		route="$(server_api GET "/sandboxes/$VERIFY_ID/endpoints/44772" 2>/dev/null \
+		route="$(osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json 2>/dev/null \
 			| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
 		if [[ -n "$route" ]]; then
 			code="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
 				-H "OpenSandbox-Ingress-To: $route" "$GATEWAY_URL/ping" 2>/dev/null || true)"
 			[[ "$code" == "200" ]] && break
 		fi
-		attempt=$((attempt + 1))
-		if (( attempt * 10 >= budget )); then
+		if (( $(now_ms) >= deadline )); then
 			fail "execd /ping did not return 200 within ${budget}ms (last code=${code:-none}, route=${route:-none})"
 		fi
-		sleep 0.01
+		sleep 0.2
 	done
 	t2="$(now_ms)"
 	# The jq filter lives in a variable first: its literal parentheses
@@ -1480,15 +1532,16 @@ verify_one_sandbox() { # <label> <ping-budget-ms>
 	# embedded in a command substitution directly.
 	local state raw raw_filter
 	raw_filter='{rt:.status.runtime.state,dp:.status.dataPlane.state,infra:[.status.infraComponents[]?|{n:.name,s:.state}],bind:[.status.actionBindings[]?|{h:.handler,s:.state}],ready:(.status.conditions[]?|select(.type=="Ready")|.status)}'
-	state="$(server_api GET "/sandboxes/$VERIFY_ID" 2>/dev/null | jq -r '.status.state // empty')"
+	state="$(osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty')"
 	raw="$(kubectl -n "$RESOURCE_NS" get sandbox "$VERIFY_ID" -o json 2>/dev/null | jq -c "$raw_filter")"
 	log "verify ($label): $VERIFY_ID access via ingress gateway: curl -H \"OpenSandbox-Ingress-To: $route\" $GATEWAY_URL/ping"
-	log "verify ($label): $VERIFY_ID create POST $(( (t1 - t0) / 1000000 ))ms, POST->execd /ping 200 $(( (t2 - t1) / 1000000 ))ms (${attempt} polls @10ms), total $(( (t2 - t0) / 1000000 ))ms"
+	log "verify ($label): $VERIFY_ID create $(( (t1 - t0) / 1000000 ))ms, create->execd /ping 200 $(( (t2 - t1) / 1000000 ))ms, total $(( (t2 - t0) / 1000000 ))ms"
 	log "verify ($label): CR at ping: server=$state raw=${raw:-unreachable}"
 	pass "execd /ping 200 through the signed gateway route (44772)"
 	wait_for "egress policy enforcing (networkPolicy -> egress action binding -> nft)" 120 verify_policy_enforced
 	# Exercise the policy UPDATE path: PUT -> UpdateSandbox(ReplaceActionBindings)
-	# -> fastlet re-SET_BINDING -> egress hot-swaps the nft rules.
+	# -> fastlet re-SET_BINDING -> egress hot-swaps the nft rules. Raw PUT:
+	# the CLI only exposes merge-style egress patches.
 	local put_body
 	put_body="$(jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "github.com"}]}')"
 	server_api PUT "/sandboxes/$VERIFY_ID/networkpolicy" "$put_body" >/dev/null \
@@ -1497,62 +1550,55 @@ verify_one_sandbox() { # <label> <ping-budget-ms>
 	# The policy waits burn a few seconds: sample the CR state again to show
 	# whether an early Failed observation converged to Running.
 	local state_final
-	state_final="$(server_api GET "/sandboxes/$VERIFY_ID" 2>/dev/null | jq -r '.status.state // empty')"
+	state_final="$(osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty')"
 	log "verify ($label): $VERIFY_ID CR state final: ${state_final:-unknown}"
 }
 
 # verify_lifecycle_ops exercises the remaining sandbox lifecycle surface
 # against the live stack on one sandbox: get, list, metadata merge-patch
-# (upsert + delete via null), and renew-expiration.
+# (upsert + null-delete; raw API — the CLI has no metadata command), and
+# renew via the CLI (TTL-based, so the assertion is "expiration advanced").
 verify_lifecycle_ops() { # <sandbox-id>
-	local id="$1" out expected_expires new_expires
-	out="$(server_api GET "/sandboxes/$id")" || fail "GET /sandboxes/$id failed"
+	local id="$1" out expected_expires renewed_expires
+	out="$(osb_api sandbox get "$id" -o json 2>/dev/null)" || fail "osb sandbox get $id failed"
 	[[ "$(printf '%s' "$out" | jq -r '.id')" == "$id" ]] || fail "GET returned wrong id: $out"
-	pass "lifecycle: GET /sandboxes/{id}"
+	pass "lifecycle: osb sandbox get"
 
-	# Capture the body: a 503 here carries the backend error code that
-	# names the failing list source.
-	local list_code
-	list_code="$(curl -sS -m 60 -o "$WORK/last-list.json" -w '%{http_code}' \
-		-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
-		"$SERVER_URL/sandboxes?page=1&pageSize=50")"
-	if [[ "$list_code" != "200" ]] || ! jq -e '.items' "$WORK/last-list.json" >/dev/null 2>&1; then
-		fail "GET /sandboxes returned $list_code: $(head -c 400 "$WORK/last-list.json" 2>/dev/null)"
-	fi
+	osb_api sandbox list --page 1 --page-size 50 -o json > "$WORK/last-list.json" 2>"$WORK/last-list.err" \
+		|| fail "osb sandbox list failed: $(head -c 400 "$WORK/last-list.err" 2>/dev/null)"
 	out="$(cat "$WORK/last-list.json")"
 	[[ "$(printf '%s' "$out" | jq -r --arg id "$id" '.items[]?.id | select(. == $id)' | head -1)" == "$id" ]] \
 		|| fail "list does not contain $id: $(printf '%s' "$out" | jq -c '.pagination')"
-	pass "lifecycle: GET /sandboxes (list contains the verify sandbox)"
+	pass "lifecycle: osb sandbox list (contains the verify sandbox)"
 
-	# JSON Merge Patch (RFC 7396): non-null upserts, null deletes.
+	# JSON Merge Patch (RFC 7396): non-null upserts, null deletes. Stays on
+	# the raw API; visibility is checked through the CLI.
 	server_api PATCH "/sandboxes/$id/metadata" '{"env":"verify","stage":"lifecycle-ops"}' >/dev/null \
 		|| fail "PATCH metadata upsert failed"
-	out="$(server_api GET "/sandboxes/$id")"
+	out="$(osb_api sandbox get "$id" -o json 2>/dev/null)"
 	[[ "$(printf '%s' "$out" | jq -r '.metadata.env')" == "verify" \
 		&& "$(printf '%s' "$out" | jq -r '.metadata.stage')" == "lifecycle-ops" ]] \
 		|| fail "metadata upsert not visible: $(printf '%s' "$out" | jq -c '.metadata')"
 	server_api PATCH "/sandboxes/$id/metadata" '{"stage":null}' >/dev/null \
 		|| fail "PATCH metadata delete failed"
-	out="$(server_api GET "/sandboxes/$id")"
+	out="$(osb_api sandbox get "$id" -o json 2>/dev/null)"
 	[[ "$(printf '%s' "$out" | jq -r '.metadata.stage')" == "null" \
 		&& "$(printf '%s' "$out" | jq -r '.metadata.env')" == "verify" ]] \
 		|| fail "metadata delete not visible: $(printf '%s' "$out" | jq -c '.metadata')"
 	pass "lifecycle: PATCH metadata (upsert + null-delete via JSON Merge Patch)"
 
-	# Renew: new expiresAt must be future and later than the current one.
-	# The create used timeout=3600, so now+2h always qualifies.
-	expected_expires="$(server_api GET "/sandboxes/$id" | jq -r '.expiresAt')"
-	new_expires="$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-	if [[ -z "$new_expires" ]]; then
-		# BSD date fallback (dev hosts running macOS); GNU is authoritative.
-		new_expires="$(date -u -v+2H +%Y-%m-%dT%H:%M:%SZ)"
-	fi
-	out="$(server_api POST "/sandboxes/$id/renew-expiration" "{\"expiresAt\": \"$new_expires\"}")" \
-		|| fail "renew-expiration failed for $new_expires: $(printf '%s' "$out" | head -c 200)"
-	out="$(server_api GET "/sandboxes/$id")"
-	[[ "$(printf '%s' "$out" | jq -r '.expiresAt')" == "$new_expires" ]] \
-		|| fail "renewed expiresAt not visible: expected $new_expires got $(printf '%s' "$out" | jq -r '.expiresAt')"
-	pass "lifecycle: POST renew-expiration ($expected_expires -> $new_expires)"
+	# Renew through the CLI takes a TTL (not an absolute expiresAt): assert
+	# the expiration advanced and is visible on the next GET.
+	expected_expires="$(osb_api sandbox get "$id" -o json 2>/dev/null | jq -r '.expires_at')"
+	out="$(osb_api sandbox renew "$id" --timeout 2h -o json 2>"$WORK/last-renew.err")" \
+		|| fail "osb sandbox renew failed: $(head -c 400 "$WORK/last-renew.err" 2>/dev/null)"
+	renewed_expires="$(printf '%s' "$out" | jq -r '.expires_at')"
+	[[ -n "$renewed_expires" && "$renewed_expires" != "null" && "$renewed_expires" != "$expected_expires" ]] \
+		|| fail "renewed expiresAt did not advance: $expected_expires -> $renewed_expires"
+	out="$(osb_api sandbox get "$id" -o json 2>/dev/null)"
+	[[ "$(printf '%s' "$out" | jq -r '.expires_at')" == "$renewed_expires" ]] \
+		|| fail "renewed expiresAt not visible: expected $renewed_expires got $(printf '%s' "$out" | jq -r '.expires_at')"
+	pass "lifecycle: osb sandbox renew 2h ($expected_expires -> $renewed_expires)"
 }
 
 opensandbox_verify() {
@@ -1570,12 +1616,12 @@ opensandbox_verify() {
 		verify_one_sandbox "warm #$index" 120000
 		ids+=("$VERIFY_ID")
 	done
-	pass "end-to-end: SDK API -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
+	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
 	verify_lifecycle_ops "${ids[0]}"
 	for id in "${ids[@]}"; do
 		VERIFY_ID="$id"
-		server_api DELETE "/sandboxes/$id" >/dev/null \
-			|| log "verify cleanup: DELETE failed; remove $id manually"
+		osb_api sandbox kill "$id" >/dev/null 2>&1 \
+			|| log "verify cleanup: kill failed; remove $id manually"
 	done
 	for id in "${ids[@]}"; do
 		VERIFY_ID="$id"
@@ -1584,12 +1630,12 @@ opensandbox_verify() {
 	pass "verify sandboxes cleaned up"
 }
 
-# --- stage: pause / resume (server API -> FastPath checkpoint) ------------------
+# --- stage: pause / resume (opensandbox CLI -> FastPath checkpoint) -------------
 
 # Fresh signed route + one GET: doubles as the "runtime actually serving" probe.
 execd_ping_ok() {
 	local route code
-	route="$(server_api GET "/sandboxes/$VERIFY_ID/endpoints/44772" 2>/dev/null \
+	route="$(osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json 2>/dev/null \
 		| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
 	[[ -n "$route" ]] || return 1
 	code="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
@@ -1598,25 +1644,21 @@ execd_ping_ok() {
 }
 
 sandbox_state_is() { # <state>
-	[[ "$(server_api GET "/sandboxes/$VERIFY_ID" 2>/dev/null | jq -r '.status.state // empty')" == "$1" ]]
+	[[ "$(osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty')" == "$1" ]]
 }
 
 sandbox_running() { sandbox_state_is Running; }
 sandbox_paused() { sandbox_state_is Paused; }
 
 pause_resume_verify() {
-	# 202 + poll GET: Paused == checkpoint durable + capacity released;
+	# Accepted + poll: Paused == checkpoint durable + capacity released;
 	# resume advances the route generation, so /ping needs a fresh route.
-	local body created t0 t1 t2 t3
-	body="$(jq -n --arg template "$TEMPLATE_ID" '{
-		templateId: $template,
-		timeout: 3600,
-		metadata: {origin: "fast-sandbox-env-pause"}
-	}')"
-	log "verify (pause): creating a sandbox via the server API (templateId=$TEMPLATE_ID)"
+	local created t0 t1 t2 t3
+	log "verify (pause): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
 	t0="$(now_ms)"
-	created="$(server_api POST /sandboxes "$body" 2>/dev/null)" \
-		|| fail "POST /sandboxes failed against $SERVER_URL"
+	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+		--metadata origin=fast-sandbox-env-pause --skip-health-check -o json 2>/dev/null)" \
+		|| fail "osb sandbox create failed against $SERVER_URL"
 	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "create response carried no id"
 	wait_for "pause target Running" 150 sandbox_running
@@ -1625,9 +1667,9 @@ pause_resume_verify() {
 
 	wait_for "pre-pause execd /ping 200 through the gateway" 100 execd_ping_ok
 
-	log "verify (pause): POST /sandboxes/$VERIFY_ID/pause"
-	server_api POST "/sandboxes/$VERIFY_ID/pause" >/dev/null \
-		|| fail "POST pause failed for $VERIFY_ID"
+	log "verify (pause): osb sandbox pause $VERIFY_ID"
+	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 \
+		|| fail "pause failed for $VERIFY_ID"
 	# Paused is durable-first: the checkpoint must be complete in the artifact
 	# store before the state is reported; the dump itself keeps serving.
 	wait_for "poll GET until Paused (checkpoint durable, capacity released)" 240 sandbox_paused
@@ -1638,34 +1680,34 @@ pause_resume_verify() {
 	fi
 	pass "paused: execd /ping no longer served (runtime released, signed route rejected at the gateway)"
 
-	log "verify (pause): POST /sandboxes/$VERIFY_ID/resume"
+	log "verify (pause): osb sandbox resume $VERIFY_ID"
 	t2="$(now_ms)"
-	server_api POST "/sandboxes/$VERIFY_ID/resume" >/dev/null \
-		|| fail "POST resume failed for $VERIFY_ID"
+	osb_api sandbox resume "$VERIFY_ID" --skip-health-check >/dev/null 2>&1 \
+		|| fail "resume failed for $VERIFY_ID"
 	wait_for "poll GET until Running (checkpoint restored)" 240 sandbox_running
 	t3="$(now_ms)"
-	log "verify (pause): $VERIFY_ID resume POST->Running (checkpoint restored) $(( (t3 - t2) / 1000000 ))ms"
+	log "verify (pause): $VERIFY_ID resume->Running (checkpoint restored) $(( (t3 - t2) / 1000000 ))ms"
 	wait_for "post-resume execd /ping 200 through a fresh route" 100 execd_ping_ok
-	pass "pause/resume round-trip timings: pause->Paused $(( (t2 - t1) / 1000000 ))ms, resume->Running $(( (t3 - t2) / 1000000 ))ms (server API -> FastPath -> artifact store)"
+	pass "pause/resume round-trip timings: pause->Paused $(( (t2 - t1) / 1000000 ))ms, resume->Running $(( (t3 - t2) / 1000000 ))ms (opensandbox CLI -> FastPath -> artifact store)"
 
-	server_api DELETE "/sandboxes/$VERIFY_ID" >/dev/null \
-		|| log "verify cleanup: DELETE failed; remove $VERIFY_ID manually"
+	osb_api sandbox kill "$VERIFY_ID" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill failed; remove $VERIFY_ID manually"
 	wait_for "pause/resume sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: snapshot (server API -> SandboxSnapshot CR -> restore) --------------
+# --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore) ----------
 
 # Ready when the server watcher has converged the snapshot row from the
 # fast-sandbox SandboxSnapshot CR (Succeeded + template index published).
 snapshot_ready() { # <snapshot-id>
-	[[ "$(server_api GET "/snapshots/$1" 2>/dev/null | jq -r '.status.state // empty')" == "Ready" ]]
+	[[ "$(osb_api snapshot get "$1" -o json 2>/dev/null | jq -r '.status.state // empty')" == "Ready" ]]
 }
 
 # Terminal (Ready or Failed): the fastlet pause-window fence resolves an
 # accepted-but-conflicting snapshot one way or the other.
 snapshot_terminal() { # <snapshot-id>
 	local state
-	state="$(server_api GET "/snapshots/$1" 2>/dev/null | jq -r '.status.state // empty')"
+	state="$(osb_api snapshot get "$1" -o json 2>/dev/null | jq -r '.status.state // empty')"
 	[[ "$state" == "Ready" || "$state" == "Failed" ]]
 }
 
@@ -1678,17 +1720,13 @@ snapshot_verify() {
 	# signed gateway route. Also covers: re-entry rejection while the dump
 	# window holds the sandbox, source-sandbox survival across the pause
 	# window, and a second (terminal-fenced) snapshot of the same sandbox.
-	local body created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
+	local created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
 	local t0 t1 t2 t3 t4
-	body="$(jq -n --arg template "$TEMPLATE_ID" '{
-		templateId: $template,
-		timeout: 3600,
-		metadata: {origin: "fast-sandbox-env-snapshot"}
-	}')"
 	t0="$(now_ms)"
-	log "verify (snapshot): creating the source sandbox via the server API (templateId=$TEMPLATE_ID)"
-	created="$(server_api POST /sandboxes "$body" 2>/dev/null)" \
-		|| fail "POST /sandboxes failed against $SERVER_URL"
+	log "verify (snapshot): creating the source sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+		--metadata origin=fast-sandbox-env-snapshot --skip-health-check -o json 2>/dev/null)" \
+		|| fail "osb sandbox create failed against $SERVER_URL"
 	source_id="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
 	VERIFY_ID="$source_id"
@@ -1697,16 +1735,16 @@ snapshot_verify() {
 	t1="$(now_ms)"
 	log "verify (snapshot): source sandbox $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
 
-	# 1. Snapshot create: 202 + Creating; the dump holds the runtime pause
-	# window, artifacts publish after it; the server row converges from the
-	# SandboxSnapshot CR via its watcher.
-	log "verify (snapshot): POST /sandboxes/$source_id/snapshots"
+	# 1. Snapshot create: accepted + Creating; the dump holds the runtime
+	# pause window, artifacts publish after it; the server row converges
+	# from the SandboxSnapshot CR via its watcher.
+	log "verify (snapshot): osb snapshot create $source_id --name env-verify"
 	t1="$(now_ms)"
-	out="$(server_api POST "/sandboxes/$source_id/snapshots" '{"name":"env-verify"}' 2>/dev/null)" \
-		|| fail "POST snapshots failed for $source_id"
+	out="$(osb_api snapshot create "$source_id" --name env-verify -o json 2>/dev/null)" \
+		|| fail "snapshot create failed for $source_id"
 	SNAPSHOT_ID="$(printf '%s' "$out" | jq -r '.id')"
 	[[ -n "$SNAPSHOT_ID" && "$SNAPSHOT_ID" != "null" ]] || fail "snapshot create carried no id"
-	[[ "$(printf '%s' "$out" | jq -r '.status.state')" == "Creating" ]] \
+	[[ "$(printf '%s' "$out" | jq -r '.status')" == "Creating" ]] \
 		|| fail "snapshot create did not return Creating: $(printf '%s' "$out" | head -c 300)"
 
 	# 2. Re-entry: a second snapshot POST while the first holds the dump
@@ -1734,10 +1772,10 @@ snapshot_verify() {
 			;;
 	esac
 
-	wait_for "poll GET /snapshots/$SNAPSHOT_ID until Ready (watcher -> SandboxSnapshot CR -> store index)" 300 snapshot_ready "$SNAPSHOT_ID"
+	wait_for "poll osb snapshot get $SNAPSHOT_ID until Ready (watcher -> SandboxSnapshot CR -> store index)" 300 snapshot_ready "$SNAPSHOT_ID"
 	t2="$(now_ms)"
-	log "verify (snapshot): $SNAPSHOT_ID snapshot POST->Ready $(( (t2 - t1) / 1000000 ))ms"
-	pass "snapshot: POST 202 Creating -> watcher -> Ready"
+	log "verify (snapshot): $SNAPSHOT_ID snapshot create->Ready $(( (t2 - t1) / 1000000 ))ms"
+	pass "snapshot: create -> Creating -> watcher -> Ready"
 
 	# 3. Source survival: the pause window must be released and the sandbox
 	# back to serving after the snapshot reached its terminal phase.
@@ -1752,27 +1790,28 @@ snapshot_verify() {
 	# sandbox through the re-entry fence.
 	if [[ -n "$SNAPSHOT_EXTRA" ]]; then
 		wait_for "re-entry snapshot $SNAPSHOT_EXTRA reaches a terminal phase" 150 snapshot_terminal "$SNAPSHOT_EXTRA"
-		log "verify (snapshot): re-entry snapshot $SNAPSHOT_EXTRA terminal: $(server_api GET "/snapshots/$SNAPSHOT_EXTRA" 2>/dev/null | jq -r '.status.state')"
+		log "verify (snapshot): re-entry snapshot $SNAPSHOT_EXTRA terminal: $(osb_api snapshot get "$SNAPSHOT_EXTRA" -o json 2>/dev/null | jq -r '.status.state')"
 		pass "snapshot: accepted re-entry snapshot resolved to a terminal phase"
 	fi
 
 	# 4. Second snapshot after the first is terminal: a fresh id, fenced in
 	# by re-entry only while non-terminal.
 	t3="$(now_ms)"
-	out="$(server_api POST "/sandboxes/$source_id/snapshots" '{"name":"env-verify-2"}' 2>/dev/null)" \
-		|| fail "second snapshot POST failed for $source_id"
+	out="$(osb_api snapshot create "$source_id" --name env-verify-2 -o json 2>/dev/null)" \
+		|| fail "second snapshot create failed for $source_id"
 	snapshot_id2="$(printf '%s' "$out" | jq -r '.id')"
 	[[ -n "$snapshot_id2" && "$snapshot_id2" != "null" && "$snapshot_id2" != "$SNAPSHOT_ID" ]] \
 		|| fail "second snapshot did not produce a distinct id: $snapshot_id2"
 	SNAPSHOT_ID2="$snapshot_id2"
-	wait_for "poll GET /snapshots/$snapshot_id2 until Ready" 300 snapshot_ready "$snapshot_id2"
+	wait_for "poll osb snapshot get $snapshot_id2 until Ready" 300 snapshot_ready "$snapshot_id2"
 	t4="$(now_ms)"
-	log "verify (snapshot): $snapshot_id2 second snapshot POST->Ready $(( (t4 - t3) / 1000000 ))ms"
+	log "verify (snapshot): $snapshot_id2 second snapshot create->Ready $(( (t4 - t3) / 1000000 ))ms"
 	pass "snapshot: repeated snapshot of the same sandbox -> Ready (distinct id)"
 
 	# 5. Listing: sandboxId scoping returns both required snapshots, both
 	# Ready (an accepted re-entry snapshot may add a third, terminal row).
-	out="$(server_api GET "/snapshots?sandboxId=$source_id&pageSize=50")"
+	out="$(osb_api snapshot list --sandbox-id "$source_id" --page-size 50 -o json 2>"$WORK/last-snapshot-list.err")" \
+		|| fail "snapshot list failed for $source_id: $(head -c 400 "$WORK/last-snapshot-list.err" 2>/dev/null)"
 	[[ "$(printf '%s' "$out" | jq -r --arg id "$SNAPSHOT_ID" --arg id2 "$snapshot_id2" \
 		'[.items[] | select((.id == $id or .id == $id2) and .status.state == "Ready")] | length')" == "2" ]] \
 		|| fail "snapshot list does not contain both required snapshots as Ready: $(printf '%s' "$out" | head -c 400)"
@@ -1785,39 +1824,36 @@ snapshot_verify() {
 
 	# 6. Restore: the snapshot row resolves to the published template index
 	# key (osb-snap-<uuid hex>); the restored sandbox boots that artifact
-	# set. resourceLimits must restate the pool profile (firecracker pool).
-	local restore_body restored
-	restore_body="$(jq -n --arg snapshot "$SNAPSHOT_ID" '{
-		snapshotId: $snapshot,
-		timeout: 3600,
-		resourceLimits: {cpu: "1", memory: "512Mi", pids: "128"}
-	}')"
-	log "verify (snapshot): POST /sandboxes with snapshotId=$SNAPSHOT_ID"
+	# set. The resource flags restate the pool profile (firecracker pool).
+	local restored
+	log "verify (snapshot): osb sandbox create --snapshot-id $SNAPSHOT_ID (pool profile restated)"
 	t3="$(now_ms)"
-	restored="$(server_api POST /sandboxes "$restore_body" 2>/dev/null)" \
-		|| fail "POST /sandboxes (snapshotId=$SNAPSHOT_ID) failed"
+	restored="$(osb_api sandbox create --snapshot-id "$SNAPSHOT_ID" --timeout 1h \
+		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
+		--skip-health-check -o json 2>/dev/null)" \
+		|| fail "osb sandbox create (snapshotId=$SNAPSHOT_ID) failed"
 	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
 	VERIFY_ID="$restore_id"
 	wait_for "restored sandbox Running" 600 sandbox_running
 	t4="$(now_ms)"
 	wait_for "restored execd /ping 200 through the gateway" 300 execd_ping_ok
-	log "verify (snapshot): restored $restore_id POST->Running $(( (t4 - t3) / 1000000 ))ms"
+	log "verify (snapshot): restored $restore_id create->Running $(( (t4 - t3) / 1000000 ))ms"
 	pass "snapshot: restore -> sandbox boots the published artifact set -> execd /ping OK"
 
 	# 7. Cleanup: restored sandbox, source sandbox, then the snapshot rows
 	# (the server forwards artifact deletion through DeleteSandboxSnapshot).
-	server_api DELETE "/sandboxes/$restore_id" >/dev/null \
-		|| log "verify cleanup: DELETE $restore_id failed"
+	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $restore_id failed"
 	wait_for "restored sandbox deleted" 120 verify_sandbox_gone
 	VERIFY_ID="$source_id"
-	server_api DELETE "/sandboxes/$source_id" >/dev/null \
-		|| log "verify cleanup: DELETE $source_id failed"
+	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $source_id failed"
 	wait_for "snapshot source sandbox deleted" 120 verify_sandbox_gone
 	for snapshot_id in "$SNAPSHOT_ID" "$SNAPSHOT_ID2" "$SNAPSHOT_EXTRA"; do
 		[[ -n "$snapshot_id" ]] || continue
-		server_api DELETE "/snapshots/$snapshot_id" >/dev/null \
-			|| log "verify cleanup: DELETE snapshot $snapshot_id failed"
+		osb_api snapshot delete "$snapshot_id" >/dev/null 2>&1 \
+			|| log "verify cleanup: snapshot delete $snapshot_id failed"
 	done
 	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
 }
@@ -1961,8 +1997,10 @@ usage: integration-env.sh [--auto-clean] {up|down|status|pool|sdk-e2e}
            firecracker runtime readiness + DART (P2P), SandboxTemplate golden
            image, firecracker-egress-pool (egress attached), the
            source-built OpenSandbox server + ingress gateway, and
-           end-to-end verifies (create -> gateway route -> execd /ping,
-           plus a pause/resume round-trip through the checkpoint).
+           end-to-end verifies driven by the opensandbox CLI
+           (create -> gateway route -> execd /ping, plus a pause/resume
+           round-trip through the checkpoint). The CLI (osb) is installed
+           fresh from PyPI unless OSB_BIN points at an existing binary.
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / RustFS / OpenSandbox health
   sdk-e2e  run the Python SDK e2e suite (tests/python/tests/test_fsb_e2e.py)
@@ -1981,7 +2019,7 @@ DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
 FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
 when the host cannot reach module VCS hosts directly),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, WARM_IMAGES=1, SBX_IMAGE, EXECD,
-XFS_STATEROOT=0, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1.
+XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1.
 See the header of this script.
 EOF
 	exit 1
@@ -2028,6 +2066,7 @@ case "$ACTION" in
 		fi
 		trap 'on_error up' ERR
 		run_stage "preflight + tooling" preflight
+		run_stage "opensandbox CLI (osb, latest from PyPI)" ensure_osb
 		run_stage "sysctl (fs.inotify)" sysctl_set
 		run_stage "fast-sandbox checkout @ pinned commit" ensure_fsb
 		run_stage "build images (fast-sandbox + OpenSandbox)" build_images
@@ -2040,11 +2079,11 @@ case "$ACTION" in
 		run_stage "credentials (publish/pull)" credentials_up
 		run_stage "firecracker runtime readiness + DART (P2P)" runtime_up
 		run_stage "OpenSandbox server + ingress gateway" opensandbox_up
-		run_stage "SandboxTemplate build (server API)" template_up
+		run_stage "SandboxTemplate build (opensandbox CLI)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
-		run_stage "end-to-end verify (templateId create -> gateway -> execd /ping)" opensandbox_verify
-		run_stage "pause/resume verify (server API -> FastPath checkpoint)" pause_resume_verify
-		run_stage "snapshot verify (server API -> SandboxSnapshot -> restore)" snapshot_verify
+		run_stage "end-to-end verify (CLI create -> gateway -> execd /ping)" opensandbox_verify
+		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
+		run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
 		trap - ERR
 		stage_summary
 		env_summary
