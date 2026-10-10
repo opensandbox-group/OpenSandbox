@@ -41,7 +41,7 @@ function createConfig(useServerProxy, requests, includeExplicitApiKey = false) {
 
   const headers = { "X-Custom-Header": "custom-value" };
   if (includeExplicitApiKey) {
-    headers["open-sandbox-api-key"] = "explicit-secret";
+    headers["OPEN-SANDBOX-API-KEY"] = "explicit-secret";
   }
 
   const config = new ConnectionConfig({
@@ -55,12 +55,16 @@ function createConfig(useServerProxy, requests, includeExplicitApiKey = false) {
   return config;
 }
 
-async function sendDataPlaneRequests(useServerProxy, useEndpointApiKeys = false) {
+async function sendDataPlaneRequests(
+  useServerProxy,
+  useEndpointApiKeys = false,
+  useExplicitConnectionApiKey = false,
+) {
   const requests = [];
   const connectionConfig = createConfig(
     useServerProxy,
     requests,
-    !useServerProxy,
+    !useServerProxy || useExplicitConnectionApiKey,
   );
   const factory = new DefaultAdapterFactory();
   const execd = factory.createExecdStack({
@@ -115,6 +119,15 @@ test("server-proxied requests preserve endpoint-specific API keys", async () => 
   assert.equal(requests.length, 2);
   assert.equal(requests[0].headers.get(API_KEY_HEADER), "execd-secret");
   assert.equal(requests[1].headers.get(API_KEY_HEADER), "egress-secret");
+});
+
+test("server-proxied requests keep an explicitly configured API key", async () => {
+  const requests = await sendDataPlaneRequests(true, false, true);
+
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.equal(request.headers.get(API_KEY_HEADER), "explicit-secret");
+  }
 });
 
 test("lifecycle requests retain the tenant API key in direct mode", async () => {

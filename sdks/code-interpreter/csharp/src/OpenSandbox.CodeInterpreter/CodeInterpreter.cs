@@ -17,6 +17,7 @@ using OpenSandbox.CodeInterpreter.Factory;
 using OpenSandbox.CodeInterpreter.Services;
 using OpenSandbox.Config;
 using OpenSandbox.Core;
+using OpenSandbox.Factory;
 using OpenSandbox.Internal;
 using OpenSandbox.Services;
 using Microsoft.Extensions.Logging;
@@ -180,7 +181,7 @@ public sealed class CodeInterpreter
         logger.LogInformation("Creating code interpreter for sandbox: {SandboxId}", sandbox.Id);
         var protocol = sandbox.ConnectionConfig.Protocol == ConnectionProtocol.Https ? "https" : "http";
         var execdBaseUrl = $"{protocol}://{endpoint.EndpointAddress}";
-        var execdHeaders = MergeHeaders(sandbox.ConnectionConfig.Headers, endpoint.Headers);
+        var execdHeaders = DefaultAdapterFactory.BuildDataPlaneHeaders(sandbox.ConnectionConfig, endpoint.Headers);
         var adapterFactory = options?.AdapterFactory ?? DefaultCodeInterpreterAdapterFactory.Create();
 
         var codes = adapterFactory.CreateCodes(new CreateCodesStackOptions
@@ -354,21 +355,5 @@ public sealed class CodeInterpreter
             var delay = pollingInterval < remaining ? pollingInterval : remaining;
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
         }
-    }
-
-    private static IReadOnlyDictionary<string, string> MergeHeaders(
-        IReadOnlyDictionary<string, string> baseHeaders,
-        IReadOnlyDictionary<string, string>? overrideHeaders)
-    {
-        var merged = baseHeaders.ToDictionary(header => header.Key, header => header.Value);
-        if (overrideHeaders != null)
-        {
-            foreach (var header in overrideHeaders)
-            {
-                merged[header.Key] = header.Value;
-            }
-        }
-
-        return merged;
     }
 }

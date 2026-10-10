@@ -354,8 +354,12 @@ export class ConnectionConfig {
     this.enableTracing = !!opts.enableTracing;
 
     const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-    // Attach API key via header unless the user already provided one.
-    if (this.apiKey && !headers["OPEN-SANDBOX-API-KEY"]) {
+    // Attach API key via header unless the user already provided one, in any
+    // casing, so a caller-supplied key is never shadowed by a second header.
+    const hasApiKeyHeader = Object.keys(headers).some(
+      (key) => key.toLowerCase() === "open-sandbox-api-key",
+    );
+    if (this.apiKey && !hasApiKeyHeader) {
       headers["OPEN-SANDBOX-API-KEY"] = this.apiKey;
     }
     // Best-effort user-agent (Node only).

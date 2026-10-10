@@ -38,7 +38,20 @@ import type {
 
 const API_KEY_HEADER = "OPEN-SANDBOX-API-KEY";
 
-function createDataPlaneHeaders(
+/**
+ * Builds headers for a data-plane request (execd or egress).
+ *
+ * The tenant API key is attached only in server-proxy mode: direct requests go
+ * straight to the sandbox, which performs no authentication, so the key must
+ * never travel into it. A credential minted for a specific endpoint wins over
+ * the connection-level key, and a credential explicitly configured in the
+ * connection headers wins over `apiKey`.
+ *
+ * Exported through the internal entrypoint so companion SDKs that build their
+ * own data-plane clients (for example the code interpreter) share this policy
+ * instead of re-implementing it.
+ */
+export function createDataPlaneHeaders(
   connectionHeaders: Record<string, string>,
   endpointHeaders: Record<string, string> | undefined,
   useServerProxy: boolean,
@@ -51,8 +64,11 @@ function createDataPlaneHeaders(
   const endpointApiKey = Object.entries(endpointHeaders ?? {}).find(
     ([key]) => key.toLowerCase() === API_KEY_HEADER.toLowerCase(),
   );
+  const connectionApiKey = Object.entries(connectionHeaders).find(
+    ([key]) => key.toLowerCase() === API_KEY_HEADER.toLowerCase(),
+  );
 
-  if (!useServerProxy || endpointApiKey || apiKey) {
+  if (!useServerProxy || endpointApiKey || (!connectionApiKey && apiKey)) {
     for (const key of Object.keys(headers)) {
       if (key.toLowerCase() === API_KEY_HEADER.toLowerCase()) {
         delete headers[key];
@@ -63,7 +79,7 @@ function createDataPlaneHeaders(
   if (useServerProxy) {
     if (endpointApiKey) {
       headers[endpointApiKey[0]] = endpointApiKey[1];
-    } else if (apiKey) {
+    } else if (!connectionApiKey && apiKey) {
       headers[API_KEY_HEADER] = apiKey;
     }
   }

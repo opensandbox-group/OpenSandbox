@@ -505,6 +505,12 @@ const config2 = new ConnectionConfig({
 });
 ```
 
+The JavaScript Code Interpreter SDK inherits the sandbox's connection
+configuration. With `useServerProxy: true`, context requests and streamed code
+execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server
+authentication. In direct mode, the SDK does not attach this key to code
+execution requests.
+
 ### 2. Sandbox Creation Configuration
 
 `Sandbox.create()` allows configuring the sandbox environment.

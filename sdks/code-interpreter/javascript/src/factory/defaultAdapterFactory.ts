@@ -12,17 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { createExecdClient } from "@alibaba-group/opensandbox/internal";
+import {
+  createDataPlaneHeaders,
+  createExecdClient,
+} from "@alibaba-group/opensandbox/internal";
 import type { AdapterFactory, CreateCodesStackOptions } from "./adapterFactory.js";
 import { CodesAdapter } from "../adapters/codesAdapter.js";
 import type { Codes } from "../services/codes.js";
 
 export class DefaultAdapterFactory implements AdapterFactory {
   createCodes(opts: CreateCodesStackOptions): Codes {
-    const headers: Record<string, string> = {
-      ...(opts.sandbox.connectionConfig.headers ?? {}),
-      ...(opts.endpointHeaders ?? {}),
-    };
+    // The tenant API key only travels with server-proxied requests; execd on the
+    // sandbox endpoint performs no authentication.
+    const headers = createDataPlaneHeaders(
+      opts.sandbox.connectionConfig.headers ?? {},
+      opts.endpointHeaders,
+      opts.sandbox.connectionConfig.useServerProxy,
+      opts.sandbox.connectionConfig.apiKey,
+    );
     const client = createExecdClient({
       baseUrl: opts.execdBaseUrl,
       headers,
