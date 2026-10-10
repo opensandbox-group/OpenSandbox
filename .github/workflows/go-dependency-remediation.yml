@@ -1,0 +1,474 @@
+name: Go Dependency Security Remediation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/security-go-remediation
+
+permissions:
+  contents: write
+
+jobs:
+
+  go-dependency-remediation:
+    name: Remediate Go Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ---------------------------------------------------------
+      # Checkout remediation branch
+      # ---------------------------------------------------------
+      - name: Checkout remediation branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/security-go-remediation
+          fetch-depth: 0
+
+      # ---------------------------------------------------------
+      # Setup Go
+      # ---------------------------------------------------------
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      # ---------------------------------------------------------
+      # Verify Go installation
+      # ---------------------------------------------------------
+      - name: Verify Go installation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Go version:"
+          go version
+
+          echo
+          echo "Go environment:"
+          go env GOPATH
+          go env GOMODCACHE
+
+      # ---------------------------------------------------------
+      # Show current dependency versions
+      # ---------------------------------------------------------
+      - name: Show current vulnerable dependency versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          modules=(
+            components/egress
+            components/execd
+            components/ingress
+            components/internal
+            components/nodeagent
+            kubernetes
+          )
+
+          for module in "${modules[@]}"; do
+            echo
+            echo "========================================"
+            echo "Module: ${module}"
+            echo "========================================"
+
+            cd "${module}"
+
+            echo
+            echo "Current relevant dependencies:"
+
+            go list -m all | grep -E \
+              'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+              || true
+
+            cd - >/dev/null
+          done
+
+      # ---------------------------------------------------------
+      # Remediate components/egress
+      # ---------------------------------------------------------
+      - name: Remediate egress dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd components/egress
+
+          echo "Updating vulnerable dependencies in egress..."
+
+          go get \
+            golang.org/x/mod@v0.40.0 \
+            golang.org/x/net@v0.58.0 \
+            golang.org/x/text@v0.41.0 \
+            google.golang.org/grpc@v1.83.2
+
+          go mod tidy
+
+          echo
+          echo "Final egress dependency versions:"
+
+          go list -m all | grep -E \
+            'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+            || true
+
+      # ---------------------------------------------------------
+      # Remediate components/execd
+      # ---------------------------------------------------------
+      - name: Remediate execd dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd components/execd
+
+          echo "Updating vulnerable dependencies in execd..."
+
+          go get \
+            golang.org/x/crypto@v0.55.0 \
+            golang.org/x/net@v0.58.0 \
+            golang.org/x/text@v0.41.0 \
+            google.golang.org/grpc@v1.83.2
+
+          go mod tidy
+
+          echo
+          echo "Final execd dependency versions:"
+
+          go list -m all | grep -E \
+            'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+            || true
+
+      # ---------------------------------------------------------
+      # Remediate components/ingress
+      # ---------------------------------------------------------
+      - name: Remediate ingress dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd components/ingress
+
+          echo "Updating vulnerable dependencies in ingress..."
+
+          go get \
+            golang.org/x/net@v0.58.0 \
+            golang.org/x/text@v0.41.0 \
+            google.golang.org/grpc@v1.83.2
+
+          go mod tidy
+
+          echo
+          echo "Final ingress dependency versions:"
+
+          go list -m all | grep -E \
+            'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+            || true
+
+      # ---------------------------------------------------------
+      # Remediate components/internal
+      # ---------------------------------------------------------
+      - name: Remediate internal dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd components/internal
+
+          echo "Updating vulnerable dependencies in internal..."
+
+          go get \
+            golang.org/x/net@v0.58.0 \
+            golang.org/x/text@v0.41.0 \
+            google.golang.org/grpc@v1.83.2
+
+          go mod tidy
+
+          echo
+          echo "Final internal dependency versions:"
+
+          go list -m all | grep -E \
+            'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+            || true
+
+      # ---------------------------------------------------------
+      # Remediate components/nodeagent
+      # ---------------------------------------------------------
+      - name: Remediate nodeagent dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd components/nodeagent
+
+          echo "Updating vulnerable dependencies in nodeagent..."
+
+          go get \
+            golang.org/x/net@v0.58.0 \
+            golang.org/x/text@v0.41.0 \
+            google.golang.org/grpc@v1.83.2
+
+          go mod tidy
+
+          echo
+          echo "Final nodeagent dependency versions:"
+
+          go list -m all | grep -E \
+            'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+            || true
+
+      # ---------------------------------------------------------
+      # Remediate Kubernetes dependencies
+      #
+      # Kubernetes dependencies are updated, but Kubernetes
+      # integration/E2E tests are not executed in this workflow.
+      # ---------------------------------------------------------
+      - name: Remediate Kubernetes dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd kubernetes
+
+          echo "Updating vulnerable dependencies in Kubernetes..."
+
+          go get \
+            golang.org/x/net@v0.58.0 \
+            golang.org/x/text@v0.41.0 \
+            google.golang.org/grpc@v1.83.2
+
+          go mod tidy
+
+          echo
+          echo "Final Kubernetes dependency versions:"
+
+          go list -m all | grep -E \
+            'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+            || true
+
+      # ---------------------------------------------------------
+      # Show dependency changes
+      # ---------------------------------------------------------
+      - name: Show dependency changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Git status"
+          echo "========================================"
+
+          git status --short
+
+          echo
+          echo "========================================"
+          echo "Dependency diff"
+          echo "========================================"
+
+          git diff -- \
+            '*/go.mod' \
+            '*/go.sum'
+
+      # ---------------------------------------------------------
+      # Run Docker deployment Go tests
+      #
+      # Kubernetes tests are intentionally excluded because
+      # the previous run failed due to missing Kubernetes
+      # test infrastructure.
+      # ---------------------------------------------------------
+      - name: Run Docker deployment Go tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          modules=(
+            components/egress
+            components/execd
+            components/ingress
+            components/internal
+            components/nodeagent
+          )
+
+          for module in "${modules[@]}"; do
+
+            echo
+            echo "========================================"
+            echo "Testing ${module}"
+            echo "========================================"
+
+            cd "${module}"
+
+            go test ./...
+
+            cd - >/dev/null
+
+          done
+
+      # ---------------------------------------------------------
+      # Install govulncheck
+      # ---------------------------------------------------------
+      - name: Install govulncheck
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+          govulncheck -version || true
+
+      # ---------------------------------------------------------
+      # Run govulncheck
+      #
+      # Report-only for this remediation phase.
+      # ---------------------------------------------------------
+      - name: Run govulncheck
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+
+          mkdir -p security-reports
+
+          modules=(
+            components/egress
+            components/execd
+            components/ingress
+            components/internal
+            components/nodeagent
+          )
+
+          overall_status=0
+
+          for module in "${modules[@]}"; do
+
+            module_name="${module//\//-}"
+
+            echo
+            echo "========================================"
+            echo "Running govulncheck: ${module}"
+            echo "========================================"
+
+            cd "${module}"
+
+            if govulncheck ./... \
+              > "../../security-reports/govulncheck-${module_name}.txt" \
+              2>&1; then
+
+              echo "govulncheck passed for ${module}"
+
+            else
+
+              echo "govulncheck reported findings or an execution error for ${module}"
+
+              overall_status=1
+
+            fi
+
+            cd - >/dev/null
+
+          done
+
+          echo
+          echo "========================================"
+          echo "govulncheck summary"
+          echo "========================================"
+
+          if [ "${overall_status}" -eq 0 ]; then
+            echo "No govulncheck findings detected."
+          else
+            echo "One or more govulncheck reports contain findings or execution errors."
+          fi
+
+          # Report-only during remediation.
+          exit 0
+
+      # ---------------------------------------------------------
+      # Verify final dependency versions
+      # ---------------------------------------------------------
+      - name: Verify remediated dependency versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          modules=(
+            components/egress
+            components/execd
+            components/ingress
+            components/internal
+            components/nodeagent
+            kubernetes
+          )
+
+          for module in "${modules[@]}"; do
+
+            echo
+            echo "========================================"
+            echo "Final dependency verification: ${module}"
+            echo "========================================"
+
+            cd "${module}"
+
+            go list -m all | grep -E \
+              'golang.org/x/(mod|net|text|crypto)|google.golang.org/grpc' \
+              || true
+
+            cd - >/dev/null
+
+          done
+
+      # ---------------------------------------------------------
+      # Upload govulncheck reports
+      # ---------------------------------------------------------
+      - name: Upload govulncheck reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-security-remediation-reports
+          path: security-reports/
+          retention-days: 7
+
+      # ---------------------------------------------------------
+      # Commit remediation changes
+      # ---------------------------------------------------------
+      - name: Commit dependency remediation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          echo "Checking for dependency changes..."
+
+          if git diff --quiet -- '*/go.mod' '*/go.sum'; then
+
+            echo "No Go dependency changes detected."
+            exit 0
+
+          fi
+
+          echo
+          echo "Changes to be committed:"
+          git status --short
+
+          git add \
+            components/egress/go.mod \
+            components/egress/go.sum \
+            components/execd/go.mod \
+            components/execd/go.sum \
+            components/ingress/go.mod \
+            components/ingress/go.sum \
+            components/internal/go.mod \
+            components/internal/go.sum \
+            components/nodeagent/go.mod \
+            components/nodeagent/go.sum \
+            kubernetes/go.mod \
+            kubernetes/go.sum
+
+          git commit \
+            -m "security: remediate vulnerable Go dependencies"
+
+          git push origin feature/security-go-remediation
