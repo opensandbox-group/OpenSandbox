@@ -168,12 +168,9 @@ func main() {
 	}
 }
 
-// newActivityRecorder wires the OSEP-0024 auto-pause activity recorder so
-// the server-side idle sweeper sees live traffic. Fire-and-forget; never
-// blocks requests. The returned recorder (Noop when disabled) is also the
-// wake flights' activity writer — but a Noop writes nothing, so running
-// --wake-enabled without --activity-enabled leaves resumed sandboxes
-// unrecorded (warned at startup).
+// newActivityRecorder wires the OSEP-0024 auto-pause activity recorder
+// (Noop when disabled). It also serves as the wake flights' activity writer;
+// with recording disabled the flights write nothing, warned in main.
 func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option) {
 	if !flag.ActivityEnabled {
 		return activity.Noop{}, nil

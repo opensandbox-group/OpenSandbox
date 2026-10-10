@@ -71,46 +71,39 @@ type ResumeOutcome uint8
 const (
 	// ResumeAccepted means this caller flipped the desired state to Running.
 	ResumeAccepted ResumeOutcome = iota
-	// ResumeAlreadyRunning means someone else already resumed; the caller
-	// joins the in-flight restore. Ambiguous with an empty expected
-	// checkpoint fence: the same "not paused" outcome also fires when the
-	// pause is still in progress, so callers must re-probe before treating
-	// it as a join.
+	// ResumeAlreadyRunning means someone else already resumed; join the
+	// in-flight restore. Ambiguous with an empty checkpoint fence — the
+	// same outcome fires when the pause is still in progress — so callers
+	// must re-probe before treating it as a join.
 	ResumeAlreadyRunning
-	// ResumeConflict means the checkpoint fence fired (a re-pause raced in);
-	// the caller must re-probe and restart within its remaining budget.
+	// ResumeConflict means the checkpoint fence fired (a re-pause raced
+	// in); re-probe and restart with the fresh checkpoint.
 	ResumeConflict
 )
 
 // SandboxLifecycle is implemented by providers with authority to inspect
-// fast-sandbox desired state and flip it back to Running. It backs
-// wake-on-access (OSEP-0024); providers without pause/resume semantics do
-// not implement it.
+// fast-sandbox desired state and flip it back to Running (OSEP-0024
+// wake-on-access).
 type SandboxLifecycle interface {
 	// ProbeSandbox inspects the sandbox lifecycle state via FastPath GetSandbox.
 	ProbeSandbox(ctx context.Context, target EndpointTarget) (SandboxProbe, error)
-	// ResumeSandbox flips the desired state back to Running. It is an
-	// asynchronous intent: convergence is observed through ProbeSandbox.
-	// request_id must be unique per checkpoint intent — a retry with a different
-	// expected checkpoint fence must carry a fresh request_id so FastPath-side
-	// request dedup cannot replay the rejected attempt's outcome.
+	// ResumeSandbox flips the desired state back to Running, asynchronously:
+	// convergence is observed through ProbeSandbox. request_id must be
+	// unique per checkpoint intent, or FastPath-side dedup can replay a
+	// rejected attempt's outcome.
 	ResumeSandbox(ctx context.Context, target EndpointTarget, expectedCheckpointID, requestID string) (ResumeOutcome, error)
 }
 
 // ErrLifecycleUnavailable is returned when the provider has no lifecycle RPC
-// surface: the resolver in use does not implement FastPathLifecycle and no
-// alternative was injected.
+// surface (resolver-only construction, nothing injected).
 var ErrLifecycleUnavailable = errors.New("FastPath lifecycle RPCs are not configured on this provider")
 
 // ErrSandboxLifecycleRejected indicates FastPath permanently rejected the
-// lifecycle call (auth, validation, unimplemented RPC, or a server-internal
-// failure). Retrying within a park budget cannot succeed; the flight must
-// end immediately and the answer must not invite a retry loop.
+// lifecycle call (auth, validation, unimplemented RPC, server fault):
+// retrying within a park budget cannot succeed.
 var ErrSandboxLifecycleRejected = errors.New("FastPath permanently rejected the lifecycle request")
 
-// permanentLifecycleCodes are gRPC codes that will not heal within a park
-// budget: retrying them only burns the budget and invites clients into a
-// 503 + Retry-After loop.
+// permanentLifecycleCodes will not heal within a park budget.
 var permanentLifecycleCodes = map[codes.Code]bool{
 	codes.PermissionDenied: true,
 	codes.Unauthenticated:  true,

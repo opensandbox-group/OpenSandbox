@@ -30,8 +30,8 @@ type flightKey struct {
 }
 
 // flight is one per-sandbox resume attempt: at most one concurrent
-// ResumeSandbox per replica per sandbox, with all parked requests sharing
-// its outcome and its remaining budget.
+// ResumeSandbox per replica per sandbox; all parked requests share its
+// outcome and remaining budget.
 type flight struct {
 	key      flightKey
 	target   sandbox.EndpointTarget
@@ -46,18 +46,14 @@ type flight struct {
 }
 
 func (f *flight) requestID(attempt int) string {
-	// Unique across attempts, replicas, and sandboxes: the fence attempt
-	// counter separates checkpoint intents, the per-process random prefix
-	// separates replicas (the epoch counter is process-local), and the
-	// namespace disambiguates same-named sandboxes so FastPath-side request
-	// dedup can never replay one caller's outcome to another.
+	// Namespace + process-unique prefix + attempt: request dedup on the
+	// FastPath side must never replay one caller's outcome to another.
 	return fmt.Sprintf("wake-%s-%s-%s-%d-%d",
 		f.target.Namespace, f.target.SandboxID, f.waker.processUnique, f.epoch, attempt)
 }
 
 // wait blocks until the flight finishes, the caller's context is done, or
-// the flight's shared budget elapses. The flight itself keeps running on its
-// background context in every case.
+// the shared budget elapses. The flight keeps running in every case.
 func (f *flight) wait(ctx context.Context) error {
 	remaining := time.Until(f.deadline)
 	if remaining <= 0 {
@@ -69,8 +65,7 @@ func (f *flight) wait(ctx context.Context) error {
 	case <-f.done:
 		return f.err
 	case <-ctx.Done():
-		// The client is gone; the flight keeps running on its background
-		// context and is distinct from budget exhaustion.
+		// The client is gone; distinct from budget exhaustion.
 		return ctx.Err()
 	case <-timer.C:
 		return ErrBudgetExhausted
@@ -87,9 +82,9 @@ func (f *flight) finish(err error) {
 	})
 }
 
-// run executes the resume flight on a background context. The desired-state
-// resume is never canceled: when the budget expires the flight simply stops
-// polling and lets fast-sandbox converge on its own.
+// run executes the resume flight on a background context. When the budget
+// expires it stops polling; the desired-state resume still converges
+// server-side.
 func (f *flight) run(checkpointID string) {
 	ctx := context.Background()
 	w := f.waker
@@ -113,13 +108,9 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 		attempt++
 		outcome, err := w.lifecycle.ResumeSandbox(ctx, f.target, *checkpointID, f.requestID(attempt))
 
-		// "Not paused" (FailedPrecondition) is an unambiguous join — someone
-		// else already resumed past our fence — only when the fence
-		// referenced a real checkpoint. With an empty fence the same outcome
-		// also fires when the pause is still in progress, in which case
-		// joining a resume that does not exist would leave every parked
-		// request spinning until the budget: re-probe instead and decide
-		// from the current phase.
+		// With an empty fence, "not paused" may also mean the pause is
+		// still in progress — joining a resume that does not exist would
+		// spin parked requests until the budget. Re-probe instead.
 		needsReprobe := outcome == sandbox.ResumeConflict ||
 			(outcome == sandbox.ResumeAlreadyRunning && *checkpointID == "")
 
@@ -130,9 +121,7 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 			switch {
 			case errors.Is(err, sandbox.ErrSandboxNotFound),
 				errors.Is(err, sandbox.ErrSandboxLifecycleRejected):
-				// Terminal: the sandbox is gone, or FastPath rejected the
-				// call permanently (auth/validation/server fault) — retrying
-				// within the budget cannot succeed and would only burn it.
+				// Nothing a retry within the budget can fix.
 				f.finish(err)
 				return false
 			default:
@@ -153,9 +142,8 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 				f.finish(probeErr)
 				return false
 			default:
-				// Transient probe failure: fall through to the backoff and
-				// retry the resume with the previous checkpoint; the fence
-				// fires again and the re-probe repeats.
+				// Transient: retry the resume with the previous checkpoint;
+				// the fence fires again and the re-probe repeats.
 			}
 		}
 		if !sleepBackoff(ctx, budget, backoff) {
@@ -206,9 +194,8 @@ func phaseOutcome(phase sandbox.SandboxPhase) error {
 }
 
 // flightRegistry is the per-replica singleflight registry keyed by
-// (namespace, sandbox_id). Duplicates across replicas are harmless by
-// construction: ResumeSandbox is an idempotent compare-and-set patch and the
-// restore itself is executed once by the fast-sandbox controller.
+// (namespace, sandbox_id). Cross-replica duplicates are harmless:
+// ResumeSandbox is an idempotent CAS patch, executed once by the controller.
 type flightRegistry struct {
 	mu      sync.Mutex
 	flights map[flightKey]*flight

@@ -28,23 +28,21 @@ import (
 )
 
 // wakeReplayBodyMax bounds request-body buffering for stale-route replay
-// (OSEP-0024). Bodies up to this size are fully buffered so the request can
-// be replayed once after a wake; larger bodies keep streaming and replay
-// today's stale-route 503 instead.
+// (OSEP-0024); larger bodies keep streaming and replay today's stale-route
+// 503 instead.
 const wakeReplayBodyMax = 1 << 20 // 1 MiB
 
-// WithActivityRecorder installs the OSEP-0024 activity writer. Every routed
-// request feeds the sandbox idle clock; writes are asynchronous and
-// fire-and-forget, never adding latency to the proxy path.
+// WithActivityRecorder installs the OSEP-0024 activity writer: every routed
+// request feeds the sandbox idle clock, fire-and-forget.
 func WithActivityRecorder(recorder activity.Recorder) Option {
 	return func(options *proxyOptions) {
 		options.activity = recorder
 	}
 }
 
-// WithWaker installs the OSEP-0024 wake-on-access orchestrator. When set,
-// resolution failures on fast-sandbox routes park on a paused sandbox until
-// it resumes, and stale-route hits are retried once after a wake.
+// WithWaker installs the OSEP-0024 wake-on-access orchestrator: resolution
+// failures on fast-sandbox routes park on a paused sandbox until it resumes,
+// and stale-route hits are retried once after a wake.
 func WithWaker(waker *wake.Waker) Option {
 	return func(options *proxyOptions) {
 		options.waker = waker
@@ -72,17 +70,15 @@ func httpStatusForWakeErr(err error) int {
 	}
 }
 
-// wakeReplay implements OSEP-0024 stale-route re-entry for one request. It
-// sits between httputil.ReverseProxy and the caller's ResponseWriter: when
+// wakeReplay implements OSEP-0024 stale-route re-entry for one request: when
 // the response observer marks the response as a manufactured stale-route
 // 503, the writer swallows it, parks the request on the waker, and lets the
-// caller replay the request once on a fresh route. Nothing has been written
-// to the client at interception time, so replay is legal.
+// caller replay it once on a fresh route. Nothing has reached the client at
+// interception time, so replay is legal.
 //
 // The concrete *statusCapturingResponseWriter is embedded (not the
-// http.ResponseWriter interface) so Flush and Hijack are promoted:
-// ReverseProxy must keep flushing streaming responses (SSE) after every
-// copied event, which the interface embedding silently broke.
+// http.ResponseWriter interface) so Flush and Hijack are promoted —
+// ReverseProxy must keep flushing streaming responses (SSE).
 type wakeReplay struct {
 	*statusCapturingResponseWriter
 
@@ -114,24 +110,15 @@ func (c *wakeReplay) replayable() bool {
 	return c.copied != nil
 }
 
-// captureBodyForReplay buffers the request body up to the replay cap.
-// Over the cap the body keeps streaming untouched and nil is returned (not
-// replayable). Content-Length short-circuits skip touching the body for the
-// common bodyless and obviously oversized requests.
-//
-// The buffer grows on demand instead of reserving the cap upfront: with wake
-// enabled every fast-sandbox request passes through here, and a full-cap
-// reservation per in-flight request would pin memory that a bulk pause
-// event never intended to bound. A parked request still retains its
-// captured body until the park ends, so the worst case stays ParkMax
-// requests x wakeReplayBodyMax — bounded by parking admission, not by
-// eager allocation.
+// captureBodyForReplay buffers the request body up to the replay cap,
+// growing the buffer on demand so healthy requests never reserve the cap
+// upfront. Over the cap the body keeps streaming untouched and nil is
+// returned (not replayable); Content-Length short-circuits skip the body
+// for the common bodyless and obviously oversized requests.
 //
 // Only a genuine EOF marks the capture complete: a mid-body I/O failure
-// (connection reset, TLS error) must not leave a truncated prefix marked as
-// replayable — the consumed bytes stay in front of the original body so the
-// forwarded request still carries the full stream and the failure resurfaces
-// downstream (loud, not silent truncation).
+// must not leave a truncated prefix marked replayable. The consumed bytes
+// stay in front of the original body so the failure resurfaces downstream.
 func captureBodyForReplay(r *http.Request) []byte {
 	if r.Body == nil || r.ContentLength == 0 {
 		return []byte{}
@@ -143,8 +130,8 @@ func captureBodyForReplay(r *http.Request) []byte {
 	for {
 		if len(buf) == cap(buf) {
 			if len(buf) > wakeReplayBodyMax {
-				// More than the cap (unknown Content-Length): keep
-				// streaming what was read in front of the original body.
+				// Over the cap: keep streaming what was read in front of
+				// the original body.
 				r.Body = bodyWithClose{Reader: io.MultiReader(bytes.NewReader(buf), r.Body), closeFn: r.Body.Close}
 				return nil
 			}
@@ -162,8 +149,7 @@ func captureBodyForReplay(r *http.Request) []byte {
 			return nil
 		}
 	}
-	// EOF: the whole body fit. Retain only the captured bytes, releasing the
-	// grown scratch.
+	// EOF: the whole body fit; retain only the captured bytes.
 	body := buf
 	if cap(buf) > len(buf) {
 		body = append([]byte(nil), buf...)
@@ -197,12 +183,10 @@ func (c *wakeReplay) observeStale() func(*http.Response) {
 func (c *wakeReplay) WriteHeader(code int) {
 	if code == http.StatusServiceUnavailable &&
 		c.replayable() && c.stale.Load() && c.intercepted.CompareAndSwap(false, true) {
-		// Parking inside WriteHeader blocks the handler goroutine before any
-		// byte reached the client: the park holds no upstream connection.
-		// ReverseProxy's copyHeader has already copied the manufactured 503's
-		// headers into the underlying map; drop them so neither the replay's
-		// real response nor a wake-error answer inherits the stray
-		// Retry-After and duplicated power-by.
+		// Parking inside WriteHeader blocks the handler before any byte
+		// reached the client. ReverseProxy's copyHeader has already copied
+		// the manufactured 503's headers; drop them so the replay or the
+		// wake-error answer starts from a clean map.
 		clear(c.Header())
 		c.wakeErr = c.proxy.waker.Wake(c.r.Context(), c.target)
 		return
@@ -217,9 +201,8 @@ func (c *wakeReplay) Write(b []byte) (int, error) {
 	return c.statusCapturingResponseWriter.Write(b)
 }
 
-// Flush forwards to the capturing writer unless the stale 503 was
-// intercepted: a flush after a swallowed WriteHeader would implicitly commit
-// a 200 to the client while the request is parked.
+// Flush is a no-op once the stale 503 was intercepted: flushing after a
+// swallowed WriteHeader would implicitly commit a 200 while parked.
 func (c *wakeReplay) Flush() {
 	if c.intercepted.Load() {
 		return

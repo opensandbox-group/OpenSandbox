@@ -39,24 +39,21 @@ const (
 	recordWorkers  = 4
 	recordChanCap  = 8192
 
-	// Worker batching: observations are drained into a pipeline so one Redis
-	// round trip carries many writes. The batch bounds and the flush window
-	// trade throughput against a tiny extra write delay (irrelevant for idle
-	// measurement at X >= 30s).
+	// Worker batching: one pipeline round trip per batch; the flush window
+	// adds at most 50ms of write delay, noise against X >= 30s.
 	recordPipeBatchSize = 64
 	recordPipeFlush     = 50 * time.Millisecond
 
-	// warnDropIntervalSeconds rate-limits the escalated Warn for dropped
-	// batches; between warnings the drops stay at Debug.
+	// warnDropIntervalSeconds rate-limits the escalated drop warnings.
 	warnDropIntervalSeconds = 30
 
-	// KeyPrefix namespaces the per-sandbox activity keys. It is a fixed
-	// convention shared with the server's idle sweeper, not a configurable.
+	// KeyPrefix is a fixed convention shared with the server's idle sweeper,
+	// not a configurable.
 	KeyPrefix = "opensandbox:activity"
 
-	// monotonicMaxScript advances the stored timestamp only forward.
-	// Buffered writes from different replicas can arrive out of order; an
-	// older observation must never regress the newest one.
+	// monotonicMaxScript advances the stored timestamp only forward, so
+	// out-of-order writes across replicas never regress the newest
+	// observation.
 	monotonicMaxScript = `local cur = redis.call('GET', KEYS[1])
 if cur and tonumber(cur) >= tonumber(ARGV[1]) then return 0 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
@@ -77,14 +74,13 @@ func (Noop) Record(string, string) {}
 
 type RedisConfig struct {
 	// TTL bounds how long an observation stays fresh; the server's idle
-	// threshold X must never exceed it.
+	// threshold X must never exceed it. Applied as whole seconds.
 	TTL time.Duration
-	// MinInterval coalesces writes: at most one Redis write per (replica,
-	// sandbox) per interval, so the write rate is independent of the
-	// per-sandbox request rate.
+	// MinInterval coalesces writes: at most one write per (replica, sandbox)
+	// per interval, independent of request rate.
 	MinInterval time.Duration
-	// NowMillis overrides the observation clock; nil uses the wall clock.
-	// Must be set before construction, never swapped afterwards.
+	// NowMillis overrides the observation clock (tests); nil uses the wall
+	// clock.
 	NowMillis func() int64
 
 	Logger logger.Logger
@@ -105,14 +101,10 @@ type RedisRecorder struct {
 	stopped   atomic.Bool
 	nowMillis func() int64
 
-	// scriptSHA caches the loaded Lua script so each pipelined command
-	// carries only the SHA, not the ~200-byte source. "" until first
-	// loaded; a NOSCRIPT from Redis (restart, SCRIPT FLUSH) triggers a
-	// reload and one batch retry.
+	// scriptSHA caches the loaded Lua script; batches send EVALSHA and a
+	// NOSCRIPT triggers one reload + retry.
 	scriptSHA atomic.Value // string
-	// scriptMu serializes ScriptLoad. Held only for the duration of the
-	// load attempt, never around a worker's batch flush.
-	scriptMu sync.Mutex
+	scriptMu  sync.Mutex   // serializes ScriptLoad only
 	// lastWarnUnix rate-limits the escalated drop warnings.
 	lastWarnUnix atomic.Int64
 }
@@ -124,9 +116,8 @@ func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig
 	if cfg.Logger == nil {
 		return nil, errors.New("activity: Logger is required")
 	}
-	// The TTL is applied as whole seconds: a sub-second value would truncate
-	// to EX 0, which Redis rejects on every write — the sweeper would never
-	// see activity and could pause sandboxes in active use.
+	// Whole seconds: a sub-second TTL truncates to EX 0 and Redis rejects
+	// every write.
 	if cfg.TTL < time.Second {
 		return nil, errors.New("activity: TTL must be at least one second, or every write is rejected by Redis and the sweeper never sees activity")
 	}
@@ -148,9 +139,8 @@ func NewRedisRecorder(ctx context.Context, client *redis.Client, cfg RedisConfig
 	if cfg.MinInterval > 0 {
 		go wait.UntilWithContext(ctx, r.runCleanupThrottle, cfg.MinInterval*2)
 	}
-	// Surface an unreachable Redis immediately: the recorder still starts
-	// (activity failures must never block the ingress), but a wrong DSN
-	// would otherwise only show up as a climbing writes_dropped counter.
+	// Surface an unreachable Redis now; the recorder still starts — activity
+	// failures must never block the ingress.
 	if err := client.Ping(ctx).Err(); err != nil {
 		cfg.Logger.With(logger.Field{Key: "error", Value: err}).Warnf(
 			"activity: Redis is not reachable at startup; activity observations will be dropped until it recovers")
@@ -183,7 +173,7 @@ func (r *RedisRecorder) runWorker(ctx context.Context) {
 
 // drainBatch collects up to recordPipeBatchSize observations, returning
 // early on the flush window or shutdown. The bool reports whether the worker
-// should keep running; idle windows yield an empty batch and continue.
+// should keep running.
 func (r *RedisRecorder) drainBatch(ctx context.Context) ([]observation, bool) {
 	batch := make([]observation, 0, recordPipeBatchSize)
 	timer := time.NewTimer(recordPipeFlush)
@@ -206,9 +196,8 @@ func (r *RedisRecorder) drainBatch(ctx context.Context) ([]observation, bool) {
 	}
 }
 
-// Record enqueues one observation. It is fire-and-forget: full channel and
-// shutdown both drop the observation, which can only delay a pause, never
-// accelerate one.
+// Record enqueues one observation, fire-and-forget: a full channel or
+// shutdown drops it, which can only delay a pause, never accelerate one.
 func (r *RedisRecorder) Record(namespace, sandboxID string) {
 	if r.stopped.Load() {
 		return
@@ -224,15 +213,10 @@ func (r *RedisRecorder) Record(namespace, sandboxID string) {
 	}
 }
 
-// shouldRecord applies the per-sandbox min-interval coalescing. Dropped
-// observations only make the recorded last-active slightly stale, which can
-// delay a pause by at most one interval and never accelerate one; the Lua
-// monotonic max keeps any racing order harmless.
-//
-// The compare-and-swap loop keeps the bound exact under concurrency: a
-// plain check-then-act would let every request for the same sandbox pass
-// once the interval window reopens, emitting one write per request instead
-// of one per interval.
+// shouldRecord applies the per-sandbox min-interval coalescing; drops only
+// make the recorded last-active slightly stale. The compare-and-swap loop
+// keeps the bound exact under concurrency — a plain check-then-act would
+// let every request pass once the window reopens.
 func (r *RedisRecorder) shouldRecord(obs observation) bool {
 	if r.cfg.MinInterval <= 0 {
 		return true
@@ -250,14 +234,10 @@ func (r *RedisRecorder) shouldRecord(obs observation) bool {
 		if r.lastSent.CompareAndSwap(key, prev, now) {
 			return true
 		}
-		// Lost the race to a concurrent writer; re-check against the value
-		// it stored.
 	}
 }
 
-// doRecordBatch flushes one batch as a single pipelined round trip. Every
-// command applies the monotonic max update: the stored timestamp moves
-// forward only, so out-of-order deliveries across replicas are harmless.
+// doRecordBatch flushes one batch as a single pipelined round trip.
 func (r *RedisRecorder) doRecordBatch(batch []observation) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
 	defer cancel()
@@ -292,17 +272,13 @@ func (r *RedisRecorder) doRecordBatch(batch []observation) {
 }
 
 // loadedScriptSHA returns the cached script SHA, loading it on first use or
-// after an invalidation. The error is non-nil (and the batch must be
-// dropped) when Redis is unreachable or another worker is already loading:
-// drops can only delay a pause, never accelerate one.
+// after invalidation. A non-nil error means the batch must be dropped.
 func (r *RedisRecorder) loadedScriptSHA(ctx context.Context) (string, error) {
 	if sha, ok := r.scriptSHA.Load().(string); ok && sha != "" {
 		return sha, nil
 	}
-	// The load is a network round trip; never serialize the workers behind
-	// it. A concurrent loader wins and the losers wait briefly for its
-	// cached SHA — dropping the startup burst would be wasted work — and
-	// only give up when the load does not complete promptly.
+	// Never serialize the workers behind a load: a concurrent loader wins
+	// and the losers wait briefly for its cached SHA before giving up.
 	if !r.scriptMu.TryLock() {
 		for range 50 {
 			time.Sleep(2 * time.Millisecond)
@@ -339,9 +315,8 @@ func isNoScriptErr(cmds []redis.Cmder, err error) bool {
 	return false
 }
 
-// dropBatch records a fully dropped batch. Sustained drops mean the sweeper
-// is flying blind and will eventually pause sandboxes in active use, so the
-// first drop of a window is escalated to Warn; the rest stay Debug.
+// dropBatch records a fully dropped batch; the first drop of a warn window
+// is escalated (sustained drops mean the sweeper is flying blind).
 func (r *RedisRecorder) dropBatch(batch []observation, err error) {
 	telemetry.RecordActivityWriteDropped(int64(len(batch)))
 	fields := []logger.Field{
@@ -368,18 +343,7 @@ func (r *RedisRecorder) reportBatchOutcome(batch []observation, cmds []redis.Cmd
 		}
 	}
 	if dropped > 0 {
-		telemetry.RecordActivityWriteDropped(int64(dropped))
-		fields := []logger.Field{
-			{Key: "dropped", Value: dropped},
-			{Key: "batch", Value: len(batch)},
-			{Key: "error", Value: err},
-		}
-		now := time.Now().Unix()
-		if last := r.lastWarnUnix.Load(); now-last >= warnDropIntervalSeconds && r.lastWarnUnix.CompareAndSwap(last, now) {
-			r.cfg.Logger.With(fields...).Warnf("activity: dropping activity writes — the idle sweeper is flying blind and may pause sandboxes in active use")
-			return
-		}
-		r.cfg.Logger.With(fields...).Debugf("activity: redis pipeline partially dropped")
+		r.dropBatch(batch[:dropped], err)
 	}
 }
 
