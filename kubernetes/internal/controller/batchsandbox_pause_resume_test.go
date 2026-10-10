@@ -56,6 +56,7 @@ func newTestReconciler(objs ...client.Object) *BatchSandboxReconciler {
 		Build()
 	return &BatchSandboxReconciler{
 		Client:              fakeClient,
+		APIReader:           fakeClient,
 		Scheme:              testscheme,
 		Recorder:            record.NewFakeRecorder(10),
 		StatusRVExpectation: expectations.NewResourceVersionExpectation(),

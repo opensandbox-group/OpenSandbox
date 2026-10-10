@@ -523,3 +523,40 @@ func TestSyncSandboxReleased_SetFailed(t *testing.T) {
 	err := allocator.SyncSandboxReleased(context.Background(), sandbox, pods)
 	assert.Error(t, err)
 }
+
+func TestTerminatingTaskAllocationHandoff(t *testing.T) {
+	now := metav1.Now()
+	replicas := int32(5)
+	for _, tc := range []struct {
+		name     string
+		cleaning bool
+		release  string
+		want     []string
+	}{
+		{name: "hooks pending", cleaning: true},
+		{name: "explicit completed task", cleaning: true, release: `{"pods":["done","historical"]}`, want: []string{"done"}},
+		{name: "cleanup complete", want: []string{"done", "running"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox", DeletionTimestamp: &now,
+					Annotations: map[string]string{
+						annoAllocStatusKey:   `{"pods":["done","running","historical"]}`,
+						annoAllocReleasedKey: `{"pods":["historical"]}`,
+						annoAllocReleaseKey:  tc.release,
+					}},
+				Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: &replicas},
+			}
+			if tc.cleaning {
+				sandbox.Finalizers = []string{finalizerTaskCleanup}
+			}
+			allocator := NewDefaultAllocator(fake.NewClientBuilder().WithScheme(testscheme).Build()).(*defaultAllocator)
+			request, err := allocator.getSandboxRequest(context.Background(), sandbox)
+			if !assert.NoError(t, err) {
+				return
+			}
+			assert.Zero(t, request.PodSupplement)
+			assert.ElementsMatch(t, tc.want, request.ToRelease)
+		})
+	}
+}

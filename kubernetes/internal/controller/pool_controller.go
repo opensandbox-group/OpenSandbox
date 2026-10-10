@@ -325,20 +325,11 @@ func (r *PoolReconciler) removePoolAllocationFinalizerIfUnavailable(
 			return err
 		}
 
-		allocated, err := r.Allocator.GetSandboxAllocation(ctx, latestSandbox)
+		pending, err := r.pendingPoolPods(ctx, latestSandbox)
 		if err != nil {
 			return err
 		}
-		released, err := r.Allocator.GetSandboxReleased(ctx, latestSandbox)
-		if err != nil {
-			return err
-		}
-		releasedSet := sets.New(released...)
-		for _, podName := range allocated {
-			// Historical released pods may already belong to another sandbox.
-			if releasedSet.Has(podName) {
-				continue
-			}
+		for _, podName := range pending {
 			pod := &corev1.Pod{}
 			err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: sandboxKey.Namespace, Name: podName}, pod)
 			if errors.IsNotFound(err) {
@@ -626,7 +617,10 @@ func shouldReconcilePoolForBatchSandboxUpdate(e event.UpdateEvent) bool {
 	if oldObj.DeletionTimestamp.IsZero() && !newObj.DeletionTimestamp.IsZero() {
 		return true
 	}
-	return false
+	// Task cleanup completion hands the remaining pods back to this controller.
+	return !newObj.DeletionTimestamp.IsZero() &&
+		controllerutil.ContainsFinalizer(oldObj, finalizerTaskCleanup) &&
+		!controllerutil.ContainsFinalizer(newObj, finalizerTaskCleanup)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -966,30 +960,12 @@ func (r *PoolReconciler) finalizeTerminatingSandboxes(ctx context.Context, batch
 			continue
 		}
 
-		allocated, err := r.Allocator.GetSandboxAllocation(ctx, sandbox)
+		pending, err := r.pendingPoolPods(ctx, sandbox)
 		if err != nil {
-			err = fmt.Errorf("failed to get terminating sandbox %s allocation: %w", sandbox.Name, err)
-			log.Error(err, "Cannot finalize terminating sandbox", "sandbox", sandbox.Name)
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("get pending allocations for %s: %w", client.ObjectKeyFromObject(sandbox), err))
 			continue
 		}
-		released, err := r.Allocator.GetSandboxReleased(ctx, sandbox)
-		if err != nil {
-			err = fmt.Errorf("failed to get terminating sandbox %s released state: %w", sandbox.Name, err)
-			log.Error(err, "Cannot finalize terminating sandbox", "sandbox", sandbox.Name)
-			errs = append(errs, err)
-			continue
-		}
-
-		releasedSet := sets.New(released...)
-		allReleased := true
-		for _, podName := range allocated {
-			if !releasedSet.Has(podName) {
-				allReleased = false
-				break
-			}
-		}
-		if !allReleased {
+		if len(pending) > 0 {
 			continue
 		}
 
@@ -1006,6 +982,20 @@ func (r *PoolReconciler) finalizeTerminatingSandboxes(ctx context.Context, batch
 		log.Info("Finalized terminating sandbox with no pending pool allocations", "sandbox", sandbox.Name)
 	}
 	return gerrors.Join(errs...)
+}
+
+// pendingPoolPods excludes completed recycling. Historical released pods may
+// already belong to another sandbox and must not delay this finalizer.
+func (r *PoolReconciler) pendingPoolPods(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) ([]string, error) {
+	allocated, err := r.Allocator.GetSandboxAllocation(ctx, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	released, err := r.Allocator.GetSandboxReleased(ctx, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	return sets.List(sets.New(allocated...).Difference(sets.New(released...))), nil
 }
 
 // getLatestReleased computes the latest released pods for each sandbox by merging current released with recycle-succeeded pods.

@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -76,6 +77,7 @@ type taskScheduleResult struct {
 // BatchSandboxReconciler reconciles a BatchSandbox object
 type BatchSandboxReconciler struct {
 	client.Client
+	APIReader           client.Reader
 	Scheme              *runtime.Scheme
 	Recorder            record.EventRecorder
 	ProfileStore        *poolassign.ProfileStore
@@ -124,14 +126,15 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, err
 	}
+	if batchSbx.DeletionTimestamp != nil {
+		return r.reconcileDeletion(ctx, batchSbx)
+	}
 	if expireAt := batchSbx.Spec.ExpireTime; expireAt != nil {
 		now := time.Now()
 		if expireAt.Time.Before(now) {
-			if batchSbx.DeletionTimestamp == nil {
-				log.Info("batch sandbox expired, delete", "expireAt", expireAt)
-				err := r.Delete(ctx, batchSbx, client.PropagationPolicy(metav1.DeletePropagationForeground))
-				return ctrl.Result{}, client.IgnoreNotFound(err)
-			}
+			log.Info("batch sandbox expired, delete", "expireAt", expireAt)
+			err := r.Delete(ctx, batchSbx, client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			return ctrl.Result{}, client.IgnoreNotFound(err)
 		} else {
 			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), expireAt.Time.Sub(now))
 		}
@@ -172,22 +175,9 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	if batchSbx.DeletionTimestamp == nil {
-		if taskStrategy.NeedTaskScheduling() {
-			if !controllerutil.ContainsFinalizer(batchSbx, finalizerTaskCleanup) {
-				err := utils.UpdateFinalizer(r.Client, batchSbx, utils.AddFinalizerOpType, finalizerTaskCleanup)
-				if err != nil {
-					log.Error(err, "failed to add finalizer", "finalizer", finalizerTaskCleanup)
-				} else {
-					log.Info("added finalizer", "finalizer", finalizerTaskCleanup)
-				}
-				return ctrl.Result{}, err
-			}
-		}
-	} else {
-		if !taskStrategy.NeedTaskScheduling() {
-			return ctrl.Result{}, nil
-		}
+	if taskStrategy.NeedTaskScheduling() && !controllerutil.ContainsFinalizer(batchSbx, finalizerTaskCleanup) {
+		err := utils.UpdateFinalizer(r.Client, batchSbx, utils.AddFinalizerOpType, finalizerTaskCleanup)
+		return ctrl.Result{}, err
 	}
 
 	// Pause/Resume dispatch: handles pause/resume intent before normal scaling.
@@ -215,7 +205,7 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Normal mode owns pod lifecycle except while a sandbox is fully paused. In Paused, the
 	// snapshot-backed runtime is quiesced and pods must stay absent until resume rewrites the
 	// template images and transitions back through Resuming.
-	if batchSbx.DeletionTimestamp == nil && !poolStrategy.IsPooledMode() &&
+	if !poolStrategy.IsPooledMode() &&
 		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused &&
 		!hasTerminalPodFailureCondition(batchSbx.Status.Conditions) {
 		// Bounded replacement of stuck provisioning pods; scale recreates them.
@@ -244,8 +234,7 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
 
-	// Deleting sandboxes must finish task cleanup even if they were paused.
-	skipTaskScheduling := batchSbx.DeletionTimestamp == nil && batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused
+	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused
 	if skipTaskScheduling {
 		r.deleteTaskScheduler(ctx, batchSbx)
 	}
@@ -433,71 +422,23 @@ func (r *BatchSandboxReconciler) reconcileTasks(
 	batchSbx *sandboxv1alpha1.BatchSandbox,
 	pods []*corev1.Pod,
 ) (*taskScheduleResult, error) {
-	log := logf.FromContext(ctx)
-	isDeleting := batchSbx.DeletionTimestamp != nil
-
-	// Once this controller's cleanup finalizer is gone, task cleanup is complete.
-	// Another controller (for example, the Pool controller) may still keep the
-	// object terminating with its own finalizer. Do not recreate an in-memory task
-	// scheduler or keep polling such objects every three seconds.
-	if isDeleting && !controllerutil.ContainsFinalizer(batchSbx, finalizerTaskCleanup) {
-		r.deleteTaskScheduler(ctx, batchSbx)
-		return nil, nil
-	}
-
 	sch, err := r.getTaskScheduler(ctx, batchSbx, pods)
 	if err != nil {
 		return nil, err
 	}
-
-	// Because tasks are in-memory and there is no event mechanism, periodic reconciliation is required.
-	// Terminating objects only need polling while task cleanup is still unfinished.
-	if !isDeleting {
-		durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), 3*time.Second)
-	}
-
-	if isDeleting {
-		stoppingTasks := sch.StopTask()
-		if len(stoppingTasks) > 0 {
-			log.Info("stopping tasks", "count", len(stoppingTasks))
-		}
-	}
-
-	now := time.Now()
-	ts, err := r.scheduleTasks(ctx, sch, batchSbx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to schedule tasks, err %w", err)
-	}
-	log.Info("schedule tasks completed", "costMs", time.Since(now).Milliseconds(), "task schedule result", utils.DumpJSON(ts))
-
-	// check task cleanup is finished
-	if isDeleting {
-		unfinishedTasks := r.getTasksCleanupUnfinished(batchSbx, sch)
-		if len(unfinishedTasks) > 0 {
-			log.Info("tasks cleanup is unfinished", "unfinishedCount", len(unfinishedTasks))
-			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), 3*time.Second)
-		} else {
-			cleanupErr := utils.UpdateFinalizer(r.Client, batchSbx, utils.RemoveFinalizerOpType, finalizerTaskCleanup)
-			if cleanupErr != nil {
-				if errors.IsNotFound(cleanupErr) {
-					cleanupErr = nil
-				} else {
-					log.Error(cleanupErr, "failed to remove finalizer", "finalizer", finalizerTaskCleanup)
-				}
-			}
-			if cleanupErr == nil {
-				r.deleteTaskScheduler(ctx, batchSbx)
-				log.Info("task cleanup is finished, removed finalizer", "finalizer", finalizerTaskCleanup)
-			}
-			// all tasks are cleaned up; skip returning task schedule result so the caller doesn't overwrite status
-			return nil, cleanupErr
-		}
-	}
-
-	return ts, nil
+	// Task state has no watch; active sandboxes periodically poll the executor.
+	durationStore.Push(client.ObjectKeyFromObject(batchSbx).String(), 3*time.Second)
+	return r.scheduleTasks(ctx, sch, batchSbx)
 }
 
 func (r *BatchSandboxReconciler) listPods(ctx context.Context, poolStrategy strategy.PoolStrategy, batchSbx *sandboxv1alpha1.BatchSandbox) ([]*corev1.Pod, error) {
+	reader := client.Reader(r.Client)
+	if batchSbx.DeletionTimestamp != nil {
+		if r.APIReader == nil {
+			return nil, fmt.Errorf("uncached API reader is not configured")
+		}
+		reader = r.APIReader
+	}
 	var ret []*corev1.Pod
 	if poolStrategy.IsPooledMode() {
 		var (
@@ -520,7 +461,7 @@ func (r *BatchSandboxReconciler) listPods(ctx context.Context, poolStrategy stra
 		for name := range activePods {
 			pod := &corev1.Pod{}
 			// TODO maybe performance is problem
-			if err := r.Client.Get(ctx, types.NamespacedName{Namespace: batchSbx.Namespace, Name: name}, pod); err != nil {
+			if err := reader.Get(ctx, types.NamespacedName{Namespace: batchSbx.Namespace, Name: name}, pod); err != nil {
 				if errors.IsNotFound(err) {
 					continue
 				}
@@ -530,14 +471,23 @@ func (r *BatchSandboxReconciler) listPods(ctx context.Context, poolStrategy stra
 		}
 	} else {
 		podList := &corev1.PodList{}
-		if err := r.Client.List(ctx, podList, &client.ListOptions{
+		options := &client.ListOptions{
 			Namespace:     batchSbx.Namespace,
 			FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(batchSbx.UID)}),
-		}); err != nil {
+		}
+		if batchSbx.DeletionTimestamp != nil {
+			// API reads cannot use the cache's owner index. Narrow by the label
+			// assigned at pod creation, then verify ownership below.
+			options.FieldSelector = nil
+			options.LabelSelector = labels.SelectorFromSet(labels.Set{labelBatchSandboxNameKey: batchSbx.Name})
+		}
+		if err := reader.List(ctx, podList, options); err != nil {
 			return nil, err
 		}
 		for i := range podList.Items {
-			ret = append(ret, &podList.Items[i])
+			if slices.Contains(fieldindex.OwnerIndexFunc(&podList.Items[i]), string(batchSbx.UID)) {
+				ret = append(ret, &podList.Items[i])
+			}
 		}
 	}
 	return ret, nil
@@ -816,6 +766,7 @@ func (r *BatchSandboxReconciler) assignPool(ctx context.Context, batchSbx *sandb
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.BatchSandbox{}).
 		Named("batchsandbox").

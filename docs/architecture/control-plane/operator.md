@@ -37,7 +37,7 @@ Two contracts connect the reconcilers without coupling them:
 | `taskTemplate` | Optional process each replica runs after allocation, executed by an in-pod task executor |
 | `shardTaskPatches` | Per-replica variants of `taskTemplate` — heterogeneous tasks across one batch |
 | `taskResourcePolicyWhenCompleted` | What happens to sandbox resources when its task reaches Succeeded/Failed: `Retain` (default) keeps them until deletion, `Release` frees them immediately |
-| `expireTime` | Absolute expiration time at which the controller begins foreground deletion |
+| `expireTime` | Absolute expiration time at which the controller begins deletion |
 | `pause` | Pause/resume intent: `true` pauses, `false` resumes. The controller never clears the field; it acks progress via `status.pauseObservedGeneration`, which also gates re-entry |
 
 If `poolRef` is empty, the controller can still auto-select a pool using configurable profiles: predicate plugins (capacity, image, resource, node selector) filter candidates, then a scoring plugin (least-allocated by default) picks one (`internal/controller/poolassign/`).
@@ -93,7 +93,9 @@ Because pool pods exist before any request, the lifecycle API cannot inject per-
 
 Tasks are optional: a `BatchSandbox` without a `taskTemplate` is pure allocation. With one, each replica runs a defined process — uniform across the batch, or customized per sandbox through shard patches.
 
-A process task can run **Local** (inside the task-executor container, the default) or **Remote** (inside the main container via `nsenter`), selected per task with `execMode`. Process tasks also support `preStart` and `postStop` lifecycle hooks: a failed or timed-out `preStart` prevents the main process from starting, and `postStop` runs on every terminal outcome, including cleanup after deletion — suitable for staging inputs and persisting outputs to mounted volumes.
+A process task can run **Local** (inside the task-executor container, the default) or **Remote** (inside the main container via `nsenter`), selected per task with `execMode`. Process tasks also support `preStart` and `postStop` lifecycle hooks: a failed or timed-out `preStart` prevents the main process from starting, and `postStop` runs on every terminal outcome, including deletion — suitable for staging inputs and persisting outputs to mounted volumes.
+
+API deletion and TTL expiration finish task cleanup, including `postStop`, before deleting or recycling pods. Direct foreground deletion of the BatchSandbox, or deletion of its Pool or pods, can bypass this ordering.
 
 ## SandboxSnapshot
 

@@ -21,25 +21,28 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	taskscheduler "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/scheduler"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/fieldindex"
 )
 
-func TestReconcileTasksSkipsDeletingObjectAfterTaskCleanup(t *testing.T) {
+func TestDeletionSkipsObjectAfterTaskCleanup(t *testing.T) {
 	now := metav1.Now()
 	sandbox := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -53,11 +56,11 @@ func TestReconcileTasksSkipsDeletingObjectAfterTaskCleanup(t *testing.T) {
 	_ = durationStore.Pop(key)
 
 	r := &BatchSandboxReconciler{}
-	result, err := r.reconcileTasks(context.Background(), sandbox, nil)
+	result, err := r.reconcileDeletion(context.Background(), sandbox)
 	if err != nil {
 		t.Fatalf("reconcileTasks() error = %v", err)
 	}
-	if result != nil {
+	if result != (ctrl.Result{}) {
 		t.Fatalf("reconcileTasks() result = %#v, want nil", result)
 	}
 	if requeueAfter := durationStore.Pop(key); requeueAfter != 0 {
@@ -70,10 +73,12 @@ func TestReconcileTasksSkipsDeletingObjectAfterTaskCleanup(t *testing.T) {
 
 func TestDeletingTaskSandboxOnlyCleansUpTasks(t *testing.T) {
 	tests := []struct {
-		name  string
-		phase sandboxv1alpha1.BatchSandboxPhase
-		pause *bool
+		name    string
+		phase   sandboxv1alpha1.BatchSandboxPhase
+		pause   *bool
+		poolRef string
 	}{
+		{name: "unassigned pool", poolRef: "*"},
 		{name: "running", phase: sandboxv1alpha1.BatchSandboxPhaseSucceed},
 		{name: "pending pause", phase: sandboxv1alpha1.BatchSandboxPhaseSucceed, pause: ptr.To(true)},
 		{name: "pending resume", phase: sandboxv1alpha1.BatchSandboxPhasePaused, pause: ptr.To(false)},
@@ -95,6 +100,7 @@ func TestDeletingTaskSandboxOnlyCleansUpTasks(t *testing.T) {
 					},
 					Spec: sandboxv1alpha1.BatchSandboxSpec{
 						Pause:    tt.pause,
+						PoolRef:  tt.poolRef,
 						Replicas: ptr.To(int32(1)),
 						Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "main", Image: "example.com"}},
@@ -165,6 +171,67 @@ func TestDeletingTaskSandboxOnlyCleansUpTasks(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestTaskCleanupPrecedesOwnedPodDeletion(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	sandbox := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup", Namespace: "default", UID: "sandbox-uid",
+			DeletionTimestamp: &now, Finalizers: []string{finalizerTaskCleanup}},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: ptr.To(int32(1)),
+			TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{}},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "cleanup-0", Namespace: sandbox.Namespace, UID: "pod-uid",
+		Labels:          map[string]string{labelBatchSandboxNameKey: sandbox.Name},
+		Finalizers:      []string{"test.opensandbox.io/keep"},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(sandbox, sandboxv1alpha1.GroupVersion.WithKind("BatchSandbox"))},
+	}}
+	r := newTestReconciler(sandbox, pod)
+	live := r.Client.(client.WithWatch)
+	queryFailed := false
+	r.APIReader = interceptor.NewClient(live, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if queryFailed {
+				return fmt.Errorf("pod query failed")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	// The cache has not observed the pod yet; finalization must use the API reader.
+	r.Client = interceptor.NewClient(live, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error { return nil },
+	})
+	key := client.ObjectKeyFromObject(sandbox)
+	t.Cleanup(func() { _ = durationStore.Pop(key.String()) })
+	sch := &recordingTaskScheduler{tasks: []taskscheduler.Task{fakeSchedulerTask{name: "cleanup-0"}}}
+	r.taskSchedulers.Store(key.String(), sch)
+	reconcile := func() {
+		t.Helper()
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+	}
+	reconcile()
+	require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(pod), pod))
+	require.Nil(t, pod.DeletionTimestamp, "task cleanup must finish before Pod termination")
+
+	sch.tasks = nil
+	queryFailed = true
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.Error(t, err)
+	queryFailed = false
+	for range 2 {
+		reconcile()
+		require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(pod), pod))
+		require.NotNil(t, pod.DeletionTimestamp)
+		require.NoError(t, live.Get(ctx, key, sandbox))
+		require.Contains(t, sandbox.Finalizers, finalizerTaskCleanup, "a terminating Pod still retains the sandbox")
+	}
+	pod.Finalizers = nil
+	require.NoError(t, live.Update(ctx, pod))
+	reconcile()
+	require.True(t, apierrors.IsNotFound(live.Get(ctx, key, sandbox)))
 }
 
 func TestUnavailablePoolWaitsForAllocatedPodDeletion(t *testing.T) {
@@ -541,4 +608,141 @@ func assertPoolFinalizerPresent(t *testing.T, c client.Client, sandbox *sandboxv
 	if !controllerutil.ContainsFinalizer(updated, finalizerPoolAllocation) {
 		t.Fatalf("sandbox %s unexpectedly lost pool finalizer", sandbox.Name)
 	}
+}
+
+// Exercise the real allocator and recycler around the BatchSandbox task-cleanup
+// handoff. A finished task must not make another still-cleaning task lose its pod.
+func TestPooledTaskDeletionHandoff(t *testing.T) {
+	for _, recycleType := range []sandboxv1alpha1.RecycleType{sandboxv1alpha1.RecycleTypeDelete, sandboxv1alpha1.RecycleTypeNoop} {
+		t.Run(string(recycleType), func(t *testing.T) {
+			ctx := context.Background()
+			now := metav1.Now()
+			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+				Spec: sandboxv1alpha1.PoolSpec{RecycleStrategy: &sandboxv1alpha1.RecycleStrategy{Type: recycleType}}}
+			sandbox := terminatingPoolSandbox("task-sandbox", pool.Name, &now)
+			sandbox.Finalizers = append(sandbox.Finalizers, finalizerTaskCleanup)
+			sandbox.Spec.Replicas = ptr.To(int32(2))
+			sandbox.Spec.TaskTemplate = &sandboxv1alpha1.TaskTemplateSpec{Spec: sandboxv1alpha1.TaskSpec{
+				Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep", "3600"}},
+			}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "task-pod", Namespace: "default", Finalizers: []string{"test/keep"}}}
+			setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{pod.Name}})
+			r := newTestReconciler(pool, sandbox, pod)
+			key := client.ObjectKeyFromObject(sandbox)
+			scheduler := &recordingTaskScheduler{tasks: []taskscheduler.Task{
+				fakeSchedulerTask{name: "task-sandbox-0", podName: pod.Name},
+				fakeSchedulerTask{name: "task-sandbox-1", released: true},
+			}}
+			r.taskSchedulers.Store(key.String(), scheduler)
+			poolReconciler := &PoolReconciler{Client: r.Client, APIReader: r.APIReader,
+				Allocator: NewDefaultAllocator(r.Client), Recorder: record.NewFakeRecorder(100)}
+			schedule := func(pods []*corev1.Pod) *scheduleResult {
+				t.Helper()
+				require.NoError(t, r.Get(ctx, key, sandbox))
+				result, err := poolReconciler.scheduleSandbox(ctx, pool, []*sandboxv1alpha1.BatchSandbox{sandbox}, pods)
+				require.NoError(t, err)
+				require.Zero(t, result.SupplyCnt, "deletion must never request new capacity")
+				return result
+			}
+			// Both controller orderings must preserve the allocation during hooks.
+			for range 2 {
+				result := schedule([]*corev1.Pod{pod})
+				require.Empty(t, result.ToDelete)
+				require.Equal(t, sandbox.Name, result.LatestAllocation[pod.Name])
+				deletion, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+				require.NoError(t, err)
+				require.Positive(t, deletion.RequeueAfter)
+			}
+			before := sandbox.DeepCopy()
+			scheduler.tasks = nil // the executor has confirmed task/hook cleanup
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			require.NoError(t, err)
+			require.NoError(t, r.Get(ctx, key, sandbox))
+			require.NotContains(t, sandbox.Finalizers, finalizerTaskCleanup)
+			require.Contains(t, sandbox.Finalizers, finalizerPoolAllocation)
+			require.True(t, shouldReconcilePoolForBatchSandboxUpdate(event.UpdateEvent{ObjectOld: before, ObjectNew: sandbox}))
+
+			result := schedule([]*corev1.Pod{pod})
+			if recycleType == sandboxv1alpha1.RecycleTypeDelete {
+				require.Equal(t, []string{pod.Name}, result.ToDelete)
+				require.NoError(t, r.Delete(ctx, pod))
+				require.Empty(t, schedule(nil).ToDelete, "terminating pods are not yet recycled")
+				require.NoError(t, r.Get(ctx, key, sandbox))
+				require.Contains(t, sandbox.Finalizers, finalizerPoolAllocation)
+				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pod), pod))
+				pod.Finalizers = nil
+				require.NoError(t, r.Update(ctx, pod))
+				schedule(nil)
+			} else {
+				require.Empty(t, result.ToDelete)
+				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pod), pod), "Noop preserves the pod after task cleanup")
+			}
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, key, &sandboxv1alpha1.BatchSandbox{})))
+		})
+	}
+}
+
+func TestDeletionRecoversAfterPodsDisappear(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	sandbox := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "recovered", Namespace: "default", DeletionTimestamp: &now, Finalizers: []string{finalizerTaskCleanup}},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: ptr.To(int32(1)), TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{
+			Spec: sandboxv1alpha1.TaskSpec{Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep", "3600"}}},
+		}},
+	}
+	r := newTestReconciler(sandbox) // fresh controller, no in-memory scheduler
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)})
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(sandbox), &sandboxv1alpha1.BatchSandbox{})))
+	var pods corev1.PodList
+	require.NoError(t, r.List(ctx, &pods))
+	require.Empty(t, pods.Items)
+}
+
+func TestExpiryDeletionPolicy(t *testing.T) {
+	for _, taskMode := range []bool{false, true} {
+		t.Run(fmt.Sprintf("task=%v", taskMode), func(t *testing.T) {
+			sandbox := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "expired", Namespace: "default"},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{ExpireTime: &metav1.Time{Time: time.Now().Add(-time.Minute)}},
+			}
+			want := metav1.DeletePropagationForeground
+			if taskMode {
+				sandbox.Spec.TaskTemplate = &sandboxv1alpha1.TaskTemplateSpec{}
+				want = metav1.DeletePropagationBackground
+			}
+			r := newTestReconciler(sandbox)
+			deleted := false
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Delete: func(_ context.Context, _ client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+					options := &client.DeleteOptions{}
+					options.ApplyOptions(opts)
+					require.Equal(t, &want, options.PropagationPolicy)
+					require.Equal(t, sandbox.Name, object.GetName())
+					deleted = true
+					return nil
+				},
+			})
+			result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)})
+			require.NoError(t, err)
+			require.True(t, deleted)
+			require.Equal(t, ctrl.Result{}, result)
+			require.Empty(t, sandbox.Finalizers, "expiry acceptance must not continue normal reconciliation")
+		})
+	}
+}
+
+func TestDeletionRequiresAuthoritativePodReads(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	sandbox := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{
+		Name: "unconfirmed", Namespace: "default", DeletionTimestamp: &now, Finalizers: []string{finalizerTaskCleanup},
+	}}
+	r := newTestReconciler(sandbox)
+	r.APIReader = nil
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)})
+	require.ErrorContains(t, err, "uncached API reader")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sandbox), sandbox))
+	require.Contains(t, sandbox.Finalizers, finalizerTaskCleanup)
 }

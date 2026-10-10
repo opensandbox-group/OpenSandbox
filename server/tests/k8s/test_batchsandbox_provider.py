@@ -1108,11 +1108,14 @@ spec:
 
     # ===== Workload Deletion Tests =====
 
+    @pytest.mark.parametrize("task_template, propagation", [(None, "Foreground"), ({}, "Background")])
     def test_delete_workload_deletes_existing_sandbox(
-        self, mock_k8s_client, mock_batchsandbox_list_response
+        self, mock_k8s_client, mock_batchsandbox_list_response, task_template, propagation
     ):
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.get_custom_object.return_value = mock_batchsandbox_list_response["items"][0]
+
+        mock_k8s_client.get_custom_object.return_value.setdefault("spec", {})["taskTemplate"] = task_template
 
         provider.delete_workload("test-id", "test-ns")
 
@@ -1123,7 +1126,7 @@ spec:
             plural="batchsandboxes",
             name="test-id",
             grace_period_seconds=0,
-            propagation_policy="Foreground",
+            propagation_policy=propagation,
         )
 
     def test_delete_workload_raises_when_not_found(self, mock_k8s_client):
@@ -2848,10 +2851,18 @@ spec:
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert "imagePullSecrets" not in body["spec"]["template"]["spec"]
 
+    @pytest.mark.parametrize("task_mode", [False, True])
     def test_create_workload_with_image_auth_secret_failure_rolls_back_batchsandbox(
-        self, mock_k8s_client
+        self, mock_k8s_client, tmp_path, task_mode
     ):
-        provider = BatchSandboxProvider(mock_k8s_client)
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  taskTemplate:\n    spec:\n      process:\n        command: [sleep, '3600']\n"
+            if task_mode else "spec: {}\n"
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
         mock_k8s_client.create_custom_object.return_value = {
             "metadata": {"name": "test-id", "uid": "uid-123"}
         }
@@ -2880,7 +2891,7 @@ spec:
             plural=provider.plural,
             name="test-id",
             grace_period_seconds=0,
-            propagation_policy="Foreground",
+            propagation_policy="Background" if task_mode else "Foreground",
         )
 
     # ===== Volume Support Tests =====
