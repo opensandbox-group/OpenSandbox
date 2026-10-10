@@ -397,7 +397,7 @@ Budget exhaustion answers `503 + Retry-After: 1`. The status stays 503 deliberat
 ```http
 HTTP/1.1 503 Service Unavailable
 Retry-After: 1
-X-OpenSandbox-Wake: expired
+OpenSandbox-Wake: expired
 
 {"error": {"code": "sandbox_wake_timeout",
            "message": "restore still in progress; request was never forwarded and is safe to retry",
@@ -406,11 +406,11 @@ X-OpenSandbox-Wake: expired
 
 The bare `503` — no marker — remains today's paused-sandbox answer (wake disabled, no declared policy, or `wakeOnAccess: false`), byte-for-byte. The ingress and the server proxy path emit the identical marker.
 
-**Gateway-owned marker.** `X-OpenSandbox-Wake` is reserved: the proxy strips it from every upstream response on both the ingress and the server-proxy path, so a sandbox application cannot forge provenance by returning the header — or the JSON code — itself. The gateway emits the marker only for its own parked-timeout responses, the one case where non-forwarding is provable; the stale-route re-entry `503` (post-forward) is bare. The header is therefore the sole provenance proof; the JSON `code` documents the same fact for humans.
+**Gateway-owned marker.** `OpenSandbox-Wake` is reserved — named in the platform's existing `OpenSandbox-*` header family alongside OSEP-0009's `OpenSandbox-Access-Renew` (no `X-` prefix): the proxy strips it from every upstream response on both the ingress and the server-proxy path, so a sandbox application cannot forge provenance by returning the header — or the JSON code — itself. The gateway emits the marker only for its own parked-timeout responses, the one case where non-forwarding is provable; the stale-route re-entry `503` (post-forward) is bare. The header is therefore the sole provenance proof; the JSON `code` documents the same fact for humans.
 
 Official SDKs apply the following contract to this response, and only this response:
 
-- **Recognition**: the gateway-owned header `X-OpenSandbox-Wake: expired` on a 503 — its presence proves gateway origin because the proxy strips it from every upstream response — with `code: sandbox_wake_timeout` as the auxiliary body form. Any other 503, including an upstream-forged marker that was stripped in transit, follows the SDK's existing retry rules untouched; a bare 503 is never auto-retried for non-idempotent methods.
+- **Recognition**: the gateway-owned header `OpenSandbox-Wake: expired` on a 503 — its presence proves gateway origin because the proxy strips it from every upstream response — with `code: sandbox_wake_timeout` as the auxiliary body form. Any other 503, including an upstream-forged marker that was stripped in transit, follows the SDK's existing retry rules untouched; a bare 503 is never auto-retried for non-idempotent methods.
 - **Automatic retry**: wait per `Retry-After` (delta-seconds or HTTP-date), then resend the original request. The marker is the gateway's proof the request never reached the sandbox, so retry is safe for any method — including command/code-execution starts — provided the body is replayable (same capture rules as pre-forward parking). On by default, disable-able per client.
 - **Established streams**: the marked request never produced a stream, so there is nothing to double-execute; once a retry succeeds and a stream is established, further failures follow the SDK's existing transport policy (no re-execution).
 - **Total wait bound**: a per-client retry policy — `overall_deadline` (default 60 s) and `max_attempts` (default 5) — spans all wake cycles: waits, retries, and request time. Retries never reset the deadline; if the next `Retry-After` exceeds the remaining budget, stop.
@@ -526,7 +526,7 @@ Dashboards/alerts: wake P95 (target < 500 ms same-node), shed rate ≈ 0, flap r
 - **Unit Tests**
    - `idlePolicy` validation: `idleTimeoutSeconds` range 30–86400, `X ≤ activity_ttl_seconds`, unknown fields rejected, omission is a no-op; `wakeOnAccess=false`: pause still happens, requests keep 503, manual resume works, no auto-wake.
    - Activity probe verdict mapping: `active: true` → observation recorded; `active: false` → none, with the `message` carried into the pause audit line; timeout/error/malformed → none + outcome counted; sentinel-carried requests are never recorded by the activity recorder.
-   - Wake marker provenance: the proxy strips `X-OpenSandbox-Wake` from upstream responses on both the ingress and the server-proxy path before the response reaches the client; the gateway emits it only for its own parked-timeout responses.
+   - Wake marker provenance: the proxy strips `OpenSandbox-Wake` from upstream responses on both the ingress and the server-proxy path before the response reaches the client; the gateway emits it only for its own parked-timeout responses.
    - Idle decision function: boundary at exactly X; stale activity key ⇒ idle by value; missing key ⇒ unknown (tombstone created, sweep skipped); tombstone aged ≥ X ⇒ idle; activity reappearance clears the tombstone; expiry and state gates.
    - Activity write: monotonic max — an older timestamp never overwrites a newer one.
    - Parking admission: slot acquired before flight creation; full lot sheds before `ResumeSandbox`; first-attempt hits take no slot.
@@ -540,7 +540,7 @@ Dashboards/alerts: wake P95 (target < 500 ms same-node), shed rate ≈ 0, flap r
   - Request arriving during `Pausing` cancels the pause (no completed checkpoint) and serves from the running sandbox.
    - Manual pause → access → wake (uniform semantics).
    - Compatibility: a pre-existing sandbox with no `idlePolicy` is manually paused, `--wake-enabled` is then turned on, and traffic arrives → stays paused, zero `ResumeSandbox` calls, manual resume works.
-   - Forged marker: the upstream executes a POST and returns 503 carrying `X-OpenSandbox-Wake: expired` and `code: sandbox_wake_timeout` → the client receives the response with the header stripped, the SDK does not replay, and the operation executed exactly once.
+   - Forged marker: the upstream executes a POST and returns 503 carrying `OpenSandbox-Wake: expired` and `code: sandbox_wake_timeout` → the client receives the response with the header stripped, the SDK does not replay, and the operation executed exactly once.
   - Paused + expired → access → 404, no resume.
    - Redis down: no pauses occur; wake still works; proxy path unaffected.
    - Redis data loss (`FLUSHALL`) with an active opted-in sandbox: no immediate pause; after continued silence the tombstone window elapses and the pause proceeds — delayed by ≥ X from first observation, never accelerated.
