@@ -1,0 +1,58 @@
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+_TERMINAL_STATES = frozenset({"Terminated", "Failed", "Stopping"})
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    # Lifecycle API uses ISO-8601; handle Z suffix.
+    normalized = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def attach_runtime_summary(sandbox: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """Return a shallow copy of sandbox with runtimeSummary added."""
+    now = now or datetime.now(timezone.utc)
+    created = _parse_dt(sandbox.get("createdAt"))
+    expires = _parse_dt(sandbox.get("expiresAt"))
+    status = sandbox.get("status") or {}
+    state = status.get("state")
+    last_transition = _parse_dt(status.get("lastTransitionAt"))
+
+    summary: dict[str, Any] = {"asOf": now.isoformat().replace("+00:00", "Z"), "basis": "createdAt"}
+    if created:
+        end = now
+        if state in _TERMINAL_STATES and last_transition:
+            end = last_transition
+            summary["basis"] = "lastTransitionAt"
+        summary["wallClockSeconds"] = max(0, int((end - created).total_seconds()))
+    if expires:
+        summary["remainingSeconds"] = max(0, int((expires - now).total_seconds()))
+
+    out = dict(sandbox)
+    out["runtimeSummary"] = summary
+    return out
