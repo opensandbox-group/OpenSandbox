@@ -262,7 +262,8 @@ class Sandboxes(Protocol):
 
     async def kill_sandbox(self, sandbox_id: str) -> None:
         """
-        Terminate a sandbox and release all associated resources.
+        Request irreversible termination of the remote sandbox. Returns when
+        deletion is accepted; runtime cleanup may continue afterward.
 
         Args:
             sandbox_id: Unique identifier of the sandbox

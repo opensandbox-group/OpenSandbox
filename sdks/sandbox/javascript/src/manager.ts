@@ -129,6 +129,10 @@ export class SandboxManager {
     return this.sandboxes.patchSandboxMetadata(sandboxId, patch);
   }
 
+  /**
+   * Request irreversible sandbox termination. Resolves when deletion is accepted;
+   * runtime cleanup may continue afterward.
+   */
   killSandbox(sandboxId: SandboxId, signal?: AbortSignal): Promise<void> {
     return this.sandboxes.deleteSandbox(sandboxId, signal);
   }

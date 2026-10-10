@@ -1297,8 +1297,8 @@ class TestSandboxKill:
         assert mock_mgr.kill_sandbox.call_count == 2
         data = json.loads(result.output)
         assert data == [
-            {"sandbox_id": "id1", "status": "terminated"},
-            {"sandbox_id": "id2", "status": "terminated"},
+            {"sandbox_id": "id1", "status": "deletion_requested"},
+            {"sandbox_id": "id2", "status": "deletion_requested"},
         ]
 
 

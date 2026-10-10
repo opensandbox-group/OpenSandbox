@@ -39,7 +39,7 @@ Creation returns before the sandbox is running (`Pending`), and clients poll sta
 
 A sandbox is observed as `Pending` or `Running`, moves through the `Pausing` / `Paused` / `Resuming` / `Stopping` transitions, and ends in `Terminated` (exit code 0) or `Failed` (non-zero). `resume()` is deliberately a pause-state operation, never a general restart: a workload that already exited is `Terminated` or `Failed`, and the honest answer to that is a replacement sandbox, not a silent revive. Pausing on Kubernetes keeps the sandbox ID and restores the root filesystem — with the opt-in QEMU mode, even guest memory. See [Pause & Resume](/guides/pause-resume).
 
-For Kubernetes BatchSandbox workloads, deletion can leave the object visible while task cleanup and pool release finish. During this window, both list and individual sandbox queries report `Stopping`, with reason `DELETING` and the deletion timestamp as `lastTransitionAt`, regardless of the previous runtime phase. Once Kubernetes removes the object, it disappears from the list and individual queries return `404`.
+For Kubernetes BatchSandbox workloads, `DELETE /sandboxes/{id}` returns `204` and SDK `kill()` returns when deletion is accepted. Poll `GET /sandboxes/{id}`: it reports `Stopping` while cleanup finishes, then returns `404`. Under normal managed deletion, non-pooled sandboxes and pools using the default `Delete` strategy wait for pods to disappear; pool `Noop` preserves processes, so its `404` does not confirm runtime termination.
 
 ### Endpoint resolution is part of the contract
 

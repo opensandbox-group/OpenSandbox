@@ -138,7 +138,8 @@ public sealed class SandboxManager : IAsyncDisposable
     }
 
     /// <summary>
-    /// Terminates a sandbox.
+    /// Requests irreversible sandbox termination.
+    /// Completes when deletion is accepted; runtime cleanup may continue afterward.
     /// </summary>
     /// <param name="sandboxId">The sandbox ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>

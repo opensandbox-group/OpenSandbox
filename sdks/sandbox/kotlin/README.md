@@ -58,7 +58,7 @@ public class QuickStart {
             System.out.println(execution.getLogs().getStdout().get(0).getText());
 
             // 5. Cleanup (sandbox.close() called automatically)
-            // Note: kill() must be called explicitly if you want to terminate the remote sandbox instance immediately
+            // kill() requests remote deletion; runtime cleanup may continue after it returns.
             sandbox.kill();
         } catch (SandboxException e) {
             // Handle Sandbox specific exceptions

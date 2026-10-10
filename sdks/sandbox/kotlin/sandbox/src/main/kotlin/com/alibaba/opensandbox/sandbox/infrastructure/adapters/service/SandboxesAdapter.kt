@@ -498,7 +498,7 @@ internal class SandboxesAdapter(
 
         return try {
             api.sandboxesSandboxIdDelete(sandboxId)
-            logger.info("Successfully terminated sandbox: {}", sandboxId)
+            logger.info("Sandbox deletion accepted: {}", sandboxId)
         } catch (e: Exception) {
             logger.error("Failed to terminate sandbox: {}", sandboxId, e)
             throw e.toSandboxException()

@@ -58,6 +58,10 @@ export interface Sandboxes {
     sandboxId: SandboxId,
     patch: SandboxMetadataPatch,
   ): Promise<SandboxInfo>;
+  /**
+   * Request irreversible sandbox termination. Resolves when deletion is accepted;
+   * runtime cleanup may continue afterward.
+   */
   deleteSandbox(sandboxId: SandboxId, signal?: AbortSignal): Promise<void>;
 
   pauseSandbox(sandboxId: SandboxId): Promise<void>;

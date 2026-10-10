@@ -72,7 +72,8 @@ public interface ISandboxes
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Deletes a sandbox.
+    /// Requests irreversible sandbox termination.
+    /// Completes when deletion is accepted; runtime cleanup may continue afterward.
     /// </summary>
     /// <param name="sandboxId">The sandbox ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>

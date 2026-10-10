@@ -804,8 +804,8 @@ class Sandbox internal constructor(
     }
 
     /**
-     * This method sends a termination signal to the remote sandbox instance, causing it to stop immediately.
-     * This is an irreversible operation.
+     * Request irreversible termination of the remote sandbox. Returns when deletion is accepted;
+     * runtime cleanup may continue afterward.
      *
      * Note: This method does NOT close the local `Sandbox` object resources (like connection pools).
      * You should call `close()` or use a try-with-resources block to clean up local resources.

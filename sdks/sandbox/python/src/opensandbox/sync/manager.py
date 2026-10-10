@@ -191,7 +191,8 @@ class SandboxManagerSync:
 
     def kill_sandbox(self, sandbox_id: str) -> None:
         """
-        Terminate a single sandbox.
+        Request irreversible termination of the remote sandbox. Returns when
+        deletion is accepted; runtime cleanup may continue afterward.
 
         Args:
             sandbox_id: Sandbox ID to terminate
@@ -201,7 +202,7 @@ class SandboxManagerSync:
         """
         logger.info(f"Terminating sandbox: {sandbox_id}")
         self._sandbox_service.kill_sandbox(sandbox_id)
-        logger.info(f"Successfully terminated sandbox: {sandbox_id}")
+        logger.info(f"Sandbox deletion accepted: {sandbox_id}")
 
     def renew_sandbox(
         self, sandbox_id: str, timeout: timedelta

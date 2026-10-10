@@ -823,14 +823,14 @@ def sandbox_get(obj: ClientContext, sandbox_id: str, output_format: str | None) 
 def sandbox_kill(
     obj: ClientContext, sandbox_ids: tuple[str, ...], output_format: str | None
 ) -> None:
-    """Terminate one or more sandboxes."""
+    """Request deletion of one or more sandboxes; cleanup may continue."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     mgr = obj.get_manager()
     rows: list[dict[str, str]] = []
     for sid in sandbox_ids:
         with obj.output.spinner(f"Killing sandbox {sid}..."):
             mgr.kill_sandbox(sid)
-        rows.append({"sandbox_id": sid, "status": "terminated"})
+        rows.append({"sandbox_id": sid, "status": "deletion_requested"})
     obj.output.print_rows(rows, columns=["sandbox_id", "status"], title="Sandboxes")
 
 

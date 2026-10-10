@@ -485,6 +485,8 @@ class TestSkillContentQuality:
     def test_lifecycle_skill_keeps_json_shapes_and_health_guidance(self) -> None:
         content = _read_builtin_skill("opensandbox-sandbox-lifecycle.md")
 
+        assert "`kill` returns `deletion_requested` when accepted" in content
+        assert "Pool `Noop` preserves processes" in content
         assert "## JSON Shapes" in content
         assert '"defaultAction": "deny"' in content
         assert '"mountPath": "/workspace/data"' in content

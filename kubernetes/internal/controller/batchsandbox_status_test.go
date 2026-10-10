@@ -108,7 +108,7 @@ func TestReconcileDeletingTaskSandbox(t *testing.T) {
 	previousStatus := bs.Status.DeepCopy()
 	require.NoError(t, apiClient.Delete(ctx, bs))
 	key := client.ObjectKeyFromObject(bs)
-	r := &BatchSandboxReconciler{Client: apiClient, Scheme: testscheme,
+	r := &BatchSandboxReconciler{Client: apiClient, APIReader: apiClient, Scheme: testscheme,
 		Recorder: record.NewFakeRecorder(10), StatusRVExpectation: expectations.NewResourceVersionExpectation()}
 
 	// No pods remain. Pending tasks must still be cleaned up, without publishing Creating.

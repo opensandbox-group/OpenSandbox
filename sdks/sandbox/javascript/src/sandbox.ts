@@ -1074,6 +1074,10 @@ export class Sandbox {
     return await Sandbox.connect({ ...opts, connectionConfig: baseConnectionConfig, adapterFactory });
   }
 
+  /**
+   * Request irreversible sandbox termination. Resolves when deletion is accepted;
+   * runtime cleanup may continue afterward.
+   */
   async kill(): Promise<void> {
     this.sandboxes.invalidateEndpointCache?.(this.id);
     await this.sandboxes.deleteSandbox(this.id);

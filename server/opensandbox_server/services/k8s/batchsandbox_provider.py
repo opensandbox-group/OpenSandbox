@@ -341,6 +341,7 @@ class BatchSandboxProvider(WorkloadProvider):
                         plural=self.plural,
                         name=sandbox_id,
                         grace_period_seconds=0,
+                        propagation_policy=self._deletion_propagation_policy(batchsandbox),
                     )
                 except Exception as del_exc:
                     logger.warning(f"Failed to rollback BatchSandbox {sandbox_id}: {del_exc}")
@@ -584,6 +585,12 @@ class BatchSandboxProvider(WorkloadProvider):
 
         return None
     
+    @staticmethod
+    def _deletion_propagation_policy(batchsandbox: Dict[str, Any]) -> str:
+        # Keep executor and main containers alive until the task cleanup finalizer
+        # stops tasks and hooks, then deletes owned pods and waits for their removal.
+        return "Background" if batchsandbox.get("spec", {}).get("taskTemplate") is not None else "Foreground"
+
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -596,6 +603,7 @@ class BatchSandboxProvider(WorkloadProvider):
             plural=self.plural,
             name=batchsandbox["metadata"]["name"],
             grace_period_seconds=0,
+            propagation_policy=self._deletion_propagation_policy(batchsandbox),
         )
 
     def list_workloads(self, namespace: str, label_selector: str) -> List[Dict[str, Any]]:
