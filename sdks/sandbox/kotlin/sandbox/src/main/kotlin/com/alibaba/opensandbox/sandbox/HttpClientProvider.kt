@@ -32,6 +32,8 @@ import okhttp3.logging.HttpLoggingInterceptor
 import org.slf4j.LoggerFactory
 import java.util.concurrent.TimeUnit
 
+private const val API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
+
 /**
  * Provider that manages HTTP client instances with proper configuration.
  */
@@ -77,6 +79,7 @@ class HttpClientProvider(
             baseBuilder
                 .applyStandardTimeouts()
                 .addRetryInterceptor()
+                .addInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
                 .addLoggingInterceptor()
                 .build()
         }
@@ -126,6 +129,7 @@ class HttpClientProvider(
                 .callTimeout(0, TimeUnit.MILLISECONDS)
                 .retryOnConnectionFailure(false)
                 .addInterceptor(ExtraHeadersInterceptor(getSseHeaders()))
+                .addInterceptor(DataPlaneApiKeySanitizer(config.useServerProxy))
                 .addLoggingInterceptor()
                 .build()
         }
@@ -202,8 +206,31 @@ class HttpClientProvider(
         override fun intercept(chain: Interceptor.Chain): Response {
             return chain.proceed(
                 chain.request().newBuilder()
-                    .header("OPEN-SANDBOX-API-KEY", apiKey)
+                    .header(API_KEY_HEADER, apiKey)
                     .build(),
+            )
+        }
+    }
+
+    /**
+     * Strips the tenant API key from data-plane requests in direct mode.
+     *
+     * execd performs no authentication, so a key that arrived via the
+     * connection's custom headers would travel straight into the untrusted
+     * sandbox. Requests declared as server-proxy keep their headers: they
+     * pass the server's auth gate. Runs after [ExtraHeadersInterceptor],
+     * and OkHttp header lookup is case-insensitive.
+     */
+    private class DataPlaneApiKeySanitizer(
+        private val serverProxyDeclared: Boolean,
+    ) : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            if (serverProxyDeclared || request.header(API_KEY_HEADER) == null) {
+                return chain.proceed(request)
+            }
+            return chain.proceed(
+                request.newBuilder().removeHeader(API_KEY_HEADER).build(),
             )
         }
     }
