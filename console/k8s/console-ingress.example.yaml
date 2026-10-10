@@ -1,0 +1,23 @@
+# 对外入口：Web nginx 同域反代 /api → BFF（推荐）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opensandbox-console
+  namespace: opensandbox-system
+spec:
+  # BFF_COOKIE_SECURE=true 时浏览器只在 HTTPS 下带回会话 Cookie。
+  tls:
+    - hosts:
+        - console.example.com
+      secretName: console-tls
+  rules:
+    - host: console.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: opensandbox-console-web
+                port:
+                  number: 80
