@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.execd.FilesystemApi
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceEntry
@@ -75,9 +76,10 @@ internal class FilesystemAdapter(
             .substringBefore("/v1/filesystem/")
             .trimEnd('/')
             .removeSuffix("/v1/filesystem")
+    private val execdBaseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
     private val api =
         FilesystemApi(
-            "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}",
+            execdBaseUrl,
             httpClientProvider.httpClient.newBuilder()
                 .addInterceptor { chain ->
                     val requestBuilder = chain.request().newBuilder()
@@ -86,8 +88,17 @@ internal class FilesystemAdapter(
                     }
                     chain.proceed(requestBuilder.build())
                 }
+                .addProtectedHeaderOriginGuard(execdBaseUrl)
                 .build(),
         )
+
+    // Same endpoint origin as the API client: guards raw newCall paths
+    // (upload/download/exist) against credential replay on cross-origin
+    // redirect hops.
+    private val guardedClient =
+        httpClientProvider.httpClient.newBuilder()
+            .addProtectedHeaderOriginGuard(execdBaseUrl)
+            .build()
 
     override fun withIdentity(
         uid: Long,
@@ -118,7 +129,7 @@ internal class FilesystemAdapter(
     ): String {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            guardedClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to read file. Status code: $statusCode, Body: $body"
@@ -142,7 +153,7 @@ internal class FilesystemAdapter(
     ): ByteArray {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            guardedClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to read file. Status code: $statusCode, Body: $body"
@@ -164,7 +175,7 @@ internal class FilesystemAdapter(
     ): InputStream {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            val response = httpClientProvider.httpClient.newCall(request).execute()
+            val response = guardedClient.newCall(request).execute()
 
             if (!response.isSuccessful) {
                 try {
@@ -243,7 +254,7 @@ internal class FilesystemAdapter(
                     .post(builder.build())
                     .build()
 
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            guardedClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to write files. Status code: $statusCode, Body: $body"

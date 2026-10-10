@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
@@ -229,6 +230,13 @@ internal class IsolatedSessionsAdapter(
     private val execdBaseUrl =
         "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
 
+    // Guards every raw newCall against credential replay on cross-origin
+    // redirect hops.
+    private val guardedClient =
+        httpClientProvider.httpClient.newBuilder()
+            .addProtectedHeaderOriginGuard(execdBaseUrl)
+            .build()
+
     override fun create(request: CreateIsolatedSessionRequest): IsolationSession {
         require(request.workspace != null || !request.overlays.isNullOrEmpty()) {
             "workspace or overlays is required"
@@ -269,7 +277,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "create isolated session")
                 val resp =
                     json.decodeFromString(
@@ -298,7 +306,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "attach isolated session")
                 val resp =
                     json.decodeFromString(
@@ -348,7 +356,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "get isolated session")
                 val resp =
                     json.decodeFromString(
@@ -464,7 +472,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 if (response.code != 202) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "run background in isolated session failed. Status: $statusCode, Body: $body"
@@ -500,7 +508,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "get isolated run status")
                 val resp =
                     json.decodeFromString(
@@ -543,7 +551,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "get isolated run logs")
                 val bytes = response.body!!.bytes()
                 val text = bytes.toString(Charsets.UTF_8)
@@ -567,7 +575,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "delete isolated session")
             }
         } catch (e: Exception) {
@@ -584,7 +592,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "get isolated capabilities")
                 val resp =
                     json.decodeFromString(
@@ -627,7 +635,7 @@ internal class IsolatedSessionsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+            guardedClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "list isolated sessions")
                 val resp =
                     json.decodeFromString(
