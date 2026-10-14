@@ -2,6 +2,10 @@
 
 Node Agent runs once per Linux Kubernetes node. It merges one or more Sources into a common pipeline, preserves order within each stream, and writes sandbox records to a file or Alibaba Cloud OSS Sink. The stock binary ships the `container-logs` Source for CRI stdout/stderr and the opt-in `syscalls` Source for cgroup-scoped Linux system-call records.
 
+The opt-in `vm-console` Source collects FastSandbox Firecracker guest serial
+output. Enable `NODEAGENT_SOURCES=container-logs,vm-console` to collect both
+backends concurrently. See [VM console configuration](../../docs/guides/node-agent.md#opt-into-vm-console-collection).
+
 ## Status
 
 The component is experimental until the OSEP-0019 real-OSS fault suite and published performance/24-hour soak report are complete. Do not infer a production capacity from the chart's starting resource values.
@@ -18,7 +22,7 @@ The `syscalls` Source attaches one eBPF program to `raw_syscalls/sys_enter`, fil
 
 The checked-in eBPF object is generated on Linux x86-64 with clang 18 and the Ubuntu 24.04 libbpf headers. Run `make generate-syscalls-bpf CLANG=clang-18` in this directory after changing the BPF C source.
 
-Every Source also receives an isolated view of the node-local sandbox Pod store. It must call `Store.Forget` after it no longer needs a terminated Pod; the Store keeps that identity until every enabled Source has released it.
+The container and syscall Sources receive isolated views of the node-local sandbox Pod store; each must call `Store.Forget` after it no longer needs a terminated Pod. The Store keeps that identity until every subscribed Source has released it. VM console discovery uses its own Sandbox and Fastlet Pod informers.
 
 For the current `container-log` format, the file Sink writes under:
 

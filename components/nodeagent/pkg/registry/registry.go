@@ -26,6 +26,7 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/config"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/store"
+	"k8s.io/client-go/rest"
 )
 
 // SourceState is the private persistent namespace owned by one Source.
@@ -39,7 +40,8 @@ type SourceState interface {
 // SourceDependencies carries everything a Source factory needs. SourceState
 // and Store are scoped to the Source being built.
 type SourceDependencies struct {
-	Config config.Config
+	Config           config.Config
+	KubernetesConfig *rest.Config
 	// Store is an isolated view of the node-local sandbox Pod cache. A Source
 	// must call Store.Forget for each terminated Pod after it no longer needs
 	// that identity; the shared Store retains the Pod until every Source does so.
@@ -95,7 +97,7 @@ func RegisterSink(name string, targetID sinkTargetID, factory sinkFactory) {
 
 // BuildSource constructs the registered Source under name.
 func BuildSource(name string, dependencies SourceDependencies) (api.Source, error) {
-	if dependencies.State == nil || dependencies.Store == nil || dependencies.Logger == nil {
+	if dependencies.State == nil || dependencies.Logger == nil || name != api.SourceNameVMConsole && dependencies.Store == nil {
 		return nil, errors.New("source dependencies require private State, Store, and Logger")
 	}
 	factory := sources[name]

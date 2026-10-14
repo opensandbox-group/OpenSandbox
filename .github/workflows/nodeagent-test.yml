@@ -59,6 +59,18 @@ jobs:
             > /tmp/nodeagent-default-sources.yaml
           grep -A1 'name: NODEAGENT_SOURCES' /tmp/nodeagent-default-sources.yaml \
             | grep -q 'value: "container-logs"'
+          if grep -Eq 'name: vm-console|sandbox.fast.io' /tmp/nodeagent-default-sources.yaml; then
+            echo "VM console mount or RBAC rendered while disabled" >&2
+            exit 1
+          fi
+          helm template nodeagent manifests/charts/node-agent \
+            --set 'config.sources={container-logs,vm-console}' \
+            > /tmp/nodeagent-mixed-sources.yaml
+          grep -A1 'name: NODEAGENT_SOURCES' /tmp/nodeagent-mixed-sources.yaml \
+            | grep -q 'value: "container-logs,vm-console"'
+          grep -q 'name: NODEAGENT_VM_CONSOLE_ROOT' /tmp/nodeagent-mixed-sources.yaml
+          grep -q 'name: vm-console' /tmp/nodeagent-mixed-sources.yaml
+          grep -q 'sandbox.fast.io' /tmp/nodeagent-mixed-sources.yaml
           helm template nodeagent manifests/charts/node-agent \
             --set 'config.sources={source-a,source-b}' \
             > /tmp/nodeagent-non-log-sources.yaml
