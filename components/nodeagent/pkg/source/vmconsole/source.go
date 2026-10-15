@@ -54,7 +54,6 @@ type stream struct {
 	Inode       uint64
 	Finalizing  bool
 	EndedAt     time.Time
-	Attempt     int64
 	UID         string
 	Resource    api.Resource
 	Path        string
@@ -71,7 +70,6 @@ type stream struct {
 }
 
 type token struct {
-	Attempt  int64
 	UID      string
 	Sequence uint64
 	Offset   int64
@@ -128,7 +126,7 @@ func (s *source) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 			if err := json.Unmarshal(value, &st); err != nil {
 				return err
 			}
-			if !safeUID(st.UID) || string(key) != streamKey(st.UID, st.Attempt) || st.Attempt < 1 || st.Offset < 0 || st.Sequence == 0 || st.Started.IsZero() || st.PrefixBytes < 0 || st.PrefixBytes > 256 {
+			if !safeUID(st.UID) || string(key) != st.UID || st.Offset < 0 || st.Sequence == 0 || st.Started.IsZero() || st.PrefixBytes < 0 || st.PrefixBytes > 256 {
 				return errors.New("invalid VM console checkpoint")
 			}
 			if st.Path != "" {
@@ -137,7 +135,7 @@ func (s *source) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 					return errors.New("VM console checkpoint belongs to a different input root")
 				}
 			}
-			s.streams[streamKey(st.UID, st.Attempt)] = &st
+			s.streams[st.UID] = &st
 			return nil
 		})
 	}); err != nil {
@@ -179,7 +177,7 @@ func (s *source) save(st *stream) error {
 	if err != nil {
 		return err
 	}
-	return s.state.Update(func(w state.SourceStateWriter) error { return w.Put([]byte(streamKey(st.UID, st.Attempt)), value) })
+	return s.state.Update(func(w state.SourceStateWriter) error { return w.Put([]byte(st.UID), value) })
 }
 
 func (s *source) notify() {
@@ -197,8 +195,8 @@ func (s *source) Acknowledge(_ context.Context, results []api.AckResult) error {
 		if err := json.Unmarshal(result.Token.Value, &t); err != nil {
 			return api.Permanent(err)
 		}
-		st := s.streams[streamKey(t.UID, t.Attempt)]
-		if st == nil || result.Token.Source != api.SourceNameVMConsole || result.Token.StreamRef != streamRef(t.UID, t.Attempt) || result.Token.ID != tokenID(t) || st.Sequence != t.Sequence {
+		st := s.streams[t.UID]
+		if st == nil || result.Token.Source != api.SourceNameVMConsole || result.Token.StreamRef != streamRef(t.UID) || result.Token.ID != tokenID(t) || st.Sequence != t.Sequence {
 			return api.Permanent(errors.New("invalid VM console acknowledgement"))
 		}
 		if t.Offset == st.Offset {
@@ -230,8 +228,8 @@ func (s *source) AcknowledgeEnd(_ context.Context, t api.EndToken) error {
 	if err := json.Unmarshal(t.Value, &value); err != nil {
 		return api.Permanent(err)
 	}
-	st := s.streams[streamKey(value.UID, value.Attempt)]
-	if st == nil || t.Source != api.SourceNameVMConsole || t.StreamRef != streamRef(value.UID, value.Attempt) || t.ID != "end/"+tokenID(value) || value.Sequence != st.Sequence || value.Offset != st.Offset || !st.Finalizing && !st.Ended {
+	st := s.streams[value.UID]
+	if st == nil || t.Source != api.SourceNameVMConsole || t.StreamRef != streamRef(value.UID) || t.ID != "end/"+tokenID(value) || value.Sequence != st.Sequence || value.Offset != st.Offset || !st.Finalizing && !st.Ended {
 		return api.Permanent(errors.New("invalid VM console end acknowledgement"))
 	}
 	next := *st
@@ -245,17 +243,15 @@ func (s *source) AcknowledgeEnd(_ context.Context, t api.EndToken) error {
 	return nil
 }
 
-func streamKey(uid string, attempt int64) string { return fmt.Sprintf("%s/%d", uid, attempt) }
-
-func streamRef(uid string, attempt int64) api.StreamRef {
-	return api.StreamRef{ID: path.Join(api.SourceNameVMConsole, streamKey(uid, attempt)), Kind: api.RecordKindVMConsole}
+func streamRef(uid string) api.StreamRef {
+	return api.StreamRef{ID: path.Join(api.SourceNameVMConsole, uid), Kind: api.RecordKindVMConsole}
 }
 
 func tokenID(t token) string {
-	return fmt.Sprintf("%s/%d/%d/%d", t.UID, t.Attempt, t.Sequence, t.Offset)
+	return fmt.Sprintf("%s/%d/%d", t.UID, t.Sequence, t.Offset)
 }
 func metadata(st *stream) api.StreamMetadata {
-	return api.StreamMetadata{"sandbox-uid": st.UID, "runtime-attempt": fmt.Sprint(st.Attempt)}
+	return api.StreamMetadata{"sandbox-uid": st.UID}
 }
 
 func (s *source) run(ctx context.Context) {
@@ -308,6 +304,18 @@ func safeUID(uid string) bool {
 	return uid != "" && uid != "." && uid != ".." && !strings.ContainsAny(uid, "/\\")
 }
 
+// A retained terminal CR is discoverable only during its bounded catch-up window.
+// Without a transition timestamp, rediscovery cannot be distinguished from replay.
+func terminalExpired(cr *unstructured.Unstructured) bool {
+	phase, _, _ := unstructured.NestedString(cr.Object, "status", "runtime", "state")
+	if phase != "Stopped" && phase != "Failed" {
+		return false
+	}
+	value, _, _ := unstructured.NestedString(cr.Object, "status", "runtime", "lastTransitionTime")
+	changed, err := time.Parse(time.RFC3339Nano, value)
+	return err != nil || time.Since(changed) >= 24*time.Hour
+}
+
 func (s *source) scan(ctx context.Context) error {
 	seen := make(map[string]*unstructured.Unstructured)
 	s.mu.Lock()
@@ -318,24 +326,22 @@ func (s *source) scan(ctx context.Context) error {
 			continue
 		}
 		seen[uid] = cr
-		attempt, _, _ := unstructured.NestedInt64(cr.Object, "status", "placement", "attempt")
-		if attempt < 1 {
+		if terminalExpired(cr) {
 			continue
 		}
-		key := streamKey(uid, attempt)
-		if _, exists := s.streams[key]; exists {
+		if _, exists := s.streams[uid]; exists {
 			continue
 		}
 		resource, local := s.localSandbox(cr)
 		if !local {
 			continue
 		}
-		st := &stream{UID: uid, Attempt: attempt, Resource: resource, Started: time.Now().UTC().Truncate(time.Second), Sequence: 1}
+		st := &stream{UID: uid, Resource: resource, Started: time.Now().UTC().Truncate(time.Second), Sequence: 1}
 		if err := s.save(st); err != nil {
 			s.mu.Unlock()
 			return err
 		}
-		s.streams[key] = st
+		s.streams[uid] = st
 	}
 	uids := make([]string, 0, len(s.streams))
 	for uid := range s.streams {
@@ -346,12 +352,8 @@ func (s *source) scan(ctx context.Context) error {
 		s.mu.Lock()
 		st := s.streams[uid]
 		cr := seen[st.UID]
-		currentAttempt := st.Attempt
-		if cr != nil {
-			currentAttempt, _, _ = unstructured.NestedInt64(cr.Object, "status", "placement", "attempt")
-		}
 		if st.Ended {
-			if (cr == nil || currentAttempt != st.Attempt) && time.Since(st.EndedAt) > 24*time.Hour {
+			if (cr == nil || terminalExpired(cr)) && time.Since(st.EndedAt) > 24*time.Hour {
 				if err := s.state.Update(func(w state.SourceStateWriter) error { return w.Delete([]byte(uid)) }); err != nil {
 					s.mu.Unlock()
 					return err
@@ -365,17 +367,7 @@ func (s *source) scan(ctx context.Context) error {
 		if cr != nil {
 			phase, _, _ = unstructured.NestedString(cr.Object, "status", "runtime", "state")
 		}
-		ended := cr == nil || currentAttempt != st.Attempt || phase == "Stopped" || phase == "Failed"
-		// A later attempt may already have replaced this UID's console pathname.
-		// Drain an existing descriptor, but never reopen that path for the old attempt.
-		if currentAttempt != st.Attempt && st.file == nil && !st.Finalizing && st.pending == "" {
-			gap(st, "vm-console-attempt-replaced")
-			st.Finalizing = true
-			if err := s.save(st); err != nil {
-				s.mu.Unlock()
-				return err
-			}
-		}
+		ended := cr == nil || phase == "Stopped" || phase == "Failed"
 		event, err := s.read(st, ended)
 		s.mu.Unlock()
 		if err != nil {
@@ -447,6 +439,7 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 	if st.Finalizing {
 		return s.endEvent(st), nil
 	}
+	before := *st
 	if st.file == nil {
 		if err := s.open(st); err != nil {
 			return nil, err
@@ -462,10 +455,13 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 			return nil, statErr
 		}
-		if current != nil && !os.SameFile(info, current) {
+		replaced := current != nil && !os.SameFile(info, current)
+		// Drain the old descriptor before following a replacement pathname.
+		if replaced && info.Size() <= st.Offset {
 			_ = st.file.Close()
 			st.file = nil
 			st.Offset, st.PrefixBytes, st.Prefix = 0, 0, ""
+			st.Device, st.Inode = 0, 0
 			st.Sequence++
 			gap(st, "vm-console-file-replaced")
 			if err := s.save(st); err != nil {
@@ -500,23 +496,27 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 			hash := sha256.Sum256(prefix[:n])
 			st.PrefixBytes, st.Prefix = n, hex.EncodeToString(hash[:])
 		}
-		if err := s.save(st); err != nil {
-			return nil, err
+		if st.Path != before.Path || st.Device != before.Device || st.Inode != before.Inode || st.Sequence != before.Sequence || st.Prefix != before.Prefix || st.PrefixBytes != before.PrefixBytes || !st.Outcome.Equal(before.Outcome) {
+			if err := s.save(st); err != nil {
+				return nil, err
+			}
 		}
-		chunkSize := min(int64(64<<10), s.cfg.PerSandboxQueueBytes-1024)
-		if chunkSize <= 0 {
-			return nil, errors.New("VM console queue budget is too small")
-		}
-		body := make([]byte, chunkSize)
-		n, err := st.file.ReadAt(body, st.Offset)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-		if n > 0 {
-			t := token{UID: st.UID, Attempt: st.Attempt, Sequence: st.Sequence, Offset: st.Offset + int64(n)}
-			value, _ := json.Marshal(t)
-			st.pending = tokenID(t)
-			return &api.SourceEvent{Delivery: &api.Delivery{Record: api.Record{Kind: api.RecordKindVMConsole, Timestamp: time.Now().UTC(), Resource: st.Resource, Body: body[:n]}, StreamRef: streamRef(st.UID, st.Attempt), Metadata: metadata(st), RecordID: tokenID(t), AckToken: api.AckToken{Source: api.SourceNameVMConsole, ID: tokenID(t), StreamRef: streamRef(st.UID, st.Attempt), Value: value}}}, nil
+		if info.Size() > st.Offset {
+			chunkSize := min(int64(64<<10), s.cfg.PerSandboxQueueBytes-1024)
+			if chunkSize <= 0 {
+				return nil, errors.New("VM console queue budget is too small")
+			}
+			body := make([]byte, chunkSize)
+			n, err := st.file.ReadAt(body, st.Offset)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, err
+			}
+			if n > 0 {
+				t := token{UID: st.UID, Sequence: st.Sequence, Offset: st.Offset + int64(n)}
+				value, _ := json.Marshal(t)
+				st.pending = tokenID(t)
+				return &api.SourceEvent{Delivery: &api.Delivery{Record: api.Record{Kind: api.RecordKindVMConsole, Timestamp: time.Now().UTC(), Resource: st.Resource, Body: body[:n]}, StreamRef: streamRef(st.UID), Metadata: metadata(st), RecordID: tokenID(t), AckToken: api.AckToken{Source: api.SourceNameVMConsole, ID: tokenID(t), StreamRef: streamRef(st.UID), Value: value}}}, nil
+			}
 		}
 	}
 	if !ended {
@@ -536,8 +536,8 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 }
 
 func (s *source) endEvent(st *stream) *api.SourceEvent {
-	t := token{UID: st.UID, Attempt: st.Attempt, Sequence: st.Sequence, Offset: st.Offset}
+	t := token{UID: st.UID, Sequence: st.Sequence, Offset: st.Offset}
 	value, _ := json.Marshal(t)
 	st.ending = true
-	return &api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef(st.UID, st.Attempt), Resource: st.Resource, Metadata: metadata(st), Revision: 1, CoverageStartedAt: st.Started, Outcome: st.Outcome.Clone(), EndToken: api.EndToken{Source: api.SourceNameVMConsole, ID: "end/" + tokenID(t), StreamRef: streamRef(st.UID, st.Attempt), Value: value}}}
+	return &api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef(st.UID), Resource: st.Resource, Metadata: metadata(st), Revision: 1, CoverageStartedAt: st.Started, Outcome: st.Outcome.Clone(), EndToken: api.EndToken{Source: api.SourceNameVMConsole, ID: "end/" + tokenID(t), StreamRef: streamRef(st.UID), Value: value}}}
 }

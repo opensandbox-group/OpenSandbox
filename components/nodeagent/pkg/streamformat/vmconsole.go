@@ -39,10 +39,10 @@ func (vmConsoleFormat) EncodeBatch(batch api.Batch) ([]byte, error) {
 
 func (vmConsoleFormat) ObjectFamily(ref api.StreamRef, resource api.Resource, metadata api.StreamMetadata) (objectlayout.Family, error) {
 	uid := metadata["sandbox-uid"]
-	if uid == "" || metadata["runtime-attempt"] == "" || ref.ID != path.Join(api.SourceNameVMConsole, uid, metadata["runtime-attempt"]) {
+	if uid == "" || ref.ID != path.Join(api.SourceNameVMConsole, uid) {
 		return objectlayout.Family{}, errors.New("VM console stream does not match its sandbox UID")
 	}
-	return objectlayout.NewFamily("", []string{resource.ClusterName, "_streams", string(api.RecordKindVMConsole), resource.Namespace, resource.SandboxID, uid}, "console."+metadata["runtime-attempt"], ".log")
+	return objectlayout.NewFamily("", []string{resource.ClusterName, "_streams", string(api.RecordKindVMConsole), resource.Namespace, resource.SandboxID, uid}, "console", ".log")
 }
 
 func (vmConsoleFormat) ObjectMetadata(_ api.Resource, metadata api.StreamMetadata) (map[string]string, error) {

@@ -151,10 +151,20 @@ and init messages. To capture command output, the guest process must write to
 separate `fc.log` is not collected.
 
 Console records preserve raw bytes and land under
-`<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.<attempt>.log`.
-Each placement attempt has its own stream and completeness marker. FC driver
+`<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.log`.
+Each Sandbox UID has one stream and completeness marker across placement changes. FC driver
 owns input-file GC; the Agent never deletes those files. If the driver removes
 a file while the Agent is offline, the unavailable data is reported as a gap.
+Recently stopped or failed Sandboxes can be collected within 24 hours of the
+runtime's `lastTransitionTime`. Older terminal CRs, and terminal CRs without a
+valid transition timestamp, are not newly discovered. Already tracked streams
+still drain and finalize; their ended checkpoints expire after the retention window.
+
+Placement attempt changes do not split the stream or reset its read offset.
+The Agent can collect an existing console immediately on first discovery, even
+if the Sandbox has already been reassigned. File replacement is handled by
+draining the old descriptor before following the new file.
+
 The file sink currently does not automatically expire VM console output families.
 See [collection mechanics](/architecture/data-plane/node-agent#firecracker-vm-console)
 for identity and recovery details.

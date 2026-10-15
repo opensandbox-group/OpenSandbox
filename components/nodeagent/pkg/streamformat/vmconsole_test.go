@@ -21,7 +21,7 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 )
 
-func TestVMConsolePreservesBytesAndSeparatesAttempts(t *testing.T) {
+func TestVMConsolePreservesBytesAndSeparatesSandboxes(t *testing.T) {
 	f := vmConsoleFormat{}
 	want := []byte("kernel\r\n\x00stdout\nstderr")
 	got, err := f.EncodeBatch(api.Batch{Items: []api.BatchItem{{Record: api.Record{Body: want[:8]}}, {Record: api.Record{Body: want[8:]}}}})
@@ -29,15 +29,15 @@ func TestVMConsolePreservesBytesAndSeparatesAttempts(t *testing.T) {
 		t.Fatalf("console changed: %q, %v", got, err)
 	}
 	r := api.Resource{ClusterName: "test", Namespace: "ns", SandboxID: "sandbox"}
-	first, err := f.ObjectFamily(api.StreamRef{ID: "vm-console/uid/1", Kind: api.RecordKindVMConsole}, r, api.StreamMetadata{"sandbox-uid": "uid", "runtime-attempt": "1"})
+	first, err := f.ObjectFamily(api.StreamRef{ID: "vm-console/uid", Kind: api.RecordKindVMConsole}, r, api.StreamMetadata{"sandbox-uid": "uid"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := f.ObjectFamily(api.StreamRef{ID: "vm-console/uid/2", Kind: api.RecordKindVMConsole}, r, api.StreamMetadata{"sandbox-uid": "uid", "runtime-attempt": "2"})
+	second, err := f.ObjectFamily(api.StreamRef{ID: "vm-console/other-uid", Kind: api.RecordKindVMConsole}, r, api.StreamMetadata{"sandbox-uid": "other-uid"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first == second {
-		t.Fatal("runtime attempts share an output object")
+		t.Fatal("sandboxes share an output object")
 	}
 }

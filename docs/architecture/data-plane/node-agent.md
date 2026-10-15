@@ -51,7 +51,10 @@ Each source owns its record kind and storage format; all feed the same marker an
 
 The Source uses the `sandbox.fast.io/v1alpha2` Sandbox name as the sandbox ID,
 the complete CR UID to locate the VM, and the placement's Fastlet Pod UID and
-node to determine ownership. Each placement attempt has its own stream.
+node to determine ownership. The complete Sandbox UID defines a stable stream,
+independent of placement attempts. File identity and acknowledged offsets track
+input progress within that stream. When the pathname is replaced, the Source
+drains the old descriptor before reading the new file.
 It reads `firecracker.log` under the driver's jail or sandbox state directory;
 it does not collect the VMM's separate `fc.log`.
 
@@ -61,7 +64,7 @@ kernel and init messages. Commands whose output is captured by execd rather
 than written to `/dev/console` are outside this Source.
 
 Output families use
-`<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.<attempt>.log`.
+`<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.log`.
 The Source checkpoints offsets after delivery acknowledgement. FC driver
 retains ownership of input-file GC; the Agent never deletes these files.
 An open descriptor can drain the final tail after unlink, but a file removed
