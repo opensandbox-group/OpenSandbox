@@ -19,6 +19,16 @@ import {createWakeRetryFetch, type WakeRetryOptions} from "./wakeRetry.js";
 export type ConnectionProtocol = "http" | "https";
 
 /**
+ * Internal request-init marker set by the redirect-safe transport on
+ * cross-origin redirect hops. When present, `createTimedFetch` skips injecting
+ * the SDK host's client-IP header so that address is never delivered to a
+ * redirect target.
+ */
+export const SUPPRESS_CLIENT_IP: unique symbol = Symbol(
+  "opensandbox.suppressClientIp"
+);
+
+/**
  * Options for {@link ConnectionConfig}.
  *
  * Most users only need `domain`, `protocol`, and `apiKey`.
@@ -309,11 +319,22 @@ function createTimedFetch(opts: {
     // caller-supplied value or dropping existing headers) and skipped silently
     // when the IP is unavailable. Await the one-time detection so even the very
     // first request carries the header (bounded by the probe timeout).
-    await ensureClientIpReady();
-    const withIp = withClientIp(input, init);
-    const reqInput = withIp.input;
+    //
+    // Cross-origin redirect hops set SUPPRESS_CLIENT_IP so the SDK host's
+    // intranet address is not delivered to a redirect target.
+    const suppressClientIp =
+      (init as Record<PropertyKey, unknown> | undefined)?.[SUPPRESS_CLIENT_IP] === true;
+
+    let reqInput: RequestInfo | URL = input;
+    let effectiveInit: RequestInit | undefined = init;
+    if (!suppressClientIp) {
+      await ensureClientIpReady();
+      const withIp = withClientIp(input, init);
+      reqInput = withIp.input;
+      effectiveInit = withIp.init;
+    }
     const mergedInit: RequestInit = {
-      ...(withIp.init ?? {}),
+      ...(effectiveInit ?? {}),
       signal: ac.signal,
     };
 
@@ -322,7 +343,7 @@ function createTimedFetch(opts: {
       // by withClientIp (which include the client-IP header), falling back to
       // the request input's headers when it is a Request object.
       const outgoing = new Headers(
-        withIp.init?.headers ??
+        effectiveInit?.headers ??
           (typeof Request !== "undefined" && reqInput instanceof Request
             ? reqInput.headers
             : undefined)

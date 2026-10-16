@@ -45,6 +45,7 @@ const VIRTUAL_NIC_PREFIXES = [
 
 let cachedIp = "";
 let detectionStarted = false;
+let detectionSettled = false;
 let detectionPromise: Promise<void> | null = null;
 
 function isNodeRuntime(): boolean {
@@ -166,6 +167,9 @@ function ensureDetectionStarted(): void {
     })
     .catch(() => {
       // best-effort
+    })
+    .then(() => {
+      detectionSettled = true;
     });
 }
 
@@ -190,6 +194,20 @@ export async function ensureClientIpReady(): Promise<void> {
 /** Return the detected intranet IP, or "" if not (yet) available. */
 export function getClientIp(): string {
   return cachedIp;
+}
+
+/**
+ * Whether the transport is expected to inject `OPEN-SANDBOX-CLIENT-IP` on the
+ * next request. Used by the redirect-safe transport to decide whether a request
+ * needs the cross-origin guard even without a caller-supplied protected header.
+ *
+ * Returns true while detection is still in flight (it may resolve to a usable
+ * IP) and once an IP has been cached.
+ */
+export function willInjectClientIp(): boolean {
+  if (!isNodeRuntime()) return false;
+  if (!detectionSettled && detectionPromise !== null) return true;
+  return cachedIp !== "";
 }
 
 /**
@@ -241,6 +259,7 @@ export function withClientIp(
 export function _setClientIpForTest(ip: string): void {
   cachedIp = ip;
   detectionStarted = true;
+  detectionSettled = true;
   // The stub is authoritative; drop any in-flight probe so ensureClientIpReady
   // is a no-op and cannot overwrite the stubbed value.
   detectionPromise = null;
@@ -253,6 +272,7 @@ export function _setClientIpForTest(ip: string): void {
 export function _restartDetectionForTest(): void {
   cachedIp = "";
   detectionStarted = false;
+  detectionSettled = false;
   detectionPromise = null;
   ensureDetectionStarted();
 }
@@ -261,5 +281,6 @@ export function _restartDetectionForTest(): void {
 export function _resetClientIpCacheForTest(): void {
   cachedIp = "";
   detectionStarted = false;
+  detectionSettled = true;
   detectionPromise = null;
 }

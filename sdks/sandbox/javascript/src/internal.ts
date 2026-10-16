@@ -44,7 +44,20 @@ export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
 export { IsolatedSessionsAdapter } from "./adapters/isolatedSessionsAdapter.js";
+export { IsolatedFilesystemAdapter } from "./adapters/isolatedFilesystemAdapter.js";
 export { EndpointCache } from "./core/endpointCache.js";
+
+// Cross-origin redirect protection helpers (advanced/testing).
+export {
+  createRedirectSafeFetch,
+  hasProtectedHeaders,
+  stripProtectedHeaders,
+  stripCredentialHeaders,
+  isSameOrigin,
+  PROTECTED_HEADER_PREFIXES,
+  CROSS_ORIGIN_CREDENTIAL_HEADERS,
+} from "./config/redirectFetch.js";
+export type { RedirectSafeFetchOptions } from "./config/redirectFetch.js";
 
 // Client-IP detection helpers (advanced/testing).
 export {

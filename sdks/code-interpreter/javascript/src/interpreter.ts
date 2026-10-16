@@ -19,6 +19,7 @@ import {
   SandboxReadyTimeoutException,
 } from "@alibaba-group/opensandbox";
 import { createExecdClient } from "@alibaba-group/opensandbox/internal";
+import { createRedirectSafeExecdFetch } from "./transport.js";
 import type { Sandbox } from "@alibaba-group/opensandbox";
 
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
@@ -160,7 +161,7 @@ export class CodeInterpreter {
     return createExecdClient({
       baseUrl: this.execdBaseUrl,
       headers: this.execdHeaders ?? {},
-      fetch: this.sandbox.connectionConfig.fetch,
+      fetch: createRedirectSafeExecdFetch(this.sandbox, this.execdBaseUrl),
     });
   }
 
