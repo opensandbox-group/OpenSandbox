@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.execd.IsolatedExecutionApi
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceEntry
@@ -84,8 +85,17 @@ internal class IsolatedFilesystemAdapter(
                     }
                     chain.proceed(requestBuilder.build())
                 }
+                .addProtectedHeaderOriginGuard(execdBaseUrl)
                 .build(),
         )
+
+    // Same endpoint origin as the transfer client: guards raw newCall paths
+    // against credential replay on cross-origin redirect hops while keeping
+    // the transfer deadline.
+    private val guardedClient =
+        httpClientProvider.transferClient.newBuilder()
+            .addProtectedHeaderOriginGuard(execdBaseUrl)
+            .build()
 
     private fun resolvedPath(template: String): String = template.replace("{sessionId}", sessionId)
 
@@ -98,7 +108,7 @@ internal class IsolatedFilesystemAdapter(
     ): String {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.transferClient.newCall(request).execute().use { response ->
+            guardedClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to read file. Status code: $statusCode, Body: $body"
@@ -121,7 +131,7 @@ internal class IsolatedFilesystemAdapter(
     ): ByteArray {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.transferClient.newCall(request).execute().use { response ->
+            guardedClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to read file. Status code: $statusCode, Body: $body"
@@ -143,7 +153,7 @@ internal class IsolatedFilesystemAdapter(
     ): InputStream {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            val response = httpClientProvider.transferClient.newCall(request).execute()
+            val response = guardedClient.newCall(request).execute()
             if (!response.isSuccessful) {
                 try {
                     throw response.toSandboxApiException { statusCode, body ->
@@ -215,7 +225,7 @@ internal class IsolatedFilesystemAdapter(
                     .post(builder.build())
                     .build()
 
-            httpClientProvider.transferClient.newCall(request).execute().use { response ->
+            guardedClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to write files. Status code: $statusCode, Body: $body"

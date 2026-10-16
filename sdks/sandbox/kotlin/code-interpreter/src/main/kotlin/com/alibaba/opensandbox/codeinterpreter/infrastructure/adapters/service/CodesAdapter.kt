@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.codeinterpreter.domain.services.Codes
 import com.alibaba.opensandbox.codeinterpreter.infrastructure.adapters.converter.CodeExecutionConverter.toApiRunCodeRequest
 import com.alibaba.opensandbox.codeinterpreter.infrastructure.adapters.converter.CodeExecutionConverter.toCodeContext
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.execd.CodeInterpretingApi
 import com.alibaba.opensandbox.sandbox.api.execd.HealthApi
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
@@ -67,9 +68,17 @@ class CodesAdapter(
                 }
                 chain.proceed(requestBuilder.build())
             }
+            .addProtectedHeaderOriginGuard(baseUrl)
             .build()
     private val api =
         CodeInterpretingApi(baseUrl, apiClient)
+
+    // The shared SSE client has no per-endpoint knowledge; clone it with the
+    // endpoint origin guard for streamed code runs.
+    private val sseGuardedClient =
+        httpClientProvider.sseClient.newBuilder()
+            .addProtectedHeaderOriginGuard(baseUrl)
+            .build()
 
     override fun getContext(id: String): CodeContext {
         try {
@@ -137,7 +146,7 @@ class CodesAdapter(
 
             val execution = Execution()
 
-            httpClientProvider.sseClient.newCall(httpRequest).execute().use { response ->
+            sseGuardedClient.newCall(httpRequest).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, responseBody ->
                         "Failed to run code. Status code: $statusCode, Body: $responseBody"

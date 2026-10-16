@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.egress.PolicyApi
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Credential
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialAuth
@@ -82,6 +83,7 @@ internal class EgressAdapter(
                 }
                 chain.proceed(requestBuilder.build())
             }
+            .addProtectedHeaderOriginGuard(egressBaseUrl)
             .build()
     private val api =
         PolicyApi(

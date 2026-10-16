@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.addProtectedHeaderOriginGuard
 import com.alibaba.opensandbox.sandbox.api.execd.MetricApi
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
@@ -33,9 +34,10 @@ internal class MetricsAdapter(
     private val execdEndpoint: SandboxEndpoint,
 ) : Metrics {
     private val logger = LoggerFactory.getLogger(MetricsAdapter::class.java)
+    private val execdBaseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
     private val api =
         MetricApi(
-            "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}",
+            execdBaseUrl,
             httpClientProvider.httpClient.newBuilder()
                 .addInterceptor { chain ->
                     val requestBuilder = chain.request().newBuilder()
@@ -44,6 +46,7 @@ internal class MetricsAdapter(
                     }
                     chain.proceed(requestBuilder.build())
                 }
+                .addProtectedHeaderOriginGuard(execdBaseUrl)
                 .build(),
         )
 
