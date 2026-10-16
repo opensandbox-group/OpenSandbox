@@ -59,6 +59,7 @@ type Config struct {
 	Sources              []string
 	Sink                 string
 	LogRoot              string
+	VMConsoleRoot        string
 	SyscallCgroupRoot    string
 	StateDir             string
 	StateMaxBytes        int64
@@ -102,6 +103,7 @@ func Load() (Config, error) {
 		Sources:            parseSources(envDefault("NODEAGENT_SOURCES", api.SourceNameContainerLogs), &errs),
 		Sink:               envDefault("NODEAGENT_SINKS", SinkFile),
 		LogRoot:            envDefault("NODEAGENT_LOG_ROOT", "/var/log/pods"),
+		VMConsoleRoot:      envDefault("NODEAGENT_VM_CONSOLE_ROOT", "/var/lib/fast-sandbox/firecracker"),
 		SyscallCgroupRoot:  envDefault("NODEAGENT_SYSCALL_CGROUP_ROOT", "/host/sys/fs/cgroup"),
 		StateDir:           envDefault("NODEAGENT_STATE_DIR", "/var/lib/opensandbox/nodeagent"),
 		FilePath:           strings.TrimSpace(os.Getenv("NODEAGENT_FILE_PATH")),
@@ -163,6 +165,17 @@ func (c Config) validate() []error {
 		errs = append(errs, fmt.Errorf("NODEAGENT_STATE_DIR: %w", err))
 	}
 	containerLogsEnabled := c.HasSource(api.SourceNameContainerLogs)
+	if c.HasSource(api.SourceNameVMConsole) {
+		if c.PerSandboxQueueBytes <= 1024 {
+			errs = append(errs, errors.New("vm-console requires a per-sandbox queue larger than 1024 bytes"))
+		}
+		if err := validateAbsolutePath(c.VMConsoleRoot); err != nil {
+			errs = append(errs, fmt.Errorf("NODEAGENT_VM_CONSOLE_ROOT: %w", err))
+		}
+		if pathsOverlap(c.StateDir, c.VMConsoleRoot) || c.FilePath != "" && pathsOverlap(c.FilePath, c.VMConsoleRoot) {
+			errs = append(errs, errors.New("VM console root must not overlap state or output paths"))
+		}
+	}
 	if containerLogsEnabled {
 		if err := validateAbsolutePath(c.LogRoot); err != nil {
 			errs = append(errs, fmt.Errorf("NODEAGENT_LOG_ROOT: %w", err))
