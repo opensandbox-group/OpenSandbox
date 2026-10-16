@@ -23,6 +23,46 @@ from opensandbox_server.services.docker.snapshot_runtime import (
     build_snapshot_image_ref,
 )
 from opensandbox_server.services.snapshot_models import SnapshotState
+from opensandbox_server.services.snapshot_runtime import (
+    SnapshotRuntimeUnsupportedError,
+)
+
+
+def _container(*, runtime: str | None = None, diff=None, commit=None, diff_error=None):
+    attrs = {"HostConfig": {}}
+    if runtime is not None:
+        attrs["HostConfig"]["Runtime"] = runtime
+
+    def default_commit(*, repository: str, tag: str) -> None:
+        return None
+
+    container = SimpleNamespace(
+        attrs=attrs,
+        commit=commit or default_commit,
+        id="ctr-1",
+    )
+    if diff_error is not None:
+        def _raise_diff():
+            raise diff_error
+
+        container.diff = _raise_diff
+    elif diff is not None:
+        container.diff = lambda: diff
+    else:
+        # Default empty diff: safety check runs and allows ordinary runtimes.
+        container.diff = lambda: []
+    return container
+
+
+def _docker_client(*, containers, runtimes=None, default_runtime=None):
+    info = {"Runtimes": runtimes or {}}
+    if default_runtime is not None:
+        info["DefaultRuntime"] = default_runtime
+    return SimpleNamespace(
+        containers=SimpleNamespace(list=lambda **kwargs: containers),
+        info=lambda: info,
+        api=SimpleNamespace(timeout=60),
+    )
 
 
 def test_supports_synchronous_create_is_false_for_docker() -> None:
@@ -33,17 +73,15 @@ def test_supports_synchronous_create_is_false_for_docker() -> None:
 
 
 def test_create_snapshot_commits_container_and_marks_ready() -> None:
-    container = SimpleNamespace()
     commits: list[tuple[str, str]] = []
 
     def commit(*, repository: str, tag: str) -> None:
         commits.append((repository, tag))
 
-    container.commit = commit
-    docker_client = SimpleNamespace(
-        containers=SimpleNamespace(
-            list=lambda **kwargs: [container],
-        )
+    container = _container(runtime="runc", commit=commit)
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
     )
 
     runtime = DockerSnapshotRuntime(docker_client)
@@ -57,11 +95,7 @@ def test_create_snapshot_commits_container_and_marks_ready() -> None:
 
 
 def test_create_snapshot_marks_failed_when_sandbox_container_missing() -> None:
-    docker_client = SimpleNamespace(
-        containers=SimpleNamespace(
-            list=lambda **kwargs: [],
-        )
-    )
+    docker_client = _docker_client(containers=[])
 
     runtime = DockerSnapshotRuntime(docker_client)
     status = runtime.create_snapshot("snap-404", "sbx-missing")
@@ -78,11 +112,12 @@ def test_create_snapshot_marks_failed_on_timeout() -> None:
     def commit(*, repository: str, tag: str) -> None:
         raise TimeoutError("timed out waiting for docker commit")
 
-    container = SimpleNamespace(commit=commit)
-    docker_client = SimpleNamespace(
-        containers=SimpleNamespace(list=lambda **kwargs: [container]),
-        api=SimpleNamespace(timeout=timeout_seconds),
+    container = _container(runtime="runc", commit=commit)
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
     )
+    docker_client.api = SimpleNamespace(timeout=timeout_seconds)
 
     runtime = DockerSnapshotRuntime(docker_client)
     status = runtime.create_snapshot("snap-timeout", "sbx-001")
@@ -191,3 +226,176 @@ def test_inspect_snapshot_marks_failed_when_image_missing() -> None:
 
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_recovery_missing_image"
+
+
+def test_preflight_rejects_gvisor_without_overlay2_none() -> None:
+    container = _container(runtime="runsc")
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": ["--platform=systrap"]}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError, match="overlay2=none"):
+        runtime.preflight_create_snapshot("sbx-001")
+
+
+def test_preflight_allows_gvisor_with_overlay2_none() -> None:
+    container = _container(runtime="runsc")
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={
+            "runsc": {
+                "path": "/usr/bin/runsc",
+                "runtimeArgs": ["--platform=systrap", "--overlay2=none"],
+            }
+        },
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+
+    runtime.preflight_create_snapshot("sbx-001")
+
+
+def test_preflight_allows_gvisor_with_split_overlay2_none() -> None:
+    container = _container(runtime="custom-gvisor")
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={
+            "custom-gvisor": {
+                "path": "/usr/local/bin/runsc",
+                "runtimeArgs": ["--overlay2", "none"],
+            }
+        },
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+
+    runtime.preflight_create_snapshot("sbx-001")
+
+
+def test_preflight_allows_ordinary_runc_runtime() -> None:
+    container = _container(runtime="runc")
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+
+    runtime.preflight_create_snapshot("sbx-001")
+
+
+def test_preflight_uses_default_runtime_when_hostconfig_runtime_empty() -> None:
+    container = _container(runtime="")
+    docker_client = _docker_client(
+        containers=[container],
+        default_runtime="runsc",
+        runtimes={"runsc": {"path": "/usr/bin/runsc"}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError, match="overlay2=none"):
+        runtime.preflight_create_snapshot("sbx-001")
+
+
+def test_create_snapshot_rejects_gvisor_filestore_only_diff() -> None:
+    commits: list[tuple[str, str]] = []
+
+    def commit(*, repository: str, tag: str) -> None:
+        commits.append((repository, tag))
+
+    container = _container(
+        runtime="runsc",
+        diff=[{"Path": "/.gvisor.filestore.123"}],
+        commit=commit,
+    )
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={
+            "runsc": {
+                "path": "/usr/bin/runsc",
+                "runtimeArgs": ["--overlay2=none"],
+            }
+        },
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+    status = runtime.create_snapshot("snap-fs", "sbx-001")
+
+    assert commits == []
+    assert status is not None
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_unsupported"
+    assert "filestore" in (status.message or "")
+
+
+def test_create_snapshot_still_commits_when_diff_has_real_paths() -> None:
+    commits: list[tuple[str, str]] = []
+
+    def commit(*, repository: str, tag: str) -> None:
+        commits.append((repository, tag))
+
+    container = _container(
+        runtime="runc",
+        diff=[{"Path": "/root/marker"}],
+        commit=commit,
+    )
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+    status = runtime.create_snapshot("snap-ok", "sbx-001")
+
+    assert commits == [("opensandbox-snapshots", "snap-ok")]
+    assert status is not None
+    assert status.state == SnapshotState.READY
+
+def test_create_snapshot_aborts_when_diff_inspection_fails() -> None:
+    commits: list[tuple[str, str]] = []
+
+    def commit(*, repository: str, tag: str) -> None:
+        commits.append((repository, tag))
+
+    container = _container(
+        runtime="runc",
+        diff_error=RuntimeError("diff endpoint denied"),
+        commit=commit,
+    )
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+    status = runtime.create_snapshot("snap-diff-fail", "sbx-001")
+
+    assert commits == []
+    assert status is not None
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_unsupported"
+    assert "filesystem diff" in (status.message or "")
+    assert "diff endpoint denied" in (status.message or "")
+
+
+def test_create_snapshot_aborts_when_diff_api_unavailable() -> None:
+    commits: list[tuple[str, str]] = []
+
+    def commit(*, repository: str, tag: str) -> None:
+        commits.append((repository, tag))
+
+    # No container.diff and no api.diff → safety check cannot run.
+    container = SimpleNamespace(
+        attrs={"HostConfig": {"Runtime": "runc"}},
+        commit=commit,
+        id="ctr-1",
+    )
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+    status = runtime.create_snapshot("snap-no-diff-api", "sbx-001")
+
+    assert commits == []
+    assert status is not None
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_unsupported"
+    assert "diff API is unavailable" in (status.message or "")
+
