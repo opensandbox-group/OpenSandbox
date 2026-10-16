@@ -1119,6 +1119,28 @@ class TestWaitForSandboxReady:
         assert detail["code"] == SandboxErrorCodes.K8S_POD_FAILED
         assert "InitContainerFailed" in detail["message"]
         assert k8s_service.workload_provider.get_status.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_stops_when_sandbox_is_already_expired(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Terminated",
+            "reason": "SANDBOX_EXPIRED",
+            "message": "Sandbox expired",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "SANDBOX_EXPIRED" in detail["message"]
+        assert k8s_service.workload_provider.get_status.call_count == 1
     
     @pytest.mark.asyncio
     async def test_wait_timeout_raises_exception(self, k8s_service, mock_workload):

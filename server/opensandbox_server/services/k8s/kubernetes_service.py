@@ -497,6 +497,21 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                                 ),
                             },
                         )
+                    if current_state == "Terminated":
+                        # expireTime can pass while the CR is still readable.
+                        # That is already final; do not poll until POD_READY_TIMEOUT.
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                                "message": (
+                                    f"Sandbox {sandbox_id} reached a terminal state "
+                                    f"before it was ready: "
+                                    f"{current_reason or current_state}"
+                                    + (f" ({current_message})" if current_message else "")
+                                ),
+                            },
+                        )
                     if _is_quota_exhausted_status(status_info):
                         # Quota admission rejection is terminal (controller cannot
                         # create the Pod until quota is raised) — fail fast instead
