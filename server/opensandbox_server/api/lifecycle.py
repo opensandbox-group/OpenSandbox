@@ -237,7 +237,7 @@ def patch_sandbox_metadata(
     """
     Patch sandbox metadata via JSON Merge Patch (RFC 7396).
     Non-null adds/replaces, null deletes, absent keeps.
-    Read-modify-write without optimistic locking — concurrent PATCH may drop updates.
+    No optimistic locking: concurrent PATCH requests are applied one after another, last write wins per key.
     """
     return sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
 

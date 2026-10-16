@@ -14,6 +14,7 @@
 
 """Unit tests for DockerMetadataStore (per-sandbox file-backed)."""
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -237,3 +238,32 @@ class TestDockerMetadataStore:
         store2 = DockerMetadataStore(root=root)
         result = store2.get("sbx-001", {"hello": "world"})
         assert result == {"hello": "world", "team": "platform"}
+
+    # -- concurrency ---------------------------------------------------------
+
+    def test_concurrent_patches_of_distinct_keys_keep_every_key(self, tmp_path: Path):
+        """Concurrent patches of one sandbox must neither fail nor drop each other's keys."""
+        store = self._make_store(tmp_path)
+        labels = {"team": "infra"}
+        writers, rounds = 8, 40
+        barrier = threading.Barrier(writers)
+        errors: list[Exception] = []
+
+        def run(writer: int) -> None:
+            for round_no in range(rounds):
+                barrier.wait()
+                try:
+                    store.patch("sbx-001", labels, {f"w{writer}-r{round_no}": "x"})
+                except Exception as exc:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(writer,)) for writer in range(writers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        result = store.get("sbx-001", labels) or {}
+        expected = {f"w{writer}-r{round_no}" for writer in range(writers) for round_no in range(rounds)}
+        assert expected - set(result) == set()
