@@ -284,16 +284,15 @@ func (m *UpperManager) Usage() (int64, error) {
 }
 
 // usageLocked calculates usage without acquiring the mutex. Caller must hold m.mu.
-// Entries whose upper directory no longer exists (e.g. a stale residue entry
-// partially removed before a GC retry) contribute zero instead of failing the
-// whole sum.
+// Missing released upper directories are tolerated as cleanup residue. A missing
+// in-use upper makes the measurement invalid instead of reporting false zero.
 func (m *UpperManager) usageLocked() (int64, error) {
 	var total int64
 	for _, e := range m.entries {
 		for _, p := range e.Pairs {
 			size, err := dirSize(p.UpperDir)
 			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
+				if errors.Is(err, fs.ErrNotExist) && !e.InUse {
 					continue
 				}
 				return 0, err

@@ -103,10 +103,11 @@ func (r *IsolatedRunner) statsSnapshot() telemetry.IsolationStats {
 		sessionCount++
 		return true
 	})
-	usage, _ := r.upperMgr.Usage()
+	usage, err := r.upperMgr.Usage()
 	return telemetry.IsolationStats{
 		ActiveSessions:  sessionCount,
 		UpperUsageBytes: usage,
+		UpperUsageValid: err == nil,
 	}
 }
 

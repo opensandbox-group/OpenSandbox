@@ -197,7 +197,11 @@ func registerExecdMetrics() error {
 			if isolationStatsProvider == nil {
 				return nil
 			}
-			obs.Observe(isolationStatsProvider().UpperUsageBytes, metric.WithAttributes(sharedAttrs()...))
+			stats := isolationStatsProvider()
+			if !stats.UpperUsageValid {
+				return nil // Missing data must not be reported as zero bytes.
+			}
+			obs.Observe(stats.UpperUsageBytes, metric.WithAttributes(sharedAttrs()...))
 			return nil
 		}),
 	)

@@ -177,6 +177,13 @@ Meter: `opensandbox/execd` · Service name: `opensandbox-execd-<version>` (fixed
 | `execd.isolation.session.count` | Observable Gauge | - | - | Current number of active isolated sessions. |
 | `execd.isolation.upper.usage_bytes` | Observable Gauge | `By` | - | Total bytes used by isolated session upper directories. |
 
+When an isolated upper-directory scan fails (for example, because an active
+upper directory is missing or a path cannot be read), execd omits that
+collection's `execd.isolation.upper.usage_bytes` observation instead of
+reporting an incorrect zero. A successfully measured empty upper still reports
+zero, and the active-session count continues to be reported. Treat a missing
+usage observation as **unknown**, not as zero usage.
+
 ### OOM kill observation
 
 Execd polls its own cgroup every 5 seconds and diffs the kernel OOM kill counter: `memory.events` (`oom_kill`) on cgroup v2, `memory.oom_control` on cgroup v1. Coverage spans the whole sandbox cgroup subtree — user and business processes and nested cgroups (e.g. isolated sessions), not only the sandbox main process. cgroup v2 hosts are covered fully; cgroup v1 reports a single increment without `level`. Kernel logs (dmesg) are intentionally not used: the sandbox container has no `CAP_SYSLOG`, and the kernel ring buffer is not sandbox-scoped.
