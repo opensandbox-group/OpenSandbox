@@ -51,3 +51,17 @@ test("ConnectionConfig.disableMetrics is preserved by withTransportIfMissing", (
   assert.equal(connectionConfig.disableMetrics, true);
   assert.equal(connectionConfig.withTransportIfMissing().disableMetrics, true);
 });
+
+test("ConnectionConfig does not duplicate an API key header supplied in another casing", () => {
+  const connectionConfig = new ConnectionConfig({
+    domain: "https://api.opensandbox.test",
+    apiKey: "tenant-secret",
+    headers: { "open-sandbox-api-key": "explicit-secret" },
+  });
+
+  const apiKeyHeaders = Object.keys(connectionConfig.headers).filter(
+    (key) => key.toLowerCase() === "open-sandbox-api-key",
+  );
+  assert.deepEqual(apiKeyHeaders, ["open-sandbox-api-key"]);
+  assert.equal(connectionConfig.headers["open-sandbox-api-key"], "explicit-secret");
+});
