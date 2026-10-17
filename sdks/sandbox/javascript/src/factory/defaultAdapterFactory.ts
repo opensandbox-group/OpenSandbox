@@ -161,8 +161,10 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers: opts.connectionConfig.headers,
       fetch: opts.connectionConfig.fetch,
     });
+    const networkPolicy = new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId);
     return {
-      egress: new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId),
+      egress: networkPolicy,
+      credentialVault: networkPolicy,
     };
   }
 }

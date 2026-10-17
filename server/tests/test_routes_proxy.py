@@ -1675,6 +1675,54 @@ def test_networkpolicy_route_forwards_egress_auth_header(
     assert len(egress_headers) == 1
     assert egress_headers[0][1] == "injected-egress-token"
 
+
+def test_credential_vault_route_forwards_egress_auth_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """The server-routed credential vault proxies the sidecar surface with the
+    endpoint-resolved egress-auth token (internal=True), replacing any
+    caller-supplied value."""
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            assert port == 18080
+            return Endpoint(
+                endpoint="10.57.1.91:18080",
+                headers={OPEN_SANDBOX_EGRESS_AUTH_HEADER: "injected-egress-token"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"revision":1}'],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/credential-vault",
+        headers={
+            **auth_headers,
+            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(): "caller-fake-token",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault"
+    egress_headers = [
+        (k, v)
+        for k, v in fake_client.built["headers"].items()
+        if k.lower() == OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()
+    ]
+    assert len(egress_headers) == 1
+    assert egress_headers[0][1] == "injected-egress-token"
+
 class _StubRenewCoordinator:
     def __init__(self) -> None:
         self.scheduled: list[str] = []

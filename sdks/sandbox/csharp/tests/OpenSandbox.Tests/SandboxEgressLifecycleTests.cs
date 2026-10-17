@@ -411,15 +411,39 @@ public class SandboxEgressLifecycleTests
         await sandbox.GetEgressPolicyAsync();
         egress.GetPolicyCallCount.Should().Be(1);
 
-        Func<Task> credentialVault = () => sandbox.CredentialVault.GetAsync();
+        // Without a factory-provided vault the getter surfaces the unavailable error.
         Func<Task> credentialVaultProperty = () =>
         {
             _ = sandbox.CredentialVault;
             return Task.CompletedTask;
         };
         await credentialVaultProperty.Should().ThrowAsync<SandboxException>()
-            .WithMessage("Credential Vault is not available for template-backed sandboxes*");
-        await credentialVault.Should().ThrowAsync<SandboxException>();
+            .WithMessage("Credential Vault is not available: the adapter factory did not provide*");
+
+        // With one, template-backed sandboxes route the vault through the
+        // lifecycle control plane instead of failing.
+        var stubVault = new StubCredentialVault();
+        var routedFactory = new StubAdapterFactory(sandboxes, egress, stubVault);
+        await using var routedSandbox = await Sandbox.CreateFromTemplateAsync(new SandboxCreateFromTemplateOptions
+        {
+            TemplateId = "tpl-123",
+            TimeoutSeconds = 600,
+            AdapterFactory = routedFactory,
+            ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+            {
+                Domain = "127.0.0.1:8080",
+                Protocol = ConnectionProtocol.Http
+            }),
+            SkipHealthCheck = true,
+            Diagnostics = new SdkDiagnosticsOptions
+            {
+                LoggerFactory = NullLoggerFactory.Instance
+            }
+        });
+        routedFactory.NetworkPolicyStackCallCount.Should().Be(1);
+        _ = routedSandbox.CredentialVault;
+        await routedSandbox.CredentialVault.GetAsync();
+        stubVault.GetVaultCallCount.Should().Be(1);
     }
 
     [Fact]
@@ -592,7 +616,8 @@ public class SandboxEgressLifecycleTests
             LastNetworkPolicySandboxId = options.SandboxId;
             return new NetworkPolicyStack
             {
-                Egress = _egress
+                Egress = _egress,
+                CredentialVault = _credentialVault
             };
         }
     }

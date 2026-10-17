@@ -82,6 +82,25 @@ class FastPathFailedPrecondition(FastPathError):
     """The referenced sandbox is not in a state that allows the operation."""
 
 
+class FastPathHandlerError(FastPathError):
+    """A relayed Action Handler answered with a non-2xx HTTP status.
+
+    Per the FastPath v2 relay contract the handler's HTTP status and body are
+    propagated as the RPC *result*, not as an RPC error: the embedded status
+    (e.g. 409 exists / 412 revision or incarnation mismatch / 404 unknown
+    subject / 400 validation NACK) is the authoritative failure surface.
+    """
+
+    def __init__(self, status_code: int, body: bytes):
+        self.status_code = status_code
+        self.body = body
+        preview = body.decode("utf-8", errors="replace").strip()
+        super().__init__(
+            f"HTTP_{status_code}",
+            preview or f"handler returned HTTP {status_code}",
+        )
+
+
 class FastPathClient:
     """Synchronous gRPC client for the fast-sandbox FastPathService v2 API."""
 
@@ -370,6 +389,46 @@ class FastPathClient:
         return self._call(
             lambda: self._require_stub().ResolveEndpoint(request, timeout=self._timeout_seconds)
         )
+
+    # -- handler relay -----------------------------------------------------
+
+    def invoke_handler_action(
+        self,
+        namespace: str,
+        sandbox_name: str,
+        *,
+        expected_uid: str,
+        handler: str,
+        path: str,
+        method: str = "POST",
+        payload: Optional[bytes] = None,
+    ) -> fastpath_pb2.HandlerActionResult:
+        """Relay an opaque payload to a Pool-declared Action Handler and
+        return its HTTP status/body verbatim on 2xx.
+
+        A 4xx/5xx handler outcome is the RPC result (not an RPC error), so it
+        raises FastPathHandlerError carrying the embedded status and body;
+        relay failures (unknown sandbox, undeclared handler, unreachable
+        Fastlet) raise the typed FastPathError subclasses as usual.
+        """
+        request = fastpath_pb2.InvokeHandlerActionRequest(
+            sandbox=namespaced_reference(namespace, sandbox_name, expected_uid=expected_uid),
+            handler=handler,
+            method=method,
+            path=path,
+            payload=payload or b"",
+        )
+        response = self._call(
+            lambda: self._require_stub().InvokeHandlerAction(
+                request, timeout=self._timeout_seconds
+            )
+        )
+        result = response.result
+        status_code = int(result.status) if result is not None else 0
+        if not 200 <= status_code <= 299:
+            body = bytes(result.body) if result is not None else b""
+            raise FastPathHandlerError(status_code, body)
+        return result
 
     # -- pools -------------------------------------------------------------
 

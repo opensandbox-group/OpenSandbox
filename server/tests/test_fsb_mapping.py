@@ -133,15 +133,6 @@ def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
             "resourceRequests",
             {"resource_requests": ResourceLimits(root={"cpu": "1"})},
         ),
-        (
-            "credentialProxy",
-            {
-                "credential_proxy": CredentialProxyConfig(enabled=True),
-                "network_policy": NetworkPolicy(
-                    egress=[NetworkRule(action="allow", target="a.com")]
-                ),
-            },
-        ),
         ("secureAccess", {"secure_access": True}),
         ("volumes", {"volumes": [_host_volume()]}),
         (
@@ -159,6 +150,19 @@ def test_map_create_request_rejects_unsupported_fields(field_name, payload):
     with pytest.raises(UnsupportedFieldError) as exc_info:
         map_create_request(request, "sbx-1", "ns-1", now=NOW)
     assert exc_info.value.field == field_name
+
+
+def test_map_create_request_accepts_credential_proxy_ignored():
+    """OSEP-0022: credentialProxy no longer rejects the fsb create; the vault
+    is not carried at create time and rides the relay after creation."""
+    request = _base_request(
+        credential_proxy=CredentialProxyConfig(enabled=True),
+        network_policy=NetworkPolicy(egress=[NetworkRule(action="allow", target="a.com")]),
+    )
+    create = map_create_request(request, "sbx-1", "ns-1", now=NOW)
+    assert create.request_id == "sbx-1"
+    assert len(create.action_bindings) == 1
+    assert create.action_bindings[0].handler == "egress"
 
 
 def test_map_create_request_accepts_idle_policy_only_lifecycle():

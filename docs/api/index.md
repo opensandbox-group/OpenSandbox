@@ -47,6 +47,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
 - `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint and required headers; supports `use_server_proxy` and signed-endpoint `expires` parameters
 - `GET/PUT/PATCH/DELETE /sandboxes/{sandboxId}/networkpolicy` - Inspect and manage the sandbox egress network policy (Fsb persists intent on the Sandbox CR; other backends proxy the sandbox-side egress service)
+- `POST/GET/PATCH/DELETE /sandboxes/{sandboxId}/credential-vault` (+ sanitized `credentials` / `bindings` reads) - Manage the sandbox Credential Vault (fsb relays to the egress-held vault over FastPath; other backends proxy the sandbox-side egress service; values are write-only and never returned)
 - `POST /templates` - Create a fsb template (asynchronous golden-image build)
 - `GET /templates` - List templates with metadata filters and pagination
 - `GET /templates/{templateId}` - Get template status and artifact references
@@ -215,9 +216,11 @@ the sandbox endpoint for the egress port and then calling the sidecar endpoint d
 - `GET /credential-vault/bindings` and `GET /credential-vault/bindings/{binding_name}` - Read binding metadata
 
 Credential values are write-only. Enable Credential Proxy and an egress policy
-before creating a vault. Template-backed sandboxes have no egress sidecar or
-Credential Vault; their policy operations use the lifecycle `networkpolicy`
-endpoints. See [Credential Vault](/guides/credential-vault).
+before creating a vault. Template-backed (fsb) sandboxes use the server-routed
+`/sandboxes/{sandboxId}/credential-vault` endpoints above: the server relays
+revisions to the egress-held vault over the FastPath handler relay, the ack is
+synchronous, and values never appear on any read (see
+[Credential Vault](/guides/credential-vault)).
 
 ## Technical Features
 

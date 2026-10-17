@@ -14,38 +14,47 @@
 # limitations under the License.
 #
 """
-Synchronous lifecycle control-plane network policy adapter.
+Synchronous lifecycle control-plane network policy and Credential Vault adapter.
 
 Sync counterpart of :mod:`opensandbox.adapters.network_policy_adapter`:
 implements the Egress protocol against the lifecycle server
-(``/sandboxes/{sandboxId}/networkpolicy``) instead of the sandbox-side
-egress sidecar.
+(``/sandboxes/{sandboxId}/networkpolicy`` and
+``/sandboxes/{sandboxId}/credential-vault``) instead of the sandbox-side
+egress sidecar. The server-side vault PATCH is atomic; a 412 means another
+writer won the revision — re-read and retry with the fresh
+``expected_revision``.
 """
 
 import logging
+from urllib.parse import quote
 
 import httpx
 
+from opensandbox.adapters.converter.credential_payload import (
+    dump_binding_mutation_set,
+    dump_bindings,
+    dump_credential_mutation_set,
+    dump_credentials,
+)
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
 from opensandbox.adapters.converter.response_handler import (
+    build_api_exception_from_httpx,
     handle_api_error,
     require_parsed,
 )
 from opensandbox.adapters.converter.sandbox_model_converter import (
     SandboxModelConverter,
 )
-from opensandbox.adapters.network_policy_adapter import (
-    _CREDENTIAL_VAULT_UNSUPPORTED_MESSAGE,
-)
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import SandboxException
 from opensandbox.models.sandboxes import (
     Credential,
     CredentialBinding,
+    CredentialBindingListResponse,
     CredentialBindingMetadata,
     CredentialBindingMutationSet,
+    CredentialListResponse,
     CredentialMetadata,
     CredentialMutationSet,
     CredentialVaultState,
@@ -55,6 +64,8 @@ from opensandbox.models.sandboxes import (
 from opensandbox.sync.services.egress import EgressSync
 
 logger = logging.getLogger(__name__)
+
+_VAULT_PATH = "/sandboxes/{sandbox_id}/credential-vault"
 
 
 class NetworkPolicyAdapterSync(EgressSync):
@@ -171,10 +182,24 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
-    def _unsupported(self, operation: str) -> SandboxException:
-        return SandboxException(
-            f"{operation}: {_CREDENTIAL_VAULT_UNSUPPORTED_MESSAGE}"
-        )
+    # -- Credential Vault (server-routed, OSEP-0022) -----------------------
+
+    def _vault_request(
+        self,
+        method: str,
+        suffix: str,
+        *,
+        operation: str,
+        json_body: object | None = None,
+    ) -> object:
+        path = _VAULT_PATH.format(sandbox_id=quote(self.sandbox_id, safe="")) + suffix
+        response = self._httpx_client.request(method, path, json=json_body)
+        if response.status_code >= 400:
+            logger.debug(f"{operation} failed with HTTP {response.status_code}")
+            raise build_api_exception_from_httpx(response, operation)
+        if response.status_code == 204 or not response.content:
+            return None
+        return response.json()
 
     def create(
         self,
@@ -182,10 +207,28 @@ class NetworkPolicyAdapterSync(EgressSync):
         credentials: list[Credential | dict[str, object]],
         bindings: list[CredentialBinding | dict[str, object]],
     ) -> CredentialVaultState:
-        raise self._unsupported("Credential Vault creation")
+        try:
+            payload = self._vault_request(
+                "POST",
+                "",
+                operation="Create credential vault",
+                json_body={
+                    "credentials": dump_credentials(credentials),
+                    "bindings": dump_bindings(bindings),
+                },
+            )
+            return CredentialVaultState.model_validate(payload)
+        except Exception as e:
+            logger.warning(f"Failed to create credential vault for sandbox {self.sandbox_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get(self) -> CredentialVaultState:
-        raise self._unsupported("Credential Vault read")
+        try:
+            payload = self._vault_request("GET", "", operation="Get credential vault")
+            return CredentialVaultState.model_validate(payload)
+        except Exception as e:
+            logger.warning(f"Failed to get credential vault for sandbox {self.sandbox_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def patch(
         self,
@@ -194,19 +237,86 @@ class NetworkPolicyAdapterSync(EgressSync):
         credentials: CredentialMutationSet | dict[str, object] | None = None,
         bindings: CredentialBindingMutationSet | dict[str, object] | None = None,
     ) -> CredentialVaultState:
-        raise self._unsupported("Credential Vault patch")
+        try:
+            body: dict[str, object] = {}
+            if expected_revision is not None:
+                body["expectedRevision"] = expected_revision
+            credential_mutations = dump_credential_mutation_set(credentials)
+            if credential_mutations is not None:
+                body["credentials"] = credential_mutations
+            binding_mutations = dump_binding_mutation_set(bindings)
+            if binding_mutations is not None:
+                body["bindings"] = binding_mutations
+            payload = self._vault_request(
+                "PATCH",
+                "",
+                operation="Patch credential vault",
+                json_body=body,
+            )
+            return CredentialVaultState.model_validate(payload)
+        except Exception as e:
+            logger.warning(f"Failed to patch credential vault for sandbox {self.sandbox_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def delete(self) -> None:
-        raise self._unsupported("Credential Vault deletion")
+        try:
+            self._vault_request("DELETE", "", operation="Delete credential vault")
+        except Exception as e:
+            logger.warning(f"Failed to delete credential vault for sandbox {self.sandbox_id}: {e}")
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_credentials(self) -> list[CredentialMetadata]:
-        raise self._unsupported("Credential Vault credential listing")
+        try:
+            payload = self._vault_request(
+                "GET",
+                "/credentials",
+                operation="List credential vault credentials",
+            )
+            return CredentialListResponse.model_validate(payload).credentials
+        except Exception as e:
+            logger.warning(
+                f"Failed to list credential vault credentials for sandbox {self.sandbox_id}: {e}"
+            )
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_credential(self, name: str) -> CredentialMetadata:
-        raise self._unsupported("Credential Vault credential read")
+        try:
+            payload = self._vault_request(
+                "GET",
+                f"/credentials/{quote(name, safe='')}",
+                operation="Get credential vault credential",
+            )
+            return CredentialMetadata.model_validate(payload)
+        except Exception as e:
+            logger.warning(
+                f"Failed to get credential vault credential for sandbox {self.sandbox_id}: {e}"
+            )
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_bindings(self) -> list[CredentialBindingMetadata]:
-        raise self._unsupported("Credential Vault binding listing")
+        try:
+            payload = self._vault_request(
+                "GET",
+                "/bindings",
+                operation="List credential vault bindings",
+            )
+            return CredentialBindingListResponse.model_validate(payload).bindings
+        except Exception as e:
+            logger.warning(
+                f"Failed to list credential vault bindings for sandbox {self.sandbox_id}: {e}"
+            )
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_binding(self, name: str) -> CredentialBindingMetadata:
-        raise self._unsupported("Credential Vault binding read")
+        try:
+            payload = self._vault_request(
+                "GET",
+                f"/bindings/{quote(name, safe='')}",
+                operation="Get credential vault binding",
+            )
+            return CredentialBindingMetadata.model_validate(payload)
+        except Exception as e:
+            logger.warning(
+                f"Failed to get credential vault binding for sandbox {self.sandbox_id}: {e}"
+            )
+            raise ExceptionConverter.to_sandbox_exception(e) from e

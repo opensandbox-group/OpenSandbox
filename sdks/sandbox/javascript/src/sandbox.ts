@@ -58,7 +58,7 @@ import { validateIdlePolicy } from "./internal/idlePolicy.js";
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
 const TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE =
-  "Credential Vault is not available for template-backed sandboxes: they have no sandbox-side egress sidecar.";
+  "Credential Vault is not available: the adapter factory's network policy stack does not provide credentialVault for template-backed sandboxes.";
 
 const unavailableIsolation: IsolationService = {
   create(): Promise<IsolationSession> {
@@ -383,7 +383,9 @@ async function resolveEgressStack(
     }
     return {
       egress: stack.egress,
-      credentialVault: unavailableCredentialVault(TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE),
+      credentialVault:
+        stack.credentialVault ??
+        unavailableCredentialVault(TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE),
       origin: SandboxOrigin.TEMPLATE,
     };
   }

@@ -56,17 +56,17 @@ class IdlePolicy:
                 valid with, `idleTimeoutSeconds`. Only `pause` exists today; the
                 enum exists so future actions are additive.
             wake_on_access (bool | Unset): Whether incoming traffic may wake the sandbox from `Paused`.
+                Defaults to `true` when omitted.
                 `false` keeps today's paused behavior (permanent 503 through the
                 gateway) and only `POST /sandboxes/{sandboxId}/resume` restores
                 the sandbox.
-                 Default: True.
             active_probe (ActivityProbe | Unset): Endpoint inside the sandbox that answers `{"active": bool,
                 "message"?: string}` with 200 while work is in progress.
     """
 
     idle_timeout_seconds: int | Unset = UNSET
     on_idle: IdlePolicyOnIdle | Unset = UNSET
-    wake_on_access: bool | Unset = True
+    wake_on_access: bool | Unset = UNSET
     active_probe: ActivityProbe | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:

@@ -35,13 +35,12 @@ class ActivityProbe:
             port (int): Sandbox port serving the probe endpoint.
             path (str): Absolute HTTP path of the probe endpoint. Must not contain
                 whitespace or control characters.
-            timeout_seconds (int | Unset): Probe request budget in seconds. The server defaults to 2 when omitted. Default:
-                2.
+            timeout_seconds (int | Unset): Probe request budget in seconds. The server defaults to 2 when omitted.
     """
 
     port: int
     path: str
-    timeout_seconds: int | Unset = 2
+    timeout_seconds: int | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         port = self.port

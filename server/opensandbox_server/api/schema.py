@@ -21,7 +21,7 @@ for request/response validation and serialization.
 
 import ipaddress
 from datetime import datetime
-from typing import Dict, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr, RootModel, field_validator, model_validator
 
@@ -208,6 +208,270 @@ class CredentialProxyConfig(BaseModel):
             "transparent MITM unless this option is set."
         ),
     )
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================================
+# Credential Vault (server-routed; mirrors specs/egress-api.yaml sidecar shapes)
+# ============================================================================
+
+
+class InlineCredentialSource(BaseModel):
+    type: Literal["inline"] = Field(..., description="Credential source type.")
+    value: str = Field(
+        ...,
+        description="Write-only credential value; never returned on any read.",
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+class Credential(BaseModel):
+    name: str = Field(..., min_length=1, description="Unique credential name.")
+    source: InlineCredentialSource = Field(..., description="Credential value source.")
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialSubstitution(BaseModel):
+    """Literal case-sensitive placeholder replacement for selected request surfaces."""
+
+    credential: str = Field(..., min_length=1, description="Credential name used as the replacement value.")
+    placeholder: str = Field(..., min_length=1, description="Literal placeholder to replace.")
+    in_: list[Literal["path", "query", "header", "body"]] = Field(
+        ...,
+        min_length=1,
+        alias="in",
+        description="Request surfaces where the placeholder may be replaced.",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class CustomHeaderEntry(BaseModel):
+    name: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$",
+        description="Header name injected by the binding.",
+    )
+    credential: str = Field(..., min_length=1, description="Credential name whose value is injected.")
+
+    class Config:
+        populate_by_name = True
+
+
+class BearerCredentialAuth(BaseModel):
+    type: Literal["bearer"]
+    credential: str = Field(..., min_length=1, description="Credential name whose value becomes the bearer token.")
+    substitutions: Optional[list[CredentialSubstitution]] = Field(
+        default=None, description="Optional placeholder substitutions scoped to this binding."
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class BasicCredentialAuth(BaseModel):
+    type: Literal["basic"]
+    credential: str = Field(
+        ...,
+        min_length=1,
+        description="Credential containing pre-encoded base64(username:password).",
+    )
+    substitutions: Optional[list[CredentialSubstitution]] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class ApiKeyCredentialAuth(BaseModel):
+    type: Literal["apiKey"]
+    name: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$",
+        description="Header name receiving the API key.",
+    )
+    credential: str = Field(..., min_length=1, description="Credential name whose value is the API key.")
+    substitutions: Optional[list[CredentialSubstitution]] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class CustomHeadersCredentialAuth(BaseModel):
+    type: Literal["customHeaders"]
+    headers: list[CustomHeaderEntry] = Field(..., min_length=1, description="Headers injected by this binding.")
+    substitutions: Optional[list[CredentialSubstitution]] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class PassthroughCredentialAuth(BaseModel):
+    type: Literal["passthrough"]
+    substitutions: Optional[list[CredentialSubstitution]] = None
+
+    class Config:
+        populate_by_name = True
+
+
+CredentialAuth = Annotated[
+    BearerCredentialAuth
+    | BasicCredentialAuth
+    | ApiKeyCredentialAuth
+    | CustomHeadersCredentialAuth
+    | PassthroughCredentialAuth,
+    Field(discriminator="type"),
+]
+
+
+class CredentialMatch(BaseModel):
+    schemes: Optional[list[Literal["https", "http"]]] = Field(
+        default=None, description="Schemes the binding matches; defaults to [https]."
+    )
+    ports: Optional[list[int]] = Field(
+        default=None,
+        deprecated=True,
+        description="Deprecated. Port is derived from scheme; other values are rejected with a validation error.",
+    )
+    hosts: list[str] = Field(..., min_length=1, description="Host patterns (FQDN or wildcard domain).")
+    methods: Optional[list[str]] = Field(
+        default=None,
+        description="HTTP methods the binding matches; defaults to GET, POST, PUT, PATCH, DELETE.",
+    )
+    paths: Optional[list[str]] = Field(
+        default=None, description="Path patterns the binding matches; defaults to ['/*']."
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialBinding(BaseModel):
+    name: str = Field(..., min_length=1, description="Unique binding name.")
+    match: CredentialMatch = Field(..., description="Request matcher for credential injection.")
+    auth: CredentialAuth = Field(..., description="Injected credential shape.")
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialVaultCreateRequest(BaseModel):
+    """Create the initial Credential Vault revision (create-only)."""
+
+    credentials: list[Credential] = Field(..., description="Initial credentials (inline sources).")
+    bindings: list[CredentialBinding] = Field(..., description="Initial credential bindings.")
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialMutationSet(BaseModel):
+    add: Optional[list[Credential]] = Field(
+        default=None, description="Credentials to create; fails when a name already exists."
+    )
+    replace: Optional[list[Credential]] = Field(
+        default=None, description="Credentials to replace; fails when a name does not exist."
+    )
+    delete: Optional[list[str]] = Field(
+        default=None, description="Credential names to remove; fails when a name does not exist."
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialBindingMutationSet(BaseModel):
+    add: Optional[list[CredentialBinding]] = Field(
+        default=None, description="Bindings to create; fails when a name already exists."
+    )
+    replace: Optional[list[CredentialBinding]] = Field(
+        default=None, description="Bindings to replace; fails when a name does not exist."
+    )
+    delete: Optional[list[str]] = Field(
+        default=None, description="Binding names to remove; fails when a name does not exist."
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialVaultMutationRequest(BaseModel):
+    """Atomically mutate credentials and bindings (server-side merge commit)."""
+
+    expected_revision: Optional[int] = Field(
+        default=None,
+        alias="expectedRevision",
+        description="Optional optimistic concurrency guard; mismatch fails with 412.",
+    )
+    credentials: Optional[CredentialMutationSet] = Field(
+        default=None, description="Credential mutations (add/replace/delete)."
+    )
+    bindings: Optional[CredentialBindingMutationSet] = Field(
+        default=None, description="Binding mutations (add/replace/delete)."
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialAuthMetadata(BaseModel):
+    type: str = Field(..., description="Injected credential shape type.")
+    name: Optional[str] = Field(
+        default=None, description="Header name, for the apiKey shape only."
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialMetadata(BaseModel):
+    name: str
+    source_type: str = Field(..., alias="sourceType", description="Credential source type.")
+    revision: int
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialBindingMetadata(BaseModel):
+    name: str
+    revision: int
+    match: Optional[CredentialMatch] = None
+    auth: Optional[CredentialAuthMetadata] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialVaultState(BaseModel):
+    """Sanitized Credential Vault state — credential values never appear."""
+
+    revision: int
+    credentials: list[CredentialMetadata]
+    bindings: list[CredentialBindingMetadata]
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialListResponse(BaseModel):
+    revision: int
+    credentials: list[CredentialMetadata]
+
+    class Config:
+        populate_by_name = True
+
+
+class CredentialBindingListResponse(BaseModel):
+    revision: int
+    bindings: list[CredentialBindingMetadata]
 
     class Config:
         populate_by_name = True

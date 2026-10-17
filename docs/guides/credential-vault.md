@@ -116,18 +116,25 @@ sidecar replacement or restart also creates a new in-memory vault and requires
 the same re-injection procedure.
 :::
 
-::: info Fast-sandbox profile: egress-local persistence
-The fast-sandbox profile keeps the vault as memory **plus one file per
-sandbox** under `OPENSANDBOX_EGRESS_VAULT_DIR` (a Pod-scoped `emptyDir`). An
+::: info Fast-sandbox profile: server-routed vault
+For template-backed (fsb) sandboxes the vault is egress-held: the server
+pushes complete vault revisions to the egress vault over the FastPath handler
+relay and the relay response is the synchronous egress-validated ack. The
+same SDK entry points (`sandbox.credential_vault` / `credentialVault` /
+`CredentialVault`) work for template-backed sandboxes through the
+server-routed API — no sidecar endpoint is resolved. The vault is **not**
+carried at create time: create the sandbox first, then call the vault API.
+
+Everything else is unchanged for this profile: values are write-only and
+stripped from every read, `PATCH` is atomic (composed server-side over the
+relay; a `412` means another writer won the revision — re-read and retry with
+the fresh `expectedRevision`), and the vault persists egress-locally (memory
+plus one plaintext v1 file per sandbox under a Pod-scoped `emptyDir`), so an
 egress container restart inside the live Pod recovers locally when the Fastlet
-replays the bindings — no server re-push is needed, and the vault files die
-with the Pod, so a Kubernetes pause/resume still follows the re-injection
-procedure above. The egress-side snapshot transfer for pause/resume (export
-into the bundle before teardown, re-stamped import at restore) is implemented
-but awaits the fast-sandbox driver hooks that invoke it; until then the
-re-injection procedure applies unchanged. The files are plaintext v1: the
-vault volume is part of the credential trust surface (mount it with
-`medium: Memory` to keep plaintext off node disk). See
+replays the bindings, and a Kubernetes pause/resume carries the vault files in
+the snapshot bundle (export strictly before teardown, re-stamped import at
+restore). The vault volume is part of the credential trust surface (mount it
+with `medium: Memory` to keep plaintext off node disk). See
 [fast-sandbox networking](/architecture/fast-sandbox/networking#credential-delivery).
 :::
 
@@ -340,6 +347,12 @@ language style:
 
 The vault APIs return sanitized metadata. Plaintext credential values are
 write-only and are not returned by `get`, `list`, or patch responses.
+
+The same entry points and methods work for template-backed (fsb) sandboxes:
+the SDK routes the vault through the lifecycle server, which relays revisions
+to the egress-held vault. No sidecar endpoint is resolved for them, and the
+`credentialProxy` create-time flag is ignored on that profile (the vault is
+set after creation, through the API).
 
 ## Claude Code With Anthropic
 

@@ -29,16 +29,30 @@ import com.alibaba.opensandbox.sandbox.domain.services.CredentialVault
 import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toApiNetworkRule
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toDomainNetworkPolicy
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.slf4j.LoggerFactory
 
+/** JSON media type shared by the raw vault transport. */
+private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
 /**
- * Egress implementation backed by the lifecycle control plane
- * (`/sandboxes/{sandboxId}/networkpolicy`).
+ * Egress and Credential Vault implementation backed by the lifecycle control
+ * plane (`/sandboxes/{sandboxId}/networkpolicy` and
+ * `/sandboxes/{sandboxId}/credential-vault`).
  *
  * Template-backed sandboxes run without a sandbox-side egress sidecar, so their
- * egress policy is managed through the lifecycle control plane instead. Credential
- * Vault is rejected because it requires the sandbox-side egress sidecar.
+ * egress policy is managed through the lifecycle control plane, and the
+ * credential vault is egress-held behind the server (OSEP-0022): the server
+ * relays vault revisions over the FastPath handler relay and the relay
+ * response is the synchronous ack. A 412 patch failure means another writer
+ * won the revision — re-read and retry with the fresh `expectedRevision`.
  */
 internal class NetworkPolicyAdapter(
     private val httpClientProvider: HttpClientProvider,
@@ -78,27 +92,174 @@ internal class NetworkPolicyAdapter(
         }
     }
 
-    override fun create(request: CredentialVaultCreateRequest): CredentialVaultState = unsupported()
+    override fun create(request: CredentialVaultCreateRequest): CredentialVaultState {
+        return try {
+            val responseBody =
+                vaultRequestJson(
+                    method = "POST",
+                    pathSuffix = "",
+                    operation = "Create credential vault",
+                    jsonBody = request.toJsonObject(),
+                ) ?: throw IllegalStateException("Credential Vault create response did not contain body")
+            responseBody.toCredentialVaultState()
+        } catch (e: Exception) {
+            logger.error("Failed to create credential vault for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    override fun get(): CredentialVaultState = unsupported()
+    override fun get(): CredentialVaultState {
+        return try {
+            val responseBody =
+                vaultRequestJson(
+                    method = "GET",
+                    pathSuffix = "",
+                    operation = "Get credential vault",
+                ) ?: throw IllegalStateException("Credential Vault get response did not contain body")
+            responseBody.toCredentialVaultState()
+        } catch (e: Exception) {
+            logger.error("Failed to get credential vault for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    override fun patch(request: CredentialVaultPatchRequest): CredentialVaultState = unsupported()
+    override fun patch(request: CredentialVaultPatchRequest): CredentialVaultState {
+        return try {
+            val responseBody =
+                vaultRequestJson(
+                    method = "PATCH",
+                    pathSuffix = "",
+                    operation = "Patch credential vault",
+                    jsonBody = request.toJsonObject(),
+                ) ?: throw IllegalStateException("Credential Vault patch response did not contain body")
+            responseBody.toCredentialVaultState()
+        } catch (e: Exception) {
+            logger.error("Failed to patch credential vault for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    override fun delete() = unsupported()
+    override fun delete() {
+        try {
+            vaultRequestJson(
+                method = "DELETE",
+                pathSuffix = "",
+                operation = "Delete credential vault",
+            )
+        } catch (e: Exception) {
+            logger.error("Failed to delete credential vault for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    override fun listCredentials(): List<CredentialMetadata> = unsupported()
+    override fun listCredentials(): List<CredentialMetadata> {
+        return try {
+            val responseBody =
+                vaultRequestJson(
+                    method = "GET",
+                    pathSuffix = "/credentials",
+                    operation = "List credential vault credentials",
+                ) ?: throw IllegalStateException("Credential Vault credential list response did not contain body")
+            responseBody.toCredentialListResponse().credentials
+        } catch (e: Exception) {
+            logger.error("Failed to list credential vault credentials for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    override fun getCredential(name: String): CredentialMetadata = unsupported()
+    override fun getCredential(name: String): CredentialMetadata {
+        return try {
+            vaultRequestJson(
+                method = "GET",
+                pathSuffix = "/credentials",
+                pathSegment = name,
+                operation = "Get credential vault credential",
+            )?.toCredentialMetadata()
+                ?: throw IllegalStateException("Credential Vault credential response did not contain body")
+        } catch (e: Exception) {
+            logger.error("Failed to get credential vault credential for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    override fun listBindings(): List<CredentialBindingMetadata> = unsupported()
+    override fun listBindings(): List<CredentialBindingMetadata> {
+        return try {
+            val responseBody =
+                vaultRequestJson(
+                    method = "GET",
+                    pathSuffix = "/bindings",
+                    operation = "List credential vault bindings",
+                ) ?: throw IllegalStateException("Credential Vault binding list response did not contain body")
+            responseBody.toCredentialBindingListResponse().bindings
+        } catch (e: Exception) {
+            logger.error("Failed to list credential vault bindings for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    override fun getBinding(name: String): CredentialBindingMetadata = unsupported()
+    override fun getBinding(name: String): CredentialBindingMetadata {
+        return try {
+            vaultRequestJson(
+                method = "GET",
+                pathSuffix = "/bindings",
+                pathSegment = name,
+                operation = "Get credential vault binding",
+            )?.toCredentialBindingMetadata()
+                ?: throw IllegalStateException("Credential Vault binding response did not contain body")
+        } catch (e: Exception) {
+            logger.error("Failed to get credential vault binding for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
-    private fun unsupported(): Nothing = throw UnsupportedOperationException(CREDENTIAL_VAULT_UNSUPPORTED_MESSAGE)
+    /**
+     * Raw vault request against the lifecycle control plane
+     * (`/sandboxes/{sandboxId}/credential-vault[...]'). Returns the decoded
+     * response body, or null for a 204/empty body.
+     */
+    private fun vaultRequestJson(
+        method: String,
+        pathSuffix: String,
+        operation: String,
+        pathSegment: String? = null,
+        jsonBody: JsonObject? = null,
+    ): String? {
+        val url =
+            httpClientProvider.config
+                .getBaseUrl()
+                .toHttpUrl()
+                .newBuilder()
+                .addPathSegments("sandboxes")
+                .addPathSegment(sandboxId)
+                .addPathSegment("credential-vault")
+                .apply {
+                    if (pathSuffix.isNotEmpty()) addPathSegment(pathSuffix.removePrefix("/"))
+                    pathSegment?.let { addPathSegment(it) }
+                }
+                .build()
+        val requestBuilder =
+            Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
 
-    companion object {
-        const val CREDENTIAL_VAULT_UNSUPPORTED_MESSAGE =
-            "Credential Vault requires the sandbox-side egress sidecar and is not available " +
-                "for sandboxes created from fsb templates."
+        when (method) {
+            "GET" -> requestBuilder.get()
+            "DELETE" -> requestBuilder.delete()
+            else ->
+                requestBuilder.method(
+                    method,
+                    (jsonBody ?: buildJsonObject { }).toString().toRequestBody(JSON_MEDIA_TYPE),
+                )
+        }
+
+        httpClientProvider.authenticatedClient.newCall(requestBuilder.build()).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            if (response.isSuccessful) {
+                return if (response.code == 204 || responseBody.isBlank()) null else responseBody
+            }
+            throw response.toSandboxApiException(responseBody) { statusCode, body ->
+                "$operation failed. Status code: $statusCode, Body: $body"
+            }
+        }
     }
 }

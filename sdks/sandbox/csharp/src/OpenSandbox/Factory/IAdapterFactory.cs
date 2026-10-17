@@ -168,18 +168,22 @@ public class CreateNetworkPolicyStackOptions
 }
 
 /// <summary>
-/// Stack of lifecycle control-plane network policy services.
+/// Stack of lifecycle control-plane network policy and Credential Vault services.
 /// </summary>
 public class NetworkPolicyStack
 {
     /// <summary>
     /// Gets the egress policy service.
     /// </summary>
-    /// <remarks>
-    /// Credential Vault is not part of this stack: template-backed sandboxes
-    /// have no sandbox-side egress sidecar.
-    /// </remarks>
     public required IEgress Egress { get; init; }
+
+    /// <summary>
+    /// Gets the server-routed Credential Vault service (OSEP-0022), when the
+    /// factory provides one. Template-backed sandboxes relay vault revisions
+    /// through the lifecycle control plane instead of a sandbox-side egress
+    /// sidecar.
+    /// </summary>
+    public ICredentialVault? CredentialVault { get; init; }
 }
 
 /// <summary>

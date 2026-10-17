@@ -428,3 +428,82 @@ func sampleCredentialVaultCreateRequest() CredentialVaultCreateRequest {
 		},
 	}
 }
+
+func TestTemplateBackedCredentialVaultRoutesThroughLifecycle(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = append(got, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if !strings.HasPrefix(r.URL.Path, "/v1/sandboxes/sbx-tpl/credential-vault") {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "message": "missing"})
+			return
+		}
+		switch {
+		case r.Method == http.MethodPost:
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, []any{map[string]any{
+				"name":   "tok",
+				"source": map[string]any{"type": "inline", "value": "sekrit"},
+			}}, body["credentials"])
+			jsonResponse(w, http.StatusCreated, CredentialVaultState{Revision: 1})
+		case r.Method == http.MethodPatch:
+			jsonResponse(w, http.StatusOK, CredentialVaultState{Revision: 2})
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v1/sandboxes/sbx-tpl/credential-vault/credentials/tok name":
+			jsonResponse(w, http.StatusOK, CredentialMetadata{Name: "tok name", SourceType: "inline", Revision: 2})
+		default:
+			jsonResponse(w, http.StatusOK, CredentialVaultState{Revision: 2})
+		}
+	}))
+	defer server.Close()
+
+	sandbox := &Sandbox{
+		id:        "sbx-tpl",
+		origin:    SandboxOriginTemplate,
+		lifecycle: NewLifecycleClient(server.URL+"/v1", "test-api-key"),
+	}
+
+	state, err := sandbox.CreateCredentialVault(context.Background(), CredentialVaultCreateRequest{
+		Credentials: []Credential{{Name: "tok", Source: InlineCredentialSource{Type: "inline", Value: "sekrit"}}},
+	})
+	require.Equal(t, nil, err)
+	require.Equal(t, 1, state.Revision)
+
+	state, err = sandbox.GetCredentialVault(context.Background())
+	require.Equal(t, nil, err)
+	require.Equal(t, 2, state.Revision)
+
+	state, err = sandbox.PatchCredentialVault(context.Background(), CredentialVaultPatchRequest{ExpectedRevision: newInt(2)})
+	require.Equal(t, nil, err)
+	require.Equal(t, 2, state.Revision)
+
+	require.Equal(t, nil, sandbox.DeleteCredentialVault(context.Background()))
+
+	metadata, err := sandbox.GetCredentialVaultCredential(context.Background(), "tok name")
+	require.Equal(t, nil, err)
+	require.Equal(t, "tok name", metadata.Name)
+
+	// The sidecar-bound vault client stays unavailable for template-backed
+	// sandboxes even though the server-routed methods work.
+	_, vaultErr := sandbox.CredentialVault(context.Background())
+	if vaultErr == nil {
+		t.Fatal("expected the sidecar vault client to stay unavailable for template-backed sandboxes")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{
+		"POST /v1/sandboxes/sbx-tpl/credential-vault",
+		"GET /v1/sandboxes/sbx-tpl/credential-vault",
+		"PATCH /v1/sandboxes/sbx-tpl/credential-vault",
+		"DELETE /v1/sandboxes/sbx-tpl/credential-vault",
+		"GET /v1/sandboxes/sbx-tpl/credential-vault/credentials/tok name",
+	}, got)
+}
+
+func newInt(v int) *int { return &v }

@@ -134,10 +134,12 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             options.ConnectionConfig.Headers,
             options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"),
             wakeRetry: options.ConnectionConfig.WakeRetry);
+        var networkPolicyAdapter = new NetworkPolicyAdapter(clientWrapper, options.SandboxId);
 
         return new NetworkPolicyStack
         {
-            Egress = new NetworkPolicyAdapter(clientWrapper, options.SandboxId)
+            Egress = networkPolicyAdapter,
+            CredentialVault = networkPolicyAdapter
         };
     }
 

@@ -145,9 +145,11 @@ Fast Sandbox is vendored from `opensandbox-group/fast-sandbox` via a pin file; t
 
 The same rule applies to any other pinned third-party source under `manifests/third-party/`.
 
+**Writing rule for pin bumps:** the note carries the upstream project's real behavior changes, not the pin mechanics. Never write "bump the pinned fast-sandbox source from `<old>` to `<new>`", upstream PR numbers, or CRD-bundle sync/verification details in the note — those are provenance for this step, not user-facing content. Instead, read the real substance (upstream commit bodies are often empty — prefer the docs/diff changes the commits touch, e.g. `git -C .fast-sandbox/src diff <old>..<new> -- docs/`), group them into one bullet per distinct story (problem → behavior change → why it matters), and cite the OpenSandbox pin-bump PR on each bullet as the carrier.
+
 ### Step 5: Draft the note
 
-Copy `docs/releases/TEMPLATE.md` structure exactly; delete section headers with no entries; strip all HTML comments. Sections in order: title `# OpenSandbox <version>`, one-paragraph summary, `## Highlights` (1–3 bullets max), then component sections (Server, SDKs, Controller, Execd, Networking, Fast Sandbox), `## Misc`, `## Upgrade & Compatibility`, `## 👥 Contributors`, `## Artifacts`, `## Installation`.
+Copy `docs/releases/TEMPLATE.md` structure exactly; delete section headers with no entries; strip all HTML comments. The note has no H1 title — the GitHub Release supplies it. Sections in order: one-paragraph summary, `## Highlights` (1–3 bullets max), then component sections (Server, SDKs, Controller, Execd, Networking, Fast Sandbox), `## Misc`, `## Upgrade & Compatibility`, `## 👥 Contributors`, `## Artifacts`, `## Installation`.
 
 Writing rules:
 

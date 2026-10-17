@@ -23,7 +23,6 @@ import pytest
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
 from opensandbox.exceptions import (
-    SandboxException,
     SandboxReadyTimeoutException,
 )
 from opensandbox.models.diagnostics import DiagnosticContent
@@ -753,10 +752,12 @@ def test_sync_create_from_template_passes_only_allowed_fields(
     assert call["extensions"] == {"debug": "true"}
 
 
-def test_sync_credential_vault_raises_for_template_sandbox() -> None:
+def test_sync_credential_vault_routes_through_egress_service_for_template_sandbox() -> None:
+    """Template-backed sandboxes expose the vault through the lifecycle
+    control-plane adapter (OSEP-0022): the same object that serves policy
+    serves the server-routed vault."""
     sandbox = _make_sync_template_sandbox()
-    with pytest.raises(SandboxException, match="Credential Vault"):
-        _ = sandbox.credential_vault
+    assert sandbox.credential_vault is sandbox._egress_service
 
 
 def test_sync_connect_from_template_skips_egress_sidecar(
@@ -815,8 +816,8 @@ def test_sync_connect_from_template_skips_egress_sidecar(
     assert sandbox.origin == SandboxOrigin.TEMPLATE
     assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
     assert factory.network_policy_calls == ["sbx-1"]
-    with pytest.raises(SandboxException, match="Credential Vault"):
-        _ = sandbox.credential_vault
+    # The vault rides the same lifecycle adapter the policy uses (OSEP-0022).
+    assert sandbox.credential_vault is sandbox._egress_service
 
 
 def _make_sync_template_sandbox() -> SandboxSync:

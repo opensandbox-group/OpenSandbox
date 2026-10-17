@@ -294,12 +294,9 @@ def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
             "resourceRequests",
             "resources are fixed by SandboxPool.spec.sandboxResources",
         )
-    if request.credential_proxy is not None and request.credential_proxy.enabled:
-        raise UnsupportedFieldError(
-            "credentialProxy",
-            "credential proxy rides the per-pod egress sidecar, which does not "
-            "exist in the shared-Fastlet model",
-        )
+    # credentialProxy is accepted and ignored at create time (OSEP-0022):
+    # the vault is not carried at create — it is set after creation through
+    # the server vault API over the FastPath handler relay.
     if request.volumes:
         raise UnsupportedFieldError(
             "volumes", "Fastlet child containers cannot receive dynamic mounts"

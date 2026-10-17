@@ -162,7 +162,7 @@ test("Sandbox.createFromTemplate creates via the template request and routes egr
   ]);
 });
 
-test("Sandbox.createFromTemplate has no Credential Vault", async () => {
+test("Sandbox.createFromTemplate falls back to an unavailable Credential Vault when the factory omits it", async () => {
   const { adapterFactory } = createTemplateFactory();
   const connectionConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });
   connectionConfig.withTransportIfMissing = () => connectionConfig;
@@ -177,8 +177,66 @@ test("Sandbox.createFromTemplate has no Credential Vault", async () => {
 
   await assert.rejects(
     () => sandbox.credentialVault.get(),
-    /Credential Vault is not available for template-backed sandboxes/,
+    /does not provide credentialVault/,
   );
+});
+
+test("Sandbox.createFromTemplate routes Credential Vault through the factory's network policy stack", async () => {
+  const vaultOps = [];
+  const credentialVault = {
+    async create(request) {
+      vaultOps.push(["create", request]);
+      return { revision: 1, credentials: [], bindings: [] };
+    },
+    async get() {
+      vaultOps.push("get");
+      return { revision: 2, credentials: [], bindings: [] };
+    },
+    async patch(request) {
+      vaultOps.push(["patch", request]);
+      return { revision: 3, credentials: [], bindings: [] };
+    },
+    async delete() {
+      vaultOps.push("delete");
+    },
+    async listCredentials() {
+      return [];
+    },
+    async getCredential() {
+      throw new Error("not implemented");
+    },
+    async listBindings() {
+      return [];
+    },
+    async getBinding() {
+      throw new Error("not implemented");
+    },
+  };
+  const { adapterFactory } = createTemplateFactory();
+  adapterFactory.createNetworkPolicyStack = () => ({ egress: {}, credentialVault });
+
+  const connectionConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });
+  connectionConfig.withTransportIfMissing = () => connectionConfig;
+
+  const sandbox = await Sandbox.createFromTemplate({
+    adapterFactory,
+    connectionConfig,
+    templateId: "tpl_123",
+    timeoutSeconds: 300,
+    skipHealthCheck: true,
+  });
+
+  const state = await sandbox.credentialVault.get();
+  assert.equal(state.revision, 2);
+  await sandbox.credentialVault.create({ credentials: [], bindings: [] });
+  await sandbox.credentialVault.patch({ expectedRevision: 2 });
+  await sandbox.credentialVault.delete();
+  assert.deepEqual(vaultOps, [
+    "get",
+    ["create", { credentials: [], bindings: [] }],
+    ["patch", { expectedRevision: 2 }],
+    "delete",
+  ]);
 });
 
 test("Sandbox.createFromTemplate requires a template id", async () => {
@@ -248,7 +306,7 @@ test("Sandbox.create detects template-backed sandboxes from the endpoint origin 
     [DEFAULT_EXECD_PORT],
   );
   assert.equal(calls.filter(([method]) => method === "createEgressStack").length, 0);
-  await assert.rejects(() => sandbox.credentialVault.get(), /template-backed/);
+  await assert.rejects(() => sandbox.credentialVault.get(), /does not provide credentialVault/);
 });
 
 test("Sandbox.connect detects template-backed sandboxes from the endpoint origin header", async () => {

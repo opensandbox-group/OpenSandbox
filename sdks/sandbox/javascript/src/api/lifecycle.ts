@@ -70,6 +70,169 @@ export interface paths {
         patch: operations["patchSandboxNetworkPolicy"];
         trace?: never;
     };
+    "/sandboxes/{sandboxId}/credential-vault": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Read sanitized sandbox Credential Vault state
+         * @description Returns the sanitized Credential Vault state: credential names,
+         *     source types, binding metadata and the current revision. Credential
+         *     values are never returned on any read surface. Readback after a lost
+         *     mutation ack resolves the current revision (retry anchor for 412).
+         *     Other backends proxy the sandbox-side egress service.
+         */
+        get: operations["getSandboxCredentialVault"];
+        put?: never;
+        /**
+         * Create the sandbox Credential Vault
+         * @description Creates the initial Credential Vault revision and activates it for
+         *     credential injection. Inline credential values are write-only and are
+         *     never returned by any read. Credential Vault requires a network
+         *     policy; `defaultAction: deny` is strongly recommended.
+         *
+         *     For Fsb the server relays the revision to the egress-held vault over
+         *     the FastPath handler relay; the relay response is the synchronous
+         *     egress-validated ack, so success means the sandbox has loaded the
+         *     revision (create-only: 409 when a vault already exists, atomic across
+         *     server replicas). Other backends proxy the sandbox-side egress
+         *     service with sidecar semantics.
+         */
+        post: operations["createSandboxCredentialVault"];
+        /**
+         * Delete the sandbox Credential Vault
+         * @description Removes all credentials and bindings; the network policy is kept.
+         *     Other backends proxy the sandbox-side egress service.
+         */
+        delete: operations["deleteSandboxCredentialVault"];
+        options?: never;
+        head?: never;
+        /**
+         * Atomically mutate sandbox credentials and bindings
+         * @description Applies one atomic mutation set: `delete` first, then `replace`, then
+         *     `add` (per set). Every mentioned name must resolve exactly once —
+         *     `add` requires the name to be absent; `replace` and `delete` require
+         *     it to exist. `expectedRevision`, when provided, must match the
+         *     current revision (412 otherwise).
+         *
+         *     For Fsb the merge is composed server-side (relay read → in-memory
+         *     merge → relay replace) and validated by the egress vault; a rejected
+         *     mutation never leaves a partially applied revision (last-good kept).
+         *     Other backends proxy the sandbox-side egress service. On 412, re-read
+         *     the state and retry with the fresh revision.
+         */
+        patch: operations["patchSandboxCredentialVault"];
+        trace?: never;
+    };
+    "/sandboxes/{sandboxId}/credential-vault/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List sanitized credential metadata
+         * @description Returns sanitized credential metadata (names, source types,
+         *     per-record revisions); values are never returned. Other backends
+         *     proxy the sandbox-side egress service.
+         */
+        get: operations["listSandboxCredentialVaultCredentials"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxId}/credential-vault/credentials/{credentialName}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+                /** @description Credential name */
+                credentialName: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Get sanitized metadata for one credential
+         * @description Returns sanitized metadata for a single credential; values are never
+         *     returned. Other backends proxy the sandbox-side egress service.
+         */
+        get: operations["getSandboxCredentialVaultCredential"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxId}/credential-vault/bindings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List sanitized credential binding metadata
+         * @description Returns sanitized credential binding metadata (matchers and auth
+         *     shapes without credential values). Other backends proxy the
+         *     sandbox-side egress service.
+         */
+        get: operations["listSandboxCredentialVaultBindings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxId}/credential-vault/bindings/{bindingName}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+                /** @description Credential binding name */
+                bindingName: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Get sanitized metadata for one binding
+         * @description Returns sanitized metadata for a single credential binding; values
+         *     are never returned. Other backends proxy the sandbox-side egress
+         *     service.
+         */
+        get: operations["getSandboxCredentialVaultBinding"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics/events": {
         parameters: {
             query?: never;
@@ -1705,6 +1868,179 @@ export interface components {
             ports?: number[];
         };
         /**
+         * @description Initial Credential Vault revision. Inline credential values are
+         *     write-only. The vault requires a network policy; `defaultAction:
+         *     deny` is strongly recommended.
+         */
+        CredentialVaultCreateRequest: {
+            credentials: components["schemas"]["Credential"][];
+            bindings: components["schemas"]["CredentialBinding"][];
+        };
+        /**
+         * @description One atomic mutation set. Applied per set as delete → replace → add;
+         *     every mentioned name must resolve exactly once (add requires the
+         *     name to be absent, replace and delete require it to exist).
+         */
+        CredentialVaultMutationRequest: {
+            /** @description Optional optimistic concurrency guard; mismatch fails with 412. */
+            expectedRevision?: number;
+            credentials?: components["schemas"]["CredentialMutationSet"];
+            bindings?: components["schemas"]["CredentialBindingMutationSet"];
+        };
+        CredentialMutationSet: {
+            add?: components["schemas"]["Credential"][];
+            replace?: components["schemas"]["Credential"][];
+            delete?: string[];
+        };
+        CredentialBindingMutationSet: {
+            add?: components["schemas"]["CredentialBinding"][];
+            replace?: components["schemas"]["CredentialBinding"][];
+            delete?: string[];
+        };
+        /** @description Sanitized Credential Vault state — credential values never appear. */
+        CredentialVaultState: {
+            revision: number;
+            credentials: components["schemas"]["CredentialMetadata"][];
+            bindings: components["schemas"]["CredentialBindingMetadata"][];
+        };
+        CredentialListResponse: {
+            revision: number;
+            credentials: components["schemas"]["CredentialMetadata"][];
+        };
+        CredentialBindingListResponse: {
+            revision: number;
+            bindings: components["schemas"]["CredentialBindingMetadata"][];
+        };
+        CredentialMetadata: {
+            name: string;
+            sourceType: string;
+            /**
+             * @description Revision that last touched this record. Fsb stamps records with
+             *     the read revision (the relay surface does not carry per-record
+             *     revisions); other backends track per-record revisions.
+             */
+            revision: number;
+        };
+        CredentialBindingMetadata: {
+            name: string;
+            /** @description See CredentialMetadata.revision for the Fsb caveat. */
+            revision: number;
+            match?: components["schemas"]["CredentialMatch"];
+            auth?: components["schemas"]["CredentialAuthMetadata"];
+        };
+        /** @description Sanitized auth shape — type always, name for apiKey only. */
+        CredentialAuthMetadata: {
+            type: string;
+            name?: string;
+        };
+        Credential: {
+            name: string;
+            source: components["schemas"]["InlineCredentialSource"];
+        };
+        InlineCredentialSource: {
+            /** @enum {string} */
+            type: "inline";
+            value: string;
+        };
+        CredentialBinding: {
+            name: string;
+            match: components["schemas"]["CredentialMatch"];
+            auth: components["schemas"]["CredentialAuth"];
+        };
+        CredentialMatch: {
+            /**
+             * @default [
+             *       "https"
+             *     ]
+             */
+            schemes: ("https" | "http")[];
+            /**
+             * @deprecated
+             * @description Deprecated. Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected with a validation error. Standard values (80/443) are accepted but ignored.
+             */
+            ports?: number[];
+            hosts: string[];
+            /**
+             * @default [
+             *       "GET",
+             *       "POST",
+             *       "PUT",
+             *       "PATCH",
+             *       "DELETE"
+             *     ]
+             */
+            methods: string[];
+            /**
+             * @default [
+             *       "/*"
+             *     ]
+             */
+            paths: string[];
+        };
+        CredentialAuth: components["schemas"]["BearerCredentialAuth"] | components["schemas"]["BasicCredentialAuth"] | components["schemas"]["ApiKeyCredentialAuth"] | components["schemas"]["CustomHeadersCredentialAuth"] | components["schemas"]["PassthroughCredentialAuth"];
+        BearerCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "bearer";
+            /** @description Credential name whose value becomes the bearer token. */
+            credential: string;
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
+        };
+        BasicCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "basic";
+            /** @description Credential containing pre-encoded base64(username:password). */
+            credential: string;
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
+        };
+        ApiKeyCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "apiKey";
+            name: string;
+            /** @description Credential name whose value is the API key. */
+            credential: string;
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
+        };
+        CustomHeadersCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "customHeaders";
+            headers: components["schemas"]["CustomHeaderEntry"][];
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
+        };
+        PassthroughCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "passthrough";
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
+        };
+        CustomHeaderEntry: {
+            name: string;
+            /** @description Credential name whose value is injected. */
+            credential: string;
+        };
+        /** @description Literal case-sensitive placeholder replacement for selected request surfaces. Replacement is opt-in and scoped per binding. */
+        CredentialSubstitution: {
+            /** @description Name of the sandbox-local credential used as the replacement value. */
+            credential: string;
+            /** @description Literal placeholder to replace. */
+            placeholder: string;
+            /** @description Request surfaces where the placeholder may be replaced. */
+            in: ("path" | "query" | "header" | "body")[];
+        };
+        /**
          * @description Storage mount definition for a sandbox. Each volume entry contains:
          *     - A unique name identifier
          *     - Exactly one backend struct (host, pvc, ossfs, etc.) with backend-specific fields
@@ -2018,6 +2354,16 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description The provided expectedRevision does not match the current revision */
+        PreconditionFailed: {
+            headers: {
+                "X-Request-ID": components["headers"]["XRequestId"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description An unexpected server error occurred */
         InternalServerError: {
             headers: {
@@ -2212,6 +2558,318 @@ export interface operations {
             409: components["responses"]["Conflict"];
             500: components["responses"]["InternalServerError"];
             /** @description FastPath or policy state is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getSandboxCredentialVault: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sanitized Credential Vault state. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialVaultState"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    createSandboxCredentialVault: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialVaultCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Credential Vault created and acknowledged (sanitized state). */
+            201: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialVaultState"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            412: components["responses"]["PreconditionFailed"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    deleteSandboxCredentialVault: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Credential Vault deleted. */
+            204: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    patchSandboxCredentialVault: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialVaultMutationRequest"];
+            };
+        };
+        responses: {
+            /** @description Mutation applied and acknowledged (sanitized state). */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialVaultState"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            412: components["responses"]["PreconditionFailed"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listSandboxCredentialVaultCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sanitized credential metadata. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getSandboxCredentialVaultCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+                /** @description Credential name */
+                credentialName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sanitized credential metadata. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialMetadata"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listSandboxCredentialVaultBindings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sanitized binding metadata. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialBindingListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getSandboxCredentialVaultBinding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+                /** @description Credential binding name */
+                bindingName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sanitized binding metadata. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialBindingMetadata"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            /** @description The vault backend is temporarily unavailable. */
             503: {
                 headers: {
                     [name: string]: unknown;

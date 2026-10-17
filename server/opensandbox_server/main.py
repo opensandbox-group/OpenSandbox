@@ -107,6 +107,7 @@ from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
 from opensandbox_server.api.network_policy import router as policy_router  # noqa: E402
+from opensandbox_server.api.credential_vault import router as credential_vault_router  # noqa: E402
 from opensandbox_server.api.templates import router as templates_router  # noqa: E402
 from opensandbox_server.integrations.otel import setup_otel_metrics, shutdown_otel_metrics  # noqa: E402
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator  # noqa: E402
@@ -280,6 +281,7 @@ app.include_router(pool_router)
 app.include_router(templates_router)
 app.include_router(proxy_router)
 app.include_router(policy_router)
+app.include_router(credential_vault_router)
 app.include_router(router, prefix="/v1")
 app.include_router(devops_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
@@ -287,6 +289,7 @@ app.include_router(templates_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")
 app.include_router(policy_router, prefix="/v1")
+app.include_router(credential_vault_router, prefix="/v1")
 
 DEFAULT_ERROR_CODE = "GENERAL::UNKNOWN_ERROR"
 DEFAULT_ERROR_MESSAGE = "An unexpected error occurred."

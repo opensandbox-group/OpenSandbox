@@ -83,15 +83,28 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets the sandbox-scoped Credential Vault service.
     /// </summary>
-    /// <exception cref="SandboxException">Thrown for template-backed sandboxes: they have no sandbox-side egress sidecar.</exception>
+    /// <remarks>
+    /// Direct sidecar sandboxes write straight to the sandbox egress sidecar.
+    /// Template-backed sandboxes route through the lifecycle control plane
+    /// (OSEP-0022): the server relays vault revisions to the egress-held vault
+    /// over the FastPath handler relay, so the ack is synchronous and values
+    /// never appear on any read. A 412 patch failure means another writer won
+    /// the revision — re-read and retry with the fresh <c>ExpectedRevision</c>.
+    /// </remarks>
+    /// <exception cref="SandboxException">
+    /// Thrown for a template-backed sandbox whose adapter factory did not
+    /// provide a Credential Vault service. For direct sidecar sandboxes the
+    /// unavailable marker is returned instead and each operation throws
+    /// <see cref="InvalidArgumentException"/> when invoked.
+    /// </exception>
     public ICredentialVault CredentialVault
     {
         get
         {
-            if (Origin == SandboxOrigin.Template)
+            if (Origin == SandboxOrigin.Template && _credentialVault is UnavailableCredentialVault)
             {
                 throw new SandboxException(
-                    "Credential Vault is not available for template-backed sandboxes: they have no sandbox-side egress sidecar.");
+                    "Credential Vault is not available: the adapter factory did not provide a Credential Vault service.");
             }
 
             return _credentialVault;
@@ -414,14 +427,16 @@ public sealed class Sandbox : IAsyncDisposable
                 logger.LogInformation(
                     "Sandbox {SandboxId} is template-backed; routing egress policy through the lifecycle control plane",
                     sandboxId);
-                egress = factory.CreateNetworkPolicyStack(new CreateNetworkPolicyStackOptions
+                var policyStack = factory.CreateNetworkPolicyStack(new CreateNetworkPolicyStackOptions
                 {
                     ConnectionConfig = connectionConfig,
                     LifecycleBaseUrl = lifecycleBaseUrl,
                     SandboxId = sandboxId,
                     HttpClientProvider = httpClientProvider,
                     LoggerFactory = loggerFactory
-                }).Egress;
+                });
+                egress = policyStack.Egress;
+                credentialVault = policyStack.CredentialVault;
             }
             else
             {

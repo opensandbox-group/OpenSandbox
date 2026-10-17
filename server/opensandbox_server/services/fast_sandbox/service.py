@@ -95,6 +95,7 @@ from opensandbox_server.services.fast_sandbox.network_policy import (
     normalized_policy,
     policy_status,
 )
+from opensandbox_server.services.fast_sandbox import vault as vault_relay
 from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -135,6 +136,16 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
         self._template_service = template_service
         self._activity_recorder: Optional[ActivityRecorder] = None
+        # Per-sandbox locks serialize the server-side vault PATCH
+        # (relay GET → merge → relay PUT) within this process; the revision
+        # precondition inside the merged PUT is the cross-replica backstop.
+        self._vault_locks: dict[str, Lock] = {}
+        self._vault_locks_guard = Lock()
+
+    def vault_lock(self, sandbox_id: str) -> Lock:
+        """Return the process-local PATCH lock for one sandbox."""
+        with self._vault_locks_guard:
+            return self._vault_locks.setdefault(sandbox_id, Lock())
 
     @property
     def cr_reader(self) -> SandboxCRReader:
@@ -667,6 +678,36 @@ class FastSandboxService(SandboxService, ExtensionService):
             scope=scope,
             content=content,
         )
+
+    # -- credential vault (relay; OSEP-0022) -------------------------------
+
+    def create_credential_vault(self, sandbox_id: str, request) -> dict:
+        """Relay POST create-only; the relay response is the sync ack."""
+        return vault_relay.relay_create(self, sandbox_id, request)
+
+    def get_credential_vault(self, sandbox_id: str) -> dict:
+        """Sanitized vault state — values never leave the server."""
+        return vault_relay.relay_get(self, sandbox_id)
+
+    def patch_credential_vault(self, sandbox_id: str, request) -> dict:
+        """Server-side merge commit: relay GET → merge → relay PUT."""
+        return vault_relay.relay_patch(self, sandbox_id, request)
+
+    def delete_credential_vault(self, sandbox_id: str) -> None:
+        """Relay DELETE; the policy is kept."""
+        vault_relay.relay_delete(self, sandbox_id)
+
+    def list_credential_vault_credentials(self, sandbox_id: str) -> dict:
+        return vault_relay.relay_list_credentials(self, sandbox_id)
+
+    def get_credential_vault_credential(self, sandbox_id: str, name: str) -> dict:
+        return vault_relay.relay_get_credential(self, sandbox_id, name)
+
+    def list_credential_vault_bindings(self, sandbox_id: str) -> dict:
+        return vault_relay.relay_list_bindings(self, sandbox_id)
+
+    def get_credential_vault_binding(self, sandbox_id: str, name: str) -> dict:
+        return vault_relay.relay_get_binding(self, sandbox_id, name)
 
     # -- endpoints ---------------------------------------------------------
 

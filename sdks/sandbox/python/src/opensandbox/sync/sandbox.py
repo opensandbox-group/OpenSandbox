@@ -232,15 +232,13 @@ class SandboxSync:
         """
         Provides access to sandbox-scoped Credential Vault operations.
 
-        Raises:
-            SandboxException: for template-backed sandboxes (they have no
-                sandbox-side egress sidecar).
+        Sidecar-backed sandboxes write straight to the egress sidecar.
+        Template-backed sandboxes route through the lifecycle server, which
+        relays vault revisions to the egress-held vault (OSEP-0022): the ack
+        is synchronous and values never appear on any read. A ``412`` patch
+        failure means another writer won the revision — re-read and retry
+        with the fresh ``expected_revision``.
         """
-        if self._origin == SandboxOrigin.TEMPLATE:
-            raise SandboxException(
-                "Credential Vault is not available for template-backed "
-                "sandboxes: they have no sandbox-side egress sidecar."
-            )
         return self._egress_service
 
     @property

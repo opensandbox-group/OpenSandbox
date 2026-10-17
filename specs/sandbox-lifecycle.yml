@@ -225,6 +225,325 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+    post:
+      tags: [Sandboxes]
+      operationId: createSandboxCredentialVault
+      summary: Create the sandbox Credential Vault
+      description: |
+        Creates the initial Credential Vault revision and activates it for
+        credential injection. Inline credential values are write-only and are
+        never returned by any read. Credential Vault requires a network
+        policy; `defaultAction: deny` is strongly recommended.
+
+        For Fsb the server relays the revision to the egress-held vault over
+        the FastPath handler relay; the relay response is the synchronous
+        egress-validated ack, so success means the sandbox has loaded the
+        revision (create-only: 409 when a vault already exists, atomic across
+        server replicas). Other backends proxy the sandbox-side egress
+        service with sidecar semantics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialVaultCreateRequest'
+      responses:
+        '201':
+          description: Credential Vault created and acknowledged (sanitized state).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      tags: [Sandboxes]
+      operationId: getSandboxCredentialVault
+      summary: Read sanitized sandbox Credential Vault state
+      description: |
+        Returns the sanitized Credential Vault state: credential names,
+        source types, binding metadata and the current revision. Credential
+        values are never returned on any read surface. Readback after a lost
+        mutation ack resolves the current revision (retry anchor for 412).
+        Other backends proxy the sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized Credential Vault state.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      tags: [Sandboxes]
+      operationId: patchSandboxCredentialVault
+      summary: Atomically mutate sandbox credentials and bindings
+      description: |
+        Applies one atomic mutation set: `delete` first, then `replace`, then
+        `add` (per set). Every mentioned name must resolve exactly once —
+        `add` requires the name to be absent; `replace` and `delete` require
+        it to exist. `expectedRevision`, when provided, must match the
+        current revision (412 otherwise).
+
+        For Fsb the merge is composed server-side (relay read → in-memory
+        merge → relay replace) and validated by the egress vault; a rejected
+        mutation never leaves a partially applied revision (last-good kept).
+        Other backends proxy the sandbox-side egress service. On 412, re-read
+        the state and retry with the fresh revision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialVaultMutationRequest'
+      responses:
+        '200':
+          description: Mutation applied and acknowledged (sanitized state).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags: [Sandboxes]
+      operationId: deleteSandboxCredentialVault
+      summary: Delete the sandbox Credential Vault
+      description: |
+        Removes all credentials and bindings; the network policy is kept.
+        Other backends proxy the sandbox-side egress service.
+      responses:
+        '204':
+          description: Credential Vault deleted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/credentials:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+    get:
+      tags: [Sandboxes]
+      operationId: listSandboxCredentialVaultCredentials
+      summary: List sanitized credential metadata
+      description: |
+        Returns sanitized credential metadata (names, source types,
+        per-record revisions); values are never returned. Other backends
+        proxy the sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized credential metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/credentials/{credentialName}:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+      - name: credentialName
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Credential name
+    get:
+      tags: [Sandboxes]
+      operationId: getSandboxCredentialVaultCredential
+      summary: Get sanitized metadata for one credential
+      description: |
+        Returns sanitized metadata for a single credential; values are never
+        returned. Other backends proxy the sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized credential metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialMetadata'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/bindings:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+    get:
+      tags: [Sandboxes]
+      operationId: listSandboxCredentialVaultBindings
+      summary: List sanitized credential binding metadata
+      description: |
+        Returns sanitized credential binding metadata (matchers and auth
+        shapes without credential values). Other backends proxy the
+        sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized binding metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBindingListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/bindings/{bindingName}:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+      - name: bindingName
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Credential binding name
+    get:
+      tags: [Sandboxes]
+      operationId: getSandboxCredentialVaultBinding
+      summary: Get sanitized metadata for one binding
+      description: |
+        Returns sanitized metadata for a single credential binding; values
+        are never returned. Other backends proxy the sandbox-side egress
+        service.
+      responses:
+        '200':
+          description: Sanitized binding metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBindingMetadata'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /metrics/events:
     post:
       tags: [Metrics]
@@ -1207,6 +1526,15 @@ components:
           $ref: '#/components/headers/XRequestId'
     Conflict:
       description: The operation conflicts with the current state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestId'
+    PreconditionFailed:
+      description: The provided expectedRevision does not match the current revision
       content:
         application/json:
           schema:
@@ -2213,6 +2541,333 @@ components:
             only), so this shape serves direct-IP clients; hostname access
             requires explicit domain rules or stable IPs.
       required: [action]
+      additionalProperties: false
+
+    CredentialVaultCreateRequest:
+      type: object
+      description: |
+        Initial Credential Vault revision. Inline credential values are
+        write-only. The vault requires a network policy; `defaultAction:
+        deny` is strongly recommended.
+      properties:
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+      required: [credentials, bindings]
+      additionalProperties: false
+    CredentialVaultMutationRequest:
+      type: object
+      description: |
+        One atomic mutation set. Applied per set as delete → replace → add;
+        every mentioned name must resolve exactly once (add requires the
+        name to be absent, replace and delete require it to exist).
+      properties:
+        expectedRevision:
+          type: integer
+          description: Optional optimistic concurrency guard; mismatch fails with 412.
+        credentials:
+          $ref: '#/components/schemas/CredentialMutationSet'
+        bindings:
+          $ref: '#/components/schemas/CredentialBindingMutationSet'
+      additionalProperties: false
+    CredentialMutationSet:
+      type: object
+      properties:
+        add:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        replace:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        delete:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+    CredentialBindingMutationSet:
+      type: object
+      properties:
+        add:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+        replace:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+        delete:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+    CredentialVaultState:
+      type: object
+      description: Sanitized Credential Vault state — credential values never appear.
+      properties:
+        revision:
+          type: integer
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialMetadata'
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBindingMetadata'
+      required: [revision, credentials, bindings]
+      additionalProperties: false
+    CredentialListResponse:
+      type: object
+      properties:
+        revision:
+          type: integer
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialMetadata'
+      required: [revision, credentials]
+      additionalProperties: false
+    CredentialBindingListResponse:
+      type: object
+      properties:
+        revision:
+          type: integer
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBindingMetadata'
+      required: [revision, bindings]
+      additionalProperties: false
+    CredentialMetadata:
+      type: object
+      properties:
+        name:
+          type: string
+        sourceType:
+          type: string
+        revision:
+          type: integer
+          description: |
+            Revision that last touched this record. Fsb stamps records with
+            the read revision (the relay surface does not carry per-record
+            revisions); other backends track per-record revisions.
+      required: [name, sourceType, revision]
+      additionalProperties: false
+    CredentialBindingMetadata:
+      type: object
+      properties:
+        name:
+          type: string
+        revision:
+          type: integer
+          description: See CredentialMetadata.revision for the Fsb caveat.
+        match:
+          $ref: '#/components/schemas/CredentialMatch'
+        auth:
+          $ref: '#/components/schemas/CredentialAuthMetadata'
+      required: [name, revision]
+      additionalProperties: false
+    CredentialAuthMetadata:
+      type: object
+      description: Sanitized auth shape — type always, name for apiKey only.
+      properties:
+        type:
+          type: string
+        name:
+          type: string
+      required: [type]
+      additionalProperties: false
+    Credential:
+      type: object
+      properties:
+        name:
+          type: string
+        source:
+          $ref: '#/components/schemas/InlineCredentialSource'
+      required: [name, source]
+      additionalProperties: false
+    InlineCredentialSource:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [inline]
+        value:
+          type: string
+          writeOnly: true
+      required: [type, value]
+      additionalProperties: false
+    CredentialBinding:
+      type: object
+      properties:
+        name:
+          type: string
+        match:
+          $ref: '#/components/schemas/CredentialMatch'
+        auth:
+          $ref: '#/components/schemas/CredentialAuth'
+      required: [name, match, auth]
+      additionalProperties: false
+    CredentialMatch:
+      type: object
+      properties:
+        schemes:
+          type: array
+          items:
+            type: string
+            enum: [https, http]
+          default: [https]
+        ports:
+          type: array
+          items:
+            type: integer
+          deprecated: true
+          description: "Deprecated. Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected with a validation error. Standard values (80/443) are accepted but ignored."
+        hosts:
+          type: array
+          items:
+            type: string
+        methods:
+          type: array
+          items:
+            type: string
+          default: [GET, POST, PUT, PATCH, DELETE]
+        paths:
+          type: array
+          items:
+            type: string
+          default: ["/*"]
+      required: [hosts]
+      additionalProperties: false
+    CredentialAuth:
+      oneOf:
+        - $ref: '#/components/schemas/BearerCredentialAuth'
+        - $ref: '#/components/schemas/BasicCredentialAuth'
+        - $ref: '#/components/schemas/ApiKeyCredentialAuth'
+        - $ref: '#/components/schemas/CustomHeadersCredentialAuth'
+        - $ref: '#/components/schemas/PassthroughCredentialAuth'
+      discriminator:
+        propertyName: type
+        mapping:
+          bearer: '#/components/schemas/BearerCredentialAuth'
+          basic: '#/components/schemas/BasicCredentialAuth'
+          apiKey: '#/components/schemas/ApiKeyCredentialAuth'
+          customHeaders: '#/components/schemas/CustomHeadersCredentialAuth'
+          passthrough: '#/components/schemas/PassthroughCredentialAuth'
+    BearerCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [bearer]
+        credential:
+          type: string
+          description: Credential name whose value becomes the bearer token.
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, credential]
+      additionalProperties: false
+    BasicCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [basic]
+        credential:
+          type: string
+          description: Credential containing pre-encoded base64(username:password).
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, credential]
+      additionalProperties: false
+    ApiKeyCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [apiKey]
+        name:
+          type: string
+          pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
+        credential:
+          type: string
+          description: Credential name whose value is the API key.
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, name, credential]
+      additionalProperties: false
+    CustomHeadersCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [customHeaders]
+        headers:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CustomHeaderEntry'
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, headers]
+      additionalProperties: false
+    PassthroughCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [passthrough]
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type]
+      additionalProperties: false
+    CustomHeaderEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
+        credential:
+          type: string
+          description: Credential name whose value is injected.
+      required: [name, credential]
+      additionalProperties: false
+    CredentialSubstitution:
+      type: object
+      description: Literal case-sensitive placeholder replacement for selected request surfaces. Replacement is opt-in and scoped per binding.
+      properties:
+        credential:
+          type: string
+          description: Name of the sandbox-local credential used as the replacement value.
+        placeholder:
+          type: string
+          minLength: 1
+          description: Literal placeholder to replace.
+        in:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [path, query, header, body]
+          description: Request surfaces where the placeholder may be replaced.
+      required: [credential, placeholder, in]
       additionalProperties: false
 
     Volume:
