@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net5.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RollForward>Major</RollForward>
+    <UseAppHost>false</UseAppHost>
+    <!-- The probe intentionally targets .NET 5 and uses an installed newer runtime. -->
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <ProbePackageVersion Condition="'$(ProbePackageVersion)' == ''">$(OpenSandboxPackageVersion)</ProbePackageVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Alibaba.OpenSandbox" Version="$(ProbePackageVersion)" />
+  </ItemGroup>
+</Project>
