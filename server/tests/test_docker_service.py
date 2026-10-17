@@ -2809,6 +2809,154 @@ def test_create_and_start_container_windows_profile_keeps_image_entrypoint(mock_
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
+def test_create_and_start_container_blanks_system_labels_inherited_from_image(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.api.create_host_config.return_value = {}
+    mock_client.api.create_container.return_value = {"Id": "cid"}
+    # A snapshot image keeps every label of the sandbox it was committed from.
+    mock_client.images.get.return_value.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "source-sandbox",
+                SANDBOX_EXPIRES_AT_LABEL: "2026-01-01T00:00:00+00:00",
+                SANDBOX_HTTP_PORT_LABEL: "48891",
+                SANDBOX_MANAGED_VOLUMES_LABEL: '["source-volume"]',
+                SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY: "source-token",
+                "opensandbox.io/extensions.custom": "source-value",
+                "maintainer": "image-author",
+            }
+        }
+    }
+    created_container = MagicMock()
+    created_container.image.attrs = {"Os": "linux", "Architecture": "amd64"}
+    mock_client.containers.get.return_value = created_container
+
+    service = DockerSandboxService(config=_app_config())
+    labels = {
+        SANDBOX_ID_LABEL: "restored-sandbox",
+        SANDBOX_MANUAL_CLEANUP_LABEL: "true",
+    }
+    with patch.object(service, "_prepare_sandbox_runtime"):
+        service._create_and_start_container(
+            sandbox_id="restored-sandbox",
+            image_uri="opensandbox-snapshots:snap-1",
+            bootstrap_command=["sleep", "infinity"],
+            labels=labels,
+            environment=[],
+            host_config_kwargs={},
+            exposed_ports=None,
+            platform=None,
+        )
+
+    mock_client.images.get.assert_called_once_with("opensandbox-snapshots:snap-1")
+    assert mock_client.api.create_container.call_args.kwargs["labels"] == {
+        SANDBOX_ID_LABEL: "restored-sandbox",
+        SANDBOX_MANUAL_CLEANUP_LABEL: "true",
+        SANDBOX_EXPIRES_AT_LABEL: "",
+        SANDBOX_HTTP_PORT_LABEL: "",
+        SANDBOX_MANAGED_VOLUMES_LABEL: "",
+        SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY: "",
+        "opensandbox.io/extensions.custom": "",
+    }
+    assert labels == {
+        SANDBOX_ID_LABEL: "restored-sandbox",
+        SANDBOX_MANUAL_CLEANUP_LABEL: "true",
+    }
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_create_and_start_container_maps_image_label_inspect_failure(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.api.create_host_config.return_value = {}
+    mock_client.images.get.side_effect = DockerException("daemon unavailable")
+
+    service = DockerSandboxService(config=_app_config())
+    with pytest.raises(HTTPException) as exc_info:
+        service._create_and_start_container(
+            sandbox_id="sandbox-1",
+            image_uri="opensandbox-snapshots:snap-1",
+            bootstrap_command=["sleep", "infinity"],
+            labels={SANDBOX_ID_LABEL: "sandbox-1"},
+            environment=[],
+            host_config_kwargs={},
+            exposed_ports=None,
+            platform=None,
+        )
+
+    assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.CONTAINER_START_FAILED
+    mock_client.api.create_container.assert_not_called()
+
+
+def test_restore_existing_sandboxes_keeps_manual_cleanup_sandbox_with_blanked_expiration():
+    service = DockerSandboxService(config=_app_config())
+    container = MagicMock()
+    container.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "restored-sandbox",
+                SANDBOX_MANUAL_CLEANUP_LABEL: "true",
+                SANDBOX_EXPIRES_AT_LABEL: "",
+            }
+        }
+    }
+
+    with (
+        patch.object(service.docker_client.containers, "list", return_value=[container]),
+        patch.object(service._metadata_store, "get_expiration", return_value=None),
+        patch.object(service, "_expire_sandbox") as mock_expire,
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        service._restore_existing_sandboxes()
+
+    mock_expire.assert_not_called()
+    mock_schedule.assert_not_called()
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_container_to_sandbox_ignores_blanked_system_labels(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    container = MagicMock()
+    container.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "sandbox-1",
+                SANDBOX_MANUAL_CLEANUP_LABEL: "true",
+                SANDBOX_EXPIRES_AT_LABEL: "",
+                SANDBOX_SNAPSHOT_ID_LABEL: "",
+                "opensandbox.io/extensions.custom": "",
+            },
+            "Cmd": ["python"],
+        },
+        "Created": "2025-01-01T00:00:00Z",
+        "State": {
+            "Status": "running",
+            "Running": True,
+            "FinishedAt": "0001-01-01T00:00:00Z",
+            "ExitCode": 0,
+        },
+    }
+    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
+
+    with patch.object(service._metadata_store, "get_expiration", return_value=None):
+        sandbox = service._container_to_sandbox(container)
+
+    assert sandbox.expires_at is None
+    assert sandbox.snapshot_id is None
+    assert sandbox.image is not None
+    assert sandbox.image.uri == "python:3.11"
+    assert sandbox.extensions is None
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
 def test_create_and_start_container_windows_profile_skips_linux_runtime_injection(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []

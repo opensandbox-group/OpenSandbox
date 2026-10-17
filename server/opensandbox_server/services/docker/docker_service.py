@@ -568,7 +568,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             entrypoint = [entrypoint]
         image_tags = container.image.tags
         image_uri = image_tags[0] if image_tags else container.image.short_id
-        snapshot_id = labels.get(SANDBOX_SNAPSHOT_ID_LABEL)
+        snapshot_id = labels.get(SANDBOX_SNAPSHOT_ID_LABEL) or None
         image_spec = None if snapshot_id else ImageSpec(uri=image_uri)
 
         created_at = parse_timestamp(container.attrs.get("Created"))
@@ -594,7 +594,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             platform=platform_spec,
             status=status_info,
             metadata=metadata,
-            extensions=extract_extensions_from_mapping(labels),
+            # Skip reserved labels blanked by _mask_inherited_system_labels.
+            extensions=extract_extensions_from_mapping(
+                {key: value for key, value in labels.items() if value}
+            ),
             entrypoint=entrypoint,
             expiresAt=expires_at,
             createdAt=created_at,
