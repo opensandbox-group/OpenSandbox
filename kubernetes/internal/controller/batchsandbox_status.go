@@ -135,7 +135,7 @@ func getPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
 
 func getTerminalPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
 	// Kubernetes may publish a terminal failure while deleting an old runtime pod.
-	// Ignore it for new failure attribution; already recorded sandbox failures remain terminal.
+	// Ignore it for new failure attribution; deletion alone cannot clear a recorded failure.
 	if pod.DeletionTimestamp != nil {
 		return "", "", false
 	}
@@ -225,6 +225,7 @@ type podFailureSummary struct {
 	primaryReason string
 	samplePod     string
 	sampleDetail  string
+	failedPodUIDs []string
 }
 
 func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
@@ -253,6 +254,7 @@ func summarizePodFailuresWith(
 		}
 
 		summary.failed++
+		summary.failedPodUIDs = append(summary.failedPodUIDs, string(pod.UID))
 		if _, exists := firstPodByReason[reason]; !exists {
 			firstPodByReason[reason] = pod.Name
 			firstDetailByReason[reason] = message
@@ -329,6 +331,8 @@ func isResumeInFlight(batchSbx *sandboxv1alpha1.BatchSandbox) bool {
 }
 
 func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
+	// Resume failures must never inherit recoverable steady-state provenance.
+	status.FailedPodUIDs = nil
 	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
@@ -348,10 +352,12 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	}
 	if hasFailures {
 		if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseFailed {
+			status.FailedPodUIDs = summary.failedPodUIDs
 			setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
 			// Under informer lag a resume-in-progress failure can be observed while the
 			// cached phase is not Resuming; keep the resume failure semantics anyway.
 			if isResumeInFlight(batchSbx) {
+				status.FailedPodUIDs = nil
 				setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
 			}
 			status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
@@ -360,15 +366,46 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	}
 
 	if status.Phase == sandboxv1alpha1.BatchSandboxPhaseFailed {
-		return
+		if hasTrueBatchSandboxCondition(status.Conditions, sandboxv1alpha1.BatchSandboxConditionResumeFailed) ||
+			!failedPodsRecovered(status.FailedPodUIDs, pods) {
+			return
+		}
 	}
 
+	status.FailedPodUIDs = nil
 	setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
 	if status.Ready > 0 {
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
 		return
 	}
 	status.Phase = sandboxv1alpha1.BatchSandboxPhasePending
+}
+
+// failedPodsRecovered requires positive evidence for every original Pod identity.
+// Missing pods, replacements, and incomplete container status cannot prove recovery.
+func failedPodsRecovered(failedUIDs []string, pods []*corev1.Pod) bool {
+	if len(failedUIDs) == 0 {
+		return false
+	}
+	recovered := make(map[string]bool, len(pods))
+	for _, pod := range pods {
+		if pod.UID == "" || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning ||
+			!utils.IsPodReady(pod) || len(pod.Spec.Containers) == 0 {
+			continue
+		}
+		for _, container := range pod.Status.ContainerStatuses {
+			if container.Name == pod.Spec.Containers[0].Name && container.State.Running != nil {
+				recovered[string(pod.UID)] = true
+				break
+			}
+		}
+	}
+	for _, uid := range failedUIDs {
+		if !recovered[uid] {
+			return false
+		}
+	}
+	return true
 }
 
 // excludeAdmissionRecovery drops pods recoverable by pod recovery, so stuck
@@ -500,7 +537,19 @@ func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox 
 	log := logf.FromContext(ctx)
 	mergedStatus := newStatus.DeepCopy()
 	mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, batchSandbox.Status.Conditions)
-	patchData, err := json.Marshal(map[string]any{"status": mergedStatus})
+	statusData, err := json.Marshal(mergedStatus)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status: %w", err)
+	}
+	var statusPatch map[string]json.RawMessage
+	if err := json.Unmarshal(statusData, &statusPatch); err != nil {
+		return fmt.Errorf("failed to decode status patch: %w", err)
+	}
+	// An omitted field is unchanged by a merge patch; explicitly remove old UIDs.
+	if len(batchSandbox.Status.FailedPodUIDs) > 0 && len(mergedStatus.FailedPodUIDs) == 0 {
+		statusPatch["failedPodUIDs"] = nil
+	}
+	patchData, err := json.Marshal(map[string]any{"status": statusPatch})
 	if err != nil {
 		return fmt.Errorf("failed to marshal status patch: %w", err)
 	}
