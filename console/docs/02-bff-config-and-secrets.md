@@ -11,6 +11,8 @@
 | `BFF_COOKIE_SECURE` | no | Set `true` behind HTTPS |
 | `BFF_CORS_ORIGINS` | no | Comma-separated SPA origins. Default `http://localhost:5173`. `*` is rejected because session cookies use credentials |
 | `BFF_HTTP_TIMEOUT_SECONDS` | no | Upstream timeout; default `30` |
+| `BFF_EXECD_PROTOCOL` | no | Scheme for execd endpoints that omit one. Empty follows `LIFECYCLE_API_BASE` (`http` or `https`) |
+| `BFF_SHELL_ENDPOINT_MODE` | no | `server` (default) dials `{LIFECYCLE_API_BASE}/sandboxes/{id}/proxy/44772`. `gateway` dials the public ingress endpoint from `GET /endpoints/44772` |
 
 ### Optional: node-agent integration
 
@@ -24,8 +26,12 @@
 | `BFF_K8S_NODE_AGENT_NAMESPACE` | `opensandbox-system` | DaemonSet namespace |
 | `BFF_K8S_NODE_AGENT_LABEL_SELECTOR` | `app.kubernetes.io/component=node-agent` | Pod selector |
 | `BFF_K8S_NODE_AGENT_PROBE_PORT` | `8080` | node-agent health port |
+| `BFF_NODEAGENT_ARCHIVE_ENABLED` | `false` | Enable `GET .../logs/archive` |
+| `BFF_NODEAGENT_CLUSTER_ID` | `dev-cluster` | Align with node-agent Helm `clusterID` |
+| `BFF_NODEAGENT_OSS_*` | empty | Read-only OSS credentials (same key layout as node-agent writer) |
+| `BFF_NODEAGENT_ARCHIVE_MAX_BYTES` | `524288` | Max bytes per archive response |
 
-Platform probes, the BFF ServiceAccount, and node-agent archive logs are not part of this PR. The deployment example uses the namespace default ServiceAccount.
+In-cluster BFF needs [console-bff-rbac.example.yaml](../k8s/console-bff-rbac.example.yaml) to list pods. Archive logs require node-agent **OSS sink** (file sink on hostPath is not readable cluster-wide).
 
 Future optional features (history PostgreSQL, Grafana monitor) are documented in [07-sandbox-history.md](./07-sandbox-history.md) and tracked on branch `feat/console-extended-scope`, not in the MVP PR.
 

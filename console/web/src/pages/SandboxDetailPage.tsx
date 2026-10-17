@@ -17,10 +17,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { adminApi, sandboxApi } from '../api/client';
+import { SandboxArchiveLogPanel } from '../components/SandboxArchiveLogPanel';
 import { SandboxLogPanel } from '../components/SandboxLogPanel';
 import type { Sandbox } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { formatDuration, sandboxDisplayName } from '../utils/format';
+import { sandboxShellPath } from '../utils/shellPath';
 
 export function SandboxDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -227,6 +229,14 @@ export function SandboxDetailPage() {
                         恢复
                       </Button>
                       <Button onClick={() => void load()}>刷新</Button>
+                      <Button
+                        disabled={state !== 'Running' || !id}
+                        onClick={() =>
+                          id && navigate(sandboxShellPath(id, isAdminProxy ? adminTenant : undefined))
+                        }
+                      >
+                        Shell
+                      </Button>
                     </Space>
                   </Card>
                 </Col>
@@ -256,7 +266,22 @@ export function SandboxDetailPage() {
             label: '运行日志',
             children: (
               <Card title="日志">
-                <SandboxLogPanel sandboxId={id} tenant={logTenant} autoLoad />
+                <Tabs
+                  items={[
+                    {
+                      key: 'live',
+                      label: '实时（Lifecycle）',
+                      children: <SandboxLogPanel sandboxId={id} tenant={logTenant} autoLoad />,
+                    },
+                    {
+                      key: 'archive',
+                      label: '归档（Node Agent）',
+                      children: (
+                        <SandboxArchiveLogPanel sandboxId={id} tenant={logTenant} autoLoad />
+                      ),
+                    },
+                  ]}
+                />
               </Card>
             ),
           },

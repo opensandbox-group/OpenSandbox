@@ -22,6 +22,7 @@ import { sandboxApi } from '../api/client';
 import type { Sandbox } from '../api/types';
 import { SandboxStateTag } from '../components/SemanticTags';
 import { formatDateTime, formatDuration, SANDBOX_STATES, sandboxDisplayName } from '../utils/format';
+import { sandboxShellPath } from '../utils/shellPath';
 
 export function SandboxListPage() {
   const navigate = useNavigate();
@@ -96,6 +97,11 @@ export function SandboxListPage() {
       render: (_, r) => (
         <Space>
           <Link to={`/sandboxes/${r.id}?tab=logs`}>日志</Link>
+          {r.status?.state === 'Running' ? (
+            <Link to={sandboxShellPath(r.id)}>Shell</Link>
+          ) : (
+            <Typography.Text type="secondary">Shell</Typography.Text>
+          )}
         </Space>
       ),
     },

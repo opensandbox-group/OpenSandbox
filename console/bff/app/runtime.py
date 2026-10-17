@@ -56,3 +56,46 @@ def attach_runtime_summary(sandbox: dict[str, Any], now: datetime | None = None)
     out = dict(sandbox)
     out["runtimeSummary"] = summary
     return out
+
+
+def aggregate_runtime_stats(
+    sandboxes: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Summarize already-attached runtime rows with one timestamp.
+
+    Missing wall clocks are skipped. Terminal sandboxes are not treated as
+    about to expire just because their remaining time is small.
+    """
+    if now is None:
+        stamped: datetime | None = None
+        for sandbox in sandboxes:
+            raw = (sandbox.get("runtimeSummary") or {}).get("asOf")
+            if isinstance(raw, str):
+                stamped = _parse_dt(raw)
+                if stamped is not None:
+                    break
+        now = stamped or datetime.now(timezone.utc)
+
+    running = [s for s in sandboxes if (s.get("status") or {}).get("state") == "Running"]
+    walls: list[int] = []
+    expiring = 0
+    for sandbox in sandboxes:
+        summary = sandbox.get("runtimeSummary") or {}
+        wall = summary.get("wallClockSeconds")
+        if isinstance(wall, int):
+            walls.append(wall)
+        state = (sandbox.get("status") or {}).get("state")
+        remaining = summary.get("remainingSeconds")
+        if state not in _TERMINAL_STATES and isinstance(remaining, int) and remaining <= 30 * 60:
+            expiring += 1
+
+    total = sum(walls)
+    return {
+        "runningCount": len(running),
+        "totalWallClockSeconds": total,
+        "avgWallClockSeconds": int(total / len(walls)) if walls else 0,
+        "maxWallClockSeconds": max(walls) if walls else 0,
+        "expiringWithin30mCount": expiring,
+        "asOf": now.isoformat().replace("+00:00", "Z"),
+    }
