@@ -260,6 +260,7 @@ Persistence backend for server-managed resources (snapshot metadata today; futur
 | `postgresql.connect_timeout_seconds` | integer | `5` | Max time to establish initial connections. |
 | `postgresql.pool_timeout_seconds` | number | `5` | Max wait for a pooled connection. |
 | `postgresql.snapshot_recovery_interval_seconds` | number | `15` | Unfinished-snapshot recovery scan interval (takeover latency, not correctness). |
+| `lifecycle_audit.enabled` | boolean | `false` | When `true` with `type = "postgresql"`, upsert sandbox create/delete into shared table `sandbox_lifecycle_history` (async, best-effort), including the sandbox `metadata` label map. Console BFF uses the same table. Does not change Lifecycle API behavior. |
 
 Notes:
 
@@ -270,6 +271,10 @@ Notes:
 ```toml
 [store]
 type = "postgresql"
+
+# Optional: durable sandbox lifecycle audit for Console (PostgreSQL only)
+# [store.lifecycle_audit]
+# enabled = true
 ```
 
 ```bash

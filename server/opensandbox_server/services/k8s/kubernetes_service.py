@@ -706,6 +706,25 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     "message": f"Pool '{pool_ref}' not found.",
                 },
             )
+        return pool
+
+    def _publish_pool_audit_shape(self, pool_manifest: dict[str, Any] | None) -> None:
+        """Audit the Pool template. BatchSandbox ignores request image and limits."""
+        if not pool_manifest:
+            return
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+        from opensandbox_server.services.lifecycle_audit import (
+            publish_lifecycle_audit_shape,
+            shape_from_pool_manifest,
+        )
+
+        if not isinstance(self.workload_provider, BatchSandboxProvider):
+            return
+        shape = shape_from_pool_manifest(pool_manifest)
+        publish_lifecycle_audit_shape(
+            image_uri=shape.image_uri,
+            resource_limits=shape.resource_limits,
+        )
 
     def _ensure_pvc_volumes(self, volumes: list, sandbox_id: str) -> list[str]:
         """
@@ -1096,8 +1115,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     },
                 )
 
+            pool_manifest = None
             if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
-                await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)
+                pool_manifest = await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)
 
             if request.volumes:
                 managed_pvcs_may_exist = True
@@ -1238,6 +1258,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 # the eventual cleanup.
                 managed_pvcs_may_exist = False
                 workload_left_alive = False
+                self._publish_pool_audit_shape(pool_manifest)
                 return response
 
             except HTTPException as e:
