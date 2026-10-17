@@ -16,9 +16,11 @@ import {
   AppstoreOutlined,
   CameraOutlined,
   DashboardOutlined,
+  DatabaseOutlined,
   FileSearchOutlined,
   LogoutOutlined,
   PlusOutlined,
+  SettingOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
 import { Layout, Menu, Typography } from 'antd';
@@ -37,22 +39,38 @@ export function AppLayout() {
 
   const items = [
     { key: '/', icon: <DashboardOutlined />, label: '概览' },
+    isAdmin
+      ? { key: '/admin/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱（全局）' }
+      : { key: '/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱' },
     ...(isAdmin
       ? []
-      : [
-          { key: '/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱' },
-          { key: '/sandboxes/new', icon: <PlusOutlined />, label: '创建沙箱' },
-        ]),
+      : [{ key: '/sandboxes/new', icon: <PlusOutlined />, label: '创建沙箱' }]),
     { key: '/snapshots', icon: <CameraOutlined />, label: '快照' },
+    ...(isAdmin ? [{ key: '/pools', icon: <DatabaseOutlined />, label: 'Pool' }] : []),
     { key: '/diagnostics', icon: <FileSearchOutlined />, label: '诊断' },
+    {
+      key: 'platform',
+      icon: <SettingOutlined />,
+      label: '平台',
+      children: [
+        { key: '/platform/health', label: '组件健康' },
+        { key: '/platform/version', label: '版本' },
+        { key: '/platform/k8s/workloads', label: 'K8s 工作负载' },
+        { key: '/platform/k8s/events', label: 'K8s 事件' },
+      ],
+    },
   ];
 
   const selectedKey =
     location.pathname === '/sandboxes/new'
       ? '/sandboxes/new'
-      : location.pathname.startsWith('/sandboxes')
-        ? '/sandboxes'
-        : location.pathname;
+      : location.pathname.startsWith('/sandboxes/')
+        ? isAdmin
+          ? '/admin/sandboxes'
+          : '/sandboxes'
+        : location.pathname.startsWith('/admin/sandboxes')
+          ? '/admin/sandboxes'
+          : location.pathname;
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -69,8 +87,11 @@ export function AppLayout() {
           theme="dark"
           mode="inline"
           selectedKeys={[selectedKey]}
+          defaultOpenKeys={['platform']}
           items={items}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) => {
+            if (key !== 'platform') navigate(key);
+          }}
         />
       </Sider>
       <Layout>
