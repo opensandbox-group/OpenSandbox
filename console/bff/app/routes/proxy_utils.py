@@ -34,6 +34,6 @@ def upstream_error_response(resp: httpx.Response) -> JSONResponse:
 async def passthrough_json(resp: httpx.Response) -> Any:
     if resp.status_code >= 400:
         return upstream_error_response(resp)
-    if resp.status_code in (202, 204) and not resp.content:
+    if not resp.content:
         return Response(status_code=resp.status_code)
     return resp.json()
