@@ -13,13 +13,17 @@
 # limitations under the License.
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from opensandbox_server.config import AppConfig, RenewIntentConfig, RuntimeConfig, ServerConfig
 from opensandbox_server.integrations.renew_intent.consumer import RenewIntentConsumer, RenewWorkItem
-from opensandbox_server.integrations.renew_intent.logutil import RENEW_SOURCE_SERVER_PROXY
+from opensandbox_server.integrations.renew_intent.controller import AccessRenewController
+from opensandbox_server.integrations.renew_intent.logutil import (
+    RENEW_SOURCE_REDIS_QUEUE,
+    RENEW_SOURCE_SERVER_PROXY,
+)
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator
 
 
@@ -34,8 +38,8 @@ def _app_config(*, renew_enabled: bool = True, min_interval: int = 60) -> AppCon
     )
 
 
-def _consumer(cfg: AppConfig) -> RenewIntentConsumer:
-    return RenewIntentConsumer(cfg, MagicMock(), MagicMock(), redis_client=None)
+def _consumer(cfg: AppConfig, redis_client=None) -> RenewIntentConsumer:
+    return RenewIntentConsumer(cfg, MagicMock(), MagicMock(), redis_client=redis_client)
 
 
 @pytest.mark.asyncio
@@ -66,13 +70,8 @@ async def test_proxy_schedule_noop_when_consumer_none():
 async def test_proxy_min_interval_skips_second_attempt(monkeypatch):
     cfg = _app_config(renew_enabled=True, min_interval=60)
     consumer = _consumer(cfg)
-    attempts = {"n": 0}
-
-    def attempt(_sid: str, *, source: str) -> bool:
-        attempts["n"] += 1
-        return True
-
-    consumer._controller.attempt_renew_sync = attempt  # type: ignore[method-assign]
+    renew = AsyncMock(return_value=True)
+    consumer._controller.renew_after_gates = renew  # type: ignore[method-assign]
 
     seq = iter([100.0, 100.0, 100.5])
 
@@ -91,20 +90,15 @@ async def test_proxy_min_interval_skips_second_attempt(monkeypatch):
     )
     await consumer._process_work(work)
     await consumer._process_work(work)
-    assert attempts["n"] == 1
+    assert renew.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_proxy_second_attempt_after_cooldown_window(monkeypatch):
     cfg = _app_config(renew_enabled=True, min_interval=60)
     consumer = _consumer(cfg)
-    attempts = {"n": 0}
-
-    def attempt(_sid: str, *, source: str) -> bool:
-        attempts["n"] += 1
-        return True
-
-    consumer._controller.attempt_renew_sync = attempt  # type: ignore[method-assign]
+    renew = AsyncMock(return_value=True)
+    consumer._controller.renew_after_gates = renew  # type: ignore[method-assign]
 
     seq = iter([100.0, 100.0, 200.0, 200.0])
 
@@ -123,7 +117,67 @@ async def test_proxy_second_attempt_after_cooldown_window(monkeypatch):
     )
     await consumer._process_work(work)
     await consumer._process_work(work)
-    assert attempts["n"] == 2
+    assert renew.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", [RENEW_SOURCE_SERVER_PROXY, RENEW_SOURCE_REDIS_QUEUE])
+async def test_min_interval_applies_with_redis_enabled(monkeypatch, source):
+    cfg = _app_config(renew_enabled=True, min_interval=60)
+    consumer = _consumer(cfg, redis_client=MagicMock())
+    renew = AsyncMock(return_value=True)
+    consumer._controller.renew_after_gates = renew  # type: ignore[method-assign]
+
+    seq = iter([100.0, 100.0, 100.5])
+
+    def mono():
+        return next(seq, 999.0)
+
+    monkeypatch.setattr(
+        "opensandbox_server.integrations.renew_intent.consumer.time.monotonic",
+        mono,
+    )
+
+    work = RenewWorkItem(
+        source=source,
+        sandbox_id="sbx-1",
+        observed_at=MagicMock(),
+        namespace="team-a",
+    )
+    await consumer._process_work(work)
+    await consumer._process_work(work)
+    renew.assert_awaited_once_with("sbx-1", source=source, namespace="team-a")
+
+
+@pytest.mark.asyncio
+async def test_failed_renew_does_not_start_cooldown():
+    cfg = _app_config(renew_enabled=True, min_interval=60)
+    consumer = _consumer(cfg, redis_client=MagicMock())
+    renew = AsyncMock(return_value=False)
+    consumer._controller.renew_after_gates = renew  # type: ignore[method-assign]
+
+    work = RenewWorkItem(
+        source=RENEW_SOURCE_REDIS_QUEUE,
+        sandbox_id="sbx-1",
+        observed_at=MagicMock(),
+    )
+    await consumer._process_work(work)
+    await consumer._process_work(work)
+    assert renew.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_renew_after_gates_returns_renew_result():
+    controller = AccessRenewController(MagicMock(), MagicMock())
+    try_renew = MagicMock(return_value=True)
+    controller._try_renew_sync = try_renew  # type: ignore[method-assign]
+
+    ok = await controller.renew_after_gates(
+        "sbx-1", source=RENEW_SOURCE_REDIS_QUEUE, namespace="team-a"
+    )
+
+    assert ok is True
+    try_renew.assert_called_once_with("sbx-1", source=RENEW_SOURCE_REDIS_QUEUE, namespace="team-a")
 
 
 def test_consumer_mem_lru_drops_oldest_unlocked_entries():

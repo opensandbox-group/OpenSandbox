@@ -141,9 +141,11 @@ class AccessRenewController:
 
     async def renew_after_gates(
         self, sandbox_id: str, *, source: str, namespace: Optional[str] = None
-    ) -> None:
+    ) -> bool:
         """Run renew in a worker thread (caller holds per-sandbox serialization)."""
-        await asyncio.to_thread(self._try_renew_sync, sandbox_id, source=source, namespace=namespace)
+        return await asyncio.to_thread(
+            self._try_renew_sync, sandbox_id, source=source, namespace=namespace
+        )
 
     async def process_intent_after_lock(self, intent: RenewIntent) -> None:
         await self.renew_after_gates(
