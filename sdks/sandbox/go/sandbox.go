@@ -23,6 +23,23 @@ import (
 	"time"
 )
 
+// serverProxyAuthHeader is the header the lifecycle server's auth middleware
+// reads. Data-plane requests routed through the server proxy authenticate with
+// the tenant API key in this header; direct-mode requests must not carry it.
+const serverProxyAuthHeader = "OPEN-SANDBOX-API-KEY"
+
+// hasHeaderFold reports whether headers already carries name under any HTTP
+// casing. Header names are case-insensitive, and endpoint-provided headers may
+// use any casing, so a plain map lookup would add a second, conflicting entry.
+func hasHeaderFold(headers map[string]string, name string) bool {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // SandboxCreateOptions configures sandbox creation.
 type SandboxCreateOptions struct {
 	// Image is the container image URI (required).
@@ -637,9 +654,15 @@ func (s *Sandbox) resolveExecd(ctx context.Context) error {
 		headers[k] = v
 	}
 	if s.config.UseServerProxy {
-		if _, ok := headers[execdAuthHeader]; !ok {
+		// The server proxy authenticates data-plane requests with the tenant
+		// API key in OPEN-SANDBOX-API-KEY, the only header its auth middleware
+		// reads. Never reuse the execd token header here: the proxy forwards
+		// unknown headers to the backend, so that would send the tenant key
+		// into the untrusted sandbox (and still leave proxied requests
+		// unauthenticated).
+		if !hasHeaderFold(headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
-				headers[execdAuthHeader] = apiKey
+				headers[serverProxyAuthHeader] = apiKey
 			}
 		}
 	}
@@ -671,9 +694,12 @@ func (s *Sandbox) resolveEgress(ctx context.Context) error {
 		headers[k] = v
 	}
 	if s.config.UseServerProxy {
-		if _, ok := headers[egressAuthHeader]; !ok {
+		// Same server-proxy auth contract as resolveExecd: the tenant key goes
+		// in OPEN-SANDBOX-API-KEY, never in the egress auth header, which the
+		// proxy forwards into the sandbox.
+		if !hasHeaderFold(headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
-				headers[egressAuthHeader] = apiKey
+				headers[serverProxyAuthHeader] = apiKey
 			}
 		}
 	}
