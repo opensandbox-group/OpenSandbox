@@ -662,6 +662,12 @@ so you can safely reuse the same `ConnectionConfig`. Once you are finished inter
 with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to
 release the underlying agent.
 
+The companion `@alibaba-group/opensandbox-code-interpreter` SDK also releases each
+code execution response reader when streaming finishes or fails. Leaving a
+`codes.runStream()` loop early cancels its response body; a rejected `codes.run()`
+handler also cancels the body and propagates the handler's error. Use
+`codes.interrupt(executionId)` to request interruption of a running code execution.
+
 ## Browser Notes
 
 ::: warning
