@@ -18,7 +18,6 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -290,9 +289,6 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	stopGroupKill := killProcessGroupOnDone(ctx, cmd.Process.Pid)
 	defer stopGroupKill()
 
-	scanner := bufio.NewScanner(stdoutR)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-
 	var (
 		envLines []string
 		pwdLine  string
@@ -300,8 +296,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		inEnv    bool
 	)
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	scanErr := scanOutputLines(stdoutR, func(line string, _ bool) bool {
 		switch {
 		case line == envDumpStartMarker:
 			inEnv = true
@@ -316,15 +311,14 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		default:
 			if inEnv {
 				envLines = append(envLines, line)
-				continue
+				return true
 			}
 			if request.Hooks.OnExecuteStdout != nil {
 				request.Hooks.OnExecuteStdout(line)
 			}
 		}
-	}
-
-	scanErr := scanner.Err()
+		return true
+	})
 	waitErr := mp.Wait()
 
 	if scanErr != nil {

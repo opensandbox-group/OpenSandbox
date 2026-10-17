@@ -422,6 +422,33 @@ func TestBashSession_envLargeOutputChained(t *testing.T) {
 	require.Equal(t, 3, completeCalls, "OnExecuteComplete expected 3 calls")
 }
 
+func TestBashSession_lineLongerThanMaxOutputLine(t *testing.T) {
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	const longLineBytes = maxOutputLineBytes + 4*1024*1024
+	var stdout []string
+	request := &ExecuteCodeRequest{
+		// More output follows the long line, so a reader that stops draining
+		// the pipe leaves the command blocked on write.
+		Code: fmt.Sprintf("head -c %d /dev/zero | tr '\\0' a; echo; seq 1 100000; echo done", longLineBytes),
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(text string) { stdout = append(stdout, text) },
+		},
+		Timeout: 20 * time.Second,
+	}
+
+	start := time.Now()
+	require.NoError(t, session.run(context.Background(), request))
+	require.Less(t, time.Since(start), 15*time.Second)
+
+	require.GreaterOrEqual(t, len(stdout), 2)
+	require.Len(t, stdout[0], maxOutputLineBytes)
+	require.Equal(t, strings.Repeat("a", longLineBytes), stdout[0]+stdout[1])
+	require.Contains(t, stdout, "done")
+}
+
 func TestBashSession_cwdPersistsWithoutOverride(t *testing.T) {
 	session := newBashSession("", nil)
 	t.Cleanup(func() { _ = session.close() })

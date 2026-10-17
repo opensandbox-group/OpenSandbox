@@ -19,6 +19,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -807,5 +808,60 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "must be an existing path") {
 		t.Errorf("expected existing-path rejection, got: %v", err)
+	}
+}
+
+func TestScanUntilMarker_LineLongerThanMaxOutputLine(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	// The output has no trailing newline, so the marker follows it on the
+	// same line and straddles the boundary between two pieces.
+	output := strings.Repeat("a", maxOutputLineBytes-5)
+	input := output + marker + " 7\nnext run output\n"
+
+	var stdout []string
+	exitCode, err := scanUntilMarker(context.Background(), io.NopCloser(strings.NewReader(input)), marker, func(text string) {
+		stdout = append(stdout, text)
+	})
+	if err != nil {
+		t.Fatalf("scanUntilMarker: %v", err)
+	}
+	if exitCode != 7 {
+		t.Fatalf("exit code = %d, want 7", exitCode)
+	}
+	if got := strings.Join(stdout, ""); got != output {
+		t.Fatalf("stdout has %d bytes, want the %d output bytes before the marker", len(got), len(output))
+	}
+}
+
+func TestScanUntilMarker_KeepsEmptyLines(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	input := "a\n\nb\n" + marker + " 0\n"
+
+	var stdout []string
+	if _, err := scanUntilMarker(context.Background(), io.NopCloser(strings.NewReader(input)), marker, func(text string) {
+		stdout = append(stdout, text)
+	}); err != nil {
+		t.Fatalf("scanUntilMarker: %v", err)
+	}
+	if got := strings.Join(stdout, "|"); got != "a||b" {
+		t.Fatalf("stdout = %q, want a, empty line, b", got)
+	}
+}
+
+func TestHoldBackMarkerPrefix(t *testing.T) {
+	cases := []struct {
+		piece, marker, send, held string
+	}{
+		{"abcdef", "XYZ", "abcd", "ef"},
+		{"abcdef", "X", "abcdef", ""},
+		{"ab", "WXYZ", "", "ab"},
+		// The cut moves back so the two-byte "é" is not split.
+		{"abcé", "XY", "abc", "é"},
+	}
+	for _, tc := range cases {
+		send, held := holdBackMarkerPrefix(tc.piece, tc.marker)
+		if send != tc.send || held != tc.held {
+			t.Errorf("holdBackMarkerPrefix(%q, %q) = (%q, %q), want (%q, %q)", tc.piece, tc.marker, send, held, tc.send, tc.held)
+		}
 	}
 }
