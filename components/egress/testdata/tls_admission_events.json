@@ -1,0 +1,98 @@
+{
+  "valid": [
+    {
+      "decision": "decrypt",
+      "reason": "binding_host"
+    },
+    {
+      "decision": "passthrough",
+      "reason": "ech"
+    },
+    {
+      "decision": "passthrough",
+      "reason": "no_sni"
+    },
+    {
+      "decision": "passthrough",
+      "reason": "static_ignore"
+    },
+    {
+      "decision": "passthrough",
+      "reason": "no_binding_host"
+    },
+    {
+      "decision": "deny",
+      "reason": "unknown_identity"
+    },
+    {
+      "decision": "deny",
+      "reason": "invalid_sni"
+    },
+    {
+      "decision": "deny",
+      "reason": "snapshot_missing"
+    },
+    {
+      "decision": "deny",
+      "reason": "generation_mismatch"
+    },
+    {
+      "decision": "deny",
+      "reason": "invalid_input"
+    },
+    {
+      "decision": "deny",
+      "reason": "registry_exhausted"
+    },
+    {
+      "decision": "deny",
+      "reason": "admission_disabled"
+    },
+    {
+      "decision": "deny",
+      "reason": "ssl_insecure"
+    },
+    {
+      "decision": "deny",
+      "reason": "malformed_extensions"
+    }
+  ],
+  "invalid": [
+    {
+      "decision": "decrypt",
+      "reason": "registry_exhausted"
+    },
+    {
+      "decision": "deny",
+      "reason": "binding_host"
+    },
+    {
+      "decision": "passthrough",
+      "reason": "snapshot_missing"
+    },
+    {
+      "decision": "needs_registry",
+      "reason": "binding_host"
+    },
+    {
+      "decision": "deny",
+      "reason": "request_registry_exhausted"
+    },
+    {
+      "decision": "decrypt",
+      "reason": "secret.example.com"
+    },
+    {
+      "decision": "decrypt",
+      "reason": "binding_host host=secret.example.com"
+    },
+    {
+      "decision": "",
+      "reason": ""
+    },
+    {
+      "decision": "decrypt\n",
+      "reason": "binding_host"
+    }
+  ]
+}

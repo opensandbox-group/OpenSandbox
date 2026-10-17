@@ -374,6 +374,13 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 		if !ok {
 			continue
 		}
+		if strings.HasPrefix(msg, "credential proxy: tls-admission-") {
+			if decision, reason, ok := tlsAdmissionEvent(msg); ok {
+				telemetry.RecordTLSAdmission(decision, reason)
+			}
+			// Consume malformed events too; never forward their raw payload.
+			continue
+		}
 		if strings.HasPrefix(msg, "credential proxy: tls-shadow ") {
 			telemetry.RecordTLSShadow(strings.TrimPrefix(msg, "credential proxy: tls-shadow "))
 			continue
@@ -384,6 +391,22 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 	// early; closing the read end makes the exec copy goroutine fail with
 	// ErrClosedPipe so cmd.Wait returns instead of hanging forever.
 	_ = r.Close()
+}
+
+const tlsAdmissionPrefix = "credential proxy: tls-admission-v1"
+
+// tlsAdmissionEvent validates framing only. The recorder validates the closed
+// decision/reason pairs before creating attributes.
+func tlsAdmissionEvent(msg string) (decision, reason string, ok bool) {
+	payload, found := strings.CutPrefix(msg, tlsAdmissionPrefix+" ")
+	if !found || strings.ContainsAny(payload, "\t\r\n\v\f") {
+		return "", "", false
+	}
+	values := strings.Split(payload, " ")
+	if len(values) != 2 || values[0] == "" || values[1] == "" {
+		return "", "", false
+	}
+	return values[0], values[1], true
 }
 
 // credentialProxyMessage returns the message of a credential proxy log line,

@@ -841,6 +841,18 @@ Add bounded-cardinality metrics to the `opensandbox/egress` meter:
 | `egress.credential_vault.transitions_total` | `transition`, `result` | Count host-set add/remove, credential-only, empty, replay, and failed transitions |
 | `egress.credential_vault.transition.duration` | `transition`, `result` | Measure snapshot install and connection-fence latency |
 
+The experimental sidecar TLS counter records final ClientHello admission
+decisions, not successful TLS handshakes, HTTP requests, or unique transport
+lifetimes. A new handshake admission on an existing transport is another
+decision; subsequent HTTP/1.1 requests and HTTP/2 streams do not increment it.
+A decrypt admission may still fail during tracking, TLS, or later HTTP/2
+handling. The snapshot-missing reason includes both bootstrap and a closed
+registry. Collection uses best-effort warning-level events forwarded to Go;
+it does not participate in admission or revision acknowledgement. Closed
+labels do not authenticate the log source, so the counter is not security
+evidence or a standalone paging signal. This increment does not implement
+the remaining active-connection, registry, or transition metrics.
+
 Allowed attribute values are closed sets. Hostnames, paths, credential names,
 credential values, raw errors, sandbox IDs beyond existing shared attributes,
 and subject UIDs must not become metric attributes.
@@ -1489,6 +1501,20 @@ acceptance status is separate from the historical live-Vault results.
    - Consider changing the default only in a future OSEP with compatibility
      evidence; this proposal keeps `all` as the default.
 
+6. **Post-feature configuration consolidation**
+   - After the core credential-bound behavior and profile parity are complete,
+     consolidate complex, static operator configuration into egress-owned
+     configuration files or custom egress images.
+   - Do not automatically expose these operational settings through the
+     lifecycle Server API or SDKs. Any public surface requires a separate,
+     justified design.
+   - Define the migration policy for existing environment variables, including
+     compatibility, conflicts, deprecation, and fail-closed validation, before
+     changing configuration behavior.
+   - This is follow-up cleanup, not a merge gate for the current feature
+     increments. File formats, locations, and internal process handoff
+     mechanisms remain implementation decisions for that work.
+
 ## Test Plan
 
 ### Unit Tests
@@ -1720,6 +1746,8 @@ paths.
    `OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS` list; the new mode rejects a
    non-empty `ignore_hosts` or `allow_hosts` list. The static selector list
    is immutable; changing it requires a new sidecar process and revalidation.
+   The later configuration-consolidation work must explicitly define migration
+   from this environment-variable interface before replacing it.
 8. Release notes must call out strict unknown-field rejection as a runtime
    compatibility tightening, even though the OpenAPI schema was already closed.
 9. Do not change the default in this OSEP. A future default change requires

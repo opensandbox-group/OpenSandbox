@@ -492,12 +492,31 @@ def _clienthello_ech_hidden(client_hello: Any) -> bool | None:
     return False
 
 
+# Closed admission outcomes only; never include SNI, credentials or raw errors.
+_TLS_ADMISSION_REASONS = {
+    "decrypt": ("binding_host",),
+    "passthrough": ("ech", "no_sni", "static_ignore", "no_binding_host"),
+    "deny": ("unknown_identity", "invalid_sni", "snapshot_missing",
+             "generation_mismatch", "invalid_input", "registry_exhausted",
+             "admission_disabled", "ssl_insecure", "malformed_extensions"),
+}
+
+
+def _record_tls_admission(decision: str, reason: str) -> None:
+    """Best-effort admission event, not handshake success or request count."""
+    with suppress(Exception):
+        if reason in _TLS_ADMISSION_REASONS.get(decision, ()):
+            ctx.log.warn(f"credential proxy: tls-admission-v1 {decision} {reason}")
+
+
 def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
     # The live credential-bound mode must never run with insecure upstream
     # verification; deny the handshake outright instead of trusting an
     # unverified origin identity with a credential.
     if ctx.options.ssl_insecure:
-        ctx.log.warn("credential proxy: tls decision deny reason=ssl_insecure")
+        _record_tls_admission("deny", "ssl_insecure")
+        with suppress(Exception):
+            ctx.log.warn("credential proxy: tls decision deny reason=ssl_insecure")
         import credential_bound
 
         credential_bound.terminate_handshake(data.context.client)
@@ -506,7 +525,9 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
     # outer-SNI matching so hidden names can never select a credential.
     ech_hidden = _clienthello_ech_hidden(data.client_hello)
     if ech_hidden is None:
-        ctx.log.warn("credential proxy: tls decision deny reason=malformed_extensions")
+        _record_tls_admission("deny", "malformed_extensions")
+        with suppress(Exception):
+            ctx.log.warn("credential proxy: tls decision deny reason=malformed_extensions")
         import credential_bound
 
         credential_bound.terminate_handshake(data.context.client)
@@ -516,6 +537,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
 
     port = destination_port(getattr(getattr(data.context, "server", None), "address", None))
     result = live.admit_tls(sni, ech_hidden=ech_hidden, destination_port=port)
+    _record_tls_admission(result.action, result.reason)
     if result.action == "passthrough":
         data.ignore_connection = True
         return
@@ -523,7 +545,8 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
         # Fail closed: bootstrapping, generation mismatch, invalid or
         # unadmittable SNI, or an exhausted registry terminate the connection.
         # A deny never degrades into opaque tunneling or decrypt-all.
-        ctx.log.warn(f"credential proxy: tls decision deny reason={result.reason}")
+        with suppress(Exception):
+            ctx.log.warn(f"credential proxy: tls decision deny reason={result.reason}")
         import credential_bound
 
         credential_bound.terminate_handshake(data.context.client)

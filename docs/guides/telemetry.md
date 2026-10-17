@@ -216,6 +216,7 @@ Meter: `opensandbox/egress` · Service name: `opensandbox-egress-<version>`.
 | `egress.dns.query.duration` | Histogram | `s` | Upstream DNS forward latency (recorded for allowed queries). |
 | `egress.dns.query.failed_total` | Counter | - | Queries the proxy could not resolve, by `reason`. |
 | `egress.dns.reply.failed_total` | Counter | - | Reply writes that failed after a decision, by `stage`. A nonzero count means a query was handled but its answer never reached the client. |
+| `egress.mitm.tls.connections_total` | Counter | - | Experimental live sidecar TLS admission decisions, by closed `mode`, `decision`, and `reason` labels; not successful handshakes or HTTP requests. |
 | `egress.policy.denied_total` | Counter | - | Number of DNS queries denied by policy. |
 | `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
@@ -224,6 +225,20 @@ Meter: `opensandbox/egress` · Service name: `opensandbox-egress-<version>`.
 | `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
 | `egress.process.cpu.time` | Observable Counter | `s` | CPU seconds consumed by the sidecar's own cgroup. Only present when cgroupfs is readable. |
+
+### Experimental TLS admission decisions
+
+`egress.mitm.tls.connections_total` is emitted only by the experimental credential-bound sidecar runtime. `mode` is always `credential-bound`; no new configuration or public interception mode is enabled. The existing request-weighted shadow metric remains separate.
+
+| `decision` | Allowed `reason` values |
+|---|---|
+| `decrypt` | `binding_host` |
+| `passthrough` | `ech`, `no_sni`, `static_ignore`, `no_binding_host` |
+| `deny` | `unknown_identity`, `invalid_sni`, `snapshot_missing`, `generation_mismatch`, `invalid_input`, `registry_exhausted`, `admission_disabled`, `ssl_insecure`, `malformed_extensions` |
+
+Each final ClientHello admission decision increments the counter once. A new handshake admission on the same transport is another decision; HTTP/1.1 requests and HTTP/2 streams do not increment it. `decrypt` means the registry admitted decryption, not that tracking, the TLS handshake, or later HTTP/2 handling succeeded. `snapshot_missing` includes bootstrap without an installed snapshot and a closed registry.
+
+Collection uses best-effort `ctx.log.warn` events forwarded to Go. Record failures do not alter admission; events may be lost and add logging cost. No hostname, credential, subject identifier, revision, or raw error is added as a metric label. The closed label set bounds cardinality but does not authenticate the log source: use this as an operational observation, not security evidence or a standalone paging signal. Failed handshakes may produce no HTTP requests, so handshake event volume is not necessarily below request volume.
 
 ### `system` vs `process`
 
