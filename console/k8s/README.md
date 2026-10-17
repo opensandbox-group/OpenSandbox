@@ -7,6 +7,7 @@ Example resources for the **same cluster and namespace** as the lifecycle server
 | File | Purpose |
 |------|---------|
 | `console-bff-secret.example.yaml` | `BFF_SESSION_SECRET`, `BFF_ADMIN_TOKEN` |
+| `console-bff-rbac.example.yaml` | BFF ServiceAccount + read-only ClusterRole |
 | `tenants-configmap.example.yaml` | Example `opensandbox-tenants` shape |
 | `console-bff-deployment.example.yaml` | BFF Deployment + Service |
 | `console-web-deployment.example.yaml` | Web Deployment + Service |
@@ -20,6 +21,7 @@ Build and image push: [../docs/06-build-and-deploy.md](../docs/06-build-and-depl
 cd console
 
 kubectl apply -f k8s/console-bff-secret.example.yaml
+kubectl apply -f k8s/console-bff-rbac.example.yaml
 kubectl apply -f k8s/console-bff-deployment.example.yaml
 kubectl apply -f k8s/console-web-deployment.example.yaml
 kubectl apply -f k8s/console-ingress.example.yaml

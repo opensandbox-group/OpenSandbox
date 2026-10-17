@@ -163,6 +163,44 @@ api_keys = ["same"]
             self.assertFalse(owns)
 
 
+class AggregateStatsTests(unittest.TestCase):
+    def test_skips_missing_wall_clock_and_terminal_expiry(self) -> None:
+        from datetime import datetime, timezone
+
+        from app.runtime import aggregate_runtime_stats
+
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        stats = aggregate_runtime_stats(
+            [
+                {
+                    "status": {"state": "Running"},
+                    "runtimeSummary": {
+                        "wallClockSeconds": 10,
+                        "remainingSeconds": 10,
+                        "asOf": "2026-01-01T00:00:00Z",
+                    },
+                },
+                {
+                    "status": {"state": "Running"},
+                    "runtimeSummary": {"remainingSeconds": 10000, "asOf": "2026-01-01T00:00:00Z"},
+                },
+                {
+                    "status": {"state": "Terminated"},
+                    "runtimeSummary": {
+                        "wallClockSeconds": 5,
+                        "remainingSeconds": 1,
+                        "asOf": "2026-01-01T00:00:00Z",
+                    },
+                },
+            ],
+            now=now,
+        )
+        self.assertEqual(stats["totalWallClockSeconds"], 15)
+        self.assertEqual(stats["avgWallClockSeconds"], 7)
+        self.assertEqual(stats["expiringWithin30mCount"], 1)
+        self.assertEqual(stats["asOf"], "2026-01-01T00:00:00Z")
+
+
 class ExtractTenantsTests(unittest.TestCase):
     def test_blank_line_keeps_later_tenants(self) -> None:
         src = Path(_TMP.name) / "cm.yaml"
