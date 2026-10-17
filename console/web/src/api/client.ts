@@ -15,6 +15,11 @@
 import type {
   DiagnosticContentResponse,
   PaginatedSandboxes,
+  PoolItem,
+  PoolListResponse,
+  PoolUpsertRequest,
+  RuntimeStats,
+  TenantListResponse,
   Sandbox,
   SessionUser,
   Snapshot,
@@ -164,6 +169,16 @@ export const sandboxApi = {
 };
 
 export const adminApi = {
+  listTenants: () => apiRequest<TenantListResponse>('/api/admin/tenants'),
+  sandboxes: (query: Record<string, string | number | undefined>) => {
+    const params = new URLSearchParams();
+    Object.entries(query).forEach(([k, v]) => {
+      if (v !== undefined && v !== '') params.set(k, String(v));
+    });
+    const qs = params.toString();
+    return apiRequest<PaginatedSandboxes>(`/api/admin/sandboxes${qs ? `?${qs}` : ''}`);
+  },
+  runtimeStats: () => apiRequest<RuntimeStats>('/api/admin/stats/runtime'),
   diagnosticLogs: (sandboxId: string, tenant: string, scope: string) => {
     const params = new URLSearchParams({ tenant, scope });
     return apiRequest<DiagnosticContentResponse>(
@@ -233,4 +248,18 @@ export const snapshotApi = {
   },
   remove: (id: string) =>
     apiRequest<void>(`/api/snapshots/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+};
+
+export const poolApi = {
+  list: () => apiRequest<PoolListResponse>('/api/pools'),
+  get: (name: string) => apiRequest<PoolItem>(`/api/pools/${encodeURIComponent(name)}`),
+  create: (body: PoolUpsertRequest) =>
+    apiRequest<PoolItem>('/api/pools', { method: 'POST', body: JSON.stringify(body) }),
+  update: (name: string, body: PoolUpsertRequest) =>
+    apiRequest<PoolItem>(`/api/pools/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  remove: (name: string) =>
+    apiRequest<void>(`/api/pools/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 };

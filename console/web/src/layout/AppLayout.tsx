@@ -16,6 +16,7 @@ import {
   AppstoreOutlined,
   CameraOutlined,
   DashboardOutlined,
+  DatabaseOutlined,
   FileSearchOutlined,
   LogoutOutlined,
   PlusOutlined,
@@ -28,6 +29,13 @@ import { useAuth } from '../auth/AuthContext';
 
 const { Header, Sider, Content } = Layout;
 
+function menuKey(pathname: string, isAdmin: boolean): string {
+  if (pathname === '/sandboxes/new') return '/sandboxes/new';
+  if (pathname.startsWith('/admin/sandboxes')) return '/admin/sandboxes';
+  if (pathname.startsWith('/sandboxes')) return isAdmin ? '/admin/sandboxes' : '/sandboxes';
+  return pathname;
+}
+
 export function AppLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -37,22 +45,18 @@ export function AppLayout() {
 
   const items = [
     { key: '/', icon: <DashboardOutlined />, label: '概览' },
+    isAdmin
+      ? { key: '/admin/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱（全局）' }
+      : { key: '/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱' },
     ...(isAdmin
       ? []
-      : [
-          { key: '/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱' },
-          { key: '/sandboxes/new', icon: <PlusOutlined />, label: '创建沙箱' },
-        ]),
+      : [{ key: '/sandboxes/new', icon: <PlusOutlined />, label: '创建沙箱' }]),
     { key: '/snapshots', icon: <CameraOutlined />, label: '快照' },
+    ...(isAdmin ? [{ key: '/pools', icon: <DatabaseOutlined />, label: 'Pool' }] : []),
     { key: '/diagnostics', icon: <FileSearchOutlined />, label: '诊断' },
   ];
 
-  const selectedKey =
-    location.pathname === '/sandboxes/new'
-      ? '/sandboxes/new'
-      : location.pathname.startsWith('/sandboxes')
-        ? '/sandboxes'
-        : location.pathname;
+  const selectedKey = menuKey(location.pathname, Boolean(isAdmin));
 
   return (
     <Layout style={{ minHeight: '100vh' }}>

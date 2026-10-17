@@ -46,12 +46,19 @@ export interface Sandbox {
   namespace?: string;
 }
 
+export interface TenantListResponse {
+  items: { name: string; namespace: string }[];
+}
+
 export interface PaginatedSandboxes {
   items: Sandbox[];
   pagination?: {
     page?: number;
     pageSize?: number;
     totalItems?: number;
+    hasNextPage?: boolean;
+    /** True when any tenant still has sandboxes beyond this page. */
+    capped?: boolean;
     tenantErrors?: { tenant: string; code: string; message: string }[];
   };
 }
@@ -83,6 +90,12 @@ export interface PoolItem {
   namespace?: string;
   status?: { state?: string; message?: string };
   spec?: Record<string, unknown>;
+}
+
+/** Lifecycle pool create/update body. `name` is required; other fields follow the pool spec. */
+export interface PoolUpsertRequest {
+  name: string;
+  [key: string]: unknown;
 }
 
 export interface K8sWorkloadRow {

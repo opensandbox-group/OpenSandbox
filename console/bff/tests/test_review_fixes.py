@@ -44,7 +44,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
 from app.lifecycle import LifecycleClient, normalize_upstream_path  # noqa: E402
-from app.session import encode_session, tenant_session  # noqa: E402
+from app.session import admin_session, encode_session, tenant_session  # noqa: E402
 from app.tenants import clear_tenant_cache, load_tenants, lookup_by_api_key  # noqa: E402
 
 get_settings.cache_clear()
@@ -163,6 +163,44 @@ api_keys = ["same"]
             self.assertFalse(owns)
 
 
+class AggregateStatsTests(unittest.TestCase):
+    def test_skips_missing_wall_clock_and_terminal_expiry(self) -> None:
+        from datetime import datetime, timezone
+
+        from app.runtime import aggregate_runtime_stats
+
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        stats = aggregate_runtime_stats(
+            [
+                {
+                    "status": {"state": "Running"},
+                    "runtimeSummary": {
+                        "wallClockSeconds": 10,
+                        "remainingSeconds": 10,
+                        "asOf": "2026-01-01T00:00:00Z",
+                    },
+                },
+                {
+                    "status": {"state": "Running"},
+                    "runtimeSummary": {"remainingSeconds": 10000, "asOf": "2026-01-01T00:00:00Z"},
+                },
+                {
+                    "status": {"state": "Terminated"},
+                    "runtimeSummary": {
+                        "wallClockSeconds": 5,
+                        "remainingSeconds": 1,
+                        "asOf": "2026-01-01T00:00:00Z",
+                    },
+                },
+            ],
+            now=now,
+        )
+        self.assertEqual(stats["totalWallClockSeconds"], 15)
+        self.assertEqual(stats["avgWallClockSeconds"], 7)
+        self.assertEqual(stats["expiringWithin30mCount"], 1)
+        self.assertEqual(stats["asOf"], "2026-01-01T00:00:00Z")
+
+
 class ExtractTenantsTests(unittest.TestCase):
     def test_blank_line_keeps_later_tenants(self) -> None:
         src = Path(_TMP.name) / "cm.yaml"
@@ -191,6 +229,156 @@ kind: ConfigMap
         text = out.read_text(encoding="utf-8")
         self.assertIn('name = "b"', text)
         self.assertIn('api_keys = ["k2"]', text)
+
+
+def _admin_cookie() -> str:
+    return encode_session(get_settings(), admin_session())
+
+
+class AdminReviewTests(unittest.TestCase):
+    def test_tenants_route_returns_names_only(self) -> None:
+        name = get_settings().bff_session_cookie_name
+        with TestClient(app) as client:
+            client.cookies.set(name, _admin_cookie())
+            listed = client.get("/api/admin/tenants")
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.json()["items"], [{"name": "acme", "namespace": "ns-acme"}])
+            self.assertNotIn("api_key", listed.text)
+            self.assertNotIn("key-one", listed.text)
+
+            client.cookies.set(name, _token())
+            denied = client.get("/api/admin/tenants")
+            self.assertEqual(denied.status_code, 403)
+
+    def test_unknown_tenant_and_bad_page_are_400(self) -> None:
+        name = get_settings().bff_session_cookie_name
+        with TestClient(app) as client:
+            client.cookies.set(name, _admin_cookie())
+            unknown = client.get("/api/admin/sandboxes", params={"tenant": "missing"})
+            self.assertEqual(unknown.status_code, 400)
+            self.assertEqual(unknown.json()["detail"]["code"], "UNKNOWN_TENANT")
+
+            bad_page = client.get("/api/admin/sandboxes", params={"page": "abc"})
+            self.assertEqual(bad_page.status_code, 400)
+            self.assertEqual(bad_page.json()["detail"]["code"], "INVALID_QUERY")
+
+    def test_timeout_on_one_tenant_keeps_the_other(self) -> None:
+        import httpx
+
+        from app import lifecycle
+
+        path = Path(_TMP.name) / "two-tenants.toml"
+        path.write_text(
+            """
+[[tenants]]
+name = "acme"
+namespace = "ns-acme"
+api_keys = ["key-one"]
+
+[[tenants]]
+name = "beta"
+namespace = "ns-beta"
+api_keys = ["key-beta"]
+""".lstrip(),
+            encoding="utf-8",
+        )
+
+        async def request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            key = (kwargs.get("headers") or {}).get("OPEN-SANDBOX-API-KEY")
+            if key == "key-one":
+                raise httpx.TimeoutException("slow")
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"id": "beta-1", "status": {"state": "Running"}}],
+                    "pagination": {"hasNextPage": False},
+                },
+            )
+
+        settings = get_settings()
+        name = settings.bff_session_cookie_name
+        with unittest.mock.patch.object(settings, "tenants_toml_path", str(path)):
+            clear_tenant_cache()
+            with TestClient(app) as client:
+                client.cookies.set(name, _admin_cookie())
+                with unittest.mock.patch.object(lifecycle._shared_client, "request", request):
+                    listed = client.get("/api/admin/sandboxes")
+        clear_tenant_cache()
+        self.assertEqual(listed.status_code, 200)
+        body = listed.json()
+        self.assertEqual([item["id"] for item in body["items"]], ["beta-1"])
+        self.assertEqual(body["pagination"]["tenantErrors"][0]["tenant"], "acme")
+        self.assertEqual(body["pagination"]["tenantErrors"][0]["code"], "UPSTREAM_TIMEOUT")
+        self.assertFalse(body["pagination"]["capped"])
+
+    def test_runtime_stats_walks_every_upstream_page(self) -> None:
+        import httpx
+
+        from app import lifecycle
+
+        async def request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            page = int((kwargs.get("params") or {}).get("page") or 1)
+            if page == 1:
+                items = [{"id": f"s{i}", "status": {"state": "Running"}} for i in range(200)]
+                return httpx.Response(200, json={"items": items, "pagination": {"hasNextPage": True}})
+            self.assertEqual(page, 2)
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"id": "last", "status": {"state": "Running"}}],
+                    "pagination": {"hasNextPage": False},
+                },
+            )
+
+        name = get_settings().bff_session_cookie_name
+        with TestClient(app) as client:
+            client.cookies.set(name, _admin_cookie())
+            with unittest.mock.patch.object(lifecycle._shared_client, "request", request):
+                stats = client.get("/api/admin/stats/runtime")
+        self.assertEqual(stats.status_code, 200)
+        self.assertEqual(stats.json()["runningCount"], 201)
+
+    def test_pool_proxy_falls_back_when_the_first_key_is_rejected(self) -> None:
+        import httpx
+
+        from app import lifecycle
+
+        path = Path(_TMP.name) / "pool-tenants.toml"
+        path.write_text(
+            """
+[[tenants]]
+name = "old"
+namespace = "ns-old"
+api_keys = ["revoked"]
+
+[[tenants]]
+name = "new"
+namespace = "ns-new"
+api_keys = ["live"]
+""".lstrip(),
+            encoding="utf-8",
+        )
+        seen: list[str] = []
+
+        async def request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            key = (kwargs.get("headers") or {}).get("OPEN-SANDBOX-API-KEY")
+            seen.append(str(key))
+            if key == "revoked":
+                return httpx.Response(401, json={"code": "UNAUTHORIZED", "message": "revoked"})
+            return httpx.Response(200, json={"items": [{"name": "pool-a"}]})
+
+        settings = get_settings()
+        name = settings.bff_session_cookie_name
+        with unittest.mock.patch.object(settings, "tenants_toml_path", str(path)):
+            clear_tenant_cache()
+            with TestClient(app) as client:
+                client.cookies.set(name, _admin_cookie())
+                with unittest.mock.patch.object(lifecycle._shared_client, "request", request):
+                    listed = client.get("/api/pools")
+        clear_tenant_cache()
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"][0]["name"], "pool-a")
+        self.assertEqual(seen, ["revoked", "live"])
 
 
 if __name__ == "__main__":
