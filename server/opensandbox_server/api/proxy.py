@@ -16,6 +16,7 @@
 HTTP and WebSocket proxy routes for reaching services inside sandboxes via the lifecycle API.
 """
 
+import asyncio
 import hmac
 import logging
 from collections.abc import AsyncIterator, Mapping
@@ -263,8 +264,6 @@ async def _authenticate_websocket_tenant(websocket: WebSocket) -> bool:
     connections must be authenticated here to establish tenant context.
     Returns True if the request is authorized (or single-tenant mode).
     """
-    import asyncio
-
     provider = getattr(websocket.app.state, "tenant_provider", None)
     if provider is None:
         return True
@@ -375,7 +374,9 @@ async def _proxy_http_request(
     internal: bool = False,
 ) -> StreamingResponse:
     resolve_internal = get_config().proxy.resolve_internal
-    endpoint = lifecycle.sandbox_service.get_endpoint(
+    # get_endpoint does blocking Docker/Kubernetes I/O; keep it off the event loop.
+    endpoint = await asyncio.to_thread(
+        lifecycle.sandbox_service.get_endpoint,
         sandbox_id,
         port,
         resolve_internal=resolve_internal,
@@ -587,7 +588,8 @@ async def _proxy_websocket_request(
 
     try:
         resolve_internal = get_config().proxy.resolve_internal
-        endpoint = lifecycle.sandbox_service.get_endpoint(
+        endpoint = await asyncio.to_thread(
+            lifecycle.sandbox_service.get_endpoint,
             sandbox_id,
             port,
             resolve_internal=resolve_internal,
