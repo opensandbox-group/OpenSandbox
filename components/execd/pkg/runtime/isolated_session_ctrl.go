@@ -17,7 +17,6 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -29,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -704,19 +704,34 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	return nil
 }
 
+// holdBackMarkerPrefix splits an unfinished piece of a long line into the
+// part that can be sent now and a tail that may be the start of a marker
+// continuing in the next piece. The cut never lands inside a UTF-8 sequence.
+func holdBackMarkerPrefix(piece, marker string) (send, held string) {
+	cut := max(len(piece)-len(marker)+1, 0)
+	for cut > 0 && cut < len(piece) && !utf8.RuneStart(piece[cut]) {
+		cut--
+	}
+	return piece[:cut], piece[cut:]
+}
+
 // scanUntilMarker reads stdout lines until the end marker is found.
 // Returns the exit code from the marker line.
 func scanUntilMarker(ctx context.Context, stdout io.ReadCloser, runMarker string, onStdout StdoutCallback) (int, error) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-
-	var exitCode int
-	markerSeen := false
+	var (
+		exitCode   int
+		markerSeen bool
+		scanErr    error
+		// carry holds the tail of an unfinished long-line piece, in case the
+		// marker is split across two pieces.
+		carry string
+	)
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
-		for scanner.Scan() {
-			line := scanner.Text()
+		scanErr = scanOutputLines(stdout, func(line string, complete bool) bool {
+			line = carry + line
+			carry = ""
 			// The marker may appear mid-line if the previous command's
 			// output didn't end with a newline (e.g. cat of a file
 			// without trailing newline).
@@ -732,12 +747,16 @@ func scanUntilMarker(ctx context.Context, stdout io.ReadCloser, runMarker string
 						exitCode = code
 					}
 				}
-				return
+				return false
+			}
+			if !complete {
+				line, carry = holdBackMarkerPrefix(line, runMarker)
 			}
 			if onStdout != nil {
 				onStdout(line)
 			}
-		}
+			return true
+		})
 	}()
 
 	select {
@@ -749,8 +768,8 @@ func scanUntilMarker(ctx context.Context, stdout io.ReadCloser, runMarker string
 		return 0, ctx.Err()
 	}
 
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("read stdout: %w", err)
+	if scanErr != nil {
+		return 0, fmt.Errorf("read stdout: %w", scanErr)
 	}
 	if !markerSeen {
 		return 1, fmt.Errorf("session process exited without end marker (process may have died or called exit)")
