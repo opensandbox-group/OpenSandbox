@@ -260,12 +260,8 @@ func (e *processExecutor) Inspect(ctx context.Context, task *types.Task) (*types
 	}
 	subStatus := types.SubStatus{}
 	var pid int
-	if exitData, err := os.ReadFile(exitPath); err == nil {
-		fileInfo, _ := os.Stat(exitPath)
-		exitCode, _ := strconv.Atoi(string(exitData))
-
+	if exitCode, finishedAt, ok := readExitCode(exitPath); ok {
 		subStatus.ExitCode = exitCode
-		finishedAt := fileInfo.ModTime()
 		subStatus.FinishedAt = &finishedAt
 
 		if exitCode == 0 {
@@ -318,6 +314,26 @@ func (e *processExecutor) Inspect(ctx context.Context, task *types.Task) (*types
 	status.SubStatuses = []types.SubStatus{subStatus}
 
 	return status, nil
+}
+
+// readExitCode returns the exit code written by the shim and when it was
+// written. The shim's redirection creates the file before the code is
+// written, so an empty file (still being written, or left by a shim killed in
+// between) is not a finished task and reports ok=false.
+func readExitCode(exitPath string) (int, time.Time, bool) {
+	data, err := os.ReadFile(exitPath)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	exitCode, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	info, err := os.Stat(exitPath)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return exitCode, info.ModTime(), true
 }
 
 func (e *processExecutor) Stop(ctx context.Context, task *types.Task) error {
