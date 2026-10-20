@@ -9,7 +9,7 @@ status: draft
 
 # OSEP-0026: Managed External Egress Authorization
 
-The number 0026 is provisional for review in a personal fork and must be confirmed before upstream submission. This document proposes behavior; it does not claim implementation acceptance or production readiness.
+The number 0026 is provisional pending upstream OSEP numbering review. This document proposes behavior; it does not claim implementation acceptance or production readiness.
 
 <!-- toc -->
 
