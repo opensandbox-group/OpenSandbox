@@ -241,17 +241,18 @@ class RetryAsyncTransport(httpx.AsyncBaseTransport):
                     try:
                         body = await response.aread()
                     except Exception:
-                        logger.debug(
-                            "failed to read wake-timeout body", exc_info=True
-                        )
+                        logger.debug("failed to read wake-timeout body", exc_info=True)
+                    finally:
+                        # The response never reaches AsyncClient on this path,
+                        # so close it even when the diagnostic read is cancelled.
+                        try:
+                            await response.aclose()
+                        except Exception:
+                            logger.debug(
+                                "failed to close wake-timeout response",
+                                exc_info=True,
+                            )
                     request_id = response.headers.get("X-Request-ID")
-                    try:
-                        await response.aclose()
-                    except Exception:
-                        logger.debug(
-                            "failed to close wake-timeout response",
-                            exc_info=True,
-                        )
                     raise SandboxWakeTimeoutException(
                         "sandbox wake timeout: restore did not complete "
                         f"within the wake retry budget "
