@@ -411,6 +411,17 @@ await sandbox.files.delete_files(["/tmp/hello.txt"])
 
 For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`; use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()` also accept `offset` and `limit` for partial reads.
 
+Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
+
+```python
+from contextlib import aclosing
+
+async with aclosing(await sandbox.files.read_bytes_stream("/tmp/large.bin")) as chunks:
+    async for chunk in chunks:
+        if enough_data(chunk):
+            break
+```
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:

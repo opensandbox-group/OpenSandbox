@@ -18,7 +18,7 @@ Filesystem service interface.
 
 Protocol for sandbox filesystem operations.
 """
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from io import IOBase
 from typing import Protocol
 
@@ -109,9 +109,9 @@ class Filesystem(Protocol):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         """
-        Stream file content as bytes chunks (read_* naming).
+        Stream file content as bytes chunks; close the started generator on early exit.
         """
         ...
 
