@@ -230,6 +230,8 @@ const sandbox = await Sandbox.create({
 
 Execute commands and handle output streams in real-time.
 
+Command and code-interpreter event streams accept LF, CRLF, and CR line endings, including when a line ending is split across network chunks.
+
 ```ts
 import type { ExecutionHandlers } from "@alibaba-group/opensandbox";
 
