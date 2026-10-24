@@ -59,9 +59,11 @@ type ConnectionConfig struct {
 	AuthHeader string
 
 	// Retry enables automatic retry with exponential backoff for transient
-	// errors. Defaults to retrying 429/502/503/504; override
-	// RetryConfig.RetryableStatusCodes for custom policies. If nil, requests
-	// are not retried.
+	// errors. Idempotent methods default to 429/502/503/504; override
+	// RetryConfig.RetryableStatusCodes for custom idempotent policies. POST
+	// and PATCH do not retry status codes unless listed in
+	// RetryConfig.RetryableStatusCodesNonIdempotent. If nil, requests are not
+	// retried.
 	// Use DefaultRetryConfig() for sensible defaults.
 	Retry *RetryConfig
 

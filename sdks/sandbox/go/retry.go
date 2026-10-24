@@ -48,9 +48,16 @@ type RetryConfig struct {
 	Jitter float64
 
 	// RetryableStatusCodes optionally overrides which HTTP status codes are
-	// treated as transient for retry decisions. When empty, SDK defaults are
-	// used (429, 502, 503, 504).
+	// treated as transient for idempotent requests (GET, HEAD, PUT, DELETE,
+	// and OPTIONS). When empty, SDK defaults are used (429, 502, 503, 504).
 	RetryableStatusCodes []int
+
+	// RetryableStatusCodesNonIdempotent lists HTTP status codes that may be
+	// retried for POST and PATCH requests. It is empty by default because a
+	// repeated write can duplicate its side effects. Set this only when the
+	// operation is idempotent at the application layer or duplicate execution
+	// is acceptable.
+	RetryableStatusCodesNonIdempotent []int
 
 	// WakeRetryEnabled controls automatic retry of gateway wake-timeout
 	// responses (OSEP-0024): a 503 carrying the "OpenSandbox-Wake: expired"
@@ -138,8 +145,12 @@ func DefaultRetryConfig() RetryConfig {
 }
 
 // WithRetry enables automatic retry with exponential backoff for transient
-// errors and network failures. By default, transient status codes are
-// 429/502/503/504; override RetryConfig.RetryableStatusCodes to customize.
+// errors and network failures. Idempotent requests retry 429/502/503/504 by
+// default; override RetryConfig.RetryableStatusCodes to customize. POST and
+// PATCH retry only transport failures provably raised before any request bytes
+// are sent (dial, proxy-connect, and TLS-handshake failures), unless
+// RetryConfig.RetryableStatusCodesNonIdempotent opts into specific status
+// codes.
 func WithRetry(cfg RetryConfig) Option {
 	return func(c *Client) {
 		c.retry = &cfg
@@ -168,7 +179,25 @@ func isTransientStatus(code int) bool {
 	}
 }
 
-func (r *RetryConfig) isRetryableStatus(code int) bool {
+func isIdempotentMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *RetryConfig) isRetryableStatus(method string, code int) bool {
+	if !isIdempotentMethod(method) {
+		for _, c := range r.RetryableStatusCodesNonIdempotent {
+			if c == code {
+				return true
+			}
+		}
+		return false
+	}
+
 	codes := r.RetryableStatusCodes
 	if len(codes) == 0 {
 		return isTransientStatus(code)
@@ -181,18 +210,59 @@ func (r *RetryConfig) isRetryableStatus(code int) bool {
 	return false
 }
 
-// isTransientError checks whether err should trigger a retry. It handles
-// *APIError (HTTP status classification) and net.Error (network-level).
-func isTransientError(err error, cfg *RetryConfig) bool {
+// requestSentError marks a transport failure after request bytes were written
+// or a response was observed, including failures on a redirect hop. It keeps a
+// later dial failure from being mistaken for a pre-send failure of the whole
+// call.
+type requestSentError struct{ err error }
+
+func (e *requestSentError) Error() string { return e.err.Error() }
+func (e *requestSentError) Unwrap() error { return e.err }
+
+// preSendError marks a transport failure proven to have happened before any
+// request bytes were written, such as a TLS handshake failure.
+type preSendError struct{ err error }
+
+func (e *preSendError) Error() string { return e.err.Error() }
+func (e *preSendError) Unwrap() error { return e.err }
+
+// isPreSendError reports whether err proves that no request bytes reached the
+// server. Go surfaces dial failures (including DNS and TCP connect failures)
+// and proxy CONNECT failures as *net.OpError; OSEP-0017 requires classifying
+// those as safe to retry for any method.
+func isPreSendError(err error) bool {
+	var sentErr *requestSentError
+	if errors.As(err, &sentErr) {
+		return false
+	}
+	var preSendErr *preSendError
+	if errors.As(err, &preSendErr) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect")
+}
+
+// isTransientErrorForMethod checks whether err should trigger a generic retry
+// for method. Status-code retries are method-specific, pre-send transport
+// failures are safe for every method, and ambiguous transport failures are
+// retried only for idempotent methods.
+func isTransientErrorForMethod(err error, cfg *RetryConfig, method string) bool {
 	if err == nil {
 		return false
 	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		if cfg != nil {
-			return cfg.isRetryableStatus(apiErr.StatusCode)
+			return cfg.isRetryableStatus(method, apiErr.StatusCode)
 		}
-		return apiErr.IsTransient()
+		return isIdempotentMethod(method) && apiErr.IsTransient()
+	}
+	if isPreSendError(err) {
+		return true
+	}
+	if !isIdempotentMethod(method) {
+		return false
 	}
 	var netErr net.Error
 	return errors.As(err, &netErr)
@@ -276,9 +346,9 @@ func retrySleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// withRetry executes fn, retrying on transient errors per the client's
-// RetryConfig. If retry is nil, or both MaxRetries and the wake contract are
-// inactive, fn is called once.
+// withRetry executes an idempotent operation, retrying on transient errors per
+// the client's RetryConfig. Callers issuing POST or PATCH must use
+// withRetryMethod so that method-aware retry safety applies.
 //
 // The OSEP-0024 wake contract is enforced on top of the generic policy: a
 // marked wake-timeout error (503 + "OpenSandbox-Wake: expired") is retried
@@ -286,17 +356,18 @@ func retrySleep(ctx context.Context, d time.Duration) error {
 // always safe — under its own attempt count and wall-clock budget. Bare 503
 // responses follow the generic rules untouched.
 func (c *Client) withRetry(ctx context.Context, fn func() error) error {
-	return c.withRetryWake(ctx, true, fn)
+	return c.withRetryMethod(ctx, http.MethodGet, fn)
 }
 
-// withRetryWake is withRetry with control over the wake contract. Streaming
-// connects pass wakeEnabled=false: an established stream is never re-executed,
-// and a waking sandbox is not parked for up to the wake budget — the response
-// falls back to the generic policy's bare-503 rules (retried only when the
-// method/status qualify), matching the other official SDKs, which leave their
-// streaming transports unwrapped.
-func (c *Client) withRetryWake(ctx context.Context, wakeEnabled bool, fn func() error) error {
-	if c.retry == nil || (c.retry.MaxRetries == 0 && !(wakeEnabled && c.retry.wakeEnabled())) {
+// withRetryMethod executes fn with the generic retry policy tailored to method.
+func (c *Client) withRetryMethod(ctx context.Context, method string, fn func() error) error {
+	return c.withRetryWake(ctx, method, fn)
+}
+
+// withRetryWake applies the generic policy together with the OSEP-0024 wake
+// contract. Streaming transports intentionally call neither layer.
+func (c *Client) withRetryWake(ctx context.Context, method string, fn func() error) error {
+	if c.retry == nil || (c.retry.MaxRetries == 0 && !c.retry.wakeEnabled()) {
 		return fn()
 	}
 
@@ -325,7 +396,7 @@ func (c *Client) withRetryWake(ctx context.Context, wakeEnabled bool, fn func() 
 		}
 
 		var apiErr *APIError
-		if wakeEnabled && c.retry.wakeEnabled() && errors.As(lastErr, &apiErr) && apiErr.WakeExpired {
+		if c.retry.wakeEnabled() && errors.As(lastErr, &apiErr) && apiErr.WakeExpired {
 			wakeAttempts++
 			elapsed := time.Since(started)
 			// An explicit Retry-After of 0 means retry immediately; only a
@@ -356,7 +427,7 @@ func (c *Client) withRetryWake(ctx context.Context, wakeEnabled bool, fn func() 
 			continue
 		}
 
-		if !isTransientError(lastErr, c.retry) {
+		if !isTransientErrorForMethod(lastErr, c.retry, method) {
 			return lastErr
 		}
 		if retriesUsed >= c.retry.MaxRetries {

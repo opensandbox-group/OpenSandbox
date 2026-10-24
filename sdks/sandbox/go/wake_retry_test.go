@@ -529,7 +529,8 @@ func boolPtr(v bool) *bool { return &v }
 func TestWakeRetry_StreamConnectDoesNotParkOnWake(t *testing.T) {
 	// The other SDKs leave streaming transports unwrapped: a marked 503 while
 	// establishing a stream must fail fast instead of parking the connect for
-	// up to the wake budget. Generic retries still apply.
+	// up to the wake budget. The POST stream is not replayed by the generic
+	// policy either, so the caller receives the marked error.
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := attempts.Add(1)
@@ -558,7 +559,10 @@ func TestWakeRetry_StreamConnectDoesNotParkOnWake(t *testing.T) {
 		events = append(events, event)
 		return nil
 	})
-	require.NoErrorf(t, err, "expected success after generic stream retry, got")
-	require.Equal(t, 2, int(attempts.Load()))
-	require.Len(t, events, 1)
+	require.Error(t, err, "a marked wake 503 on a POST stream must fail fast")
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.True(t, apiErr.WakeExpired)
+	require.Equal(t, 1, int(attempts.Load()))
+	require.Len(t, events, 0)
 }

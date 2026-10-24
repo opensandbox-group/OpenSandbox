@@ -14,6 +14,10 @@ Covers all three OpenAPI specs:
 go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 ```
 
+## Retry Behavior
+
+Idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`) retry `429`, `502`, `503`, and `504` by default. `POST` and `PATCH` retry only dial, proxy-connect, and TLS-handshake failures that are provably pre-send; status-code retries for writes are opt-in because a replay can duplicate a sandbox, session, command, or file mutation. Set `RetryableStatusCodesNonIdempotent` only when the operation is idempotent at the application layer or duplicate execution is acceptable. SSE bootstraps are never retried.
+
 ## Quick Start
 
 ### Create and manage a sandbox

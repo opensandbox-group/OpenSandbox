@@ -24,8 +24,10 @@ import (
 	"crypto/x509"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,6 +56,16 @@ func TestIsTransient(t *testing.T) {
 		if got := apiErr.IsTransient(); got != tt.transient {
 			assert.Fail(t, fmt.Sprintf("status %d: IsTransient() = %v, want %v", tt.status, got, tt.transient))
 		}
+	}
+}
+
+func TestIsIdempotentMethod(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodOptions} {
+		require.True(t, isIdempotentMethod(method), method)
+		require.True(t, isIdempotentMethod(strings.ToLower(method)), "case-insensitive "+method)
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodTrace} {
+		require.Equal(t, false, isIdempotentMethod(method), method)
 	}
 }
 
@@ -262,7 +274,7 @@ func TestRetry_RateLimit429(t *testing.T) {
 	}
 }
 
-func TestRetry_StreamingConnection(t *testing.T) {
+func TestRetry_StreamingWriteStatusOptInNotRetried(t *testing.T) {
 	var attempts atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -279,10 +291,11 @@ func TestRetry_StreamingConnection(t *testing.T) {
 	defer srv.Close()
 
 	client := NewExecdClient(srv.URL, "tok", WithRetry(RetryConfig{
-		MaxRetries:     2,
-		InitialBackoff: 10 * time.Millisecond,
-		MaxBackoff:     100 * time.Millisecond,
-		Multiplier:     2.0,
+		MaxRetries:                        2,
+		InitialBackoff:                    10 * time.Millisecond,
+		MaxBackoff:                        100 * time.Millisecond,
+		Multiplier:                        2.0,
+		RetryableStatusCodesNonIdempotent: []int{http.StatusServiceUnavailable},
 	}))
 
 	var events []StreamEvent
@@ -290,13 +303,12 @@ func TestRetry_StreamingConnection(t *testing.T) {
 		events = append(events, event)
 		return nil
 	})
-	require.NoErrorf(t, err, "expected success after stream retry, got")
-	if len(events) != 1 || events[0].Data != "hello" {
-		assert.Fail(t, fmt.Sprintf("events = %+v, want [{Event:stdout Data:hello}]", events))
-	}
-	if attempts.Load() != 2 {
-		assert.Fail(t, fmt.Sprintf("attempts = %d, want 2", attempts.Load()))
-	}
+	require.Error(t, err, "a POST stream must not be replayed after a 503")
+	require.Len(t, events, 0)
+	require.Equal(t, int32(1), attempts.Load())
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
 }
 
 func TestBackoff(t *testing.T) {
@@ -586,24 +598,79 @@ func TestParseRetryAfter_NilResponse(t *testing.T) {
 }
 
 func TestIsTransientError(t *testing.T) {
+	idempotentOnlyOptIn := &RetryConfig{
+		RetryableStatusCodes: []int{http.StatusTooManyRequests},
+	}
+	nonIdempotentOptIn := &RetryConfig{
+		RetryableStatusCodesNonIdempotent: []int{http.StatusServiceUnavailable},
+	}
 	tests := []struct {
 		name      string
+		method    string
 		err       error
+		cfg       *RetryConfig
 		transient bool
 	}{
-		{"nil", nil, false},
-		{"api 503", &APIError{StatusCode: 503}, true},
-		{"api 429", &APIError{StatusCode: 429}, true},
-		{"api 404", &APIError{StatusCode: 404}, false},
-		{"api 400", &APIError{StatusCode: 400}, false},
-		{"api 502", &APIError{StatusCode: 502}, true},
-		{"api 504", &APIError{StatusCode: 504}, true},
-		{"api 500", &APIError{StatusCode: 500}, false},
+		{"nil", http.MethodGet, nil, nil, false},
+		{"api 503 GET", http.MethodGet, &APIError{StatusCode: 503}, nil, true},
+		{"api 429 GET", http.MethodGet, &APIError{StatusCode: 429}, nil, true},
+		{"api 404 GET", http.MethodGet, &APIError{StatusCode: 404}, nil, false},
+		{"api 400 GET", http.MethodGet, &APIError{StatusCode: 400}, nil, false},
+		{"api 502 GET", http.MethodGet, &APIError{StatusCode: 502}, nil, true},
+		{"api 504 GET", http.MethodGet, &APIError{StatusCode: 504}, nil, true},
+		{"api 500 GET", http.MethodGet, &APIError{StatusCode: 500}, nil, false},
+		{"api 503 POST default", http.MethodPost, &APIError{StatusCode: 503}, nil, false},
+		{"api 503 PATCH default", http.MethodPatch, &APIError{StatusCode: 503}, nil, false},
+		{"api 503 POST opt-in", http.MethodPost, &APIError{StatusCode: 503}, nonIdempotentOptIn, true},
+		{"api 429 POST not opted in", http.MethodPost, &APIError{StatusCode: 429}, nonIdempotentOptIn, false},
+		{"api 429 POST ignores idempotent opt-in", http.MethodPost, &APIError{StatusCode: 429}, idempotentOnlyOptIn, false},
+		{
+			"dial failure POST",
+			http.MethodPost,
+			&net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connection refused")},
+			nil,
+			true,
+		},
+		{
+			"read failure POST",
+			http.MethodPost,
+			&net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("connection reset")},
+			nil,
+			false,
+		},
+		{
+			"redirect dial after send POST",
+			http.MethodPost,
+			&requestSentError{err: &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connection refused")}},
+			nil,
+			false,
+		},
+		{
+			"TLS handshake POST",
+			http.MethodPost,
+			&preSendError{err: fmt.Errorf("tls handshake failed")},
+			nil,
+			true,
+		},
+		{
+			"proxy connect POST",
+			http.MethodPost,
+			&net.OpError{Op: "proxyconnect", Net: "tcp", Err: fmt.Errorf("connection refused")},
+			nil,
+			true,
+		},
+		{
+			"read failure GET",
+			http.MethodGet,
+			&net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("connection reset")},
+			nil,
+			true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isTransientError(tt.err, nil); got != tt.transient {
-				assert.Fail(t, fmt.Sprintf("isTransientError(%v) = %v, want %v", tt.err, got, tt.transient))
+			if got := isTransientErrorForMethod(tt.err, tt.cfg, tt.method); got != tt.transient {
+				assert.Fail(t, fmt.Sprintf("isTransientErrorForMethod(%v, %s) = %v, want %v", tt.err, tt.method, got, tt.transient))
 			}
 		})
 	}

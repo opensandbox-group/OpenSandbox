@@ -17,6 +17,7 @@ package opensandbox
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -301,7 +303,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, r
 // non-nil. It exists for callers that need server-reported response metadata
 // (e.g. the OPEN-SANDBOX-ORIGIN header) that is not part of the JSON body.
 func (c *Client) doRequestCapture(ctx context.Context, method, path string, body, result any, capture func(http.Header)) error {
-	return c.withRetry(ctx, func() error {
+	return c.withRetryMethod(ctx, method, func() error {
 		var reused bool
 		err := c.doRequestOnce(ctx, method, path, body, result, &reused, capture)
 		if err != nil && reused && c.shouldRetryOnFreshConn(ctx, method, err) {
@@ -362,13 +364,33 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 		bodyReader = bytes.NewReader(buf)
 	}
 
-	if reused != nil {
-		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-			GotConn: func(info httptrace.GotConnInfo) {
+	var sent atomic.Bool
+	var traceStarted atomic.Bool
+	var gotConn atomic.Bool
+	var tlsHandshakeFailed atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GetConn: func(string) {
+			traceStarted.Store(true)
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			gotConn.Store(true)
+			if reused != nil {
 				*reused = info.Reused
-			},
-		})
+			}
+		},
+		WroteHeaders: func() {
+			sent.Store(true)
+		},
+		GotFirstResponseByte: func() {
+			sent.Store(true)
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err != nil {
+				tlsHandshakeFailed.Store(true)
+			}
+		},
 	}
+	ctx = httptrace.WithClientTrace(ctx, trace)
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
@@ -389,6 +411,11 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if sent.Load() {
+			err = &requestSentError{err: err}
+		} else if (traceStarted.Load() && !gotConn.Load()) || tlsHandshakeFailed.Load() {
+			err = &preSendError{err: err}
+		}
 		return fmt.Errorf("opensandbox: do request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -415,13 +442,14 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 }
 
 // doStreamRequest builds an HTTP request, executes it, and streams SSE events
-// through handler. Connection setup is retried on transient errors; once
-// streaming begins, errors are not retried (partial data may have been
-// delivered to the handler).
+// through handler. SSE bootstraps deliberately bypass the generic retry loop:
+// the stream may already have delivered partial data or submitted a command,
+// and OSEP-0017 requires the bootstrap to stay unwrapped. Once streaming begins,
+// errors are not retried.
 func (c *Client) doStreamRequest(ctx context.Context, method, path string, body any, handler EventHandler) error {
 	var resp *http.Response
 
-	connectErr := c.withRetryWake(ctx, false, func() error {
+	connectErr := func() error {
 		var bodyReader io.Reader
 		if body != nil {
 			buf, err := json.Marshal(body)
@@ -463,7 +491,7 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 
 		resp = r
 		return nil
-	})
+	}()
 	if connectErr != nil {
 		return connectErr
 	}
