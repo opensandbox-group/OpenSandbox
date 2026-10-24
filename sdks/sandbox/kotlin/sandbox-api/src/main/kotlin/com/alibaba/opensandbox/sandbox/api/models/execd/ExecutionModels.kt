@@ -23,7 +23,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 @Serializable
-data class EventNode(
+data class EventNode @JvmOverloads constructor(
     val type: String,
     val timestamp: Long,
     val text: String? = null,
@@ -33,6 +33,11 @@ data class EventNode(
     @SerialName("execution_count")
     val executionCount: Long? = null,
     val error: ErrorData? = null,
+    // Successful foreground POST /command exit status (0). Present only on
+    // execution_complete after the process has exited; omitted for background
+    // startup, code execution, and older servers. Non-zero exits use error.exit_code.
+    @SerialName("exit_code")
+    val exitCode: Long? = null,
 )
 
 @Serializable
@@ -46,11 +51,16 @@ value class ResultData(val raw: JsonObject) {
 }
 
 @Serializable
-data class ErrorData(
+data class ErrorData @JvmOverloads constructor(
     @SerialName("ename")
     val name: String? = null,
     @SerialName("evalue")
     val value: String? = null,
     @SerialName("traceback")
     val traceback: List<String> = emptyList(),
+    // Exit status for CommandExecError when the command ran and finished
+    // non-zero (-1 when terminated by a signal). Null when the process failed
+    // to start, for non-command errors, and on servers that predate error.exit_code.
+    @SerialName("exit_code")
+    val exitCode: Long? = null,
 )

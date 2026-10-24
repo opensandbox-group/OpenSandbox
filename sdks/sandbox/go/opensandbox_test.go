@@ -2545,6 +2545,46 @@ func TestExecution_ErrorEventExitCode(t *testing.T) {
 	}
 }
 
+func TestExecution_CompleteEventExitCode(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	tests := []struct {
+		name              string
+		data              string
+		wantCompleteCode  *int
+		wantExecutionCode *int
+	}{
+		{
+			name:              "wire exit_code is surfaced on complete and execution",
+			data:              `{"type":"execution_complete","timestamp":10,"execution_time":5,"exit_code":0}`,
+			wantCompleteCode:  intPtr(0),
+			wantExecutionCode: intPtr(0),
+		},
+		{
+			name:              "older server without exit_code still infers zero",
+			data:              `{"type":"execution_complete","timestamp":10,"execution_time":5}`,
+			wantCompleteCode:  nil,
+			wantExecutionCode: intPtr(0),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &Execution{}
+			var handled *ExecutionComplete
+			handlers := &ExecutionHandlers{
+				OnComplete: func(c ExecutionComplete) error { handled = &c; return nil },
+			}
+			require.NoError(t, processStreamEvent(exec, StreamEvent{Event: "execution_complete", Data: tc.data}, handlers))
+
+			require.NotNil(t, exec.Complete)
+			require.NotNil(t, handled)
+			require.Equal(t, tc.wantCompleteCode, exec.Complete.ExitCode)
+			require.Equal(t, tc.wantCompleteCode, handled.ExitCode)
+			require.Equal(t, tc.wantExecutionCode, exec.ExitCode)
+		})
+	}
+}
+
 func TestExecution_HandlersInvoked(t *testing.T) {
 	exec := &Execution{}
 	var initCalled, stdoutCalled, stderrCalled, resultCalled, completeCalled bool

@@ -115,4 +115,72 @@ class ExecdEventSupportTest {
             }
         assertNull(ExecdEventSupport.inferForegroundExitCode(nonNumeric))
     }
+
+    @Test
+    fun `foreground exit code prefers authoritative error exitCode over evalue`() {
+        val mismatched =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "99",
+                        timestamp = 1,
+                        exitCode = 3,
+                    )
+            }
+        assertEquals(3, ExecdEventSupport.inferForegroundExitCode(mismatched))
+
+        val signalKill =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "-1",
+                        timestamp = 1,
+                        exitCode = -1,
+                    )
+            }
+        assertEquals(-1, ExecdEventSupport.inferForegroundExitCode(signalKill))
+
+        val startFailure =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "fork/exec /bin/sh: argument list too long",
+                        timestamp = 1,
+                    )
+            }
+        assertNull(ExecdEventSupport.inferForegroundExitCode(startFailure))
+    }
+
+    @Test
+    fun `foreground exit code prefers wire complete exitCode when present`() {
+        val withWire =
+            Execution().apply {
+                complete = ExecutionComplete(timestamp = 1, executionTimeInMillis = 1, exitCode = 0)
+            }
+        assertEquals(0, ExecdEventSupport.inferForegroundExitCode(withWire))
+    }
+
+    @Test
+    fun `decodes execution_complete and error exit_code wire fields`() {
+        val complete =
+            decode(
+                """{"type":"execution_complete","timestamp":10,"execution_time":5,"exit_code":0}""",
+            )
+        assertNotNull(complete)
+        assertEquals("execution_complete", complete!!.type)
+        assertEquals(0L, complete.exitCode)
+
+        val error =
+            decode(
+                """{"type":"error","timestamp":11,"error":{"ename":"CommandExecError","evalue":"3","traceback":["exit status 3"],"exit_code":3}}""",
+            )
+        assertNotNull(error)
+        assertEquals("error", error!!.type)
+        assertNotNull(error.error)
+        assertEquals(3L, error.error!!.exitCode)
+        assertTrue(reported.isEmpty())
+    }
 }

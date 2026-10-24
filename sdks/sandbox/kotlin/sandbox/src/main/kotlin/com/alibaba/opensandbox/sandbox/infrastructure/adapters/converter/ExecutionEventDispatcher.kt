@@ -105,6 +105,7 @@ class ExecutionEventDispatcher(
                 value = errorData.value ?: "",
                 traceback = errorData.traceback,
                 timestamp = timestamp,
+                exitCode = errorData.exitCode?.toInt(),
             )
         execution.error = error
         handlers?.onError?.handle(error)
@@ -118,6 +119,7 @@ class ExecutionEventDispatcher(
             ExecutionComplete(
                 executionTimeInMillis = eventNode.executionTimeInMillis ?: 0L,
                 timestamp = timestamp,
+                exitCode = eventNode.exitCode?.toInt(),
             )
         execution.complete = complete
         handlers?.onExecutionComplete?.handle(complete)

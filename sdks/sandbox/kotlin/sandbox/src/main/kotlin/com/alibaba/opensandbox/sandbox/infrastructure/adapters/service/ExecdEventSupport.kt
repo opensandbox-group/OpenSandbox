@@ -59,12 +59,19 @@ public object ExecdEventSupport {
         }
     }
 
-    /** Error payload carries the code on failure; completion implies success. */
+    /**
+     * Prefers the authoritative wire exit_code (error.exitCode /
+     * complete.exitCode) and falls back to parsing error.value for older
+     * servers. A completed execution without an error is 0 when the wire
+     * field is absent; unfinished executions stay null.
+     */
     public fun inferForegroundExitCode(execution: Execution): Int? {
-        return if (execution.error != null) {
-            execution.error?.value?.toIntOrNull()
-        } else {
-            if (execution.complete != null) 0 else null
+        val error = execution.error
+        if (error != null) {
+            error.exitCode?.let { return it }
+            return error.value.toIntOrNull()
         }
+        val complete = execution.complete ?: return null
+        return complete.exitCode ?: 0
     }
 }

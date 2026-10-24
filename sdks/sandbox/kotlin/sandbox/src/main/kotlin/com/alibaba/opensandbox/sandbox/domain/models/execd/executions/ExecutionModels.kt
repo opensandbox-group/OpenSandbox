@@ -143,12 +143,21 @@ class ExecutionResult(
  * @property timestamp Unix timestamp in milliseconds when the error occurred
  * @property traceback List of traceback lines showing the complete error stack trace
  */
-class ExecutionError(
-    val name: String,
-    val value: String,
-    val timestamp: Long,
-    val traceback: List<String> = emptyList(),
-)
+class ExecutionError
+    @JvmOverloads
+    constructor(
+        val name: String,
+        val value: String,
+        val timestamp: Long,
+        val traceback: List<String> = emptyList(),
+        /**
+         * Exit status reported by execd for a CommandExecError when the command ran
+         * and finished with a non-zero status (-1 when terminated by a signal).
+         * Null when the process failed to start, for non-command errors, and on
+         * servers that predate error.exit_code.
+         */
+        val exitCode: Int? = null,
+    )
 
 /**
  * Execution complete event.
@@ -156,17 +165,25 @@ class ExecutionError(
  * Represents the completion of a code execution,
  * including timing information about when the execution finished.
  */
-class ExecutionComplete(
-    /**
-     * Timestamp when the execution completed.
-     * Unix timestamp in milliseconds indicating when the execution finished.
-     */
-    val timestamp: Long,
-    /**
-     * Execution time in mills
-     */
-    val executionTimeInMillis: Long,
-)
+class ExecutionComplete
+    @JvmOverloads
+    constructor(
+        /**
+         * Timestamp when the execution completed.
+         * Unix timestamp in milliseconds indicating when the execution finished.
+         */
+        val timestamp: Long,
+        /**
+         * Execution time in mills
+         */
+        val executionTimeInMillis: Long,
+        /**
+         * Successful foreground POST /command exit status (0), when present on the
+         * wire execution_complete event. Null for background startup, code
+         * execution, and servers that omit execution_complete.exit_code.
+         */
+        val exitCode: Int? = null,
+    )
 
 /**
  * Execution init event.
