@@ -56,6 +56,11 @@ type ExecutionError struct {
 type ExecutionComplete struct {
 	Timestamp     int64 `json:"timestamp"`
 	ExecutionTime int64 `json:"execution_time"`
+	// ExitCode is the exit status of a foreground command execution reported by
+	// execd on the completion event (0 on success). Nil on servers that predate
+	// execution_complete.exit_code, where the SDK still infers 0 for a clean
+	// completion.
+	ExitCode *int `json:"exit_code,omitempty"`
 }
 
 // ExecutionInit represents the initialization event from the server.
@@ -246,8 +251,15 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 			Timestamp:     ev.Timestamp,
 			ExecutionTime: ev.ExecutionTime,
 		}
+		if ev.ExitCode != nil {
+			code := *ev.ExitCode
+			complete.ExitCode = &code
+			// Prefer the authoritative wire field when the server provides it.
+			exec.ExitCode = &code
+		}
 		exec.Complete = &complete
-		// Foreground command exit code: 0 if no error
+		// Foreground command exit code: 0 if no error and the server did not
+		// report one explicitly.
 		if exec.ExitCode == nil && exec.Error == nil {
 			zero := 0
 			exec.ExitCode = &zero

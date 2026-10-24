@@ -2470,6 +2470,29 @@ func TestExecution_ProcessStreamEvents(t *testing.T) {
 	}
 }
 
+func TestExecution_CompleteEventExitCode(t *testing.T) {
+	// execution_complete.exit_code (added for foreground commands) must be
+	// surfaced on ExecutionComplete and preferred for the result's ExitCode.
+	exec := &Execution{}
+	event := StreamEvent{
+		Event: "execution_complete",
+		Data:  `{"type":"execution_complete","timestamp":104,"execution_time":200,"exit_code":0}`,
+	}
+
+	if err := processStreamEvent(exec, event, nil); err != nil {
+		require.NoErrorf(t, err, "processStreamEvent")
+	}
+	if exec.Complete == nil {
+		require.FailNow(t, "expected Complete to be set")
+	}
+	if exec.Complete.ExitCode == nil || *exec.Complete.ExitCode != 0 {
+		assert.Fail(t, fmt.Sprintf("Complete.ExitCode = %v, want 0", exec.Complete.ExitCode))
+	}
+	if exec.ExitCode == nil || *exec.ExitCode != 0 {
+		assert.Fail(t, fmt.Sprintf("ExitCode = %v, want 0", exec.ExitCode))
+	}
+}
+
 func TestExecution_ErrorEvent(t *testing.T) {
 	exec := &Execution{}
 	event := StreamEvent{
