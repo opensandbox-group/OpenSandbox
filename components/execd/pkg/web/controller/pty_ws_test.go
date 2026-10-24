@@ -18,10 +18,12 @@
 package controller
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -585,6 +587,93 @@ func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
 	// 3. ...and it is the SAME shell: the var set on conn1 is still readable.
 	ptyWriteStdin(t, conn2, "echo SAMESHELL_$TAKEOVER_VAR\n")
 	ptyOutputContains(t, conn2, "SAMESHELL_alive", 8*time.Second)
+}
+
+// pipeListener hands the server one end of a net.Pipe per dial. With no socket
+// buffers in between, a server write blocks until the client reads it.
+type pipeListener struct {
+	conns     chan net.Conn
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newPipeListener() *pipeListener {
+	return &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *pipeListener) Close() error {
+	l.closeOnce.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *pipeListener) Addr() net.Addr { return &net.UnixAddr{Name: "pipe", Net: "pipe"} }
+
+func (l *pipeListener) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	client, server := net.Pipe()
+	select {
+	case l.conns <- server:
+		return client, nil
+	case <-l.done:
+	case <-ctx.Done():
+	}
+	_ = client.Close()
+	_ = server.Close()
+	return nil, net.ErrClosed
+}
+
+// TestPTYWS_TakeoverClosesBusyHolderWithCloseCode verifies that a holder whose
+// output pump is in the middle of a write still gets the WSCloseTakenOver close
+// frame, rather than a bare close (1006). The holder is connected over a pipe and
+// stops reading while it floods output, so the pump is blocked writing when the
+// takeover evicts it.
+func TestPTYWS_TakeoverClosesBusyHolderWithCloseCode(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	pl := newPipeListener()
+	pipeSrv := &http.Server{Handler: buildPTYRouter()}
+	go func() { _ = pipeSrv.Serve(pl) }()
+	defer pipeSrv.Close()
+
+	id := ptyCreateSession(t, srv)
+	// Delete the session to stop the flood: the new holder never reads its replay,
+	// so a Ctrl-C sent through it would never be handled.
+	runner := codeRunner
+	t.Cleanup(func() { _ = runner.DeletePTYSession(id) })
+
+	dialer := websocket.Dialer{NetDialContext: pl.DialContext}
+	conn1, _, err := dialer.Dial("ws://pipe/pty/"+id+"/ws", nil)
+	require.NoError(t, err)
+	defer conn1.Close()
+	ptyWaitFrame(t, conn1, "connected", 10*time.Second)
+	ptyWriteStdin(t, conn1, "yes flood_output\n")
+	time.Sleep(100 * time.Millisecond)
+
+	_ = wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "takeover=1")
+	// The server evicts the holder right after the upgrade. Read again only once
+	// that is under way, well within wsTakeoverCloseTimeout.
+	time.Sleep(50 * time.Millisecond)
+
+	var closeErr *websocket.CloseError
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, err := conn1.ReadMessage(); err != nil {
+			_ = errors.As(err, &closeErr)
+			break
+		}
+	}
+	require.NotNil(t, closeErr, "holder should be closed with a WS CloseError after takeover")
+	require.Equal(t, model.WSCloseTakenOver, closeErr.Code)
 }
 
 // TestPTYWS_TakeoverOnFreeSessionConnects verifies ?takeover=1 is a no-op when the

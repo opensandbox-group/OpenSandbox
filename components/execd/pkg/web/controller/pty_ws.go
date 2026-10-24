@@ -200,16 +200,14 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	// closeConn it must not wait behind a stalled output writer: a takeover targets
 	// exactly the slow/abandoned-client case, so blocking on connMu (held by a pump
 	// stuck in WriteMessage) until wsWriteDeadline would defeat wsTakeoverTimeout. It
-	// therefore sends the close frame only on a best-effort basis (TryLock, short
-	// deadline) and always closes the conn, which unblocks any stuck writer. A client
+	// therefore sends the close frame with WriteControl, which is safe alongside the
+	// pumps' writes and waits at most wsTakeoverCloseTimeout for an in-flight frame to
+	// finish, and always closes the conn, which unblocks any stuck writer. A client
 	// too backed-up to receive the frame could not have received it anyway.
 	evictClose := func(code int, text string) {
-		if connMu.TryLock() {
-			_ = conn.SetWriteDeadline(time.Now().Add(wsTakeoverCloseTimeout))
-			_ = conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(code, text))
-			connMu.Unlock()
-		}
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(code, text),
+			time.Now().Add(wsTakeoverCloseTimeout))
 		_ = conn.Close()
 	}
 
@@ -257,7 +255,7 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	}
 
 	// Upgrade the eviction hook now that the initial writes are done and all subsequent
-	// writes will be serialized by connMu (pumps + evictClose's TryLock). The full hook
+	// writes will be serialized by connMu (evictClose bypasses it via WriteControl). The full hook
 	// sends the WSCloseTakenOver close frame best-effort so the client can distinguish an
 	// intentional handoff from a network drop, then closes the conn and cancels goroutines.
 	// Generation-tokened: a tearing-down handler never clears a successor's hook.
