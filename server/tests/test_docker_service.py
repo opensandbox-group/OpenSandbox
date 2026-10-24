@@ -15,6 +15,7 @@
 import asyncio
 import json
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -2669,6 +2670,40 @@ async def test_create_sandbox_response_includes_extensions(mock_docker):
         response = await service.create_sandbox(request)
 
     assert response.extensions == {"opensandbox.extensions.test-key": "test-value"}
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_runs_docker_validation_off_the_event_loop(mock_docker):
+    """Network and volume validation call the Docker API, which can block for
+    a long time; it must not run on the event loop thread."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        entrypoint=["python"],
+    )
+    loop_thread = threading.get_ident()
+    validation_threads: list[int] = []
+
+    def record_thread(*_args):
+        validation_threads.append(threading.get_ident())
+        return {}, []
+
+    with (
+        patch.object(service, "_validate_network_exists", side_effect=record_thread),
+        patch.object(service, "_validate_volumes", side_effect=record_thread),
+        patch.object(service, "_create_and_start_container", return_value=MagicMock()),
+    ):
+        await service.create_sandbox(request)
+
+    assert len(validation_threads) == 2
+    assert loop_thread not in validation_threads
 
 
 def test_build_labels_store_platform_constraints():

@@ -620,7 +620,8 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._ensure_secure_access_support(request)
         self._ensure_network_policy_support(request)
         resource_limits = self._prepare_resource_limits(request)
-        self._validate_network_exists()
+        # Docker API calls block; keep them off the event loop.
+        await asyncio.to_thread(self._validate_network_exists)
 
         try:
             sandbox_env, egress_env = split_egress_env(request.env)
@@ -634,12 +635,16 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             ) from e
 
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
-        pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[CreateSandboxResponse] = loop.create_future()
 
         def _run() -> None:
+            auto_created_volumes: list[str] = []
             try:
+                # Volume validation calls the Docker API and may create
+                # volumes, so it runs here, off the event loop, where a failed
+                # create removes them below.
+                pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
                 result = self._provision_sandbox(
                     sandbox_id, request, created_at, expires_at, resource_limits,
                     pvc_inspect_cache, auto_created_volumes,
