@@ -1,0 +1,127 @@
+# Copyright 2026 The OpenSandbox Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: DeepSeek Harness Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - "integrations/deepseek-harness/**"
+      - "examples/deepseek-harness/**"
+      - "sdks/sandbox/javascript/**"
+      - "sdks/package.json"
+      - "sdks/pnpm-lock.yaml"
+      - "specs/sandbox-lifecycle.yml"
+      - "specs/execd-api.yaml"
+      - "server/opensandbox_server/services/fast_sandbox/create_mapping.py"
+      - "scripts/fast-sandbox-env/integration-env.sh"
+      - "manifests/third-party/fast-sandbox.commit"
+      - "docs/examples/deepseek-harness.md"
+      - "docs/examples/deepseek-harness-ubuntu.md"
+      - "docs/.vitepress/config.mts"
+      - ".github/workflows/detect-changes.yml"
+      - ".github/workflows/deepseek-harness-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: deepseek-harness
+
+  test:
+    name: DSH integration and consumer
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Contract tests may access npm, but never opt in to cluster/model calls.
+      DSH_REAL_MODEL: "0"
+      DSH_LIVE_E2E: "0"
+      OPENSANDBOX_DISABLE_METRICS: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install integration dependencies
+        working-directory: integrations/deepseek-harness
+        run: pnpm install --frozen-lockfile
+
+      - name: Check integration and strict tarball consumer
+        working-directory: integrations/deepseek-harness
+        # package.test.ts runs the full strict npm tarball consumer once.
+        run: |
+          pnpm run typecheck
+          pnpm run build
+          pnpm test
+          pnpm run test:helper
+
+      # The file: consumer must install compiled exports, not source aliases.
+      - name: Install example dependencies
+        working-directory: examples/deepseek-harness
+        run: pnpm install --frozen-lockfile
+
+      - name: Check consumer and contract-only smoke
+        working-directory: examples/deepseek-harness
+        run: |
+          pnpm run typecheck
+          pnpm test
+          pnpm smoke
+
+      - name: Verify lockfiles are unchanged
+        run: git diff --exit-code -- integrations/deepseek-harness/pnpm-lock.yaml examples/deepseek-harness/pnpm-lock.yaml
+
+  required:
+    name: DSH CI
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$TEST_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" ]]
+          fi
