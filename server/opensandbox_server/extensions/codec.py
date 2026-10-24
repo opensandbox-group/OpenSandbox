@@ -100,7 +100,9 @@ def extract_extensions_from_mapping(
     Restore extension keys previously propagated to Pod annotations.
 
     For each annotation key starting with ANNOTATION_METADATA_PREFIX, the value is
-    copied to extensions with EXTENSIONS_ANNOTATION_PREFIX prefix.
+    copied to extensions with EXTENSIONS_ANNOTATION_PREFIX prefix. Empty values are
+    treated as unset: Docker labels cannot be removed, so an extension inherited
+    from a snapshot image is blanked instead.
     """
     if not annotations:
         return None
@@ -108,6 +110,6 @@ def extract_extensions_from_mapping(
     extensions = {
         EXTENSIONS_ANNOTATION_PREFIX + key[len(ANNOTATION_METADATA_PREFIX):]: value
         for key, value in annotations.items()
-        if key.startswith(ANNOTATION_METADATA_PREFIX)
+        if key.startswith(ANNOTATION_METADATA_PREFIX) and value
     }
     return extensions or None

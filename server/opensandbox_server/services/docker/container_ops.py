@@ -39,6 +39,7 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
 )
 from opensandbox_server.services.constants import (
+    RESERVED_LABEL_PREFIX,
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
@@ -315,6 +316,29 @@ class DockerContainerOpsMixin:
         environment.append(f"OPENSANDBOX_ID={sandbox_id}")
         return labels, environment
 
+    def _mask_inherited_system_labels(
+        self,
+        image_uri: str,
+        labels: dict[str, str],
+        sandbox_id: str,
+    ) -> dict[str, str]:
+        """Blank reserved labels the image would pass on to the container.
+
+        Docker merges image labels into container labels, and a snapshot image
+        keeps every label of the sandbox it was committed from (expiration,
+        host ports, managed volumes, egress token, ...). Labels can be
+        overridden but not removed, so set the ones this sandbox does not
+        define itself to an empty value.
+        """
+        with self._docker_operation(f"inspect image {image_uri} labels", sandbox_id):
+            image = self.docker_client.images.get(image_uri)
+        image_labels = ((image.attrs or {}).get("Config") or {}).get("Labels") or {}
+        masked = dict(labels)
+        for key in image_labels:
+            if key.startswith(RESERVED_LABEL_PREFIX) and key not in masked:
+                masked[key] = ""
+        return masked
+
     def _resolve_image_auth(
         self, request: CreateSandboxRequest, sandbox_id: str
     ) -> tuple[str, Optional[dict]]:
@@ -439,6 +463,7 @@ class DockerContainerOpsMixin:
         container = None
         container_id: Optional[str] = None
         try:
+            labels = self._mask_inherited_system_labels(image_uri, labels, sandbox_id)
             with self._docker_operation("create sandbox container", sandbox_id):
                 container_kwargs = {
                     "image": image_uri,
