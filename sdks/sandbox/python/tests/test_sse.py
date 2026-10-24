@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import gzip
+from codecs import BOM_UTF8
 from collections.abc import AsyncIterator, Iterator
 
 import httpx
@@ -99,3 +100,52 @@ async def test_aiter_sse_events_accepts_legacy_bare_json() -> None:
         f'{{"type":"stdout","text":"{_UNICODE_SEPARATORS}"}}',
         '{"type":"execution_complete"}',
     ]
+
+
+def _bom_content(legacy: bool) -> tuple[bytes, list[str]]:
+    values = ['{"text":"first\ufeffkeep"}', '{"text":"second"}']
+    prefix = "" if legacy else "data: "
+    return BOM_UTF8 + "".join(
+        f"{prefix}{value}\n\n" for value in values
+    ).encode(), values
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("split", [False, True])
+def test_iter_sse_events_accepts_initial_bom(legacy: bool, split: bool) -> None:
+    content, expected = _bom_content(legacy)
+    stream = _OneByteStream(content) if split else httpx.ByteStream(content)
+
+    assert [event.data for event in iter_sse_events(_response(stream))] == expected
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.asyncio
+async def test_aiter_sse_events_accepts_initial_bom(legacy: bool, split: bool) -> None:
+    content, expected = _bom_content(legacy)
+    stream = _AsyncOneByteStream(content) if split else httpx.ByteStream(content)
+
+    assert [
+        event.data async for event in aiter_sse_events(_response(stream))
+    ] == expected
+
+
+def test_iter_sse_events_accepts_bom_without_events() -> None:
+    assert list(iter_sse_events(_response(_OneByteStream(BOM_UTF8)))) == []
+
+
+@pytest.mark.asyncio
+async def test_aiter_sse_events_accepts_bom_without_events() -> None:
+    assert [
+        event
+        async for event in aiter_sse_events(_response(_AsyncOneByteStream(BOM_UTF8)))
+    ] == []
+
+
+def test_iter_sse_events_removes_only_one_initial_bom() -> None:
+    content = BOM_UTF8 + BOM_UTF8 + b"data: first\n\ndata: second\n\n"
+
+    assert [
+        event.data for event in iter_sse_events(_response(_OneByteStream(content)))
+    ] == ["second"]

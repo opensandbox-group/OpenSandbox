@@ -276,6 +276,10 @@ sandbox = await Sandbox.create(
 
 ### 3. Command Execution & Streaming
 
+Both synchronous and asynchronous streaming APIs accept an optional leading
+UTF-8 byte order mark (BOM), including when it spans network chunks. Only the
+stream's initial BOM is removed; U+FEFF characters in event data are preserved.
+
 Execute commands and handle output streams in real-time.
 
 ```python

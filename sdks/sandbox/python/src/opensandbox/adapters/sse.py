@@ -15,6 +15,7 @@
 #
 """SSE parsing with compatibility for execd's legacy bare-JSON frames."""
 
+from codecs import BOM_UTF8
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 
 import httpx
@@ -25,19 +26,27 @@ class _LegacyJsonSseNormalizer:
     """Turn legacy ``JSON\n\n`` frames into standard SSE data events.
 
     Current and older execd versions write one bare JSON object followed by
-    two LF bytes. Standard SSE streams are passed through byte-for-byte and
-    parsed entirely by ``httpx-sse``.
+    two LF bytes. After removing an optional initial BOM, standard SSE streams
+    are passed through byte-for-byte and parsed entirely by ``httpx-sse``.
     """
 
     def __init__(self) -> None:
         self._legacy: bool | None = None
         self._buffer = bytearray()
+        self._at_start = True
 
     def decode(self, chunk: bytes) -> list[bytes]:
         if self._legacy is False:
             return [chunk]
 
         self._buffer.extend(chunk)
+        if self._at_start:
+            prefix = bytes(self._buffer)
+            if len(prefix) < len(BOM_UTF8) and BOM_UTF8.startswith(prefix):
+                return []
+            if prefix.startswith(BOM_UTF8):
+                del self._buffer[: len(BOM_UTF8)]
+            self._at_start = False
         if self._legacy is None:
             first = bytes(self._buffer).lstrip()[:1]
             if not first:
