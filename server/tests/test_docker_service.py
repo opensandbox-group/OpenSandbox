@@ -2468,6 +2468,25 @@ def test_build_labels_marks_manual_cleanup_without_expiration():
     assert "opensandbox.io/expires-at" not in labels
 
 
+def test_metadata_excludes_labels_inherited_from_the_image(tmp_path):
+    """Docker merges image labels (e.g. nginx's ``maintainer``) into the
+    container's labels; only the keys the request set are metadata."""
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="nginx:latest"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={"team": "infra"},
+        entrypoint=["nginx"],
+    )
+
+    labels, _ = service._build_labels_and_env("sandbox-meta", request, None)
+    container_labels = {"maintainer": "NGINX Docker Maintainers", **labels}
+
+    store = DockerMetadataStore(root=tmp_path / "metadata")
+    assert store.get("sandbox-meta", container_labels) == {"team": "infra"}
+
+
 def test_build_env_omits_execd_run_as_init_by_default():
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(

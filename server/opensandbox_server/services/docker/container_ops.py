@@ -21,6 +21,7 @@ Mixed into DockerSandboxService.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -41,6 +42,7 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.services.constants import (
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
+    SANDBOX_METADATA_KEYS_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_PLATFORM_ARCH_LABEL,
     SANDBOX_PLATFORM_OS_LABEL,
@@ -288,6 +290,7 @@ class DockerContainerOpsMixin:
     ) -> tuple[dict[str, str], list[str]]:
         metadata = request.metadata or {}
         labels = {key: str(value) for key, value in metadata.items()}
+        labels[SANDBOX_METADATA_KEYS_LABEL] = json.dumps(sorted(metadata))
         labels[SANDBOX_ID_LABEL] = sandbox_id
         if expires_at is None:
             labels[SANDBOX_MANUAL_CLEANUP_LABEL] = "true"

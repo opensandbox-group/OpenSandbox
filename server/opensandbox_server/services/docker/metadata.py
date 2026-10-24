@@ -31,6 +31,8 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from opensandbox_server.services.constants import SANDBOX_METADATA_KEYS_LABEL
+
 logger = logging.getLogger(__name__)
 
 _NON_USER_LABEL_PREFIXES = (
@@ -48,6 +50,18 @@ def _is_user_label(key: str) -> bool:
 
 
 def _extract_user_labels(labels: dict) -> dict:
+    """User metadata stored in container labels.
+
+    Image labels are merged into container labels, so only the keys recorded
+    at create are metadata. Containers created before that label existed fall
+    back to every label without a system prefix.
+    """
+    try:
+        keys = json.loads(labels[SANDBOX_METADATA_KEYS_LABEL])
+    except (KeyError, TypeError, ValueError):
+        keys = None
+    if isinstance(keys, list):
+        return {k: labels[k] for k in keys if isinstance(k, str) and k in labels}
     return {k: v for k, v in labels.items() if _is_user_label(k)}
 
 

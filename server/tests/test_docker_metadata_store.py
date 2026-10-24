@@ -60,6 +60,22 @@ class TestExtractUserLabels:
     def test_empty_returns_empty(self):
         assert _extract_user_labels({}) == {}
 
+    def test_keeps_only_recorded_metadata_keys(self):
+        labels = {
+            "team": "infra",
+            "maintainer": "from the image",
+            "opensandbox.io/metadata-keys": '["team"]',
+        }
+        assert _extract_user_labels(labels) == {"team": "infra"}
+
+    def test_recorded_empty_metadata(self):
+        labels = {"maintainer": "from the image", "opensandbox.io/metadata-keys": "[]"}
+        assert _extract_user_labels(labels) == {}
+
+    def test_malformed_metadata_keys_fall_back_to_user_labels(self):
+        labels = {"team": "infra", "opensandbox.io/metadata-keys": "not json"}
+        assert _extract_user_labels(labels) == {"team": "infra"}
+
 
 class TestDockerMetadataStore:
 
