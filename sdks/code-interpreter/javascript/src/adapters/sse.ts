@@ -53,38 +53,45 @@ export async function* parseJsonEventStream<T>(
   const decoder = new TextDecoder("utf-8");
   let buf = "";
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    buf += decoder.decode(value, { stream: true });
-    let idx: number;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
 
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const rawLine = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const rawLine = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
 
-      const line = rawLine.trim();
-      if (!line) continue;
+        const line = rawLine.trim();
+        if (!line) continue;
 
-      // Support standard SSE "data:" prefix
-      if (line.startsWith(":")) continue;
-      if (line.startsWith("event:") || line.startsWith("id:") || line.startsWith("retry:")) continue;
+        // Support standard SSE "data:" prefix
+        if (line.startsWith(":")) continue;
+        if (line.startsWith("event:") || line.startsWith("id:") || line.startsWith("retry:")) continue;
 
-      const jsonLine = line.startsWith("data:") ? line.slice("data:".length).trim() : line;
-      if (!jsonLine) continue;
+        const jsonLine = line.startsWith("data:") ? line.slice("data:".length).trim() : line;
+        if (!jsonLine) continue;
 
-      const parsed = tryParseJson(jsonLine);
-      if (!parsed) continue;
-      yield parsed as T;
+        const parsed = tryParseJson(jsonLine);
+        if (!parsed) continue;
+        yield parsed as T;
+      }
     }
-  }
 
-  // flush last line if exists
-  const last = buf.trim();
-  if (last) {
-    const jsonLine = last.startsWith("data:") ? last.slice("data:".length).trim() : last;
-    const parsed = tryParseJson(jsonLine);
-    if (parsed) yield parsed as T;
+    // flush last line if exists
+    const last = buf.trim();
+    if (last) {
+      const jsonLine = last.startsWith("data:") ? last.slice("data:".length).trim() : last;
+      const parsed = tryParseJson(jsonLine);
+      if (parsed) yield parsed as T;
+    }
+  } finally {
+    // Consumers may stop early or throw from an execution handler. Cancel
+    // the unread body without replacing the original error if cleanup fails.
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }

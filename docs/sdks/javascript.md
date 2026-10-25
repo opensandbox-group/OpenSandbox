@@ -610,6 +610,12 @@ See [Credential Vault](/guides/credential-vault) for auth types, binding guidanc
 
 Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
 
+The companion `@alibaba-group/opensandbox-code-interpreter` SDK also releases each
+code execution response reader when streaming finishes or fails. Leaving a
+`codes.runStream()` loop early cancels its response body; a rejected `codes.run()`
+handler also cancels the body and propagates the handler's error. Use
+`codes.interrupt(executionId)` to request interruption of a running code execution.
+
 ## Browser Notes
 
 ::: warning
