@@ -422,6 +422,9 @@ func (m *MergedView) Remove(path string) error {
 
 	if m.UpperDir != "" {
 		upperPath := m.resolveUpper(rel)
+		if err := m.rejectSymlink(upperPath); err != nil {
+			return err
+		}
 		if _, err := os.Stat(upperPath); err == nil {
 			if err := os.Remove(upperPath); err != nil {
 				return err
@@ -463,6 +466,9 @@ func (m *MergedView) RemoveAll(path string) error {
 	}
 
 	upperPath := m.resolveUpper(rel)
+	if err := m.rejectSymlink(upperPath); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(upperPath); err != nil {
 		return err
 	}
@@ -487,6 +493,9 @@ func (m *MergedView) MkdirAll(path string, perm os.FileMode) error {
 		return err
 	}
 	upperPath := m.resolveUpper(rel)
+	if err := m.rejectSymlink(upperPath); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(upperPath, perm); err != nil {
 		return err
 	}
@@ -515,6 +524,12 @@ func (m *MergedView) Rename(oldPath, newPath string) error {
 
 	oldUpper := m.resolveUpper(oldRel)
 	newUpper := m.resolveUpper(newRel)
+	if err := m.rejectSymlink(oldUpper); err != nil {
+		return err
+	}
+	if err := m.rejectSymlink(newUpper); err != nil {
+		return err
+	}
 
 	// A hidden lower entry, at oldRel or above it, shows nothing to copy up.
 	lowerHidden := m.lowerHidden(oldRel)
@@ -712,7 +727,11 @@ func (m *MergedView) Chmod(path string, mode os.FileMode) error {
 	}
 
 	if m.Mode == WorkspaceRW {
-		return os.Chmod(m.resolveLower(rel), mode)
+		lowerPath := m.resolveLower(rel)
+		if err := m.rejectSymlink(lowerPath); err != nil {
+			return err
+		}
+		return os.Chmod(lowerPath, mode)
 	}
 	return fmt.Errorf("chmod denied: no upper directory")
 }
