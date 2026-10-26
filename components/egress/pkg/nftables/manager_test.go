@@ -815,10 +815,12 @@ func TestApplyStatic_PortFloorRangesDenyBeforeAllows(t *testing.T) {
 	}, p.Egress...)
 	require.NoError(t, m.ApplyStatic(context.Background(), p))
 
-	floorRule := "add rule inet opensandbox egress tcp dport { 1-79, 81-442, 444-65535 } drop"
+	floorRule := "add rule inet opensandbox egress meta l4proto tcp ct original proto-dst { 1-79, 81-442, 444-65535 } drop"
 	userAllow := "add rule inet opensandbox egress tcp dport { 22 } accept"
 	expectContains(t, rendered, floorRule)
 	expectContains(t, rendered, userAllow)
+	require.NotContains(t, rendered, "add rule inet opensandbox egress tcp dport { 1-79, 81-442, 444-65535 } drop",
+		"the port floor must use the original destination port after transparent REDIRECT")
 	require.Less(t, strings.Index(rendered, floorRule), strings.Index(rendered, userAllow),
 		"the platform floor must be evaluated before any user port allow")
 }

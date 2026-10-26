@@ -353,15 +353,22 @@ func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, ver
 			members = append(members, fmt.Sprintf("%d-%d", rg.Lo, rg.Hi))
 		}
 		portsClause := strings.Join(members, ", ")
+		portMatch := "tcp dport"
+		if len(r.Ranges) > 0 {
+			// Port ranges are reserved for the platform port floor. Match the
+			// original destination so transparent REDIRECTs are checked against
+			// the caller's port (for example 443), not mitmproxy's listener.
+			portMatch = "meta l4proto tcp ct original proto-dst"
+		}
 		if r.Target == "" {
-			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chainName, portsClause, verb)
+			fmt.Fprintf(b, "add rule inet %s %s %s { %s } %s\n", tableName, chainName, portMatch, portsClause, verb)
 			continue
 		}
 		daddr := "ip daddr"
 		if r.IsV6 {
 			daddr = "ip6 daddr"
 		}
-		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chainName, daddr, r.Target, portsClause, verb)
+		fmt.Fprintf(b, "add rule inet %s %s %s %s %s { %s } %s\n", tableName, chainName, daddr, r.Target, portMatch, portsClause, verb)
 	}
 }
 
