@@ -139,7 +139,15 @@ def compute_backoff(
     base_s = policy.initial_backoff.total_seconds()
     m = policy.backoff_multiplier
 
-    exp_s = min(max_s, base_s * (m**retry_index)) if base_s > 0 else 0.0
+    exp_s = 0.0
+    if policy.jitter is not JitterMode.DECORRELATED and base_s > 0:
+        try:
+            exp_s = min(max_s, base_s * (m**retry_index))
+        except OverflowError:
+            # The exponential can overflow before min() applies the cap.
+            # A positive timedelta base times an overflowing power exceeds
+            # every representable timedelta cap.
+            exp_s = max_s
 
     if policy.jitter is JitterMode.NONE:
         sleep_s = exp_s

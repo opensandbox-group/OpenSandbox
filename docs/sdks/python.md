@@ -589,7 +589,7 @@ Default behavior:
 
 - **Enabled by default.** Idempotent methods (`GET/HEAD/PUT/DELETE/OPTIONS`) are retried on `429`, `502`, `503`, and on pre-send transport failures (DNS, TCP connect, TLS handshake, fresh-connection reset).
 - **`POST`/`PATCH` are never retried on a status code by default**, since the request may already have been applied server-side. Pre-send transport failures (before any byte is written) are still retried for these methods.
-- Up to `3` retries with decorrelated-jitter exponential backoff, honoring a server `Retry-After` header (capped at 60s).
+- Up to `3` retries with decorrelated-jitter exponential backoff, honoring a server `Retry-After` header (capped at 60s). Custom policies keep computed backoff bounded by `max_backoff`, including long retry sequences; `max_backoff=timedelta(0)` allows immediate retries.
 - **SSE / streaming requests bypass retry** entirely (bodies are not replayable).
 
 ::: warning Behavior change
