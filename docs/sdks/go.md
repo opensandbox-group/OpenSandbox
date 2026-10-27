@@ -747,6 +747,8 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 
 ## SSE Streaming
 
+The stream parser accepts LF, CRLF, and CR line endings for both standard SSE and execd's legacy bare-JSON frames, including when a line ending is split across network reads.
+
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 
 ```go
