@@ -591,6 +591,7 @@ Default behavior:
 - **`POST`/`PATCH` are never retried on a status code by default**, since the request may already have been applied server-side. Pre-send transport failures (before any byte is written) are still retried for these methods.
 - Up to `3` retries with decorrelated-jitter exponential backoff, honoring a server `Retry-After` header (capped at 60s).
 - **SSE / streaming requests bypass retry** entirely (bodies are not replayable).
+- Non-replayable request bodies (such as generators or multipart uploads) are not retried after post-send transport errors, even for idempotent methods such as `PUT`; the original transport error is preserved.
 
 ::: warning Behavior change
 Retries are on by default. This can increase the number of HTTP attempts and tail latency compared to earlier SDK versions. If you rely on fast-fail semantics, opt out explicitly with `RetryPolicy.disabled()`.

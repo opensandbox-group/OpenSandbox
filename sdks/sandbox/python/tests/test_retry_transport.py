@@ -673,3 +673,71 @@ class TestUnwrapRetryTransport:
         from opensandbox.transport import unwrap_retry_transport
 
         assert unwrap_retry_transport(None) is None
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ReadError],
+)
+@pytest.mark.parametrize("replayable", [False, True])
+def test_sync_post_send_retry_requires_replayable_body(
+    error_type: type[httpx.TransportError], replayable: bool
+) -> None:
+    error = error_type("failure after consuming request body")
+    bodies: list[bytes] = []
+
+    class ConsumingTransport(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            assert isinstance(request.stream, httpx.SyncByteStream)
+            bodies.append(b"".join(request.stream))
+            if len(bodies) == 1:
+                raise error
+            return httpx.Response(200)
+
+    def chunks():
+        yield b"upload"
+
+    transport = RetrySyncTransport(ConsumingTransport(), _fast_policy())
+    with httpx.Client(transport=transport) as client:
+        if replayable:
+            assert client.put("http://x/file", content=b"upload").status_code == 200
+        else:
+            with pytest.raises(error_type) as raised:
+                client.put("http://x/file", content=chunks())
+            assert raised.value is error
+    assert bodies == [b"upload"] * (2 if replayable else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ReadError],
+)
+@pytest.mark.parametrize("replayable", [False, True])
+async def test_async_post_send_retry_requires_replayable_body(
+    error_type: type[httpx.TransportError], replayable: bool
+) -> None:
+    error = error_type("failure after consuming request body")
+    bodies: list[bytes] = []
+
+    class ConsumingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            assert isinstance(request.stream, httpx.AsyncByteStream)
+            bodies.append(b"".join([chunk async for chunk in request.stream]))
+            if len(bodies) == 1:
+                raise error
+            return httpx.Response(200)
+
+    async def chunks():
+        yield b"upload"
+
+    transport = RetryAsyncTransport(ConsumingTransport(), _fast_policy())
+    async with httpx.AsyncClient(transport=transport) as client:
+        if replayable:
+            response = await client.put("http://x/file", content=b"upload")
+            assert response.status_code == 200
+        else:
+            with pytest.raises(error_type) as raised:
+                await client.put("http://x/file", content=chunks())
+            assert raised.value is error
+    assert bodies == [b"upload"] * (2 if replayable else 1)
