@@ -78,6 +78,8 @@ export interface ExecdCommands {
   /**
    * Run a shell command in an existing bash session (SSE stream, same event shape as run).
    * Optional workingDirectory and timeout apply to this run only; session state (e.g. env) persists.
+   * timeoutSeconds is rounded to the nearest millisecond (minimum 1 ms for positive values)
+   * and must be finite and non-negative.
    */
   runInSession(
     sessionId: string,
