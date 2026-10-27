@@ -82,6 +82,11 @@ func SetFileOwnership(_ string, _ string, _ string) error {
 	return nil
 }
 
+// lookupOwnership is a placeholder on Windows, where owner and group are ignored.
+func lookupOwnership(_ string, _ string) (int, int, error) {
+	return -1, -1, nil
+}
+
 func RenameFile(item model.RenameFileItem) error {
 	srcPath, err := pathutil.ExpandAbsPath(item.Src)
 	if err != nil {

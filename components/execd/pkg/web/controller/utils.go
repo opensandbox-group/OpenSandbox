@@ -81,28 +81,9 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 		return nil
 	}
 
-	uid := -1
-	if owner != "" {
-		userInfo, err := user.Lookup(owner)
-		if err != nil {
-			return fmt.Errorf("failed to lookup user %s: %w", owner, err)
-		}
-		uid, err = strconv.Atoi(userInfo.Uid)
-		if err != nil {
-			return fmt.Errorf("failed to convert uid for user %s: %w", owner, err)
-		}
-	}
-
-	gid := -1
-	if group != "" {
-		groupInfo, err := user.LookupGroup(group)
-		if err != nil {
-			return fmt.Errorf("failed to lookup group %s: %w", group, err)
-		}
-		gid, err = strconv.Atoi(groupInfo.Gid)
-		if err != nil {
-			return fmt.Errorf("failed to convert gid for group %s: %w", group, err)
-		}
+	uid, gid, err := lookupOwnership(owner, group)
+	if err != nil {
+		return err
 	}
 
 	if err := os.Chown(absPath, uid, gid); err != nil {
@@ -110,6 +91,36 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 	}
 
 	return nil
+}
+
+// lookupOwnership resolves an owner and a group name to numeric IDs without
+// changing anything. An empty name resolves to -1, which os.Chown leaves as is.
+func lookupOwnership(owner string, group string) (int, int, error) {
+	uid := -1
+	if owner != "" {
+		userInfo, err := user.Lookup(owner)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to lookup user %s: %w", owner, err)
+		}
+		uid, err = strconv.Atoi(userInfo.Uid)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to convert uid for user %s: %w", owner, err)
+		}
+	}
+
+	gid := -1
+	if group != "" {
+		groupInfo, err := user.LookupGroup(group)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to lookup group %s: %w", group, err)
+		}
+		gid, err = strconv.Atoi(groupInfo.Gid)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to convert gid for group %s: %w", group, err)
+		}
+	}
+
+	return uid, gid, nil
 }
 
 func RenameFile(item model.RenameFileItem) error {
