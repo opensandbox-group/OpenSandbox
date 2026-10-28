@@ -20,6 +20,7 @@ This mirrors ConnectionConfig (async) but uses httpx sync transports.
 """
 
 import os
+import ssl
 from datetime import timedelta
 
 import httpx
@@ -43,6 +44,7 @@ class ConnectionConfigSync(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _owns_transport: bool = PrivateAttr(default=True)
+    _ssl_context: ssl.SSLContext | None = PrivateAttr(default=None)
 
     api_key: str | None = Field(
         default=None, description="API key for authentication with sandbox service"
@@ -59,7 +61,7 @@ class ConnectionConfigSync(BaseModel):
         default=False, description="Enable debug logging for HTTP requests"
     )
     user_agent: str = Field(
-        default="OpenSandbox-Python-SDK/1.1.0", description="User agent string"
+        default="OpenSandbox-Python-SDK/1.2.0", description="User agent string"
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
@@ -92,8 +94,9 @@ class ConnectionConfigSync(BaseModel):
     retry_policy: RetryPolicy = Field(
         default_factory=RetryPolicy,
         description=(
-            "Retry policy applied to non-streaming requests going through "
-            "the shared transport. Pass RetryPolicy.disabled() for fast-fail."
+            "Retry policy applied to requests going through the shared "
+            "transport. Streaming (SSE) requests only get its wake-timeout "
+            "retry. Pass RetryPolicy.disabled() for fast-fail."
         ),
     )
     use_server_proxy: bool = Field(
@@ -158,7 +161,9 @@ class ConnectionConfigSync(BaseModel):
         shared `transport` on this config is never touched. Callers that
         close what they build (e.g. adapter clients) can do so safely.
         """
-        ssl_context = httpx.create_ssl_context()
+        if self._ssl_context is None:
+            self._ssl_context = httpx.create_ssl_context()
+        ssl_context = self._ssl_context
         inner = httpx.HTTPTransport(
             verify=ssl_context,
             limits=httpx.Limits(
@@ -223,7 +228,11 @@ class ConnectionConfigSync(BaseModel):
         return self.domain or os.getenv(self._ENV_DOMAIN, self._DEFAULT_DOMAIN)
 
     def get_base_url(self) -> str:
-        domain = self.get_domain()
+        # Same normalization as ConnectionConfig.get_base_url().
+        domain = self.get_domain().rstrip("/")
+        version_suffix = f"/{self._API_VERSION}"
+        if domain.endswith(version_suffix):
+            domain = domain[: -len(version_suffix)]
         if domain.startswith("http://") or domain.startswith("https://"):
             return f"{domain}/{self._API_VERSION}"
         return f"{self.protocol}://{domain}/{self._API_VERSION}"

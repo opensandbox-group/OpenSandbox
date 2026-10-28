@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -36,6 +37,21 @@ import (
 func TestClassifyIsolatedCreateError_UidModeUnavailable(t *testing.T) {
 	status, code := classifyIsolatedCreateError(
 		fmt.Errorf("create session: %w: userns", runtime.ErrUidModeUnavailable),
+	)
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+	if code != model.ErrorCodeNotSupported {
+		t.Errorf("code = %q, want %q", code, model.ErrorCodeNotSupported)
+	}
+}
+
+func TestClassifyIsolatedCreateError_PrivateNetUnavailable(t *testing.T) {
+	status, code := classifyIsolatedCreateError(
+		fmt.Errorf(
+			"create session: %w: uid mode setpriv cannot create the private network namespace",
+			runtime.ErrSessionPrivateNetUnavailable,
+		),
 	)
 	if status != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", status, http.StatusServiceUnavailable)
@@ -428,6 +444,69 @@ func TestBackgroundRun_Endpoints404(t *testing.T) {
 	}
 }
 
+func TestIsolatedDownloadFile_RangeHeader(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "data.bin"), []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: workspace,
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+	tests := []struct {
+		rangeHeader string
+		wantStatus  int
+		wantLength  string
+		wantType    string
+	}{
+		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream"},
+		// A malformed Range gets a JSON 416 without the file's Content-Length.
+		{rangeHeader: "bytes=abc", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
+	}
+	for _, tt := range tests {
+		ctx, rec := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/files/download?path=data.bin", nil)
+		ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+		ctx.Request.Header.Set("Range", tt.rangeHeader)
+		NewIsolatedSessionController(ctx).DownloadFile()
+
+		if rec.Code != tt.wantStatus {
+			t.Fatalf("Range %q: status = %d, want %d; body: %s", tt.rangeHeader, rec.Code, tt.wantStatus, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Length"); got != tt.wantLength {
+			t.Errorf("Range %q: Content-Length = %q, want %q", tt.rangeHeader, got, tt.wantLength)
+		}
+		if got := rec.Header().Get("Content-Type"); got != tt.wantType {
+			t.Errorf("Range %q: Content-Type = %q, want %q", tt.rangeHeader, got, tt.wantType)
+		}
+	}
+}
+
 // TestGetRunLogs_RejectsMalformedCursor verifies non-integer and negative
 // cursor values are rejected with 400 instead of silently reading from 0.
 func TestGetRunLogs_RejectsMalformedCursor(t *testing.T) {
@@ -473,5 +552,106 @@ func TestGetRunLogs_RejectsMalformedCursor(t *testing.T) {
 		if logsRecorder.Code != http.StatusBadRequest {
 			t.Errorf("cursor=%q: status = %d, want 400", cursor, logsRecorder.Code)
 		}
+	}
+}
+
+// TestIsolatedRun_ForegroundStreamSendsPings verifies the foreground run
+// streams SSE with periodic ping keepalives: a command that produces no
+// stdout for a while must still emit bytes so gateway idle timeouts cannot
+// reap the connection, and the stream must end with the complete event.
+func TestIsolatedRun_ForegroundStreamSendsPings(t *testing.T) {
+	previousRunner := isolatedRunner
+	previousInterval := ssePingInterval
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	ssePingInterval = 30 * time.Millisecond
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+		ssePingInterval = previousInterval
+	})
+
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+	runCtx, runRecorder := newTestContext(
+		http.MethodPost,
+		"/v1/isolated/session/"+sessionID+"/run",
+		[]byte(`{"code":"sleep 0.4","timeout_seconds":10}`),
+	)
+	runCtx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+	NewIsolatedSessionController(runCtx).Run()
+
+	if runRecorder.Code != http.StatusOK {
+		t.Fatalf("run status = %d, want 200; body: %s", runRecorder.Code, runRecorder.Body.String())
+	}
+	if got := runRecorder.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content type = %q, want text/event-stream", got)
+	}
+
+	body := runRecorder.Body.String()
+	pings := strings.Count(body, `"type":"ping"`)
+	if pings == 0 {
+		t.Fatalf("expected at least one ping event during silent command, body:\n%s", body)
+	}
+	if !strings.Contains(body, `"type":"execution_complete"`) {
+		t.Fatalf("stream must end with execution_complete, body:\n%s", body)
+	}
+}
+
+// TestIsolatedRun_UnknownSessionReturnsJSON verifies that a run on a missing
+// session still returns the structured 404 JSON error, not an SSE stream
+// (headers are not committed before the session check).
+func TestIsolatedRun_UnknownSessionReturnsJSON(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	runCtx, runRecorder := newTestContext(
+		http.MethodPost,
+		"/v1/isolated/session/nope/run",
+		[]byte(`{"code":"echo hi"}`),
+	)
+	runCtx.Params = gin.Params{{Key: "sessionId", Value: "nope"}}
+	NewIsolatedSessionController(runCtx).Run()
+
+	if runRecorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body: %s", runRecorder.Code, runRecorder.Body.String())
+	}
+	if got := runRecorder.Header().Get("Content-Type"); got == "text/event-stream" {
+		t.Fatal("unknown-session run must return JSON, not an SSE stream")
+	}
+	if !strings.Contains(runRecorder.Body.String(), "session not found") {
+		t.Fatalf("body = %s, want session-not-found error", runRecorder.Body.String())
 	}
 }

@@ -42,10 +42,14 @@ type ConnectionConfig struct {
 
 	// RequestTimeout is the timeout for non-streaming HTTP requests.
 	// Zero means DefaultRequestTimeout (30s); there is currently no way to
-	// select "no timeout".
+	// select "no timeout". It does not cap SSE streams or file uploads and
+	// downloads, which bound only the wait for response headers; use the
+	// context to limit those.
 	RequestTimeout time.Duration
 
-	// Headers are custom HTTP headers added to all requests.
+	// Headers are custom HTTP headers added to lifecycle and data-plane
+	// requests. In direct mode, OPEN-SANDBOX-API-KEY is omitted from
+	// execd/egress requests because those endpoints run inside the sandbox.
 	Headers map[string]string
 
 	// HTTPClient is an optional custom HTTP client. If nil, a default is created.
@@ -57,9 +61,11 @@ type ConnectionConfig struct {
 	AuthHeader string
 
 	// Retry enables automatic retry with exponential backoff for transient
-	// errors. Defaults to retrying 429/502/503/504; override
-	// RetryConfig.RetryableStatusCodes for custom policies. If nil, requests
-	// are not retried.
+	// errors. Idempotent methods default to 429/502/503/504; override
+	// RetryConfig.RetryableStatusCodes for custom idempotent policies. POST
+	// and PATCH do not retry status codes unless listed in
+	// RetryConfig.RetryableStatusCodesNonIdempotent. If nil, requests are not
+	// retried.
 	// Use DefaultRetryConfig() for sensible defaults.
 	Retry *RetryConfig
 
@@ -164,6 +170,14 @@ func (c *ConnectionConfig) GetRequestTimeout() time.Duration {
 
 // clientOpts builds the common Option slice from config fields.
 func (c *ConnectionConfig) clientOpts(includeAuthHeader bool) []Option {
+	return c.clientOptsWithHeaders(includeAuthHeader, c.Headers)
+}
+
+// clientOptsWithHeaders builds the common Option slice with an explicit header
+// map. Lifecycle clients pass ConnectionConfig.Headers unchanged; data-plane
+// clients pass the result of dataPlaneHeaders so the tenant credential policy
+// is applied consistently.
+func (c *ConnectionConfig) clientOptsWithHeaders(includeAuthHeader bool, headers map[string]string) []Option {
 	var opts []Option
 	if includeAuthHeader && c.AuthHeader != "" {
 		opts = append(opts, WithAuthHeader(c.AuthHeader))
@@ -178,13 +192,34 @@ func (c *ConnectionConfig) clientOpts(includeAuthHeader bool) []Option {
 	if t := c.GetRequestTimeout(); t > 0 {
 		opts = append(opts, WithTimeout(t))
 	}
-	if len(c.Headers) > 0 {
-		opts = append(opts, WithHeaders(c.Headers))
+	if len(headers) > 0 {
+		opts = append(opts, WithHeaders(headers))
 	}
 	if c.Retry != nil {
 		opts = append(opts, WithRetry(*c.Retry))
 	}
 	return opts
+}
+
+// dataPlaneHeaders merges connection and endpoint headers for execd/egress.
+// Direct-mode requests terminate inside the sandbox, so the tenant API key must
+// never be forwarded there, even when a caller supplied it via Headers.
+func (c *ConnectionConfig) dataPlaneHeaders(endpointHeaders map[string]string) map[string]string {
+	if len(c.Headers) == 0 && len(endpointHeaders) == 0 {
+		return nil
+	}
+
+	headers := make(map[string]string, len(c.Headers)+len(endpointHeaders))
+	for key, value := range c.Headers {
+		headers[key] = value
+	}
+	for key, value := range endpointHeaders {
+		headers[key] = value
+	}
+	if !c.UseServerProxy {
+		deleteHeaderFold(headers, serverProxyAuthHeader)
+	}
+	return headers
 }
 
 // lifecycleClient creates a LifecycleClient from this config.
@@ -202,10 +237,7 @@ func (c *ConnectionConfig) lifecycleClient() *LifecycleClient {
 // returned by the lifecycle GetEndpoint call (auth tokens, routing hints,
 // sticky-session keys, etc.) are forwarded as-is on every subsequent request.
 func (c *ConnectionConfig) execdClient(endpointURL string, endpointHeaders map[string]string) *ExecdClient {
-	opts := c.clientOpts(true)
-	if len(endpointHeaders) > 0 {
-		opts = append(opts, WithHeaders(endpointHeaders))
-	}
+	opts := c.clientOptsWithHeaders(true, c.dataPlaneHeaders(endpointHeaders))
 	return NewExecdClient(endpointURL, "", opts...)
 }
 
@@ -213,9 +245,6 @@ func (c *ConnectionConfig) execdClient(endpointURL string, endpointHeaders map[s
 // returned by the lifecycle GetEndpoint call are forwarded as-is on every
 // subsequent request.
 func (c *ConnectionConfig) egressClient(endpointURL string, endpointHeaders map[string]string) *EgressClient {
-	opts := c.clientOpts(false)
-	if len(endpointHeaders) > 0 {
-		opts = append(opts, WithHeaders(endpointHeaders))
-	}
+	opts := c.clientOptsWithHeaders(false, c.dataPlaneHeaders(endpointHeaders))
 	return NewEgressClient(endpointURL, "", opts...)
 }

@@ -29,6 +29,9 @@ ARG CXXFLAGS=
 ARG CGO_CFLAGS=
 ARG CGO_CXXFLAGS=
 ARG CGO_LDFLAGS=
+# Optional module proxy for restricted build networks; empty keeps Go's
+# environment (proxy.golang.org) untouched.
+ARG GOPROXY=
 
 # Copy only go mod/sum first for better caching
 COPY components/egress/go.mod components/egress/go.sum ./components/egress/
@@ -38,7 +41,7 @@ COPY components/internal ./components/internal
 WORKDIR /workspace/components/egress
 
 # Static-ish build (no cgo by default) to simplify runtime deps.
-RUN go mod download
+RUN test -z "${GOPROXY}" || go env -w GOPROXY="${GOPROXY}" && go mod download
 
 # Pre-download internal-module deps for the supervisor build below.
 RUN cd /workspace/components/internal && go mod download
@@ -75,10 +78,32 @@ RUN cd /workspace/components/internal && \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /out/opensandbox-supervisor ./cmd/supervisor
 
+# egress-trace: read-only admission viewer (policy API + nft sets/leases +
+# /proc sockets) for demos and troubleshooting; stdlib-only, same module.
+# Run inside the container via docker exec.
+RUN go build ${GOFLAGS} -trimpath -buildvcs=false \
+    -ldflags "-s -w -buildid= -B none" \
+    -o /out/egress-trace ./tools/egress-trace
+
 FROM debian:bookworm-slim
 
+# Optional Debian mirror host for restricted build networks (e.g.
+# mirrors.aliyun.com); empty keeps the default deb.debian.org sources.
+ARG APT_MIRROR=
+
 # iptables is needed for DNS REDIRECT; ca-certificates for TLS to upstream resolvers
-RUN apt-get update \
+RUN if [ -n "${APT_MIRROR}" ]; then \
+        set --; \
+        for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do \
+            if [ -f "$source" ]; then set -- "$@" "$source"; fi; \
+        done; \
+        if [ "$#" -eq 0 ]; then \
+            echo "APT_MIRROR requires a supported APT source file" >&2; exit 1; \
+        fi; \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+            "$@"; \
+    fi \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         iptables \
         iproute2 \
@@ -105,10 +130,12 @@ RUN apt-get update \
 
 # Python mitmproxy (transparent mode): mitmdump runs as user mitmproxy; iptables skips this uid.
 # /var/lib/mitmproxy is mitm's home, used as the confdir (CA + config.yaml live under .mitmproxy/).
+COPY components/egress/requirements-mitmproxy.txt /tmp/requirements-mitmproxy.txt
 RUN useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy \
     && mkdir -p /var/lib/mitmproxy/.mitmproxy \
     && chown -R mitmproxy:mitmproxy /var/lib/mitmproxy \
-    && pip3 install --no-cache-dir --break-system-packages 'mitmproxy==11.0.2' \
+    && pip3 install --no-cache-dir --break-system-packages \
+        -r /tmp/requirements-mitmproxy.txt \
     && (command -v mitmdump && mitmdump --version) \
     && mkdir -p /var/egress/mitmscripts
 
@@ -123,6 +150,7 @@ RUN chown mitmproxy:mitmproxy /var/lib/mitmproxy/.mitmproxy/config.yaml \
 # All egress runtime artifacts live under one directory to keep paths grouped.
 COPY --from=builder /out/egress /opt/opensandbox-egress/egress
 COPY --from=builder /out/opensandbox-supervisor /opt/opensandbox-egress/supervisor
+COPY --from=builder /out/egress-trace /opt/opensandbox-egress/egress-trace
 # Pre-start hook: reap any mitmdump left over from a previous crashed
 # egress, and remove stale DNS-redirect iptables rules + opensandbox_dns_redirect
 # nft tables left pointing at a dead proxy. The `inet opensandbox` policy table
@@ -132,13 +160,20 @@ COPY components/egress/scripts/cleanup.sh /opt/opensandbox-egress/cleanup.sh
 RUN chmod 0755 /opt/opensandbox-egress/cleanup.sh \
             /opt/opensandbox-egress/egress \
             /opt/opensandbox-egress/supervisor \
-    && ln -s /opt/opensandbox-egress/egress /egress
+            /opt/opensandbox-egress/egress-trace \
+    && ln -s /opt/opensandbox-egress/egress /egress \
+    && ln -s /opt/opensandbox-egress/egress-trace /usr/local/bin/egress-trace
 
 COPY components/egress/mitmscripts /var/egress/mitmscripts
 # The mitmdump addon is loaded by the mitmproxy user (uid 10042): normalize
 # permissions so a restrictive build umask (e.g. 027) can never leave the
-# scripts unreadable to it.
-RUN chmod -R a+rX /var/egress/mitmscripts
+# scripts unreadable to it. Check the installed libraries against the same
+# interpreter and exact-version gate used by the H2 adapter before producing
+# the image.
+RUN chmod -R a+rX /var/egress/mitmscripts \
+    && PYTHONPATH=/var/egress/mitmscripts python3 -c \
+        'import sys; from credential_bound_h2 import PINS, dependency_versions_supported; \
+         raise SystemExit(0 if dependency_versions_supported() else f"unsupported H2 runtime: interpreter={sys.implementation.name}, sys.version={sys.version!r}; required CPython 3.10/3.11 and packages={PINS}")'
 
 # Supervisor wraps the egress binary: restarts on crash with backoff and
 # forwards SIGTERM gracefully. The cleanup hook runs only as pre-start; the

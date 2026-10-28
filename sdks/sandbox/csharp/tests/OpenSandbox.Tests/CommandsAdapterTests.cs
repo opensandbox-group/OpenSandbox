@@ -30,6 +30,33 @@ namespace OpenSandbox.Tests;
 public class CommandsAdapterTests
 {
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task RunStreamAsync_ShouldPreserveOptionalSuccessExitCode(bool explicitExitCode, bool background)
+    {
+        var eventJson = explicitExitCode
+            ? "{\"type\":\"execution_complete\",\"exit_code\":0}"
+            : "{\"type\":\"execution_complete\"}";
+        var handler = new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"data: {eventJson}\n\n", Encoding.UTF8, "text/event-stream")
+            }));
+        IExecdCommands commands = CreateAdapter(handler);
+        var events = new List<ServerStreamEvent>();
+
+        await foreach (var streamEvent in commands.RunStreamAsync("exit 0", new RunCommandOptions { Background = background }))
+        {
+            events.Add(streamEvent);
+        }
+
+        var complete = events.Should().ContainSingle().Which;
+        complete.Type.Should().Be(ServerStreamEventTypes.ExecutionComplete);
+        complete.ExitCode.Should().Be(explicitExitCode ? 0 : (int?)null);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task BackgroundCommand_StopsAtCompleteAndDisposesStream(bool argv)

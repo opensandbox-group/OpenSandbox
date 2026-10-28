@@ -558,6 +558,17 @@ def test_execution_text_strips_trailing_newlines() -> None:
     assert str(ex) == "1\n2"
 
 
+def test_execution_text_preserves_blank_lines_from_split_crlf_events() -> None:
+    ex = Execution(
+        logs=ExecutionLogs(
+            stdout=[_make_output(text) for text in ("a\r", "\n", "\r", "\n", "b\r", "\n")],
+            stderr=[_make_output(text, is_error=True) for text in ("error\r", "\n", "detail\r", "\n")],
+        ),
+    )
+    assert ex.text == "a\n\nb"
+    assert str(ex) == "a\n\nb\n[stderr]\nerror\ndetail"
+
+
 def test_isolated_binds_serialize_to_wire_format() -> None:
     """binds and uid_mode serialize to the execd wire format."""
     from opensandbox.models import (

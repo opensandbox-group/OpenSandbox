@@ -26,6 +26,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_PID=""
 
 source "${REPO_ROOT}/scripts/credential-vault-e2e-target.sh"
+source "${REPO_ROOT}/scripts/egress-mitm-e2e-target.sh"
 
 cleanup_server() {
   if [ -n "${SERVER_PID}" ]; then
@@ -37,6 +38,7 @@ cleanup_server() {
 cleanup() {
   cleanup_server
   cleanup_credential_vault_e2e_target
+  cleanup_egress_mitm_e2e_target
 }
 trap cleanup EXIT
 
@@ -66,6 +68,7 @@ echo "-------- PYTHON E2E test logs for execd --------" > /tmp/opensandbox-e2e/l
 
 export OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE="${OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE:-opensandbox/code-interpreter:${TAG}}"
 setup_credential_vault_e2e_target
+setup_egress_mitm_e2e_target
 
 # setup server
 cd server

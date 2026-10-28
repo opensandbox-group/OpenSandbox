@@ -29,6 +29,8 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
+from urllib.parse import unquote
 
 
 class _Log:
@@ -137,15 +139,17 @@ def _load_system_module() -> Any:
     mitmproxy_tls = types.ModuleType("mitmproxy.tls")
     mitmproxy_tls.ClientHelloData = object
 
-    sys.modules["mitmproxy"] = mitmproxy
-    sys.modules["mitmproxy.tls"] = mitmproxy_tls
-
     path = Path(__file__).parents[1] / "mitmscripts" / "system.py"
     spec = importlib.util.spec_from_file_location("opensandbox_egress_system_addon", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    # The loaded addon retains its fake context; restore real dependency modules
+    # immediately so later H2 tests can import the pinned mitmproxy package.
+    with mock.patch.dict(
+        sys.modules, {"mitmproxy": mitmproxy, "mitmproxy.tls": mitmproxy_tls}
+    ):
+        spec.loader.exec_module(module)
     return module
 
 
@@ -1193,7 +1197,10 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertEqual("[REDACTED]", flow.response.headers.get("x-token-echo"))
         self.assertEqual("upstream body includes secret-token", flow.response.body)
         self.assertFalse(flow.response.set_text_called)
-        self.assertFalse(hasattr(system, "response"))
+        # The response hook exists only to release live request handles; in the
+        # legacy path it is a no-op and never touches response content.
+        system.response(flow)
+        self.assertEqual("upstream body includes secret-token", flow.response.body)
 
     def test_responseheaders_uses_injected_flow_redactions(self) -> None:
         system = _load_system_module()
@@ -2061,9 +2068,12 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         self.assertEqual(403, flow.response.status_code)
         self.assertNotIn("Authorization", flow.request.headers._values)
 
-    def test_scoped_package_double_encoded_slash_still_rejected(self) -> None:
-        """A double-encoded ``%252f`` has no legitimate use and is rejected
-        even under the relaxed single-layer ``%2f`` policy."""
+    def test_scoped_package_double_encoded_slash_receives_credential(self) -> None:
+        """A double-encoded ``%252f`` is legitimate for artifact stores whose
+        coordinate paths are double-encoded on the wire (e.g. pypi proxy
+        download URLs like ``pkg%252F1.0``). It passes when every decode
+        depth matches the same binding, as here with the catch-all ``/*``
+        scope."""
         system = self._make_system_with_npm_vault()
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
@@ -2072,9 +2082,218 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
 
         system.requestheaders(flow)
 
+        self.assertEqual("Bearer npm-token", flow.request.headers.get("Authorization"))
+
+
+class SystemAddonDoubleEncodedPathTest(unittest.TestCase):
+    """Double-encoded ``%252f`` artifact URLs must not be blocked as ambiguous.
+
+    Artifact stores double-encode their coordinate paths on the wire, so a
+    pip download URL like
+    ``/1/pypi/simple/requests/%252Fcentral-proxy%252Fpackages%252F.../pkg.whl``
+    is a legitimate wire format. The credential-injection invariant is that
+    every percent-decoding depth of the path must match the same binding;
+    encoded slashes are safe exactly when that invariant holds.
+    """
+
+    def _make_system_with_artlab_vault(self, bindings=None):
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            1,
+            bindings
+            or [
+                {
+                    "name": "artlab-pypi",
+                    "match": {
+                        "hosts": ["artlab.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/*"],
+                    },
+                    "headers": [
+                        {"name": "Private-Token", "value": "artlab-token"}
+                    ],
+                }
+            ],
+            ["artlab-token"],
+        )
+        return system
+
+    def _artlab_flow(self, path: str) -> _Flow:
+        flow = _Flow()
+        flow.request.pretty_host = "artlab.example.com"
+        flow.request.host = "artlab.example.com"
+        flow.request.path = path
+        return flow
+
+    def test_double_encoded_artifact_url_receives_credential(self) -> None:
+        """The artlab pypi proxy download shape must reach the upstream with
+        credentials attached. Regression: this used to return 403 because
+        nested encodings were rejected by depth count instead of by the
+        binding invariant."""
+        system = self._make_system_with_artlab_vault()
+        flow = self._artlab_flow(
+            "/1/pypi/simple/requests/"
+            "%252Fartlab-pypi-central-proxy%252Fpackages%252Fa0%252Ff4"
+            "%252Fc67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a"
+            "/requests-2.34.2-py3-none-any.whl"
+        )
+
+        system.requestheaders(flow)
+
+        self.assertFalse(flow.killed)
+        self.assertNotEqual(403, getattr(flow.response, "status_code", None))
+        self.assertEqual("artlab-token", flow.request.headers.get("Private-Token"))
+
+    def test_deeply_nested_encoded_slash_allowed_when_binding_stable(self) -> None:
+        """``%25252f`` decodes across three depths to ``/``; the injection
+        decision must stay binding-stable at every depth, and here it does."""
+        system = self._make_system_with_artlab_vault()
+        flow = self._artlab_flow("/packages/pkg%25252F1.0%252Ffile.whl")
+
+        system.requestheaders(flow)
+
+        self.assertNotEqual(403, getattr(flow.response, "status_code", None))
+        self.assertEqual("artlab-token", flow.request.headers.get("Private-Token"))
+
+    def test_double_encoded_slash_crossing_binding_rejected(self) -> None:
+        """A double-encoded path whose decoded form escapes the matched
+        binding scope must be rejected before credential injection.
+
+        The narrow binding's path pattern contains the literal ``%252F`` so
+        only the raw view matches it, and ``_select_binding`` selects it
+        unambiguously; the fully decoded view matches only the plain-path
+        binding instead. The mismatch is exactly what the decode guard must
+        catch — with the guard removed, the narrow binding's credential
+        would be injected onto a path that belongs to another scope."""
+        system = self._make_system_with_artlab_vault(
+            [
+                {
+                    "name": "artlab-narrow",
+                    "match": {
+                        "hosts": ["artlab.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/pkg%252Fadmin%252F*"],
+                    },
+                    "headers": [
+                        {"name": "Private-Token", "value": "narrow-token"}
+                    ],
+                },
+                {
+                    "name": "artlab-plain",
+                    "match": {
+                        "hosts": ["artlab.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/pkg/admin/*"],
+                    },
+                    "headers": [
+                        {"name": "Private-Token", "value": "plain-token"}
+                    ],
+                },
+            ]
+        )
+        flow = self._artlab_flow("/pkg%252Fadmin%252Fsecrets")
+
+        system.requestheaders(flow)
+
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
-        self.assertNotIn("Authorization", flow.request.headers._values)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+        # The decode guard (not the earlier binding-ambiguity check) must be
+        # what rejected this flow.
+        self.assertIn(
+            "percent-decoding crosses the credential binding boundary",
+            "\n".join(system.ctx.log.messages),
+        )
+
+    def test_double_encoded_dot_segments_still_rejected(self) -> None:
+        """``%252f..%252f`` hides dot-segments behind nested encodings; the
+        fixpoint decode exposes them and the request is rejected even though
+        the binding would be stable."""
+        system = self._make_system_with_artlab_vault()
+        flow = self._artlab_flow("/pkg%252f..%252fadmin/secrets")
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+
+class PathIsAmbiguousDecodingBoundariesTest(unittest.TestCase):
+    """Direct boundary tests for the two ``_path_is_ambiguous`` modes.
+
+    Tolerant mode (client-supplied paths) tolerates encoded slashes at any
+    decoding depth but never dot-segments or backslashes. Strict mode (our
+    own substitution pipeline) rejects every encoded separator.
+    """
+
+    def setUp(self) -> None:
+        self.system = _load_system_module()
+
+    def test_strict_mode_rejects_every_encoded_separator(self) -> None:
+        for path in ["/a%2fb", "/a%252fb", "/a%5cb", "/a\\b"]:
+            self.assertTrue(
+                self.system._path_is_ambiguous(path), f"strict must reject {path}"
+            )
+
+    def test_tolerant_mode_allows_encoded_slashes_at_any_depth(self) -> None:
+        for path in [
+            "/a%2fb",
+            "/a%252fb",
+            "/a%25252fb",
+            "/@scope%2fname",
+            "/1/pypi/simple/requests/%252Fproxy%252Fpackages/wheel.whl",
+        ]:
+            self.assertFalse(
+                self.system._path_is_ambiguous(path, allow_encoded_slash=True),
+                f"tolerant must allow {path}",
+            )
+
+    def test_dot_segments_rejected_at_every_depth_in_both_modes(self) -> None:
+        for path in [
+            "/a/../b",
+            "/a/..",
+            "/a%2f..%2fb",
+            "/a%252f..%252fb",
+            "/%252e%252e/x",
+            "/%2e%2e/x",
+        ]:
+            for kwargs in ({}, {"allow_encoded_slash": True}):
+                self.assertTrue(
+                    self.system._path_is_ambiguous(path, **kwargs),
+                    f"must reject {path} with {kwargs}",
+                )
+
+    def test_backslashes_rejected_at_every_depth_in_both_modes(self) -> None:
+        for path in ["/a%5cb", "/a\\b", "/a%25%35%63b"]:
+            for kwargs in ({}, {"allow_encoded_slash": True}):
+                self.assertTrue(
+                    self.system._path_is_ambiguous(path, **kwargs),
+                    f"must reject {path} with {kwargs}",
+                )
+
+    def test_decode_iteration_bound_fails_closed(self) -> None:
+        """The guard decodes to a fixpoint with a bounded iteration count.
+        Escape nesting that converges within the bound is analyzed normally;
+        deeper nesting cannot establish a canonical view and fails closed."""
+        convergent = "/%25" + "25" * 7 + "2fx"
+        self.assertFalse(
+            self.system._path_is_ambiguous(convergent, allow_encoded_slash=True)
+        )
+        non_convergent = "/%25" + "25" * 8 + "2fx"
+        self.assertTrue(
+            self.system._path_is_ambiguous(non_convergent, allow_encoded_slash=True)
+        )
+
+    def test_overlong_utf8_slash_is_not_seen_by_unquote(self) -> None:
+        """Pins a known adjacent limitation: ``%c0%af`` does not decode to a
+        slash via ``unquote`` (it becomes U+FFFD replacement characters), so
+        it passes the guard today. If this test fails, decode behavior
+        changed and the guard's assumptions must be revisited."""
+        self.assertNotIn("/", unquote("%c0%af"))
+        self.assertFalse(
+            self.system._path_is_ambiguous("/x%c0%afy", allow_encoded_slash=True)
+        )
 
 
 class SystemAddonStreamingTest(unittest.TestCase):
@@ -2384,3 +2603,46 @@ class SystemAddonTlsClientHelloTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnixSocketHTTPConnectionLeakTest(unittest.TestCase):
+    """A failed connect must close the freshly created socket, not leak it."""
+
+    def test_failed_connect_leaves_no_socket_and_no_resource_warning(self) -> None:
+        import gc
+        import warnings
+
+        system = _load_system_module()
+        connection = system.UnixSocketHTTPConnection("/nonexistent/live-vault.sock", timeout=0.1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with self.assertRaises(OSError):
+                connection.connect()
+            self.assertIsNone(connection.sock)
+            connection = None
+            gc.collect()
+        leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual([], [str(w.message) for w in leaked])
+
+    def test_successful_connect_uses_the_unix_socket(self) -> None:
+        import gc
+        import warnings
+
+        system = _load_system_module()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = os.path.join(temporary.name, "receiver.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(path)
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        connection = system.UnixSocketHTTPConnection(path, timeout=2)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            connection.connect()
+            self.assertIsNotNone(connection.sock)
+            connection.close()
+            connection = None
+            gc.collect()
+        leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual([], [str(w.message) for w in leaked])

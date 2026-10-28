@@ -45,12 +45,23 @@ type ExecutionError struct {
 	Value     string   `json:"value"`
 	Timestamp int64    `json:"timestamp"`
 	Traceback []string `json:"traceback"`
+	// ExitCode is the exit status reported by execd for a CommandExecError
+	// when the command ran and finished with a non-zero status (-1 when it was
+	// terminated by a signal). Nil when the process failed to start, for
+	// non-command errors, and on servers that predate error.exit_code.
+	ExitCode *int `json:"exit_code,omitempty"`
 }
 
 // ExecutionComplete represents the completion event from the server.
 type ExecutionComplete struct {
 	Timestamp     int64 `json:"timestamp"`
 	ExecutionTime int64 `json:"execution_time"`
+	// ExitCode is the successful foreground POST /command process exit status
+	// (0), present only on its execution_complete event after the process has
+	// exited. Nil for background startup acknowledgements, code execution,
+	// other events, and servers that predate execution_complete.exit_code.
+	// Non-zero command exits use error.exit_code instead.
+	ExitCode *int `json:"exit_code,omitempty"`
 }
 
 // ExecutionInit represents the initialization event from the server.
@@ -88,7 +99,10 @@ func (e *Execution) Text() string {
 	var b strings.Builder
 	for i, m := range e.Stdout {
 		if i > 0 {
-			b.WriteByte('\n')
+			previous := e.Stdout[i-1].Text
+			if !strings.HasSuffix(previous, "\n") && !strings.HasSuffix(previous, "\r") {
+				b.WriteByte('\n')
+			}
 		}
 		b.WriteString(m.Text)
 	}
@@ -116,6 +130,7 @@ type sseErrorPayload struct {
 	EName     string   `json:"ename,omitempty"`
 	EValue    string   `json:"evalue,omitempty"`
 	Traceback []string `json:"traceback,omitempty"`
+	ExitCode  *int     `json:"exit_code,omitempty"`
 }
 
 // sseEvent is the raw JSON structure from execd SSE/NDJSON events.
@@ -203,11 +218,13 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 	case "error":
 		var ename, evalue string
 		var traceback []string
+		var exitCode *int
 		// Prefer nested error object per spec; fall back to flat fields
 		if ev.Error != nil {
 			ename = ev.Error.EName
 			evalue = ev.Error.EValue
 			traceback = ev.Error.Traceback
+			exitCode = ev.Error.ExitCode
 		} else {
 			ename = ev.EName
 			evalue = ev.EValue
@@ -218,10 +235,15 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 			Value:     evalue,
 			Timestamp: ev.Timestamp,
 			Traceback: traceback,
+			ExitCode:  exitCode,
 		}
 		exec.Error = &execErr
-		// Try to parse exit code from error value
-		if code, err := strconv.Atoi(evalue); err == nil {
+		// Prefer the authoritative error.exit_code; fall back to parsing the
+		// error value for servers that predate it.
+		if exitCode != nil {
+			code := *exitCode
+			exec.ExitCode = &code
+		} else if code, err := strconv.Atoi(evalue); err == nil {
 			exec.ExitCode = &code
 		}
 		if handlers != nil && handlers.OnError != nil {
@@ -232,12 +254,19 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 		complete := ExecutionComplete{
 			Timestamp:     ev.Timestamp,
 			ExecutionTime: ev.ExecutionTime,
+			ExitCode:      ev.ExitCode,
 		}
 		exec.Complete = &complete
-		// Foreground command exit code: 0 if no error
-		if exec.ExitCode == nil && exec.Error == nil {
-			zero := 0
-			exec.ExitCode = &zero
+		// Prefer the wire execution_complete.exit_code when present; otherwise
+		// infer 0 for a successful foreground completion (older servers omit it).
+		if exec.ExitCode == nil {
+			if ev.ExitCode != nil {
+				code := *ev.ExitCode
+				exec.ExitCode = &code
+			} else if exec.Error == nil {
+				zero := 0
+				exec.ExitCode = &zero
+			}
 		}
 		if handlers != nil && handlers.OnComplete != nil {
 			return handlers.OnComplete(complete)

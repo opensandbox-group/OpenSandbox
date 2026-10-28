@@ -1,0 +1,66 @@
+# Copyright 2025 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OpenSandbox server config for the DeerFlow all-in-one image.
+#
+# Topology matches server/docker-compose.example.yaml: the server runs inside
+# this image's container and creates sandbox containers on the HOST Docker
+# daemon through the mounted /var/run/docker.sock. Sandbox ports are published
+# on the host, and the server reaches them back via host-gateway
+# (host.docker.internal). Only the server port differs (8080).
+
+[server]
+host = "0.0.0.0"
+port = 8080
+# Fixed teaching-only key: the server refuses to start in non-interactive
+# mode with an empty api_key, and the DeerFlow provider in this image reads
+# the same value from OPEN_SANDBOX_API_KEY. Replace both for any shared
+# deployment (mount a custom config and override the env var).
+api_key = "deerflow-lab-key"
+
+[proxy]
+# The server container and sandbox containers are not on the same Docker
+# network: always reach sandboxes through their host-published ports.
+resolve_internal = false
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+# Images default to the Alibaba Cloud Container Registry for faster pulls in
+# mainland-China classrooms; the Docker Hub equivalents are the same versions
+# (matching the latest release, 1.1.1).
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
+# execd_image = "opensandbox/execd:v1.1.0"
+
+[egress]
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.7"
+# image = "opensandbox/egress:v1.1.7"
+readiness_timeout_seconds = 30.0
+
+[docker]
+network_mode = "bridge"
+# Sandbox ports are published on the host; from this container they resolve
+# through the host-gateway address.
+host_ip = "host.docker.internal"
+port_range_min = 40000
+port_range_max = 60000
+# Hardening, matching the official compose example.
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+pids_limit = 4096
+
+[ingress]
+mode = "direct"

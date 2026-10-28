@@ -21,6 +21,62 @@ namespace OpenSandbox.Tests;
 
 public class ModelsTests
 {
+    [Theory]
+    [InlineData("{\"type\":\"execution_complete\",\"exit_code\":0}", 0)]
+    [InlineData("{\"type\":\"execution_complete\"}", null)]
+    public void ServerStreamEvent_ShouldPreserveOptionalZeroExitCode(string json, int? expected)
+    {
+        var streamEvent = JsonSerializer.Deserialize<ServerStreamEvent>(json)!;
+        streamEvent.ExitCode.Should().Be(expected);
+
+        using var serialized = JsonDocument.Parse(JsonSerializer.Serialize(streamEvent));
+        if (expected.HasValue)
+        {
+            serialized.RootElement.GetProperty("exit_code").GetInt32().Should().Be(0);
+        }
+        else
+        {
+            serialized.RootElement.TryGetProperty("exit_code", out _).Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public void RenewalPolicy_ShouldAcceptBoundaries()
+    {
+        var act300 = () => new RenewalPolicy { ExtendSeconds = 300 }.Validate();
+        act300.Should().NotThrow();
+        var act86400 = () => new RenewalPolicy { ExtendSeconds = 86400 }.Validate();
+        act86400.Should().NotThrow();
+    }
+
+    [Fact]
+    public void RenewalPolicy_ShouldRejectOutOfRange()
+    {
+        var actLow = () => new RenewalPolicy { ExtendSeconds = 299 }.Validate();
+        actLow.Should().Throw<ArgumentOutOfRangeException>();
+        var actHigh = () => new RenewalPolicy { ExtendSeconds = 86401 }.Validate();
+        actHigh.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void SandboxLifecycle_ShouldSerializeRenewalPolicyWithWireNames()
+    {
+        // Catches a JsonPropertyName typo on lifecycle.renewalPolicy.extendSeconds.
+        var lifecycle = new SandboxLifecycle
+        {
+            RenewalPolicy = new RenewalPolicy { ExtendSeconds = 3600 }
+        };
+
+        string json = JsonSerializer.Serialize(lifecycle);
+
+        using var doc = JsonDocument.Parse(json);
+        doc.RootElement
+            .GetProperty("renewalPolicy")
+            .GetProperty("extendSeconds")
+            .GetInt32()
+            .Should().Be(3600);
+    }
+
     [Fact]
     public void IsolatedCapabilities_ShouldDeserializeModeAvailability()
     {

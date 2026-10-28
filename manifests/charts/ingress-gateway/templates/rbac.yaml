@@ -29,6 +29,13 @@ rules:
   - apiGroups: ["sandbox.opensandbox.io"]
     resources: ["batchsandboxes", "batchsandboxes/status"]
     verbs: ["get", "list", "watch"]
+  {{- if .Values.gateway.wake.enabled }}
+  # OSEP-0024 wake gating: read-only access to the fast-sandbox Sandbox CR
+  # so the gateway can check the per-sandbox idle policy before waking it.
+  - apiGroups: ["sandbox.fast.io"]
+    resources: ["sandboxes"]
+    verbs: ["get"]
+  {{- end }}
 ---
 apiVersion: {{ include "opensandbox-ingress-gateway.rbac.apiVersion" . }}
 kind: ClusterRoleBinding

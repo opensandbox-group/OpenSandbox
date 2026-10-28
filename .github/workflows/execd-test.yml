@@ -31,6 +31,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/execd/go.sum
 
       - name: Check gofmt
         working-directory: components/execd
@@ -63,6 +64,16 @@ jobs:
           sudo /tmp/execd-filesystem-identity.test -test.run "^TestFilesystemIdentity" -test.v -test.timeout 90s
           go test -c -o /tmp/execd-filesystem-runtime.test ./pkg/runtime
           sudo /tmp/execd-filesystem-runtime.test -test.run "^TestFilesystem" -test.v -test.timeout 90s
+
+      - name: Verify OOM watcher smoke as root
+        working-directory: components/execd
+        run: |
+          # End-to-end: a helper process joins a memory-limited cgroup, the
+          # kernel OOM killer terminates it, and the execd OOM watcher must
+          # emit its detection log line. Skips itself when cgroup v2 or root
+          # is unavailable.
+          go test -c -o /tmp/execd-oom-smoke.test ./pkg/telemetry
+          sudo /tmp/execd-oom-smoke.test -test.run "^TestOOMSmoke$" -test.v -test.timeout 120s
 
       - name: Run execd-ebpf variant tests
         working-directory: components/execd
@@ -120,6 +131,8 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache: ${{ matrix.os != 'self-hosted' }}
+          cache-dependency-path: components/execd/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -167,6 +180,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: components/execd
         run: bash tests/mitm_ca_nss.sh
+
+      - name: MITM CA JDK bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: python3 tests/test_mitm_ca_jdk.py
 
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
@@ -216,6 +235,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/execd/go.sum
 
       - name: Build latest bubblewrap (v0.11.2)
         run: |

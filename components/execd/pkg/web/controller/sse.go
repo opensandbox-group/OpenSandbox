@@ -37,6 +37,10 @@ var sseHeaders = map[string]string{
 	"X-Accel-Buffering": "no",
 }
 
+// ssePingInterval is the SSE keepalive period; it must stay well below
+// gateway idle timeouts so silent commands cannot get the stream reaped.
+var ssePingInterval = 3 * time.Second
+
 // setupSSEResponse is idempotent: once headers are committed, subsequent calls
 // no-op. Callers that need the headers up front (e.g. long-running streaming
 // endpoints with no early-error path) can call it explicitly. Endpoints that
@@ -52,6 +56,14 @@ func (c *basicController) setupSSEResponse() {
 			flusher.Flush()
 		}
 	})
+}
+
+// streamStarted reports whether the response has been committed. It takes the
+// event write lock because the ping goroutine may be writing concurrently.
+func (c *basicController) streamStarted() bool {
+	c.chunkWriter.Lock()
+	defer c.chunkWriter.Unlock()
+	return c.ctx.Writer.Written()
 }
 
 // setServerEventsHandler adapts runtime callbacks to SSE events.
@@ -119,13 +131,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			}
 		},
 		OnExecuteComplete: func(executionTime time.Duration) {
-			event := model.ServerStreamEvent{
-				Type:          model.StreamEventTypeComplete,
-				ExecutionTime: executionTime.Milliseconds(),
-				Timestamp:     time.Now().UnixMilli(),
-			}
-			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteComplete", payload, true, event.Summary())
+			c.writeExecutionComplete(executionTime, nil)
 		},
 		OnExecuteError: func(err *execute.ErrorOutput) {
 			if err == nil {
@@ -184,6 +190,38 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	return hooks, stopSSE
 }
 
+// respondRunError reports an error returned by a run. Before any event has
+// been written it is a JSON error response. After that the status is already
+// committed, so it is sent as an SSE error event through hooks instead, unless
+// the run has already ended (ended is closed) with its own complete or error
+// event.
+func (c *CodeInterpretingController) respondRunError(hooks runtime.ExecuteResultHook, ended <-chan struct{}, message string) {
+	if !c.streamStarted() {
+		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, message)
+		return
+	}
+	select {
+	case <-ended:
+		return
+	default:
+	}
+	hooks.OnExecuteError(&execute.ErrorOutput{
+		EName:     "RuntimeError",
+		EValue:    message,
+		Traceback: []string{message},
+	})
+}
+
+func (c *CodeInterpretingController) writeExecutionComplete(executionTime time.Duration, exitCode *int) {
+	event := model.ServerStreamEvent{
+		Type:          model.StreamEventTypeComplete,
+		ExecutionTime: executionTime.Milliseconds(),
+		ExitCode:      exitCode,
+		Timestamp:     time.Now().UnixMilli(),
+	}
+	c.writeSingleEvent("OnExecuteComplete", event.ToJSON(), true, event.Summary())
+}
+
 func (c *basicController) writeSingleEvent(handler string, data []byte, verbose bool, summary string) {
 	if c == nil || c.ctx == nil || c.ctx.Writer == nil {
 		return
@@ -224,7 +262,7 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 }
 
 // ping periodically keeps the SSE connection alive.
-func (c *CodeInterpretingController) ping(ctx context.Context) {
+func (c *basicController) ping(ctx context.Context) {
 	wait.Until(func() {
 		if c.ctx.Writer == nil {
 			return
@@ -236,5 +274,5 @@ func (c *CodeInterpretingController) ping(ctx context.Context) {
 		}
 		payload := event.ToJSON()
 		c.writeSingleEvent("Ping", payload, false, event.Summary())
-	}, 3*time.Second, ctx.Done())
+	}, ssePingInterval, ctx.Done())
 }

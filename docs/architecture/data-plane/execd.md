@@ -28,7 +28,7 @@ Execd also fronts a small reverse proxy (`/proxy/{port}`), so one exposed host p
 
 ## API surface
 
-Everything execd exposes lives under one API. When the platform configures an access token, every endpoint below requires it in the `X-EXECD-ACCESS-TOKEN` header — only liveness and readiness are always open. The contract lives in [specs/execd-api.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml).
+Everything execd exposes lives under one API. When the platform configures an access token, every endpoint below requires it in the `X-EXECD-ACCESS-TOKEN` header — only liveness and readiness are always open. PTY WebSocket handshakes also accept the browser-compatible credential described below. The contract lives in [specs/execd-api.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml).
 
 ![execd request pipeline](../../public/images/execd-request-pipeline.svg)
 
@@ -56,6 +56,12 @@ Execution modes:
 - **Foreground** returns the output as a live Server-Sent-Events stream while the command runs.
 - **Background** returns immediately; you poll status and retrieve incremental logs. Completed background output stays retrievable for 24 hours, and running commands are never cleaned up.
 
+Foreground `stdout` and `stderr` event text preserves the command's line endings (`\n`, `\r`, or `\r\n`). Concatenate event text for each stream to reconstruct its output; the last event may be an unterminated fragment.
+
+A successful foreground `POST /command` ends with `execution_complete` carrying `exit_code: 0`. This optional field is omitted from background startup acknowledgements and code execution events; absence is not an exit status. Non-zero command exits retain `error.exit_code` on the `error` event. Older execd versions omit the successful exit code, so clients may retain their existing foreground-only completion inference. A stream that ends before a terminal event does not establish success.
+
+Bash-session runs stream one merged `stdout` event stream (session stderr is merged into it) with the same line-ending contract: event text preserves `\n`, `\r`, or `\r\n`, and concatenating event text reconstructs the run's output. Blank lines are preserved as events containing only the line ending, and the final event may be an unterminated fragment. A line longer than 16 MiB is split across several events, and only the last of them ends with the line ending.
+
 Sessions use Bash when the image provides it and fall back to POSIX `sh` on minimal images — commands sent to a fallback session must be `sh`-compatible. Windows sandboxes are supported (environment names are case-insensitive; batch files require shell syntax).
 
 ## Code execution
@@ -72,45 +78,39 @@ Each terminal session is a real PTY served over WebSocket — not a wrapped comm
 
 The sharing model is deliberate: exactly one **holder** owns the keyboard, and any number of **viewers** can watch. Viewers first replay what has already been printed, then follow live output — useful for supervision, debugging assistants, or letting a second person watch an agent work without giving it input.
 
+### Browser WebSocket authentication
+
+Browsers cannot attach an arbitrary `X-EXECD-ACCESS-TOKEN` header to a WebSocket handshake. For `GET /pty/{sessionId}/ws` only, a browser can instead offer the `opensandbox-pty` application subprotocol and one credential subprotocol whose suffix is the existing execd token encoded as unpadded base64url:
+
+```javascript
+const bytes = new TextEncoder().encode(execdToken);
+const encoded = btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(""))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const socket = new WebSocket(websocketUrl, [
+  "opensandbox-pty",
+  `base64url.bearer.execd.opensandbox.${encoded}`,
+]);
+```
+
+Execd verifies the same token before upgrading the connection, removes the credential entry, and negotiates only `opensandbox-pty`. This works for both interactive attachments and `?mode=viewer`. An explicit `X-EXECD-ACCESS-TOKEN` header takes precedence, including when it is empty or invalid; it never falls back to a subprotocol token. Duplicate credentials, malformed encoding, and a credential without the application subprotocol are rejected with `401`. Existing header-authenticated clients do not need to offer a subprotocol. Other HTTP APIs, including PTY creation and deletion, still require the header when token protection is enabled.
+
+This is a sandbox-wide credential, not a restricted terminal ticket. Obtain it through an authorized endpoint-resolution flow; do not place it in the URL or persistent browser storage. Use WSS in production: base64url is not encryption. Configure proxies and observability systems to redact the credential-bearing `Sec-WebSocket-Protocol` request header. An ingress signed URL satisfies ingress authentication only and does not replace execd authentication. The existing Origin policy and PTY disconnect/reconnect behavior are unchanged; deployments must enforce their browser-origin policy at the trusted gateway.
+
 ## Files and directories
 
 One API covers the whole filesystem tree: stream files in and out, list and search directories, inspect and change permissions, replace file contents, move and remove paths. The file APIs in every sandbox SDK are a thin wrapper over these endpoints.
 
 ### Filesystem execution identity
 
-On Linux, a trusted backend can select the identity performing ordinary file
-operations by prefixing the file API path with `/v1/filesystem/{uid}/{gid}`.
-Both IDs are required decimal integers between 0 and 4294967294. For example,
-`GET /v1/filesystem/1001/1001/files/download?path=/workspace/session-b/result.txt`
-reads the file as UID 1001 with primary GID 1001. The same prefix supports all
-ordinary file and directory operations, including uploads, metadata, search,
-replacement, rename, deletion, and permission changes.
+On Linux, a trusted backend can select the identity performing ordinary file operations by prefixing the file API path with `/v1/filesystem/{uid}/{gid}`. Both IDs are required decimal integers between 0 and 4294967294. For example, `GET /v1/filesystem/1001/1001/files/download?path=/workspace/session-b/result.txt` reads the file as UID 1001 with primary GID 1001. The same prefix supports all ordinary file and directory operations, including uploads, metadata, search, replacement, rename, deletion, and permission changes.
 
-Each request runs in a separate worker process with the selected credentials.
-Supplementary groups come from the selected user's system account; an unknown
-numeric UID has no supplementary groups. Account or group lookup failures other
-than an unknown UID fail the request. The worker never inherits Execd's
-supplementary groups as a fallback. Execd must have permission to establish the
-requested credentials; failure does not retry the operation as Execd.
-Relative paths resolve from `/`, and `~` uses the selected account's home
-directory (or `/` for an unknown UID). Workers do not inherit Execd's environment.
+Each request runs in a separate worker process with the selected credentials. Supplementary groups come from the selected user's system account; an unknown numeric UID has no supplementary groups. Account or group lookup failures other than an unknown UID fail the request. The worker never inherits Execd's supplementary groups as a fallback. Execd must have permission to establish the requested credentials; failure does not retry the operation as Execd. Relative paths resolve from `/`, and `~` uses the selected account's home directory (or `/` for an unknown UID). Workers do not inherit Execd's environment.
 
-Linux checks path traversal, parent directory access, file access, and metadata
-changes under that identity. Upload `owner`, `group`, and `mode` remain target
-metadata and cannot grant the worker additional privileges. Requests with
-different identities can run concurrently without changing Execd's credentials.
+Linux checks path traversal, parent directory access, file access, and metadata changes under that identity. Upload `owner`, `group`, and `mode` remain target metadata and cannot grant the worker additional privileges. Requests with different identities can run concurrently without changing Execd's credentials.
 
-To share a sandbox between conversations, provision a separate user and workspace
-for each conversation, allow the desired read access, and reserve directory write
-access for the owner. Deletion and rename permissions depend on the parent
-directory, so read-only file modes alone are insufficient. Keep sandbox API
-credentials in the trusted backend that selects these identities. This feature
-does not provide a separate mount namespace or a tenant isolation boundary.
+To share a sandbox between conversations, provision a separate user and workspace for each conversation, allow the desired read access, and reserve directory write access for the owner. Deletion and rename permissions depend on the parent directory, so read-only file modes alone are insufficient. Keep sandbox API credentials in the trusted backend that selects these identities. This feature does not provide a separate mount namespace or a tenant isolation boundary.
 
-The existing `/files` and `/directories` routes retain their default identity.
-The identity-prefixed routes require Linux and a supporting Execd version. Older
-servers return an unsupported route instead of silently ignoring identity
-options; clients must not fall back to the unprefixed routes.
+The existing `/files` and `/directories` routes retain their default identity. The identity-prefixed routes require Linux and a supporting Execd version. Older servers return an unsupported route instead of silently ignoring identity options; clients must not fall back to the unprefixed routes.
 
 ## Isolated sessions
 
@@ -147,4 +147,4 @@ Sandboxes can be pre-warmed in pools and reused across allocations. Execd makes 
 
 ## Observability
 
-Execd exposes local CPU and memory metrics as a snapshot and as a live stream, and exports OpenTelemetry metrics when the platform configures an endpoint — attributed to your sandbox ID and allocation. See [component telemetry](/guides/component-telemetry) for how export is configured.
+Execd exposes local CPU and memory metrics as a snapshot and as a live stream, and exports OpenTelemetry metrics when the platform configures an endpoint — attributed to your sandbox ID and allocation. See [telemetry](/guides/telemetry#execd) for the metric list and how export is configured.

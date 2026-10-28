@@ -32,6 +32,7 @@ import (
 
 func TestRevisionLaunchBootstrapsBeforeReturning(t *testing.T) {
 	events := []string{}
+	ticket := &revisionBootstrapTicket{}
 	session := &fakeRevisionProcessSession{
 		config: &mitmproxy.RevisionIPCConfig{
 			SocketPath:        "/run/opensandbox/revision/session.sock",
@@ -48,21 +49,23 @@ func TestRevisionLaunchBootstrapsBeforeReturning(t *testing.T) {
 			events = append(events, "new-session")
 			return session, nil
 		},
-		snapshot: func(context.Context) (credentialvault.ActiveSnapshot, int64, error) {
+		snapshot: func(context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error) {
 			events = append(events, "snapshot")
-			return credentialvault.ActiveSnapshot{Revision: 7}, 11, nil
+			return credentialvault.ActiveSnapshot{Revision: 7}, 11, ticket, nil
 		},
 		stop: func(*mitmproxy.Running) { events = append(events, "stop") },
 	}
 	base := mitmproxy.Config{ListenPort: 18081}
-	running, gotSession, err := owner.launch(context.Background(), base, func(cfg mitmproxy.Config) (*mitmproxy.Running, error) {
+	result, err := owner.launch(context.Background(), base, func(cfg mitmproxy.Config) (*mitmproxy.Running, error) {
 		events = append(events, "launch")
 		require.Equal(t, session.config, cfg.RevisionIPC)
 		return &mitmproxy.Running{}, nil
 	})
 	require.NoError(t, err)
-	require.NotNil(t, running)
-	require.Same(t, session, gotSession)
+	require.NotNil(t, result.running)
+	require.Same(t, session, result.session)
+	require.Same(t, ticket, result.ticket)
+	require.Zero(t, result.generation, "only the tagged lifecycle owner assigns generations")
 	require.Equal(t, []string{"snapshot", "new-session", "config", "launch", "bootstrap"}, events)
 	require.Equal(t, credentialvault.ActiveSnapshot{Revision: 7}, session.snapshots[0])
 	require.Equal(t, int64(11), session.policyEpochs[0])
@@ -77,7 +80,7 @@ func TestRevisionLaunchReconcilesLostCommitAcknowledgement(t *testing.T) {
 	}
 	owner := fakeRevisionLaunchOwner(session)
 
-	_, _, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, fakeMitmLaunch)
+	_, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, fakeMitmLaunch)
 	require.NoError(t, err)
 	require.Equal(t, 1, session.bootstrapCalls)
 	require.Equal(t, 1, session.reconcileCalls)
@@ -91,7 +94,7 @@ func TestRevisionLaunchRetriesAfterConfirmedAbort(t *testing.T) {
 	}
 	owner := fakeRevisionLaunchOwner(session)
 
-	_, _, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, fakeMitmLaunch)
+	_, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, fakeMitmLaunch)
 	require.NoError(t, err)
 	require.Equal(t, 2, session.bootstrapCalls)
 	require.Equal(t, 1, session.reconcileCalls)
@@ -101,13 +104,13 @@ func TestRevisionLaunchSanitizesSnapshotFailureBeforeStartingChild(t *testing.T)
 	events := []string{}
 	session := &fakeRevisionProcessSession{config: validFakeRevisionIPCConfig(), events: &events}
 	owner := fakeRevisionLaunchOwner(session)
-	owner.snapshot = func(context.Context) (credentialvault.ActiveSnapshot, int64, error) {
+	owner.snapshot = func(context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error) {
 		events = append(events, "snapshot")
-		return credentialvault.ActiveSnapshot{}, 0, errors.New("source detail must not escape")
+		return credentialvault.ActiveSnapshot{}, 0, nil, errors.New("source detail must not escape")
 	}
 	owner.stop = func(*mitmproxy.Running) { events = append(events, "stop") }
 
-	_, _, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, func(mitmproxy.Config) (*mitmproxy.Running, error) {
+	_, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, func(mitmproxy.Config) (*mitmproxy.Running, error) {
 		events = append(events, "launch")
 		return &mitmproxy.Running{}, nil
 	})
@@ -125,9 +128,9 @@ func TestRevisionLaunchStopsChildBeforeClosingFailedBootstrap(t *testing.T) {
 		events:        &events,
 	}
 	owner := fakeRevisionLaunchOwner(session)
-	owner.snapshot = func(context.Context) (credentialvault.ActiveSnapshot, int64, error) {
+	owner.snapshot = func(context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error) {
 		events = append(events, "snapshot")
-		return credentialvault.ActiveSnapshot{}, 0, nil
+		return credentialvault.ActiveSnapshot{}, 0, nil, nil
 	}
 	owner.newSession = func(revisionruntime.ProcessSessionConfig) (revisionProcessSession, error) {
 		events = append(events, "new-session")
@@ -135,7 +138,7 @@ func TestRevisionLaunchStopsChildBeforeClosingFailedBootstrap(t *testing.T) {
 	}
 	owner.stop = func(*mitmproxy.Running) { events = append(events, "stop") }
 
-	_, _, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, func(mitmproxy.Config) (*mitmproxy.Running, error) {
+	_, err := owner.launch(context.Background(), mitmproxy.Config{ListenPort: 18081}, func(mitmproxy.Config) (*mitmproxy.Running, error) {
 		events = append(events, "launch")
 		return &mitmproxy.Running{}, nil
 	})
@@ -153,16 +156,16 @@ func TestRevisionLaunchCancellationWhileSnapshotBlockedNeverStartsChild(t *testi
 			newSessionCalls++
 			return &fakeRevisionProcessSession{config: validFakeRevisionIPCConfig()}, nil
 		},
-		snapshot: func(ctx context.Context) (credentialvault.ActiveSnapshot, int64, error) {
+		snapshot: func(ctx context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error) {
 			close(started)
 			<-ctx.Done()
-			return credentialvault.ActiveSnapshot{}, 0, ctx.Err()
+			return credentialvault.ActiveSnapshot{}, 0, nil, ctx.Err()
 		},
 		stop: func(*mitmproxy.Running) {},
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, _, err := owner.launch(ctx, mitmproxy.Config{ListenPort: 18081}, func(mitmproxy.Config) (*mitmproxy.Running, error) {
+		_, err := owner.launch(ctx, mitmproxy.Config{ListenPort: 18081}, func(mitmproxy.Config) (*mitmproxy.Running, error) {
 			launchCalls++
 			return &mitmproxy.Running{}, nil
 		})
@@ -182,7 +185,7 @@ func TestSidecarRevisionLaunchOwnerDefaultsOffBeforeRuntimeLookup(t *testing.T) 
 	require.Nil(t, owner)
 }
 
-func TestExperimentalRevisionRuntimeRejectsVaultWrites(t *testing.T) {
+func TestExperimentalRevisionRuntimeRejectsVaultWritesWithoutMitm(t *testing.T) {
 	t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
 	server := &policyServer{
 		credentialVault: credentialvault.NewStore(nil, func() bool { return true }),
@@ -193,7 +196,7 @@ func TestExperimentalRevisionRuntimeRejectsVaultWrites(t *testing.T) {
 			response := httptest.NewRecorder()
 			server.handleCredentialVault(response, request)
 			require.Equal(t, http.StatusServiceUnavailable, response.Code)
-			require.Contains(t, response.Body.String(), "writes are unavailable")
+			require.Contains(t, response.Body.String(), "mutation unavailable")
 		})
 	}
 	_, err := server.credentialVault.Sanitized()
@@ -238,14 +241,17 @@ func TestPolicyServerRevisionBootstrapSnapshotDistinguishesMissingAndEmpty(t *te
 		credentialVault: credentialvault.NewStore(nil, func() bool { return true }),
 	}
 
-	snapshot, policyEpoch, err := server.revisionBootstrapSnapshot(context.Background())
+	require.NoError(t, server.initRevisionRecoveryLocked(effectivePolicyInputs{user: policy.DefaultDenyPolicy()}))
+	snapshot, policyEpoch, _, err := server.captureRevisionBootstrap(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, credentialvault.ActiveSnapshot{}, snapshot)
+	require.Zero(t, snapshot.Revision)
+	require.Empty(t, snapshot.Bindings)
+	require.Empty(t, snapshot.Redactions)
 	require.Zero(t, policyEpoch)
 
 	_, err = server.credentialVault.Create(credentialvault.CreateRequest{}, policy.DefaultDenyPolicy())
 	require.NoError(t, err)
-	snapshot, policyEpoch, err = server.revisionBootstrapSnapshot(context.Background())
+	snapshot, policyEpoch, _, err = server.captureRevisionBootstrap(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(1), snapshot.Revision)
 	require.Empty(t, snapshot.Bindings)
@@ -355,8 +361,8 @@ func fakeRevisionLaunchOwner(session revisionProcessSession) revisionLaunchOwner
 		newSession: func(revisionruntime.ProcessSessionConfig) (revisionProcessSession, error) {
 			return session, nil
 		},
-		snapshot: func(context.Context) (credentialvault.ActiveSnapshot, int64, error) {
-			return credentialvault.ActiveSnapshot{}, 0, nil
+		snapshot: func(context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error) {
+			return credentialvault.ActiveSnapshot{}, 0, nil, nil
 		},
 		stop: func(*mitmproxy.Running) {},
 	}

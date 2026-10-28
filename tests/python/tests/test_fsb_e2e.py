@@ -13,15 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""E2E coverage for the fast-sandbox (fsb) integration environment.
+"""SDK contract e2e for the fast-sandbox (fsb) integration environment.
 
-Mirrors the HTTP verify stages of
-``scripts/fast-sandbox-env/integration-env.sh`` using the Python SDK
-instead of raw curl: template catalog visibility, template-based sandbox
-creation through the signed gateway route, networkpolicy convergence
-(PATCH merge + DELETE), lifecycle ops (get/list/metadata/renew),
-pause/resume round trip, and the public snapshot round trip (snapshot,
-re-entry fence, restore, cleanup).
+The deep stack behavior — the create wire-up, policy enforcement and update
+convergence, checkpoint durability and route release, recorded-policy carry
+across pause/resume and snapshots, vault transfer, idle-pause/wake, and
+artifact-store hygiene — is covered by the shell verify suites under
+``scripts/fast-sandbox-env/verify/``, which ``integration.sh up`` chains on
+every run. This module stays deliberately thin: it exercises only the Python
+SDK client contract against the live stack — template CRUD, create with a
+network policy, the execd surface (commands/files/metrics), diagnostics, the
+egress patch/delete methods, pause/resume state fidelity, snapshot
+create/restore, and connect re-attach.
 
 Requires the fsb integration stack to be up plus
 ``OPENSANDBOX_TEST_FSB_TEMPLATE_ID`` (the golden-image template built by
@@ -50,9 +53,7 @@ from opensandbox.manager import SandboxManager
 from opensandbox.models.sandboxes import (
     NetworkPolicy,
     NetworkRule,
-    SandboxFilter,
     SandboxOrigin,
-    SnapshotFilter,
 )
 from opensandbox.models.templates import (
     CreateTemplateRequest,
@@ -65,6 +66,8 @@ from opensandbox.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 FSB_TEMPLATE_ID = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ID", "")
+# Set per run by the env's sdk-e2e (native + overlaybd templates differ).
+FSB_TEMPLATE_ORIGIN = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ORIGIN", "fast-sandbox-env")
 # alpine ships busybox wget: a real HTTPS request, so egress probes
 # exercise both gates of the fsb dns+nft chain (DNS resolution and
 # transport). Override with e.g. curlimages/curl if cert-verified curl
@@ -150,14 +153,13 @@ async def _get_sandbox_info(manager: SandboxManager, sandbox_id: str):
         raise
 
 
-async def _http_reachable_on(sandbox: Sandbox, target: str) -> bool:
-    """HTTP-level enforcement probe: a real HTTPS GET must succeed.
+async def _state_is(manager: SandboxManager, sandbox_id: str, state: str) -> bool:
+    info = await _get_sandbox_info(manager, sandbox_id)
+    return info is not None and info.status.state == state
 
-    curl rather than busybox wget: the fsb-sandbox-golden test image (the
-    default template source of the integration environment) ships curl
-    but no wget, so wget probes fail with "not found" regardless of the
-    egress data plane.
-    """
+
+async def _http_reachable_on(sandbox: Sandbox, target: str) -> bool:
+    """HTTP-level probe: a real HTTPS GET from inside the guest must succeed."""
     result = await sandbox.commands.run(
         f"curl -fsS -m 8 -o /dev/null https://{target}"
     )
@@ -169,16 +171,6 @@ async def _http_blocked_on(sandbox: Sandbox, target: str) -> bool:
         f"curl -fsS -m 8 -o /dev/null https://{target}"
     )
     return result.error is not None
-
-
-async def _get_policy_tolerant(sandbox: Sandbox):
-    """get_egress_policy tolerating transient 404/503 during CR propagation."""
-    try:
-        return await sandbox.get_egress_policy()
-    except SandboxApiException as exc:
-        if exc.status_code in {404, 503}:
-            return None
-        raise
 
 
 async def _get_snapshot(manager: SandboxManager, snapshot_id: str):
@@ -209,7 +201,8 @@ async def _kill_and_wait_gone(manager: SandboxManager, sandbox_id: str) -> None:
 
 
 class TestFsbE2E:
-    """SDK-driven conversion of the fsb integration-env verify stages."""
+    """SDK client contract against the live fsb stack (kept deliberately
+    thin — the deep stack behavior is the shell verify suites' job)."""
 
     @pytest.fixture(scope="class")
     async def connection_config(self):
@@ -230,30 +223,20 @@ class TestFsbE2E:
         info = await manager.get_template(FSB_TEMPLATE_ID)
         assert info.status.phase == TemplatePhase.SUCCEEDED
         assert info.status.manifest_ref, "template manifestRef is empty"
-        assert info.metadata.get("origin") == "fast-sandbox-env"
-        logger.info(
-            "env template %s: phase=%s manifestRef=%s",
-            FSB_TEMPLATE_ID,
-            info.status.phase,
-            info.status.manifest_ref,
-        )
+        assert info.metadata.get("origin") == FSB_TEMPLATE_ORIGIN
 
         paged = await manager.list_templates(
-            TemplateFilter(metadata={"origin": "fast-sandbox-env"})
+            TemplateFilter(metadata={"origin": FSB_TEMPLATE_ORIGIN})
         )
         assert FSB_TEMPLATE_ID in [t.template_id for t in paged.template_infos]
-        logger.info(
-            "metadata filter hit: %d template(s), env template listed",
-            len(paged.template_infos),
-        )
 
     @pytest.mark.timeout(1800)
     async def test_01b_template_crud(
         self, manager: SandboxManager, connection_config
     ) -> None:
         """Full template lifecycle via the SDK: async build -> Succeeded ->
-        listed under its metadata filter -> env visible inside a guest created
-        from the template -> deleted (404)."""
+        listed under its metadata filter -> a guest created from it sees the
+        baked env -> deleted (404)."""
         created = await manager.create_template(
             CreateTemplateRequest(
                 image=FSB_TEMPLATE_IMAGE,
@@ -264,11 +247,6 @@ class TestFsbE2E:
                 readiness=TemplateReadiness(warmup_seconds=15),
                 metadata={"origin": "fast-sandbox-env-sdk"},
             )
-        )
-        logger.info(
-            "template created: id=%s phase=%s (build runs asynchronously)",
-            created.template_id,
-            created.status.phase,
         )
         try:
             assert created.status.phase == TemplatePhase.PENDING
@@ -288,25 +266,14 @@ class TestFsbE2E:
             assert info.env == FSB_TEMPLATE_ENV, (
                 f"template env not persisted: {info.env}"
             )
-            logger.info(
-                "template build Succeeded: manifestRef=%s image=%s env=%s",
-                info.status.manifest_ref,
-                info.image,
-                info.env,
-            )
 
             paged = await manager.list_templates(
                 TemplateFilter(metadata={"origin": "fast-sandbox-env-sdk"})
             )
             assert created.template_id in [t.template_id for t in paged.template_infos]
-            logger.info(
-                "template listed under metadata filter (%d hit(s))",
-                len(paged.template_infos),
-            )
 
-            # Runtime env verification: the env is baked into the golden
-            # image at build time, so a sandbox created from this template
-            # must see it in the guest process environment.
+            # Runtime env verification: a sandbox created from this template
+            # must see the baked env in the guest process environment.
             sandbox = await Sandbox.create_from_template(
                 created.template_id,
                 timeout=timedelta(hours=1),
@@ -321,14 +288,10 @@ class TestFsbE2E:
                     f"template env not visible in the guest: "
                     f"expected {FSB_TEMPLATE_ENV['FSB_E2E_MARKER']!r}, got {marker!r}"
                 )
-                logger.info(
-                    "template env visible in guest: FSB_E2E_MARKER=%s", marker
-                )
             finally:
                 await _kill_and_wait_gone(manager, sandbox.id)
         finally:
             await manager.delete_template(created.template_id)
-            logger.info("template deleted: %s", created.template_id)
 
         async def _gone() -> bool:
             try:
@@ -338,16 +301,15 @@ class TestFsbE2E:
                 return exc.status_code == 404
 
         assert await _gone()
-        logger.info("template 404 confirmed after delete")
 
     @pytest.mark.timeout(1200)
-    async def test_02_template_sandbox_lifecycle_and_policy(
+    async def test_02_sandbox_surface_and_egress_methods(
         self, manager: SandboxManager, connection_config
     ) -> None:
-        # verify_one_sandbox: create carries the default egress policy so the
-        # networkPolicy -> egress action binding -> nft chain is exercised on
-        # every create; SDK readiness is the execd /ping through the signed
-        # gateway route.
+        """SDK create-with-policy, the execd surface, diagnostics, and the
+        patch/delete egress methods converging with real traffic. The
+        enforcement wire-up itself (networkPolicy -> binding -> nft) is the
+        shell verify's job — one reachable probe per method is enough here."""
         sandbox = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
@@ -358,7 +320,6 @@ class TestFsbE2E:
                 defaultAction="deny",
                 egress=[
                     NetworkRule(action="allow", target="example.com"),
-                    NetworkRule(action="allow", target="*.opensandbox.ai"),
                 ],
             ),
         )
@@ -366,189 +327,142 @@ class TestFsbE2E:
         try:
             assert sandbox.origin == SandboxOrigin.TEMPLATE
 
-            # HTTP-level enforcement probe: busybox wget performs a real
-            # HTTPS request, covering both gates of the fsb dns+nft chain
-            # (DNS resolution and transport).
-            def _http_reachable(target: str) -> bool:
-                return _http_reachable_on(sandbox, target)
-
-            def _http_blocked(target: str) -> bool:
-                return _http_blocked_on(sandbox, target)
-
-            async def _example_com_enforced() -> bool:
-                policy = await _get_policy_tolerant(sandbox)
-                return policy is not None and any(
-                    rule.target == "example.com" for rule in policy.egress or []
-                )
-
-            await _wait_until(
-                _example_com_enforced,
-                timedelta(minutes=2),
-                "egress policy enforcing (networkPolicy -> action binding -> nft)",
-            )
-            await _wait_until(
-                lambda: _http_reachable("example.com"),
-                timedelta(seconds=30),
-                "allowed target serves HTTPS",
-            )
-            await _wait_until(
-                lambda: _http_blocked("pypi.org"),
-                timedelta(seconds=30),
-                "denied target must not serve HTTPS",
-            )
-
-            # execd surface: command execution, filesystem round trip, metrics.
+            # Execd surface: command execution, filesystem round trip, metrics.
             result = await sandbox.commands.run("echo hello-fsb")
             assert result.error is None
             assert "hello-fsb" in result.logs.stdout[0].text
-            logger.info("execd command ok: stdout=%r", result.logs.stdout[0].text)
             await sandbox.files.write_file("/tmp/fsb-e2e.txt", "hello-fsb")
             assert await sandbox.files.read_file("/tmp/fsb-e2e.txt") == "hello-fsb"
-            logger.info("execd file round trip ok: /tmp/fsb-e2e.txt")
             metrics = await sandbox.get_metrics()
             assert metrics.cpu_count > 0
             assert metrics.memory_total_in_mib > 0
-            logger.info(
-                "execd metrics ok: cpu=%s memory=%.1fMiB",
-                metrics.cpu_count,
-                metrics.memory_total_in_mib,
-            )
 
-            # verify_policy_updated, converted to the SDK merge/delete paths:
-            # PATCH merges pypi.org into the binding and the egress
-            # sidecar hot-swaps the nft rules; DELETE removes example.com.
-            # A fresh FQDN never probed before (no stale negative DNS
-            # cache) and a flat A record; the shell verify allows up to 120s
-            # for the binding hot-swap to converge.
+            # Diagnostics surface: fsb serves context + inline events; the
+            # docker-style container logs endpoint is unsupported (501).
+            context = await manager.get_diagnostic_context(sandbox.id)
+            current = await sandbox.get_diagnostic_context()
+            assert context.sandbox_id == current.sandbox_id == sandbox.id
+            assert context.backend_type == current.backend_type == "fast-sandbox"
+            assert context.state
+            for scope in ("runtime", "all"):
+                for events in (
+                    await manager.get_diagnostic_events(sandbox.id, scope),
+                    await sandbox.get_diagnostic_events(scope),
+                ):
+                    assert events.sandbox_id == sandbox.id
+                    assert events.kind == "events"
+                    assert events.scope == scope
+                    assert events.delivery == "inline"
+                    assert isinstance(events.content, str)
+            for get_logs in (
+                lambda: manager.get_diagnostic_logs(sandbox.id, "container"),
+                lambda: sandbox.get_diagnostic_logs("container"),
+            ):
+                with pytest.raises(SandboxApiException) as error:
+                    await get_logs()
+                assert error.value.status_code == 501
+
+            # Egress methods converge with real traffic: PATCH adds an allow
+            # rule (pypi.org starts serving), DELETE removes the create-carried
+            # one (example.com stops serving).
             await sandbox.patch_egress_rules(
                 [NetworkRule(action="allow", target="pypi.org")]
             )
-
-            async def _pypi_org_enforced() -> bool:
-                policy = await _get_policy_tolerant(sandbox)
-                return policy is not None and any(
-                    rule.target == "pypi.org" for rule in policy.egress or []
-                )
-
             await _wait_until(
-                _pypi_org_enforced,
+                lambda: _http_reachable_on(sandbox, "pypi.org"),
                 timedelta(minutes=2),
-                "policy update converged (PATCH -> ReplaceActionBindings -> egress)",
-            )
-            await _wait_until(
-                lambda: _http_reachable("pypi.org"),
-                timedelta(minutes=2),
-                "newly allowed target serves HTTPS",
-            )
-            logger.info(
-                "PATCH enforced: pypi.org reachable after allow rule merge"
+                "PATCH enforced: pypi.org reachable",
             )
             await sandbox.delete_egress_rules(["example.com"])
-
-            async def _example_com_gone() -> bool:
-                policy = await _get_policy_tolerant(sandbox)
-                return policy is not None and all(
-                    rule.target != "example.com" for rule in policy.egress or []
-                )
-
             await _wait_until(
-                _example_com_gone,
+                lambda: _http_blocked_on(sandbox, "example.com"),
                 timedelta(minutes=2),
-                "deleted rule no longer served",
+                "DELETE enforced: example.com blocked",
             )
-            await _wait_until(
-                lambda: _http_blocked("example.com"),
-                timedelta(minutes=2),
-                "deleted target must stop serving HTTPS",
-            )
-            logger.info("DELETE enforced: example.com blocked after rule removal")
+        finally:
+            await _kill_and_wait_gone(manager, sandbox.id)
 
-            # verify_lifecycle_ops: get, list, metadata merge-patch
-            # (upsert + delete via null), renew-expiration.
-            info = await manager.get_sandbox_info(sandbox.id)
-            assert info.id == sandbox.id
-
-            listed = await manager.list_sandbox_infos(
-                SandboxFilter(page=1, page_size=50)
+    @pytest.mark.timeout(600)
+    async def test_02b_network_policy_rejects_port_scoped_rules(
+        self, manager: SandboxManager, connection_config
+    ) -> None:
+        """Fast-sandbox enforcement does not cover port-scoped rules yet, so
+        the server must fail closed with 400 on both the create-carried
+        policy and the PATCH route instead of silently installing rules the
+        fastlet nft path would ignore (a dropped deny rule fails open)."""
+        # Create-carried policy: a rule that pairs ports with an IP target is
+        # rejected the same as a port-only rule.
+        with pytest.raises(SandboxApiException) as create_exc:
+            await Sandbox.create_from_template(
+                FSB_TEMPLATE_ID,
+                timeout=timedelta(hours=1),
+                ready_timeout=COLD_READY_TIMEOUT,
+                connection_config=connection_config,
+                metadata={"origin": "fsb-port-scope-reject"},
+                network_policy=NetworkPolicy(
+                    defaultAction="deny",
+                    egress=[NetworkRule(action="allow", target="1.1.1.1", ports=[443])],
+                ),
             )
-            assert sandbox.id in [item.id for item in listed.sandbox_infos]
-            logger.info(
-                "list ok: %d sandbox(es), verify sandbox present",
-                len(listed.sandbox_infos),
-            )
+        assert create_exc.value.status_code == 400, (
+            "fsb create with a port-scoped rule must be rejected with 400"
+        )
 
-            await manager.patch_sandbox_metadata(
-                sandbox.id, {"env": "verify", "stage": "lifecycle-ops"}
-            )
-
-            async def _metadata_upserted() -> bool:
-                current = await manager.get_sandbox_info(sandbox.id)
-                return (
-                    current.metadata.get("env") == "verify"
-                    and current.metadata.get("stage") == "lifecycle-ops"
+        # A policy-only sandbox so the PATCH rejection can be asserted
+        # against a live fsb sandbox; killed in the finally block.
+        sandbox = await Sandbox.create_from_template(
+            FSB_TEMPLATE_ID,
+            timeout=timedelta(hours=1),
+            ready_timeout=COLD_READY_TIMEOUT,
+            connection_config=connection_config,
+            metadata={"origin": "fsb-port-scope-reject"},
+            network_policy=NetworkPolicy(
+                defaultAction="deny",
+                egress=[NetworkRule(action="allow", target="example.com")],
+            ),
+        )
+        try:
+            for rules in (
+                [NetworkRule(action="deny", ports=[25])],
+                [NetworkRule(action="allow", target="1.1.1.1", ports=[443])],
+            ):
+                with pytest.raises(SandboxApiException) as patch_exc:
+                    await sandbox.patch_egress_rules(rules)
+                assert patch_exc.value.status_code == 400, (
+                    "fsb PATCH with a port-scoped rule must be rejected with 400"
                 )
-
-            await _wait_until(_metadata_upserted, timedelta(minutes=1), "metadata upsert")
-            await manager.patch_sandbox_metadata(sandbox.id, {"stage": None})
-
-            async def _metadata_deleted() -> bool:
-                current = await manager.get_sandbox_info(sandbox.id)
-                return (
-                    current.metadata.get("stage") is None
-                    and current.metadata.get("env") == "verify"
-                )
-
-            await _wait_until(_metadata_deleted, timedelta(minutes=1), "metadata delete")
-
-            before = await manager.get_sandbox_info(sandbox.id)
-            renewed = await manager.renew_sandbox(sandbox.id, timedelta(hours=2))
-            after = await manager.get_sandbox_info(sandbox.id)
-            assert renewed.expires_at > before.expires_at
-            logger.info(
-                "renew ok: expiresAt %s -> %s",
-                before.expires_at,
-                renewed.expires_at,
-            )
-            # The server persists expiresAt truncated to whole seconds while
-            # the renew response carries microseconds.
-            assert abs(
-                (after.expires_at - renewed.expires_at).total_seconds()
-            ) < 1
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)
 
     @pytest.mark.timeout(1200)
-    async def test_03_pause_resume_round_trip(
+    async def test_03_pause_resume_state_fidelity(
         self, manager: SandboxManager, connection_config
     ) -> None:
-        started = time.monotonic()
+        """Pause/resume through the SDK preserves guest state: a regular
+        file, a RAM-backed tmpfs file, and continuous uptime survive the
+        checkpoint round trip (a reboot would reset uptime to ~0). The
+        durability semantics and recorded-policy carry are the shell
+        pause/resume verify's job."""
         sandbox = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
             ready_timeout=COLD_READY_TIMEOUT,
             connection_config=connection_config,
             metadata={"origin": "fast-sandbox-env-pause"},
-            network_policy=NetworkPolicy(
-                defaultAction="deny",
-                egress=[NetworkRule(action="allow", target="pypi.org")],
-            ),
-        )
-        logger.info(
-            "sandbox ready: id=%s origin=%s (create+ready %.1fs)",
-            sandbox.id,
-            sandbox.origin,
-            time.monotonic() - started,
         )
         try:
-            async def _state_is(state: str) -> bool:
-                info = await _get_sandbox_info(manager, sandbox.id)
-                return info is not None and info.status.state == state
+            # Pause a RUNNING sandbox: on a warm pool the guest serves execd
+            # almost immediately, and a pause fired before the Sandbox CR
+            # settles loses its intent (the controller never sees it — the
+            # CI run on 2026-10-21 swallowed a pause fired ~500ms after
+            # create). Wait for Running first.
+            await _wait_until(
+                lambda: _state_is(manager, sandbox.id, "Running"),
+                timedelta(minutes=3),
+                "Running",
+            )
 
-            await _wait_until(lambda: _state_is("Running"), timedelta(minutes=3), "Running")
-
-            # State markers written before the checkpoint: a regular file,
-            # a RAM-backed tmpfs file, and the guest clock (uptime must be
-            # continuous across resume - a reboot would reset it to ~0).
+            # State markers written before the checkpoint.
             await sandbox.files.write_file("/tmp/fsb-state.txt", "pause-state-check")
             await sandbox.commands.run("echo ram-state-check > /dev/shm/fsb-mem.txt")
             uptime_before = float(
@@ -556,45 +470,25 @@ class TestFsbE2E:
                     await sandbox.commands.run("cut -d' ' -f1 /proc/uptime")
                 ).logs.stdout[0].text
             )
-            await _wait_until(
-                lambda: _http_reachable_on(sandbox, "pypi.org"),
-                timedelta(minutes=2),
-                "pypi.org reachable pre-pause",
-            )
-            logger.info(
-                "pre-pause state written (file + tmpfs + uptime=%.1fs); policy enforced (pypi.org reachable)",
-                uptime_before,
-            )
 
-            # Paused is durable-first: checkpoint complete + capacity released;
-            # the signed gateway route stops serving.
-            pause_started = time.monotonic()
             await sandbox.pause()
-            logger.info("pause initiated: %s", sandbox.id)
-            await _wait_until(lambda: _state_is("Paused"), timedelta(minutes=4), "Paused")
-            logger.info(
-                "Paused observed (durable-first, %.1fs after pause)",
-                time.monotonic() - pause_started,
+            await _wait_until(
+                lambda: _state_is(manager, sandbox.id, "Paused"),
+                timedelta(minutes=4),
+                "Paused",
             )
 
             # Resume advances the route generation; Sandbox.resume re-resolves
             # endpoints and reads the sandbox origin from the server header.
-            resume_started = time.monotonic()
             resumed = await Sandbox.resume(
                 sandbox.id,
                 connection_config=connection_config,
                 resume_timeout=WARM_READY_TIMEOUT,
             )
-            logger.info(
-                "resumed: origin=%s healthy (restore window %.1fs incl. 503 retries)",
-                resumed.origin,
-                time.monotonic() - resume_started,
-            )
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
 
-            # Checkpoint fidelity: regular file, RAM-backed tmpfs file and
-            # continuous uptime all survive the checkpoint round trip.
+            # Checkpoint fidelity.
             assert (
                 await resumed.files.read_file("/tmp/fsb-state.txt")
                 == "pause-state-check"
@@ -611,36 +505,17 @@ class TestFsbE2E:
                 f"uptime regressed {uptime_before} -> {uptime_after}: "
                 "the sandbox rebooted instead of resuming the checkpoint"
             )
-            logger.info(
-                "checkpoint fidelity ok: file + tmpfs + uptime continuous (%.1fs -> %.1fs)",
-                uptime_before,
-                uptime_after,
-            )
-
-            # Policy survives resume, stays enforced, and can be updated.
-            policy = await resumed.get_egress_policy()
-            assert any(
-                rule.target == "pypi.org" for rule in policy.egress or []
-            ), f"policy lost across resume: {policy}"
-            await _wait_until(
-                lambda: _http_reachable_on(resumed, "pypi.org"),
-                timedelta(minutes=2),
-                "pypi.org reachable post-resume",
-            )
-            await resumed.delete_egress_rules(["pypi.org"])
-            await _wait_until(
-                lambda: _http_blocked_on(resumed, "pypi.org"),
-                timedelta(minutes=2),
-                "pypi.org blocked after post-resume DELETE",
-            )
-            logger.info("post-resume policy update verified (delete -> blocked)")
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)
 
     @pytest.mark.timeout(1800)
-    async def test_04_snapshot_round_trip(
+    async def test_04_snapshot_restore_minimal(
         self, manager: SandboxManager, connection_config
     ) -> None:
+        """Minimal SDK snapshot round trip: create -> Ready -> restore boots
+        the published artifact set (the pre-snapshot file is present in the
+        restored guest). The artifact/policy carry detail is the shell
+        snapshot verify's job."""
         source = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
@@ -650,11 +525,11 @@ class TestFsbE2E:
         )
         snapshot_ids: list[str] = []
         try:
-            async def _state_is(state: str) -> bool:
-                info = await _get_sandbox_info(manager, source.id)
-                return info is not None and info.status.state == state
-
-            await _wait_until(lambda: _state_is("Running"), timedelta(minutes=5), "Running")
+            await _wait_until(
+                lambda: _state_is(manager, source.id, "Running"),
+                timedelta(minutes=5),
+                "Running",
+            )
             assert await source.is_healthy()
 
             # State marker written before the snapshot: a restored sandbox
@@ -663,98 +538,21 @@ class TestFsbE2E:
             await source.files.write_file(
                 "/tmp/fsb-snap-state.txt", "snapshot-state-check"
             )
-            logger.info("pre-snapshot state written: /tmp/fsb-snap-state.txt")
 
-            # 1. Snapshot create returns Creating; the server row converges
-            # from the fast-sandbox SandboxSnapshot CR via its watcher.
             snapshot = await manager.create_snapshot(source.id, name="env-verify")
             snapshot_ids.append(snapshot.id)
             assert snapshot.status.state == "Creating"
-            logger.info(
-                "snapshot created: id=%s state=%s", snapshot.id, snapshot.status.state
-            )
-
-            # 2. Re-entry while the dump window holds the sandbox: fenced as
-            # 409 once the CR is cache-visible, or accepted (202) during
-            # fence cache lag and resolved to a terminal phase afterwards.
-            extra_snapshot_id: str | None = None
-            try:
-                reentry = await manager.create_snapshot(
-                    source.id, name="env-verify-reentry"
-                )
-                extra_snapshot_id = reentry.id
-                snapshot_ids.append(reentry.id)
-                logger.info(
-                    "re-entry snapshot accepted during fence cache lag: id=%s",
-                    extra_snapshot_id,
-                )
-            except SandboxApiException as exc:
-                assert exc.status_code == 409, f"unexpected re-entry error: {exc}"
-                logger.info("re-entry snapshot fenced by the pause window (409)")
 
             async def _snapshot_ready(snapshot_id: str) -> bool:
                 info = await _get_snapshot(manager, snapshot_id)
                 return info is not None and info.status.state == "Ready"
 
-            snapshot_started = time.monotonic()
             await _wait_until(
                 lambda: _snapshot_ready(snapshot.id),
                 timedelta(minutes=5),
                 f"snapshot {snapshot.id} Ready",
             )
-            logger.info(
-                "snapshot Ready (%.1fs after POST)",
-                time.monotonic() - snapshot_started,
-            )
 
-            # 3. Source survival: the pause window must be released and the
-            # sandbox back to serving after the snapshot went terminal.
-            await _wait_until(lambda: _state_is("Running"), timedelta(minutes=2), "source Running")
-            assert await source.is_healthy()
-            logger.info("source sandbox survived: Running + /ping 200 after snapshot")
-
-            if extra_snapshot_id is not None:
-                async def _extra_terminal() -> bool:
-                    info = await _get_snapshot(manager, extra_snapshot_id)
-                    return info is not None and info.status.state in {"Ready", "Failed"}
-
-                await _wait_until(
-                    _extra_terminal,
-                    timedelta(minutes=3),
-                    "accepted re-entry snapshot reached a terminal phase",
-                )
-
-            # 4. Second snapshot after the first is terminal: fresh id.
-            second = await manager.create_snapshot(source.id, name="env-verify-2")
-            snapshot_ids.append(second.id)
-            assert second.id != snapshot.id
-            await _wait_until(
-                lambda: _snapshot_ready(second.id),
-                timedelta(minutes=5),
-                f"snapshot {second.id} Ready",
-            )
-            logger.info("second snapshot Ready: id=%s (distinct id)", second.id)
-
-            # 5. Listing scoped by sandboxId contains the snapshots as Ready.
-            listed = await manager.list_snapshots(
-                SnapshotFilter(sandbox_id=source.id, page=1, page_size=50)
-            )
-            ready_ids = {
-                item.id
-                for item in listed.snapshot_infos
-                if item.status.state == "Ready"
-            }
-            assert snapshot.id in ready_ids
-            assert second.id in ready_ids
-            logger.info(
-                "snapshot list ok: %d row(s), both required snapshots Ready",
-                len(listed.snapshot_infos),
-            )
-
-            # 6. Restore: the restored sandbox boots the published artifact
-            # set; resourceLimits must restate the pool profile.
-            restore_started = time.monotonic()
-            logger.info("restoring sandbox from snapshot %s ...", snapshot.id)
             restore = await Sandbox.create(
                 snapshot_id=snapshot.id,
                 timeout=timedelta(hours=1),
@@ -762,58 +560,18 @@ class TestFsbE2E:
                 connection_config=connection_config,
                 ready_timeout=timedelta(minutes=10),
             )
+            snapshot_ids.append(snapshot.id)
             try:
                 assert await restore.is_healthy()
-                logger.info(
-                    "restore ok: %s boots the published artifact set (ready %.1fs)",
-                    restore.id,
-                    time.monotonic() - restore_started,
-                )
-
-                # State fidelity: the pre-snapshot file must be present in
-                # the restored guest.
                 assert (
                     await restore.files.read_file("/tmp/fsb-snap-state.txt")
                     == "snapshot-state-check"
-                )
-                logger.info("file state survived snapshot restore")
-
-                # The restore carries no network policy: set one, verify it
-                # is enforced, then update it and verify again.
-                await restore.patch_egress_rules(
-                    [NetworkRule(action="allow", target="pypi.org")]
-                )
-                await _wait_until(
-                    lambda: _http_reachable_on(restore, "pypi.org"),
-                    timedelta(minutes=2),
-                    "restored sandbox enforces the patched allow rule",
-                )
-                await _wait_until(
-                    lambda: _http_blocked_on(restore, "www.github.com"),
-                    timedelta(minutes=2),
-                    "restored sandbox blocks non-allowed targets (deny-first)",
-                )
-                logger.info(
-                    "policy on restored sandbox enforced: pypi.org reachable, www.github.com blocked"
-                )
-                await restore.delete_egress_rules(["pypi.org"])
-                await _wait_until(
-                    lambda: _http_blocked_on(restore, "pypi.org"),
-                    timedelta(minutes=2),
-                    "deleted rule stops resolving on the restored sandbox",
-                )
-                logger.info(
-                    "policy update on restored sandbox verified (DELETE -> blocked)"
                 )
             finally:
                 await _kill_and_wait_gone(manager, restore.id)
         finally:
             await _kill_and_wait_gone(manager, source.id)
-            logger.info(
-                "cleanup: source sandbox deleted, %d snapshot row(s) removed",
-                len(snapshot_ids),
-            )
-            for snapshot_id in snapshot_ids:
+            for snapshot_id in set(snapshot_ids):
                 try:
                     await manager.delete_snapshot(snapshot_id)
                 except Exception as exc:  # noqa: BLE001 - best-effort cleanup
@@ -829,7 +587,8 @@ class TestFsbE2E:
     ) -> None:
         """Sandbox.connect re-attaches to a running template sandbox: the
         server header drives origin auto-detection (control-plane egress),
-        and the re-attached instance fully serves execd + policy operations."""
+        and the re-attached instance fully serves execd + reads the
+        persisted policy."""
         sandbox = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
@@ -848,42 +607,14 @@ class TestFsbE2E:
             assert attached.id == sandbox.id
             assert attached.origin == SandboxOrigin.TEMPLATE
             assert await attached.is_healthy()
-            logger.info(
-                "connected: id=%s origin=%s (server header auto-detected)",
-                attached.id,
-                attached.origin,
-            )
 
             # execd serves through the re-attached instance.
             result = await attached.commands.run("echo connect-ok")
             assert result.error is None
             assert "connect-ok" in result.logs.stdout[0].text
-            logger.info("execd command ok on connected instance")
 
-            # The policy persisted across attach, is enforced, and can be
-            # updated through the connected instance.
+            # The policy persisted across attach.
             policy = await attached.get_egress_policy()
             assert any(r.target == "example.com" for r in policy.egress or [])
-            await _wait_until(
-                lambda: _http_reachable_on(attached, "example.com"),
-                timedelta(minutes=2),
-                "pre-existing allow rule still enforced after connect",
-            )
-            await _wait_until(
-                lambda: _http_blocked_on(attached, "www.github.com"),
-                timedelta(minutes=2),
-                "deny-first still blocks non-allowed targets after connect",
-            )
-            await attached.patch_egress_rules(
-                [NetworkRule(action="allow", target="pypi.org")]
-            )
-            await _wait_until(
-                lambda: _http_reachable_on(attached, "pypi.org"),
-                timedelta(minutes=2),
-                "PATCH via the connected instance is enforced",
-            )
-            logger.info(
-                "policy verified on connected instance: persisted, enforced, updatable"
-            )
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)

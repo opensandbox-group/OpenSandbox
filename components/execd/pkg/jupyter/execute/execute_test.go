@@ -282,3 +282,202 @@ func TestExecuteCodeStreamFallsBackWhenPollIntervalIsNonPositive(t *testing.T) {
 	require.GreaterOrEqual(t, elapsed, 90*time.Millisecond, "expected non-positive poll interval to fall back to runtime default (100ms)")
 	require.Less(t, elapsed, 300*time.Millisecond, "expected fallback poll interval to still close stream promptly")
 }
+
+// collectUntilClosed drains resultChan and fails the test if it is not closed
+// within the timeout.
+func collectUntilClosed(t *testing.T, resultChan chan *ExecutionResult, timeout time.Duration) []*ExecutionResult {
+	t.Helper()
+	var results []*ExecutionResult
+	deadline := time.After(timeout)
+	for {
+		select {
+		case result, ok := <-resultChan:
+			if !ok {
+				return results
+			}
+			results = append(results, result)
+		case <-deadline:
+			t.Fatalf("resultChan was not closed within %s; got %d results", timeout, len(results))
+		}
+	}
+}
+
+func sendStatus(conn *websocket.Conn, state ExecutionState, parent Header) {
+	content, _ := json.Marshal(StatusUpdate{ExecutionState: state})
+	_ = conn.WriteJSON(Message{
+		Header:       Header{MessageID: "status-" + string(state), MessageType: string(MsgStatus)},
+		ParentHeader: parent,
+		Content:      json.RawMessage(content),
+	})
+}
+
+func TestExecuteCodeStreamFailsWhenConnectionDrops(t *testing.T) {
+	server := createTestServer(t, func(conn *websocket.Conn) {
+		var executeRequest Message
+		if err := conn.ReadJSON(&executeRequest); err != nil {
+			return
+		}
+		streamContent, _ := json.Marshal(StreamOutput{Name: StreamStdout, Text: "before drop\n"})
+		_ = conn.WriteJSON(Message{
+			Header:       Header{MessageID: "stream-msg-id", MessageType: string(MsgStream)},
+			ParentHeader: executeRequest.Header,
+			Content:      json.RawMessage(streamContent),
+		})
+		// Returning closes the connection without an execute_reply.
+	})
+	defer server.Close()
+
+	client := NewClient("", nil)
+	if err := client.Connect("ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/k/channels"); err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer client.Disconnect()
+
+	resultChan := make(chan *ExecutionResult, 10)
+	if err := client.ExecuteCodeStream("print('before drop')", resultChan); err != nil {
+		t.Fatalf("ExecuteCodeStream: %v", err)
+	}
+
+	results := collectUntilClosed(t, resultChan, 3*time.Second)
+	last := results[len(results)-1]
+	if last.Error == nil {
+		t.Fatalf("last result = %+v, want an error", last)
+	}
+}
+
+func TestExecuteCodeStreamFailsWhenKernelRestarts(t *testing.T) {
+	serverDone := make(chan struct{})
+	defer close(serverDone)
+	server := createTestServer(t, func(conn *websocket.Conn) {
+		var executeRequest Message
+		if err := conn.ReadJSON(&executeRequest); err != nil {
+			return
+		}
+		sendStatus(conn, StateBusy, executeRequest.Header)
+		// The kernel died; the server restarts it, and the new kernel reports
+		// idle with no parent. The execute_request never gets a reply.
+		sendStatus(conn, StateRestarting, Header{})
+		sendStatus(conn, StateStarting, Header{})
+		sendStatus(conn, StateIdle, Header{})
+		<-serverDone
+	})
+	defer server.Close()
+
+	client := NewClient("", nil)
+	if err := client.Connect("ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/k/channels"); err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer client.Disconnect()
+
+	resultChan := make(chan *ExecutionResult, 10)
+	if err := client.ExecuteCodeStream("import os; os._exit(1)", resultChan); err != nil {
+		t.Fatalf("ExecuteCodeStream: %v", err)
+	}
+
+	results := collectUntilClosed(t, resultChan, 3*time.Second)
+	if len(results) == 0 || results[len(results)-1].Error == nil {
+		t.Fatalf("results = %+v, want the last one to be an error", results)
+	}
+	for _, result := range results {
+		if result.ExecutionTime > 0 {
+			t.Fatalf("got a completion result %+v for an execution that never finished", result)
+		}
+	}
+}
+
+func TestExecuteCodeStreamDisconnectIsNotReportedAsLostConnection(t *testing.T) {
+	serverDone := make(chan struct{})
+	defer close(serverDone)
+	requestRead := make(chan struct{})
+	server := createTestServer(t, func(conn *websocket.Conn) {
+		var executeRequest Message
+		if err := conn.ReadJSON(&executeRequest); err != nil {
+			return
+		}
+		close(requestRead)
+		<-serverDone
+	})
+	defer server.Close()
+
+	client := NewClient("", nil)
+	if err := client.Connect("ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/k/channels"); err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+
+	resultChan := make(chan *ExecutionResult, 10)
+	if err := client.ExecuteCodeStream("import time; time.sleep(60)", resultChan); err != nil {
+		t.Fatalf("ExecuteCodeStream: %v", err)
+	}
+	<-requestRead
+
+	// The caller stopped waiting (e.g. its request was cancelled) and closes
+	// the connection itself.
+	client.Disconnect()
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case result := <-resultChan:
+		t.Fatalf("got %+v after Disconnect, want nothing", result)
+	default:
+	}
+}
+
+func sendExecuteReply(conn *websocket.Conn, executionCount int, parent Header) {
+	content, _ := json.Marshal(ExecuteReply{ExecutionCount: executionCount, Status: "ok"})
+	_ = conn.WriteJSON(Message{
+		Header:       Header{MessageID: "reply-msg-id", MessageType: string(MsgExecuteReply)},
+		ParentHeader: parent,
+		Content:      json.RawMessage(content),
+	})
+}
+
+// A connection that closes after the kernel has replied does not turn the
+// completed execution into a failure, whether or not idle arrived first.
+func TestExecuteCodeStreamConnectionClosedAfterReplyIsNotAnError(t *testing.T) {
+	previousPollInterval := execdflag.JupyterIdlePollInterval
+	execdflag.JupyterIdlePollInterval = 200 * time.Millisecond
+	t.Cleanup(func() { execdflag.JupyterIdlePollInterval = previousPollInterval })
+
+	for name, idleFirst := range map[string]bool{"idle then reply": true, "reply without idle": false} {
+		t.Run(name, func(t *testing.T) {
+			server := createTestServer(t, func(conn *websocket.Conn) {
+				var executeRequest Message
+				if err := conn.ReadJSON(&executeRequest); err != nil {
+					return
+				}
+				if idleFirst {
+					sendStatus(conn, StateIdle, executeRequest.Header)
+					// Let finalizeExecution start waiting for the reply.
+					time.Sleep(50 * time.Millisecond)
+				}
+				sendExecuteReply(conn, 1, executeRequest.Header)
+				// Returning closes the connection right after the reply.
+			})
+			defer server.Close()
+
+			client := NewClient("", nil)
+			if err := client.Connect("ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/k/channels"); err != nil {
+				t.Fatalf("failed to connect: %v", err)
+			}
+			defer client.Disconnect()
+
+			resultChan := make(chan *ExecutionResult, 10)
+			if err := client.ExecuteCodeStream("1", resultChan); err != nil {
+				t.Fatalf("ExecuteCodeStream: %v", err)
+			}
+
+			results := collectUntilClosed(t, resultChan, 3*time.Second)
+			completed := false
+			for _, result := range results {
+				if result.Error != nil {
+					t.Fatalf("got error result %+v for an execution the kernel completed", result.Error)
+				}
+				if result.ExecutionTime > 0 {
+					completed = true
+				}
+			}
+			if !completed {
+				t.Fatalf("results = %+v, want a completion", results)
+			}
+		})
+	}
+}

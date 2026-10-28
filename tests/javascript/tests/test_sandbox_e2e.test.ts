@@ -115,7 +115,7 @@ test("01 sandbox lifecycle, health, endpoint, metrics, renew, connect", async ()
     expect(await sandbox2.isHealthy()).toBe(true);
     const r = await sandbox2.commands.run("echo connect-ok");
     expect(r.error).toBeUndefined();
-    expect(r.logs.stdout[0]?.text).toBe("connect-ok");
+    expect(r.logs.stdout[0]?.text).toBe("connect-ok\n");
   } finally {
     // no local resources to close
   }
@@ -300,7 +300,7 @@ test("01b sandbox create with host volume mount (read-write)", async () => {
     }
     expect(readMarker.error).toBeUndefined();
     expect(readMarker.logs.stdout).toHaveLength(1);
-    expect(readMarker.logs.stdout[0]?.text).toBe("opensandbox-e2e-marker");
+    expect(readMarker.logs.stdout[0]?.text).toBe("opensandbox-e2e-marker\n");
 
     // Step 2: Write a file from inside the sandbox to the mounted path
     const writeResult = await volumeSandbox.commands.run(
@@ -322,7 +322,7 @@ test("01b sandbox create with host volume mount (read-write)", async () => {
     }
     expect(readBack.error).toBeUndefined();
     expect(readBack.logs.stdout).toHaveLength(1);
-    expect(readBack.logs.stdout[0]?.text).toBe("written-from-sandbox");
+    expect(readBack.logs.stdout[0]?.text).toBe("written-from-sandbox\n");
 
     // Step 4: Verify the mount path is a proper directory
     let dirCheck = await volumeSandbox.commands.run(
@@ -330,13 +330,13 @@ test("01b sandbox create with host volume mount (read-write)", async () => {
     );
     for (let attempt = 0; attempt < 3; attempt++) {
       expect(dirCheck.error).toBeUndefined();
-      if (dirCheck.logs.stdout[0]?.text === "OK") break;
+      if (dirCheck.logs.stdout[0]?.text === "OK\n") break;
       await new Promise((r) => setTimeout(r, 1000));
       dirCheck = await volumeSandbox.commands.run(
         `test -d ${containerMountPath} && echo OK`
       );
     }
-    expect(dirCheck.logs.stdout[0]?.text).toBe("OK");
+    expect(dirCheck.logs.stdout[0]?.text).toBe("OK\n");
   } finally {
     try {
       await volumeSandbox.kill();
@@ -383,7 +383,7 @@ test("01c sandbox create with host volume mount (read-only)", async () => {
     }
     expect(readMarker.error).toBeUndefined();
     expect(readMarker.logs.stdout).toHaveLength(1);
-    expect(readMarker.logs.stdout[0]?.text).toBe("opensandbox-e2e-marker");
+    expect(readMarker.logs.stdout[0]?.text).toBe("opensandbox-e2e-marker\n");
 
     // Step 2: Verify writing is denied on read-only mount
     const writeResult = await roSandbox.commands.run(
@@ -394,7 +394,7 @@ test("01c sandbox create with host volume mount (read-only)", async () => {
     );
     const writeWasRejected =
       writeResult.error != null || writeResult.logs.stderr.length > 0;
-    const fileWasNotCreated = statResult.logs.stdout[0]?.text === "OK";
+    const fileWasNotCreated = statResult.logs.stdout[0]?.text === "OK\n";
     expect(writeWasRejected || fileWasNotCreated).toBe(true);
   } finally {
     try {
@@ -442,7 +442,7 @@ test("01d sandbox create with PVC named volume mount (read-write)", async () => 
     }
     expect(readMarker.error).toBeUndefined();
     expect(readMarker.logs.stdout).toHaveLength(1);
-    expect(readMarker.logs.stdout[0]?.text).toBe("pvc-marker-data");
+    expect(readMarker.logs.stdout[0]?.text).toBe("pvc-marker-data\n");
 
     // Step 2: Write a file from inside the sandbox to the named volume
     const writeResult = await pvcSandbox.commands.run(
@@ -464,7 +464,7 @@ test("01d sandbox create with PVC named volume mount (read-write)", async () => 
     }
     expect(readBack.error).toBeUndefined();
     expect(readBack.logs.stdout).toHaveLength(1);
-    expect(readBack.logs.stdout[0]?.text).toBe("written-to-pvc");
+    expect(readBack.logs.stdout[0]?.text).toBe("written-to-pvc\n");
 
     // Step 4: Verify the mount path is a proper directory
     let dirCheck = await pvcSandbox.commands.run(
@@ -472,13 +472,13 @@ test("01d sandbox create with PVC named volume mount (read-write)", async () => 
     );
     for (let attempt = 0; attempt < 3; attempt++) {
       expect(dirCheck.error).toBeUndefined();
-      if (dirCheck.logs.stdout[0]?.text === "OK") break;
+      if (dirCheck.logs.stdout[0]?.text === "OK\n") break;
       await new Promise((r) => setTimeout(r, 1000));
       dirCheck = await pvcSandbox.commands.run(
         `test -d ${containerMountPath} && echo OK`
       );
     }
-    expect(dirCheck.logs.stdout[0]?.text).toBe("OK");
+    expect(dirCheck.logs.stdout[0]?.text).toBe("OK\n");
   } finally {
     try {
       await pvcSandbox.kill();
@@ -525,7 +525,7 @@ test("01e sandbox create with PVC named volume mount (read-only)", async () => {
     }
     expect(readMarker.error).toBeUndefined();
     expect(readMarker.logs.stdout).toHaveLength(1);
-    expect(readMarker.logs.stdout[0]?.text).toBe("pvc-marker-data");
+    expect(readMarker.logs.stdout[0]?.text).toBe("pvc-marker-data\n");
 
     // Step 2: Verify writing is denied on read-only mount
     const writeResult = await roSandbox.commands.run(
@@ -536,7 +536,7 @@ test("01e sandbox create with PVC named volume mount (read-only)", async () => {
     );
     const writeWasRejected =
       writeResult.error != null || writeResult.logs.stderr.length > 0;
-    const fileWasNotCreated = statResult.logs.stdout[0]?.text === "OK";
+    const fileWasNotCreated = statResult.logs.stdout[0]?.text === "OK\n";
     expect(writeWasRejected || fileWasNotCreated).toBe(true);
   } finally {
     try {
@@ -585,7 +585,7 @@ test("01f sandbox create with PVC named volume subPath mount", async () => {
     }
     expect(readMarker.error).toBeUndefined();
     expect(readMarker.logs.stdout).toHaveLength(1);
-    expect(readMarker.logs.stdout[0]?.text).toBe("pvc-subpath-marker");
+    expect(readMarker.logs.stdout[0]?.text).toBe("pvc-subpath-marker\n");
 
     // Step 2: Verify only subPath contents are visible (not the full volume)
     const lsResult = await subpathSandbox.commands.run(
@@ -612,7 +612,7 @@ test("01f sandbox create with PVC named volume subPath mount", async () => {
     }
     expect(readBack!.error).toBeUndefined();
     expect(readBack!.logs.stdout).toHaveLength(1);
-    expect(readBack!.logs.stdout[0]?.text).toBe("subpath-write-test");
+    expect(readBack!.logs.stdout[0]?.text).toBe("subpath-write-test\n");
   } finally {
     try {
       await subpathSandbox.kill();
@@ -679,7 +679,7 @@ test("02 command execution: success, working directory, background, failure", as
   expect(ok.id).toBeTruthy();
   expect(ok.error).toBeUndefined();
   expect(ok.logs.stdout).toHaveLength(1);
-  expect(ok.logs.stdout[0]?.text).toBe("Hello OpenSandbox E2E");
+  expect(ok.logs.stdout[0]?.text).toBe("Hello OpenSandbox E2E\n");
   assertRecentTimestampMs(ok.logs.stdout[0]!.timestamp);
   expect(ok.exitCode).toBe(0);
   expect(ok.complete).toBeTruthy();
@@ -691,7 +691,7 @@ test("02 command execution: success, working directory, background, failure", as
 
   const pwd = await sandbox.commands.run("pwd", { workingDirectory: "/tmp" });
   expect(pwd.error).toBeUndefined();
-  expect(pwd.logs.stdout[0]?.text).toBe("/tmp");
+  expect(pwd.logs.stdout[0]?.text).toBe("/tmp\n");
   expect(pwd.exitCode).toBe(0);
   expect(pwd.complete).toBeTruthy();
 
@@ -1004,7 +1004,7 @@ test("03 filesystem operations: CRUD + replace/move/delete + range + stream", as
     { workingDirectory: "/tmp" }
   );
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (!verify.error && verify.logs.stdout[0]?.text === "OK") break;
+    if (!verify.error && verify.logs.stdout[0]?.text === "OK\n") break;
     await new Promise((r) => setTimeout(r, 1000));
     verify = await sandbox.commands.run(
       `test ! -d ${dir1} && test ! -d ${dir2} && echo OK`,
@@ -1012,7 +1012,7 @@ test("03 filesystem operations: CRUD + replace/move/delete + range + stream", as
     );
   }
   expect(verify.error).toBeUndefined();
-  expect(verify.logs.stdout[0]?.text).toBe("OK");
+  expect(verify.logs.stdout[0]?.text).toBe("OK\n");
 });
 
 test("03a line-based file reading with offset and limit", async () => {
@@ -1092,7 +1092,7 @@ test("04 interrupt command", async () => {
     completed.length > 0 ||
       errors.length > 0 ||
       (followUp?.error === undefined &&
-        followUp?.logs.stdout[0]?.text === "interrupt-ok"),
+        followUp?.logs.stdout[0]?.text === "interrupt-ok\n"),
   ).toBe(true);
 });
 
@@ -1136,7 +1136,7 @@ test("05 sandbox pause + resume", async () => {
 
   const echo = await sandbox.commands.run("echo resume-ok");
   expect(echo.error).toBeUndefined();
-  expect(echo.logs.stdout[0]?.text).toBe("resume-ok");
+  expect(echo.logs.stdout[0]?.text).toBe("resume-ok\n");
 });
 
 test("06 x-request-id passthrough on server error", async () => {

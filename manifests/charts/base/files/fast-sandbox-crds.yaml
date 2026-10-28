@@ -296,6 +296,9 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
+                    description: |-
+                      CPU and Memory are runtime limits. ResourceAware Sandboxes may override
+                      them per request; otherwise they are the defaults.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   memory:
@@ -304,13 +307,38 @@ spec:
                     - type: string
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
+                  mode:
+                    enum:
+                    - LegacySlot
+                    - ResourceAware
+                    type: string
+                  overcommitRatio:
+                    description: |-
+                      OvercommitRatio derives commitment requests from runtime limits. It is
+                      required only in ResourceAware mode and remains separate for CPU and
+                      memory because the resources have different pressure policies.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
                   pids:
                     format: int64
                     minimum: 1
                     type: integer
                 required:
-                - cpu
-                - memory
                 - pids
                 type: object
               warmImages:
@@ -395,6 +423,27 @@ spec:
                 type: integer
               fastletRevision:
                 type: string
+              fastlets:
+                properties:
+                  busy:
+                    format: int32
+                    type: integer
+                  current:
+                    format: int32
+                    type: integer
+                  desired:
+                    format: int32
+                    type: integer
+                  draining:
+                    format: int32
+                    type: integer
+                  idle:
+                    format: int32
+                    type: integer
+                  ready:
+                    format: int32
+                    type: integer
+                type: object
               idleFastlets:
                 format: int32
                 type: integer
@@ -409,7 +458,104 @@ spec:
               readyPods:
                 format: int32
                 type: integer
+              resources:
+                description: |-
+                  SandboxPoolResourceSummary reports request-based commitment accounting.
+                  Free is schedulable commitment, not host OS idle CPU or memory.
+                properties:
+                  capacity:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                  committed:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                  free:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                required:
+                - capacity
+                - committed
+                - free
+                type: object
               runtimeRevision:
+                type: string
+              sandboxes:
+                properties:
+                  assigned:
+                    format: int32
+                    type: integer
+                  failed:
+                    format: int32
+                    type: integer
+                  paused:
+                    format: int32
+                    type: integer
+                  pending:
+                    format: int32
+                    type: integer
+                  running:
+                    format: int32
+                    type: integer
+                  terminating:
+                    format: int32
+                    type: integer
+                  total:
+                    format: int32
+                    type: integer
+                type: object
+              summaryObservedAt:
+                format: date-time
                 type: string
               warmImages:
                 items:
@@ -710,6 +856,35 @@ spec:
                   When Spec.ResetRevision > Status.Runtime.AcceptedResetRevision, the sandbox will be rescheduled.
                 format: date-time
                 type: string
+              resources:
+                description: |-
+                  Resources contains caller-owned per-Sandbox runtime limits. It is valid
+                  only for ResourceAware Pools and is immutable after creation. When it is
+                  omitted, the Pool's sandboxResources CPU and memory limits are used.
+                properties:
+                  limits:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                required:
+                - limits
+                type: object
               state:
                 default: Running
                 description: |-
@@ -1011,8 +1186,9 @@ spec:
       openAPIV3Schema:
         description: |-
           SandboxSnapshot is a one-shot snapshot of a running Sandbox: the artifacts
-          (rootfs, vmstate, memory) are published to the artifact store in the
-          SandboxTemplate layout, addressable under spec.templateName. The object is
+          (rootfs, vmstate, memory) are published to the native artifact store or an
+          OCI registry, addressable by status.manifestRef. Native snapshots also
+          publish an image-name index under spec.templateName. The object is
           created by fastpath (CreateSandboxSnapshot) and driven to completion by
           the controller; a Sandbox (or template name) with a non-terminal snapshot
           rejects further snapshot requests.
@@ -1067,8 +1243,8 @@ spec:
                 type: object
               templateName:
                 description: |-
-                  TemplateName is the artifact-store index key the artifact set is
-                  published under: publish writes index/<sha256(templateName)>.json, and
+                  TemplateName is required for native snapshots and selects the artifact-store
+                  index key the artifact set is published under: publish writes index/<sha256(templateName)>.json, and
                   a later Sandbox create with image=TemplateName boots from the
                   snapshot through the standard pull/restore chain. Unlike a
                   SandboxTemplate build, no default sha256(image) index is written.
@@ -1076,12 +1252,13 @@ spec:
                   snapshots with the same TemplateName overwrite each other's artifacts
                   (last writer wins), and FastPath's pre-check therefore rejects a
                   non-terminal holder of a name cluster-wide.
+                  OCI snapshots may omit it: their two images use a random snapshotID,
+                  and new Sandboxes boot from status.manifestRef without a name index.
                 maxLength: 255
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*(/[a-zA-Z0-9._-]+)*(:[a-zA-Z0-9._-]{1,127})?$
                 type: string
             required:
             - sandboxRef
-            - templateName
             type: object
           status:
             description: |-
@@ -1171,8 +1348,8 @@ spec:
                 type: string
               manifestRef:
                 description: |-
-                  ManifestRef is the s3:// URI of the published manifest.json
-                  (Succeeded only).
+                  ManifestRef is the published s3:// manifest.json or immutable oci://
+                  snapfiles manifest reference (Succeeded only).
                 type: string
               message:
                 description: Message is the latest progress or failure reason.
@@ -1286,6 +1463,47 @@ spec:
           spec:
             description: SandboxTemplateSpec defines the desired golden-image build.
             properties:
+              egressMitmCertificate:
+                description: |-
+                  EgressMITMCertificate bakes the egress MITM proxy CA certificate into
+                  the template: the builder places it at /opt/opensandbox/mitmproxy-ca-cert.pem
+                  (the execd bootstrap contract path) and enables the trust gate, so
+                  the bootstrap installs it into the guest trust store and client env
+                  vars at the snapshot boot. Restored sandboxes trust the CA from first
+                  boot; the CA is cluster-global, so the field is pool-agnostic.
+                properties:
+                  key:
+                    default: ca.crt
+                    description: |-
+                      Key is the Secret data entry holding the PEM certificate. Only this
+                      key is projected into the build Pod, so the CA private key never
+                      enters the build. The builder accepts entries consisting solely of
+                      PEM CERTIFICATE blocks — private keys, other PEM blocks, and trailing
+                      non-PEM data are rejected — and bakes them re-encoded; CA constraints
+                      (BasicConstraints CA:TRUE) are not verified.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef references the Secret carrying the certificate; it must
+                      live in the template's namespace.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - key
+                - secretRef
+                type: object
               entrypoint:
                 description: |-
                   Entrypoint is the guest business command as an argv list; empty
@@ -1507,8 +1725,9 @@ spec:
                 properties:
                   format:
                     default: overlaybd
-                    description: Format selects the storage encoding of the snapshot
-                      set.
+                    description: |-
+                      Format selects the storage encoding. Native requires object storage;
+                      OverlayBD requires an explicit oci:// publish target.
                     enum:
                     - native
                     - overlaybd
@@ -1529,7 +1748,12 @@ spec:
                     type: object
                   publish:
                     description: |-
-                      Publish is the S3-compatible object store target, e.g.
+                      Publish selects the destination. oci://registry/namespace/repo must
+                      omit the tag and digest; each build Pod receives a system-generated
+                      UUID and publishes <uuid>_rootfs and <uuid>_snapfiles. A new build
+                      uses a new UUID; retries of the same Pod reuse its UUID.
+                      PublishSecretRef then requires .dockerconfigjson.
+                      For format=native, Publish is the S3-compatible object store target, e.g.
                       s3://bucket/sandbox-images/ (digest-addressed publication). When
                       empty, the controller defaults it to the platform artifact store
                       (the fast-sandbox-artifact-store ConfigMap); when set it must equal

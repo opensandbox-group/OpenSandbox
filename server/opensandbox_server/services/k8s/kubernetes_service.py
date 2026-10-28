@@ -497,6 +497,21 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                                 ),
                             },
                         )
+                    if current_state == "Terminated":
+                        # expireTime can pass while the CR is still readable.
+                        # That is already final; do not poll until POD_READY_TIMEOUT.
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                                "message": (
+                                    f"Sandbox {sandbox_id} reached a terminal state "
+                                    f"before it was ready: "
+                                    f"{current_reason or current_state}"
+                                    + (f" ({current_message})" if current_message else "")
+                                ),
+                            },
+                        )
                     if _is_quota_exhausted_status(status_info):
                         # Quota admission rejection is terminal (controller cannot
                         # create the Pod until quota is raised) — fail fast instead
@@ -663,6 +678,20 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 ),
             },
         )
+
+    def _ensure_idle_policy_support(self, request: CreateSandboxRequest) -> None:
+        """Refuse the OSEP-0024 idle policy on pod sandboxes (fsb backend only)."""
+        if request.lifecycle is not None and request.lifecycle.idle_policy is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "lifecycle.idlePolicy is only supported by the fast-sandbox "
+                        "backend; pod sandboxes are never auto-paused or auto-woken."
+                    ),
+                },
+            )
 
     def _ensure_pool_ref_exists(self, pool_ref: str) -> None:
         """Validate that the referenced Pool exists before creating a BatchSandbox."""
@@ -1026,6 +1055,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         self._ensure_secure_access_support(request)
         self._ensure_network_policy_support(request)
         self._ensure_image_auth_support(request)
+        self._ensure_idle_policy_support(request)
 
         sandbox_id = self.generate_sandbox_id()
 
@@ -1037,13 +1067,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         # _ensure_pvc_volumes (some PVCs created, others not) still triggers
         # cleanup of the ones we managed to label.
         managed_pvcs_may_exist = False
-        # Set to True the moment ``create_workload`` returns; cleared only when
-        # the workload is confirmed gone (success path, or rollback
-        # ``delete_workload`` returns without raising). The ``finally`` clause
-        # must not sweep PVCs while the CR is still alive — that would leave a
-        # live workload referencing missing storage. Mirrors the semantics of
-        # ``delete_sandbox`` which skips PVC cleanup unless the workload was
-        # deleted (or already gone).
+        # Keep PVCs if workload creation succeeds or rollback deletion fails.
+        # Accepted deletion allows cleanup; PVC protection retains in-use claims
+        # until pod teardown.
         workload_left_alive = False
         created_managed_pvcs: list[str] = []
         try:
@@ -1058,7 +1084,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             tenant = get_current_tenant()
             if tenant is not None:
                 context.labels[SANDBOX_TENANT_LABEL] = tenant.name
-            apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
+            apply_access_renew_extend_seconds_to_mapping(
+                context.annotations, request.extensions, lifecycle=request.lifecycle
+            )
             apply_extensions_to_mapping(context.annotations, request.extensions)
 
             ensure_volumes_valid(
@@ -1100,7 +1128,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             #      touched, so the PVCs we just labeled are orphans we must
             #      sweep. Flag stays False; outer handler converts to 400.
             #   2. Other exception after partial CR creation — try rollback
-            #      ``delete_workload``: on success the CR is gone, sweep PVCs;
+            #      ``delete_workload``: on accepted deletion, sweep PVCs;
             #      on failure the CR may still be alive with pods needing the
             #      PVCs, so flip the flag to skip the sweep.
             #   3. Success — flag becomes True so a subsequent
@@ -1386,11 +1414,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         never touched. Errors are logged but never propagate — workload
         deletion has already succeeded and PVC cleanup is best-effort.
 
-        Runs after workload deletion so the kubelet has dropped the
-        ``kubernetes.io/pvc-protection`` finalizer; otherwise the PVC would
-        stay in the ``Terminating`` state until pod teardown completes
-        (Kubernetes handles that case correctly, but immediate removal is
-        cleaner when the pod is already gone).
+        Runs after workload deletion is accepted. Kubernetes keeps in-use
+        claims in ``Terminating`` through the ``kubernetes.io/pvc-protection``
+        finalizer until pod teardown completes.
         """
         from kubernetes.client import ApiException
 

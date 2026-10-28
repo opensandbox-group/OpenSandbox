@@ -14,7 +14,7 @@ Fast Sandbox schedules sandboxes into **pools** of pre-warmed **Fastlet** pods. 
 A `SandboxPool` is the unit of capacity and policy:
 
 - **`capacity`** sizes the Fastlet fleet — how many warm pods to hold, and the ceiling.
-- **`runtime`** selects one immutable, platform-owned runtime profile (a container profile, or a Firecracker profile). All sandboxes in a pool share it.
+- **`runtime`** selects one immutable, platform-owned runtime profile (the Firecracker profile). All sandboxes in a pool share it.
 - **`sandboxResources`** is the immutable resource shape of every sandbox the pool produces.
 - **`fastletTemplate`** is an ordinary Kubernetes pod template for the Fastlet pods themselves — node selectors, affinity, and spreads stay Kubernetes-native.
 - **`infraComponents`** declares the pod-local infrastructure (such as the egress action handler). It is compiled into an immutable revision: updating it rolls new Fastlets while existing sandboxes stay on the revision they were admitted with.

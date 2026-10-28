@@ -140,6 +140,10 @@ class _InflightEntry:
         self.owner: bool = False
 
 
+class _FetchCancelled(Exception):
+    """Set on an inflight future when the caller fetching it is cancelled."""
+
+
 class AsyncEndpointCache:
     """Async LRU+TTL endpoint cache with asyncio.Future-based inflight dedup."""
 
@@ -188,12 +192,20 @@ class AsyncEndpointCache:
         key: tuple,
         fetch: Callable[[], Awaitable[SandboxEndpoint]],
     ) -> SandboxEndpoint:
-        cached = self.get(key)
-        if cached is not None:
-            return cached
+        while True:
+            cached = self.get(key)
+            if cached is not None:
+                return cached
 
-        if key in self._inflight:
-            return await asyncio.shield(self._inflight[key])
+            inflight = self._inflight.get(key)
+            if inflight is None:
+                break
+            try:
+                return await asyncio.shield(inflight)
+            except _FetchCancelled:
+                # The caller that started the fetch was cancelled, not this one;
+                # fetch again instead of raising its cancellation here.
+                continue
 
         gen_before = self._generation
         loop = asyncio.get_running_loop()
@@ -208,7 +220,10 @@ class AsyncEndpointCache:
             return endpoint
         except BaseException as e:
             if not future.done():
-                future.set_exception(e)
+                # Waiters must not inherit this caller's cancellation.
+                future.set_exception(
+                    _FetchCancelled() if isinstance(e, asyncio.CancelledError) else e
+                )
                 # The owner raises the original exception directly instead of awaiting
                 # this future. Mark the exception as observed so asyncio does not log
                 # "Future exception was never retrieved" when there are no waiters.

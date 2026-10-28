@@ -36,6 +36,11 @@ from opensandbox_server.services.fast_sandbox.generated import (
     fastpath_pb2 as pb2,
 )
 
+# The egress binding input seeded for a sandbox created without a
+# networkPolicy: default-allow (behavior identical to a policy-less
+# sandbox) — the binding's point is subject registration, not enforcement.
+DEFAULT_ALLOW_POLICY = {"defaultAction": "allow", "egress": []}
+
 SUPPORTED_EXTENSION_KEYS = frozenset({"poolRef"})
 
 #: FastPath CreateSandboxRequest has no nullable timeout; fsb requires an explicit one.
@@ -133,9 +138,21 @@ def map_create_request(
     if request.metadata:
         create.metadata.update(request.metadata)
 
+    # Every fsb sandbox registers an egress subject at create: the binding
+    # is what makes the Fastlet run SET_BINDING (deny-first install, network
+    # attachment) — the handler-relay surfaces (/policy/{uid},
+    # /vault/{uid}) and the pause/resume state transfer attach to it. A
+    # sandbox created without a networkPolicy seeds a no-op default-allow
+    # record (the registration is the point — the sandbox behaves exactly
+    # like today's policy-less one), and runtime changes ride the relay.
     if request.network_policy is not None:
         create.action_bindings.add(
             handler="egress", input=json.dumps(normalized_policy(request.network_policy))
+        )
+    else:
+        create.action_bindings.add(
+            handler="egress",
+            input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
     extensions = request.extensions or {}
@@ -193,9 +210,15 @@ def map_template_create_request(
     if request.metadata:
         create.metadata.update(request.metadata)
 
+    # Same registration rule as map_create_request: every fsb sandbox gets
+    # an egress subject at create.
     if request.network_policy is not None:
         create.action_bindings.add(
             handler="egress", input=json.dumps(normalized_policy(request.network_policy))
+        )
+    else:
+        create.action_bindings.add(
+            handler="egress", input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
     extensions = request.extensions or {}
@@ -278,10 +301,20 @@ def _canonical_quantity(value: str) -> decimal.Decimal:
 def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
     """Reject pod-identity-dependent fields that have no shared-Fastlet meaning."""
     if request.lifecycle is not None:
-        raise UnsupportedFieldError(
-            "lifecycle",
-            "lifecycle hooks are not supported by the fsb backend",
-        )
+        if request.lifecycle.has_hooks:
+            raise UnsupportedFieldError(
+                "lifecycle",
+                "lifecycle hooks are not supported by the fsb backend; "
+                "only lifecycle.idlePolicy is accepted (OSEP-0024)",
+            )
+        if request.lifecycle.renewal_policy is not None:
+            raise UnsupportedFieldError(
+                "lifecycle.renewalPolicy",
+                "renew-on-access is not supported by the fsb backend; fsb rejects "
+                "the deprecated extensions['access.renew.extend.seconds'] key too "
+                "(OSEP-0009)",
+            )
+        # idlePolicy is validated and persisted as a CR annotation by the service.
     # snapshotId is allowed: restore resolution replaced it with the snapshot
     # artifact reference (restore_config.image) before routing reached fsb.
     if request.platform is not None:
@@ -291,12 +324,9 @@ def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
             "resourceRequests",
             "resources are fixed by SandboxPool.spec.sandboxResources",
         )
-    if request.credential_proxy is not None and request.credential_proxy.enabled:
-        raise UnsupportedFieldError(
-            "credentialProxy",
-            "credential proxy rides the per-pod egress sidecar, which does not "
-            "exist in the shared-Fastlet model",
-        )
+    # credentialProxy is accepted and ignored at create time (OSEP-0022):
+    # the vault is not carried at create — it is set after creation through
+    # the server vault API over the FastPath handler relay.
     if request.volumes:
         raise UnsupportedFieldError(
             "volumes", "Fastlet child containers cannot receive dynamic mounts"

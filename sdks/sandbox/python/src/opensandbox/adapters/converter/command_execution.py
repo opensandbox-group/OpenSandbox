@@ -34,12 +34,17 @@ def resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
         # The execd API validates this timeout with `gte=0`.
         if timeout < timedelta(0):
             raise InvalidArgumentException("timeout must not be negative")
-        return int(timeout.total_seconds() * 1000)
+        # Round up using integer microseconds to preserve whole milliseconds exactly.
+        return (timeout // timedelta(microseconds=1) + 999) // 1000
     raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
 
 
 def infer_foreground_exit_code(execution: Execution) -> int | None:
     if execution.error is not None:
+        # Prefer the authoritative error.exit_code; fall back to parsing evalue
+        # for servers that predate it.
+        if execution.error.exit_code is not None:
+            return execution.error.exit_code
         try:
             return int(execution.error.value)
         except (TypeError, ValueError):

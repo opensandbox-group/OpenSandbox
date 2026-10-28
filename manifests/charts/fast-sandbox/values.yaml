@@ -90,7 +90,7 @@ controller:
   # fastlet Pods. Defaults to the released companion image published by the
   # umbrella release (build-fast-sandbox.sh); override for clusters that
   # cannot pull from docker.io.
-  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.1.1-rc.1
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.2.0
 
 # Artifact store shared by the controller, the runtime-agent and golden-image
 # builds. Rendered into the fast-sandbox-artifact-store ConfigMap.
@@ -209,6 +209,9 @@ runtime:
     agent: {}
     # -- Resources for the janitor sidecar container.
     janitor: {}
+    # -- Resources for the overlaybd-ublkd sidecar container
+    # (runtime.oci.enabled only).
+    ublkd: {}
   # -- Secret carrying the compiled agent registry configuration
   # (registry.json key with artifact-store pull credentials); must be
   # provisioned by the operator.
@@ -231,3 +234,14 @@ runtime:
   # startup-only; the nodeReadiness section (fcVersion, interval,
   # minFree, minMemory) hot-reloads on every readiness pass.
   config: ""
+  # -- OverlayBD OCI on-demand loading: installs the fsb-vm + OverlayBD
+  # tools bundle (init container), sets FAST_SANDBOX_OCI_ENABLED on the
+  # agent, and runs one overlaybd-ublkd sidecar per node. Nodes need KVM
+  # plus kernel ublk support. Pool fastlets set the flag separately
+  # (pools are not managed by this chart).
+  oci:
+    # -- Whether the node OCI stack (tools init + overlaybd-ublkd sidecar
+    # + agent flag + janitor oci-state-root) is installed
+    enabled: false
+    # -- Shared overlaybd block cache capacity (OVERLAYBD_CACHE_SIZE_GB).
+    cacheSizeGB: 16

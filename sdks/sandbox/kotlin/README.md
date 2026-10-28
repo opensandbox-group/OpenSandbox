@@ -58,7 +58,7 @@ public class QuickStart {
             System.out.println(execution.getLogs().getStdout().get(0).getText());
 
             // 5. Cleanup (sandbox.close() called automatically)
-            // Note: kill() must be called explicitly if you want to terminate the remote sandbox instance immediately
+            // kill() requests remote deletion; runtime cleanup may continue after it returns.
             sandbox.kill();
         } catch (SandboxException e) {
             // Handle Sandbox specific exceptions
@@ -189,9 +189,7 @@ sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 
 ### 5. Snapshots
 
-Capture a sandbox's state and restore new sandboxes from it. Snapshots are
-administered through `SandboxManager` (the per-sandbox shortcut
-`sandbox.createSnapshot(name)` also exists):
+Capture a sandbox's state and restore new sandboxes from it. Snapshots are administered through `SandboxManager` (the per-sandbox shortcut `sandbox.createSnapshot(name)` also exists):
 
 ```java
 SnapshotInfo snapshot = manager.createSnapshot(sandboxId, "pre-migration");
@@ -207,9 +205,7 @@ PagedSnapshotInfos page = manager.listSnapshots(
 );
 ```
 
-Restore by pointing `Sandbox.builder()` at the snapshot — `image(...)` and
-`snapshotId(...)` are mutually exclusive by construction: setting one clears
-the other:
+Restore by pointing `Sandbox.builder()` at the snapshot — `image(...)` and `snapshotId(...)` are mutually exclusive by construction: setting one clears the other:
 
 ```java
 try (Sandbox restored = Sandbox.builder()
@@ -227,13 +223,7 @@ manager.deleteSnapshot(ready.getId());
 
 ### 6. Isolated Sessions
 
-Isolated sessions run multi-step code in a hardened, resource-bounded
-namespace with bind mounts — reachable through `sandbox.isolation()`. The
-service also offers `runOnce(...)` (create → run → best-effort delete in
-one call) and `withSession(...) { }` (scoped block with best-effort
-delete — both catch and log delete failures, so the session can outlive
-the helper if execd is unavailable) for callers that don't need to keep
-the session around:
+Isolated sessions run multi-step code in a hardened, resource-bounded namespace with bind mounts — reachable through `sandbox.isolation()`. The service also offers `runOnce(...)` (create → run → best-effort delete in one call) and `withSession(...) { }` (scoped block with best-effort delete — both catch and log delete failures, so the session can outlive the helper if execd is unavailable) for callers that don't need to keep the session around:
 
 ```java
 IsolationSession session = sandbox.isolation().create(
@@ -274,9 +264,7 @@ try {
 }
 ```
 
-`getRunLogs` is cursor-based: each call returns at most 16 MiB, and per-run
-retention is capped at 16 MiB, so drain incrementally with the returned
-cursor while the run is active if the output may exceed one page.
+`getRunLogs` is cursor-based: each call returns at most 16 MiB, and per-run retention is capped at 16 MiB, so drain incrementally with the returned cursor while the run is active if the output may exceed one page.
 
 ### 7. Sandbox Management (Admin)
 
@@ -355,8 +343,7 @@ try {
 pool.shutdown(true);
 ```
 
-Use `SandboxPoolManager` for release or operations workflows that need to destroy an old
-pool namespace without constructing the old `SandboxPool` object:
+Use `SandboxPoolManager` for release or operations workflows that need to destroy an old pool namespace without constructing the old `SandboxPool` object:
 
 ```java
 SandboxPoolManager poolManager = SandboxPoolManager.builder()
@@ -374,52 +361,30 @@ poolManager.destroy(
 Pool lifecycle semantics:
 - `acquire()` is only allowed when pool state is `RUNNING`.
 - In `DRAINING` / `STOPPED`, `acquire()` throws `PoolNotRunningException`.
-- When a pool namespace is being destroyed or has been destroyed, `acquire()` throws
-  `PoolDestroyedException` and does not fall back to direct create.
-- `maxIdle` is the target/cap for ready idle sandboxes. It is not a global limit
-  on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
-- `ownerId` is the lock owner identity (node/process id), not the pool identifier.
-  If omitted, SDK auto-generates a UUID-based default.
+- When a pool namespace is being destroyed or has been destroyed, `acquire()` throws `PoolDestroyedException` and does not fall back to direct create.
+- `maxIdle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
+- `ownerId` is the lock owner identity (node/process id), not the pool identifier. If omitted, SDK auto-generates a UUID-based default.
 - Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool. An optional `warmupPostPrepareHealthCheck(...)` can validate the prepared sandbox before it becomes idle; retries never rerun the preparer.
-- `warmupCreateQps` caps new warmup creates admitted by each pool during its fixed
-  one-second reconcile tick. `warmupConcurrency` independently bounds active
-  post-create warmup work such as health checks and preparation. Their defaults
-  are `10` and `128`, respectively.
-- Readiness checks start after `warmupHealthCheckInitialDelay` (zero by default).
-  Readiness and post-prepare retries share `warmupHealthCheckPollingInterval`,
-  whose Pool default is `500ms`. Their timeout settings are soft deadlines: a
-  delayed task still receives one final check at or after its deadline.
-- Pool warmup create uses one transport attempt. Direct create, standalone create,
-  acquire, connect, renew, and cleanup retain the configured retry behavior.
+- `warmupCreateQps` caps new warmup creates admitted by each pool during its fixed one-second reconcile tick. `warmupConcurrency` independently bounds active post-create warmup work such as health checks and preparation. Their defaults are `10` and `128`, respectively.
+- Readiness checks start after `warmupHealthCheckInitialDelay` (zero by default). Readiness and post-prepare retries share `warmupHealthCheckPollingInterval`, whose Pool default is `500ms`. Their timeout settings are soft deadlines: a delayed task still receives one final check at or after its deadline.
+- Pool warmup create uses one transport attempt. Direct create, standalone create, acquire, connect, renew, and cleanup retain the configured retry behavior.
 - Reconcile runs once per second. Warmup completion does not trigger an extra tick.
-- With `ConnectionConfig.enableTracing()`, each admitted warmup emits one
-  `pool.warmup` trace. Each health stage is summarized by one span with its
-  attempt count and scheduler delay. Terminal structured logs classify
-  `stage`, `result`, and `reason`; the current primary also emits an active-pool
-  summary every 30 seconds from the existing reconcile thread. Production
-  deployments should configure OpenTelemetry sampling explicitly; tracing is
-  opt-in but the SDK does not override the application's sampler.
-- Graceful shutdown stops admitting new warmups, keeps the primary heartbeat and
-  delayed-stage dispatcher alive while already-admitted warmups finish, and preserves
-  the existing behavior of allowing those warmups to enter idle before shutdown completes.
-- When `ConnectionConfig` carries no custom OkHttp `ConnectionPool`, the pool
-  creates one for direct create and idle connect, sized by `warmupConcurrency`
-  with a 5-minute keep-alive, and evicts it on `shutdown()`. Default staged
-  warmup sandboxes retain their own endpoint pools to avoid accumulating
-  mutually incompatible routes in one large pool. An explicitly user-provided
-  connection pool is honored by every path and is never evicted by the pool.
+- With `ConnectionConfig.enableTracing()`, each admitted warmup emits one `pool.warmup` trace. Each health stage is summarized by one span with its attempt count and scheduler delay. Terminal structured logs classify `stage`, `result`, and `reason`; the current primary also emits an active-pool summary every 30 seconds from the existing reconcile thread. Production deployments should configure OpenTelemetry sampling explicitly; tracing is opt-in but the SDK does not override the application's sampler.
+- Graceful shutdown stops admitting new warmups, keeps the primary heartbeat and delayed-stage dispatcher alive while already-admitted warmups finish, and preserves the existing behavior of allowing those warmups to enter idle before shutdown completes.
+- When `ConnectionConfig` carries no custom OkHttp `ConnectionPool`, the pool creates one for direct create and idle connect, sized by `warmupConcurrency` with a 5-minute keep-alive, and evicts it on `shutdown()`. Default staged warmup sandboxes retain their own endpoint pools to avoid accumulating mutually incompatible routes in one large pool. An explicitly user-provided connection pool is honored by every path and is never evicted by the pool.
 
 
-> For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. The pool renews an owned primary lock independently from warmup execution at an internal interval no greater than `primaryLockTtl / 3`, so one slow warmup does not block leader heartbeats.
-> In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
-> `releaseAllIdle()` preserves the original serial cleanup behavior. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive; the overload returns only after every ID drained from the store has received a best-effort kill attempt.
-> `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
+> For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. The pool renews an owned primary lock independently from warmup execution at an internal interval no greater than `primaryLockTtl / 3`, so one slow warmup does not block leader heartbeats. In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass. `releaseAllIdle()` preserves the original serial cleanup behavior. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive; the overload returns only after every ID drained from the store has received a best-effort kill attempt. `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 
 ## Configuration
 
 ### 1. Connection Configuration
 
 The `ConnectionConfig` class manages API server connection settings.
+
+Transfer timeouts:
+
+- `requestTimeout` bounds each transport phase - connecting, waiting for response headers, and waiting for more of a response body - but it never caps a healthy file upload or download that keeps making progress. A transfer that stalls for longer than the timeout, or an upload that gets no response headers within it after the body has been sent, fails instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract). An explicit `RetryPolicy.overallDeadline` still caps the whole transfer.
 
 | Parameter        | Description                                | Default                      | Environment Variable   |
 | ---------------- | ------------------------------------------ | ---------------------------- | ---------------------- |
@@ -473,8 +438,7 @@ The `Sandbox.builder()` allows configuring the sandbox environment.
 | `credentialProxy` | Optional Credential Vault proxy startup settings | -                     |
 | `readyTimeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
 
-Note: metadata keys under `opensandbox.io/` are reserved for system-managed
-labels and will be rejected by the server.
+Note: metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.
 
 ```java
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy;
@@ -504,8 +468,7 @@ Sandbox sandbox = Sandbox.builder()
 
 ### 3. Runtime Egress Policy Updates
 
-Runtime egress reads and patches go directly to the sandbox egress sidecar.
-The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+Runtime egress reads and patches go directly to the sandbox egress sidecar. The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `target`.
@@ -526,10 +489,7 @@ sandbox.patchEgressRules(
 
 ### 4. Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `credentialProxyEnabled(true)`, then write
-credentials and bindings through `sandbox.credentialVault()`.
+Credential Vault injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `credentialProxyEnabled(true)`, then write credentials and bindings through `sandbox.credentialVault()`.
 
 ```java
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Credential;
@@ -587,5 +547,4 @@ sandbox.credentialVault().create(
 );
 ```
 
-See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.

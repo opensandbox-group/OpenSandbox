@@ -22,10 +22,8 @@ The note is the **authoritative** copy: the `release-umbrella.yml` workflow cons
 
 Priority order:
 
-1. **Previous umbrella tag (the normal case).** Find the highest
-   existing `release-X.Y.Z` tag below `<version>` (`git tag -l 'release-*'` / `gh release list`). If one exists, that single tag is the baseline for **every** section — test all PRs against it and move on.
-2. **No previous umbrella tag (first umbrella release, e.g. `1.1.0`
-   after the legacy era).** Fall back to the last independent legacy release tag per component (see the "First Umbrella Version of Every Artifact" table in `oseps/0016-*.md`, or `gh release list`):
+1. **Previous umbrella tag (the normal case).** Find the highest existing `release-X.Y.Z` tag below `<version>` (`git tag -l 'release-*'` / `gh release list`). If one exists, that single tag is the baseline for **every** section — test all PRs against it and move on.
+2. **No previous umbrella tag (first umbrella release, e.g. `1.1.0` after the legacy era).** Fall back to the last independent legacy release tag per component (see the "First Umbrella Version of Every Artifact" table in `oseps/0016-*.md`, or `gh release list`):
 
 | Note section | Baseline artifact |
 |---|---|
@@ -39,8 +37,7 @@ Priority order:
 | Misc CLI | last `cli/v*` release |
 | Misc node-agent, docs, CI, deps | no legacy release → include everything in the window |
 
-3. **rc.N**: baseline is the previous rc tag on the same line
-   (`release-X.Y.0-rc.(N-1)`), or the line's birth baseline for `rc.1`.
+3. **rc.N**: baseline is the previous rc tag on the same line (`release-X.Y.0-rc.(N-1)`), or the line's birth baseline for `rc.1`.
 
 **Prefer git ancestry over dates.** For each PR, resolve its merge commit (`gh pr list --json mergeCommit`) and test it against the baseline tag locally — a date cutoff misclassifies PRs merged on release day:
 
@@ -53,14 +50,10 @@ git merge-base --is-ancestor <merge_commit_sha> <baseline_tag>^{commit} && echo 
 
 Rules for edge cases (fallback mode only):
 
-- Multi-label PRs are judged per section: a PR can be SHIPPED for one
-  component and NEW for another (e.g. a server fix already released in `server/v0.2.3` whose SDK regen first ships now — include under SDKs only if the client-side change is user-visible, not a pure regen).
-- Chart-path PRs are judged against the Helm tag of the chart they
-  modify, not the controller tag.
-- When a component has no legacy release (node-agent, fast-sandbox,
-  server chart), everything in the window is first-ship.
-- Mention the differing baselines in the note's opening paragraph or
-  Upgrade & Compatibility when a section carries a large frozen delta — upgraders need to know a component jumps several months at once.
+- Multi-label PRs are judged per section: a PR can be SHIPPED for one component and NEW for another (e.g. a server fix already released in `server/v0.2.3` whose SDK regen first ships now — include under SDKs only if the client-side change is user-visible, not a pure regen).
+- Chart-path PRs are judged against the Helm tag of the chart they modify, not the controller tag.
+- When a component has no legacy release (node-agent, fast-sandbox, server chart), everything in the window is first-ship.
+- Mention the differing baselines in the note's opening paragraph or Upgrade & Compatibility when a section carries a large frozen delta — upgraders need to know a component jumps several months at once.
 
 ## Workflow
 
@@ -69,17 +62,13 @@ Rules for edge cases (fallback mode only):
 Read these from the working tree (they define the format — never invent sections):
 
 - `docs/releases/TEMPLATE.md` — the exact section structure
-- `docs/releases/*.md` — the most recent existing note(s), to match
-  tone and conventions
-- `docs/releases/*.yaml` — previous BOM(s): give `metadata.releaseDate`
-  for baselines and `compatibility.kubernetes` for the upgrade section
-- `oseps/0016-unified-umbrella-release-governance.md` — release rules
-  (rc packages are held, cadence, naming) when release-type questions arise
+- `docs/releases/*.md` — the most recent existing note(s), to match tone and conventions
+- `docs/releases/*.yaml` — previous BOM(s): give `metadata.releaseDate` for baselines and `compatibility.kubernetes` for the upgrade section
+- `oseps/0016-unified-umbrella-release-governance.md` — release rules (rc packages are held, cadence, naming) when release-type questions arise
 
 Release type from `<version>`:
 
-- `X.Y.0-rc.N` — pre-release: images published, **all packages held**;
-  notes are short (mechanics only, no functional claims), SDK/CLI artifacts and Installation SDK lines are omitted
+- `X.Y.0-rc.N` — pre-release: images published, **all packages held**; notes are short (mechanics only, no functional claims), SDK/CLI artifacts and Installation SDK lines are omitted
 - `X.Y.0` — line birth; `X.Y.Z (Z>0)` — in-line snapshot
 
 ### Step 2: Collect merged PRs since the baseline
@@ -110,25 +99,18 @@ Classify by auto-labels first (`.github/workflows/pr-label-check.yml` infers the
 
 Rules:
 
-- A PR with multiple component labels can appear in more than one
-  section — mention it where it matters most, cross-reference `[#NNNN](…)` in the second place.
-- `components/code-interpreter` is the sandbox-image side (out of the
-  umbrella, versioned in opensandbox-group/sandbox-images) — its *runtime component* changes go under Misc unless they are clearly server/execd behavior. The code-interpreter **SDK** is in scope and belongs under SDKs.
-- Spec changes (`specs/`) that accompany a feature belong to that
-  feature's component section, not Misc.
-- Skip pure release-mechanics PRs for stable notes only if they carry
-  no user-visible change; version-bump PRs get one Misc line.
+- A PR with multiple component labels can appear in more than one section — mention it where it matters most, cross-reference `[#NNNN](…)` in the second place.
+- `components/code-interpreter` is the sandbox-image side (out of the umbrella, versioned in opensandbox-group/sandbox-images) — its *runtime component* changes go under Misc unless they are clearly server/execd behavior. The code-interpreter **SDK** is in scope and belongs under SDKs.
+- Spec changes (`specs/`) that accompany a feature belong to that feature's component section, not Misc.
+- Skip pure release-mechanics PRs for stable notes only if they carry no user-visible change; version-bump PRs get one Misc line.
 
 ### Step 4: Extract substance from PR bodies
 
 For every classified PR, read `body` and extract:
 
-- **Breaking changes**: explicit "Breaking" sections/mentions → must
-  surface in the component section AND in Upgrade & Compatibility with migration guidance
-- **Problem → change → scope**: why it was needed, what changed, what
-  is explicitly out of scope (e.g. "Docker only, K8s follow-up")
-- **Experimental/unstable**: mark entries **[EXPERIMENTAL]** /
-  **[UNSTABLE]** per template conventions
+- **Breaking changes**: explicit "Breaking" sections/mentions → must surface in the component section AND in Upgrade & Compatibility with migration guidance
+- **Problem → change → scope**: why it was needed, what changed, what is explicitly out of scope (e.g. "Docker only, K8s follow-up")
+- **Experimental/unstable**: mark entries **[EXPERIMENTAL]** / **[UNSTABLE]** per template conventions
 - **Security fixes**: flag explicitly (CVE, sandbox escape, auth bypass)
 
 Fall back to the PR title + diff summary (`gh pr view <num> --repo <owner>/<repo>`) only when the body is empty or uninformative.
@@ -145,34 +127,29 @@ Fast Sandbox is vendored from `opensandbox-group/fast-sandbox` via a pin file; t
 
 The same rule applies to any other pinned third-party source under `manifests/third-party/`.
 
+**Writing rule for pin bumps:** the note carries the upstream project's real behavior changes, not the pin mechanics. Never write "bump the pinned fast-sandbox source from `<old>` to `<new>`", upstream PR numbers, or CRD-bundle sync/verification details in the note — those are provenance for this step, not user-facing content. Instead, read the real substance (upstream commit bodies are often empty — prefer the docs/diff changes the commits touch, e.g. `git -C .fast-sandbox/src diff <old>..<new> -- docs/`), group them into one bullet per distinct story (problem → behavior change → why it matters), and cite the OpenSandbox pin-bump PR on each bullet as the carrier.
+
 ### Step 5: Draft the note
 
-Copy `docs/releases/TEMPLATE.md` structure exactly; delete section headers with no entries; strip all HTML comments. Sections in order: title `# OpenSandbox <version>`, one-paragraph summary, `## Highlights` (1–3 bullets max), then component sections (Server, SDKs, Controller, Execd, Networking, Fast Sandbox), `## Misc`, `## Upgrade & Compatibility`, `## 👥 Contributors`, `## Artifacts`, `## Installation`.
+Copy `docs/releases/TEMPLATE.md` structure exactly; delete section headers with no entries; strip all HTML comments. The note has no H1 title — the GitHub Release supplies it. Sections in order: one-paragraph summary, `## Highlights` (1–3 bullets max), then component sections (Server, SDKs, Controller, Execd, Networking, Fast Sandbox), `## Misc`, `## Upgrade & Compatibility`, `## 👥 Contributors`, `## Artifacts`, `## Installation`.
 
 Writing rules:
 
-- **No hard line wrapping** — one paragraph or one bullet per line, no
-  matter how long; markdown renderers join them anyway.
-- **Within a component: Features first, then Bug Fixes.** Split the
-  Networking section into `### egress` and `### ingress` subsections (shared items go at the end of the more relevant one, labeled). Split the SDKs section into one `### <Language>` subsection per language (Python, JavaScript, Kotlin, C#, Go) with fsb/feature entries distributed to their language; cross-language items stay as lead bullets directly under `## SDKs` — never use a "Cross-SDK" subheading. Cross-SDK changes always go first.
-- **Do not copy PR titles** — synthesize; each entry is tight and
-  dense: problem → change → key scope, in 1–3 sentences, no filler.
-- **Group only PRs that are the same story.** Cite several `[#NNNN](…pull/NNNN)`
-  links in one entry only when they implement one user story (e.g. the same feature across languages, or one coordinated fix campaign). Never bundle unrelated fixes into a "misc correctness" entry just because they share a component — give each its own bullet instead.
-- **Reference every PR** as a full markdown link `[#NNNN](https://github.com/<owner>/<repo>/pull/NNNN)` at the end of its entry
-  (space-separated for groups, each inside one shared parenthesis).
+- **No hard line wrapping** — one paragraph or one bullet per line, no matter how long; markdown renderers join them anyway.
+- **Within a component: Features first, then Bug Fixes.** Split the Networking section into `### egress` and `### ingress` subsections (shared items go at the end of the more relevant one, labeled). Split the SDKs section into one `### <Language>` subsection per language (Python, JavaScript, Kotlin, C#, Go) with fsb/feature entries distributed to their language; cross-language items stay as lead bullets directly under `## SDKs` — never use a "Cross-SDK" subheading. Cross-SDK changes always go first.
+- **Do not copy PR titles** — synthesize; each entry is tight and dense: problem → change → key scope, in 1–3 sentences, no filler.
+- **Apply a density gradient: major fixes and features expand, minor bugfixes get one sentence.** Headline features, breaking changes, security fixes, and fixes with a user-visible failure story (data loss, hangs, wrong results, outages) each get their own bullet expanded to 2–4 sentences (problem → change → impact). Individually trivial bugfixes get exactly one sentence each ("what broke → now fixed"), and may be folded into a single trailing "smaller fixes/items" bullet per component — semicolon-separated, each with its own `[#NNNN]` citation — so the section leads with what matters. Trivial means: no data-loss/security angle, no behavior change an operator must react to, no migration step.
+- **Group only PRs that are the same story.** Cite several `[#NNNN](…pull/NNNN)` links in one entry only when they implement one user story (e.g. the same feature across languages, or one coordinated fix campaign) — or when they are individually trivial one-liners folded together per the density-gradient rule above. Never bundle unrelated *substantive* fixes into a "misc correctness" entry just because they share a component — give each its own bullet instead.
+- **Reference every PR** as a full markdown link `[#NNNN](https://github.com/<owner>/<repo>/pull/NNNN)` at the end of its entry (space-separated for groups, each inside one shared parenthesis).
 - **User-facing** — what operators/consumers need, not internals.
-- The opening paragraph states the headline and who should upgrade;
-  for a first umbrella / GA (e.g. `1.1.0`), also state the unified-versioning context and the `1.0.0` gap rationale per the umbrella governance OSEP.
-- rc notes omit: SDK/CLI package claims, `## Installation` SDK lines,
-  `## 👥 Contributors` (optional), and say packages ship at the stable bump.
+- The opening paragraph carries only what Highlights cannot: line context (stable cut / rc, what baseline the sections cover), who should upgrade, and package/image shipping timing. It must NOT enumerate the headline features — that is `## Highlights`' job; restating them verbatim is redundancy. The GitHub Release supplies the title (no H1 here), so this paragraph is the first prose on the page; for a first umbrella / GA (e.g. `1.1.0`), also state the unified-versioning context and the `1.0.0` gap rationale per the umbrella governance OSEP.
+- rc notes omit: SDK/CLI package claims, `## Installation` SDK lines, `## 👥 Contributors` (optional), and say packages ship at the stable bump.
+- **Upgrade & Compatibility never gets the density gradient** — every behavior change, breaking change, deprecation, and migration step keeps its own complete bullet there, even when its component-section entry was compressed to one sentence.
 
 Fixed boilerplate (fill from the BOM/compat facts, keep wording):
 
-- Upgrade & Compatibility: images `opensandbox/<component>:release-<version>`
-  (all three registries; fsb images for fast-sandbox); packages at `<version>`; charts render from the tag; Kubernetes supported range from `compatibility.kubernetes` (latest BOM if no new one); skew sentence (server ↔ CLI/SDK same line supported, ±1 minor warns).
-- Artifacts: BOM link `docs/releases/<version>.yaml`; image/package
-  inventory lines from the template.
+- Upgrade & Compatibility: images `opensandbox/<component>:release-<version>` (all three registries; fsb images for fast-sandbox); packages at `<version>`; charts render from the tag; Kubernetes supported range from `compatibility.kubernetes` (latest BOM if no new one); skew sentence (server ↔ CLI/SDK same line supported, ±1 minor warns).
+- Artifacts: BOM link `docs/releases/<version>.yaml`; image/package inventory lines from the template.
 - Installation: verbatim from the template with `<version>` substituted.
 
 ### Step 6: Contributors
@@ -196,8 +173,7 @@ Filter bots from the list before writing.
 Write to `docs/releases/<version>.md` in the repo working tree (this is the authoritative in-repo copy the workflow later commits to the release branch). Verify:
 
 - No HTML comments remain; no empty sections remain
-- Every entry cites a `[#NNNN](…pull/NNNN)` link; every collected PR appears exactly once
-  (or is deliberately skipped as noise — say so in the handoff)
+- Every entry cites a `[#NNNN](…pull/NNNN)` link; every collected PR appears exactly once (or is deliberately skipped as noise — say so in the handoff)
 - No bare `#NNNN` references remain — all are full markdown links to `https://github.com/<owner>/<repo>/pull/NNNN`
 - Title and all version strings match `<version>` exactly
 
@@ -207,10 +183,8 @@ Print the file path when done.
 
 This skill only **generates** `docs/releases/<version>.md`. Do NOT:
 
-- write or hand-edit `docs/releases/<version>.yaml` — the BOM is
-  workflow-generated by `create-umbrella-release.sh`
-- commit to a release branch, create/push tags (`release-X.Y.Z`, Go
-  companion tags), or run `gh release create`
+- write or hand-edit `docs/releases/<version>.yaml` — the BOM is workflow-generated by `create-umbrella-release.sh`
+- commit to a release branch, create/push tags (`release-X.Y.Z`, Go companion tags), or run `gh release create`
 - trigger `release-umbrella.yml`
 
 Hand off: tell the user the note must be committed on the release branch before triggering the workflow, and that they may edit the file freely before then.

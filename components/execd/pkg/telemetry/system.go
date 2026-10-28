@@ -15,10 +15,10 @@
 package telemetry
 
 import (
-	"github.com/shirou/gopsutil/cpu"
-	"github.com/shirou/gopsutil/mem"
 	gopsnet "github.com/shirou/gopsutil/net"
 	"github.com/shirou/gopsutil/process"
+
+	"github.com/alibaba/opensandbox/execd/pkg/resources"
 )
 
 func systemProcessCount() int64 {
@@ -30,19 +30,19 @@ func systemProcessCount() int64 {
 }
 
 func systemCPUUsagePercent() float64 {
-	usage, err := cpu.Percent(0, false)
-	if err != nil || len(usage) == 0 {
-		return 0
-	}
-	return usage[0]
-}
-
-func systemMemoryUsageBytes() int64 {
-	stats, err := mem.VirtualMemory()
+	usage, err := resources.CPUPercent(0)
 	if err != nil {
 		return 0
 	}
-	return int64(stats.Used)
+	return usage
+}
+
+func systemMemoryUsageBytes() int64 {
+	stats, err := resources.MemoryStats()
+	if err != nil {
+		return 0
+	}
+	return stats.UsedBytes
 }
 
 func systemNetworkIOBytes() (inBytes int64, outBytes int64) {

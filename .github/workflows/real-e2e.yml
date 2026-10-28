@@ -54,6 +54,8 @@ jobs:
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker rm -f opensandbox-e2e-credential-vault-target || true
           docker ps -aq --filter "label=opensandbox.e2e=credential-vault" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-egress-mitm-target || true
+          docker ps -aq --filter "label=opensandbox.e2e=egress-mitm" | xargs -r docker rm -f || true
           docker rm -f opensandbox-e2e-redis || true
           # Remove root-owned files from previous sandbox runs by mounting parent dir
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
@@ -124,6 +126,8 @@ jobs:
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker rm -f opensandbox-e2e-credential-vault-target || true
           docker ps -aq --filter "label=opensandbox.e2e=credential-vault" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-egress-mitm-target || true
+          docker ps -aq --filter "label=opensandbox.e2e=egress-mitm" | xargs -r docker rm -f || true
           docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
 

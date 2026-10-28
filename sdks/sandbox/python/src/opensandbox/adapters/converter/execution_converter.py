@@ -63,7 +63,8 @@ class ExecutionConverter:
         if opts.timeout is not None:
             if opts.timeout < timedelta(0):
                 raise InvalidArgumentException("timeout must be positive")
-            timeout_milliseconds = int(opts.timeout.total_seconds() * 1000)
+            # Round up using integer microseconds to preserve whole milliseconds exactly.
+            timeout_milliseconds = (opts.timeout // timedelta(microseconds=1) + 999) // 1000
 
         uid = UNSET
         if opts.uid is not None:

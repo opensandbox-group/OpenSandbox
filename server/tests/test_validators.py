@@ -66,6 +66,38 @@ def test_ensure_metadata_labels_allows_none_or_empty():
     assert ensure_metadata_labels(None) is None
     assert ensure_metadata_labels({}) is None
 
+
+@pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("app{}", "web"),
+        ("example.com/app{}", "web"),
+        ("example.com{}/app", "web"),
+        ("app", "web{}"),
+        ("app", "{}"),
+    ],
+    ids=["name", "prefixed-name", "prefix", "value", "empty-value"],
+)
+def test_ensure_metadata_labels_rejects_whitespace(key, value, whitespace):
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_metadata_labels({key.format(whitespace): value.format(whitespace)})
+    assert exc_info.value.status_code == 400
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == SandboxErrorCodes.INVALID_METADATA_LABEL
+
+
+@pytest.mark.parametrize("value", ["we b", "web\nx"])
+def test_ensure_metadata_labels_rejects_embedded_whitespace(value):
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_metadata_labels({"app": value})
+    assert exc_info.value.status_code == 400
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == SandboxErrorCodes.INVALID_METADATA_LABEL
+
+
 def test_ensure_metadata_labels_rejects_name_too_long():
     long_name = "a" * 64
     with pytest.raises(HTTPException) as exc_info:
@@ -206,6 +238,15 @@ class TestEnsureValidVolumeName:
             ensure_valid_volume_name("volume-")
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_VOLUME_NAME
+
+    @pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
+    def test_name_with_trailing_whitespace_raises(self, whitespace):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_volume_name("data" + whitespace)
+        assert exc_info.value.status_code == 400
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.INVALID_VOLUME_NAME
 
 class TestEnsureValidMountPath:
 
@@ -350,6 +391,15 @@ class TestEnsureValidPvcName:
             ensure_valid_pvc_name(name)
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
+
+    @pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
+    def test_name_with_trailing_whitespace_raises(self, whitespace):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_pvc_name("my-pvc" + whitespace)
+        assert exc_info.value.status_code == 400
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.INVALID_PVC_NAME
 
 class TestEnsureVolumesValid:
 

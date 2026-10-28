@@ -66,3 +66,14 @@ class InlineCredentialSource:
         )
 
         return inline_credential_source
+
+
+# Redacted repr: the credential value is write-only and must never
+# surface in logs, exception messages, or debug output. attrs would
+# overwrite a class-level __repr__, so the override is applied on the
+# class object after definition.
+def _redacted_repr(self: InlineCredentialSource) -> str:
+    return f"{type(self).__name__}(value=***)"
+
+
+InlineCredentialSource.__repr__ = _redacted_repr  # type: ignore[method-assign]

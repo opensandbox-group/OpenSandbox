@@ -14,6 +14,8 @@
 
 """Well-known CreateSandboxRequest.extensions keys and workload storage keys."""
 
+# Deprecated: superseded by lifecycle.renewalPolicy (OSEP-0009); the request
+# entry ends in 2.0, the metadata key stays. See #2289.
 ACCESS_RENEW_EXTEND_SECONDS_KEY = "access.renew.extend.seconds"
 ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY = "opensandbox.io/access-renew-extend-seconds"
 
@@ -30,3 +32,7 @@ ISOLATION_UPPER_MOUNT_PATH = "/var/lib/execd/isolation"
 # are automatically propagated to Pod annotations with ANNOTATION_METADATA_PREFIX
 EXTENSIONS_ANNOTATION_PREFIX = "opensandbox.extensions."
 ANNOTATION_METADATA_PREFIX = "opensandbox.io/extensions."
+
+# OSEP-0024 idle policy: reserved Sandbox CR annotation (JSON), parsed by the
+# same key on the ingress wake gate. Reserved prefix: user patches cannot set it.
+IDLE_POLICY_ANNOTATION_KEY = "sandbox.opensandbox.io/idle-policy"

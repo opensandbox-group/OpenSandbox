@@ -42,6 +42,10 @@ class ServerStreamEvent:
         text (str | Unset): Textual data for status, init, and stream events Example: Hello, World!
             .
         execution_count (int | Unset): Cell execution number in the session Example: 1.
+        exit_code (int | Unset): Successful foreground POST /command process exit status (0), present only on its
+            execution_complete event after the process has exited. Omitted for background startup acknowledgements, code
+            execution, and other events. Absence does not imply success; older servers omit this field. Non-zero command
+            exits use error.exit_code instead.
         execution_time (int | Unset): Execution duration in milliseconds Example: 150.
         timestamp (int | Unset): When the event was generated (Unix milliseconds) Example: 1700000000000.
         results (ServerStreamEventResults | Unset): Execution output in various MIME types (e.g., "text/plain",
@@ -52,6 +56,7 @@ class ServerStreamEvent:
     type_: ServerStreamEventType | Unset = UNSET
     text: str | Unset = UNSET
     execution_count: int | Unset = UNSET
+    exit_code: int | Unset = UNSET
     execution_time: int | Unset = UNSET
     timestamp: int | Unset = UNSET
     results: ServerStreamEventResults | Unset = UNSET
@@ -66,6 +71,8 @@ class ServerStreamEvent:
         text = self.text
 
         execution_count = self.execution_count
+
+        exit_code = self.exit_code
 
         execution_time = self.execution_time
 
@@ -88,6 +95,8 @@ class ServerStreamEvent:
             field_dict["text"] = text
         if execution_count is not UNSET:
             field_dict["execution_count"] = execution_count
+        if exit_code is not UNSET:
+            field_dict["exit_code"] = exit_code
         if execution_time is not UNSET:
             field_dict["execution_time"] = execution_time
         if timestamp is not UNSET:
@@ -116,6 +125,8 @@ class ServerStreamEvent:
 
         execution_count = d.pop("execution_count", UNSET)
 
+        exit_code = d.pop("exit_code", UNSET)
+
         execution_time = d.pop("execution_time", UNSET)
 
         timestamp = d.pop("timestamp", UNSET)
@@ -138,6 +149,7 @@ class ServerStreamEvent:
             type_=type_,
             text=text,
             execution_count=execution_count,
+            exit_code=exit_code,
             execution_time=execution_time,
             timestamp=timestamp,
             results=results,

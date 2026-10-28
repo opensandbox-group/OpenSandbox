@@ -17,6 +17,10 @@ package credentialvault
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 
@@ -93,6 +97,66 @@ func TestCredentialVaultCreateSanitizesAndRendersActiveSnapshot(t *testing.T) {
 	require.Equal(t, int64(1), payload.Revision)
 	require.Equal(t, []InjectionHeader{{Name: "Private-Token", Value: "secret-token"}}, payload.Bindings[0].Headers)
 	require.Contains(t, payload.Redactions, "secret-token")
+}
+
+func TestCredentialVaultPatchRevisionConflict(t *testing.T) {
+	for _, prepare := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prepare=%t", prepare), func(t *testing.T) {
+			store := NewStore(nil, func() bool { return true })
+			pol := testCredentialPolicy(t, `{"defaultAction":"deny"}`)
+			initial, err := store.Create(CreateRequest{}, pol)
+			require.NoError(t, err)
+			patch := func(req MutationRequest) error {
+				if prepare {
+					candidate, err := store.PreparePatch(req, pol)
+					if candidate != nil {
+						candidate.Discard()
+					}
+					return err
+				}
+				_, err := store.Patch(req, pol)
+				return err
+			}
+			stale := initial.Revision + 1
+			err = patch(MutationRequest{ExpectedRevision: &stale})
+			require.ErrorIs(t, err, ErrRevisionConflict)
+			response := httptest.NewRecorder()
+			WriteError(response, fmt.Errorf("wrapped: %w", err))
+			require.Equal(t, http.StatusConflict, response.Code)
+
+			err = patch(MutationRequest{ExpectedRevision: &initial.Revision,
+				Credentials: &CredentialMutationSet{Delete: []string{"expectedRevision"}}})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "expectedRevision")
+			require.NotErrorIs(t, err, ErrRevisionConflict)
+			response = httptest.NewRecorder()
+			WriteError(response, err)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			state, err := store.Sanitized()
+			require.NoError(t, err)
+			require.Equal(t, initial, state)
+		})
+	}
+}
+
+func TestCredentialVaultWriteErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"conflict-without-expectedRevision-text", fmt.Errorf("wrapped: %w", ErrRevisionConflict), http.StatusConflict},
+		{"validation-with-expectedRevision-text", errors.New("invalid name expectedRevision"), http.StatusBadRequest},
+		{"invalid", errors.New("invalid credential"), http.StatusBadRequest},
+		{"not-found", fmt.Errorf("wrapped: %w", ErrNotFound), http.StatusNotFound},
+		{"exists", fmt.Errorf("wrapped: %w", ErrExists), http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			WriteError(response, tc.err)
+			require.Equal(t, tc.code, response.Code)
+		})
+	}
 }
 
 func TestCredentialVaultActiveSnapshotIfChanged(t *testing.T) {

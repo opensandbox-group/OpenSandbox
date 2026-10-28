@@ -173,11 +173,7 @@ func (c *CodeInterpretingController) RunCode() {
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running codes %v", err),
-		)
+		c.respondRunError(runCodeRequest.Hooks, completeCh, fmt.Sprintf("error running codes %v", err))
 		return
 	}
 
@@ -415,11 +411,7 @@ func (c *CodeInterpretingController) RunInSession() {
 	err := codeRunner.RunInBashSession(ctx, runReq)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running in session. %v", err),
-		)
+		c.respondRunError(runReq.Hooks, completeCh, fmt.Sprintf("error running in session. %v", err))
 		return
 	}
 

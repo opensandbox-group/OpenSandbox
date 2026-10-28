@@ -265,6 +265,91 @@ class RenewIntentConfig(BaseModel):
     )
 
 
+class IdlePauseRedisConfig(BaseModel):
+    """Redis settings for idle-pause activity tracking (OSEP-0024)."""
+
+    dsn: Optional[str] = Field(
+        default=None,
+        description=(
+            'Redis DSN (e.g. "redis://127.0.0.1:6379/0"). '
+            "Required when idle_pause.enabled is true."
+        ),
+    )
+    lock_ttl_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="TTL of the per-sandbox pause admission lock (SET NX EX).",
+    )
+
+
+class IdlePauseConfig(BaseModel):
+    """Auto-pause for opted-in fast sandboxes after X seconds of inactivity.
+
+    OSEP-0024. Only sandboxes that declare ``lifecycle.idlePolicy`` at create
+    time are ever auto-paused or auto-woken; absent the field this feature is
+    a no-op regardless of these switches.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch: enables the idle sweeper (and server-side activity "
+            "registry access). Off by default."
+        ),
+    )
+    sweep_interval_seconds: int = Field(
+        default=15,
+        ge=1,
+        description="Period between idle sweeps per server replica.",
+    )
+    activity_ttl_seconds: int = Field(
+        default=1800,
+        ge=30,
+        description=(
+            "TTL of per-sandbox activity keys. Must stay >= the largest accepted "
+            "idlePolicy.idleTimeoutSeconds (30-86400, enforced at create time) so "
+            "a present-but-stale key always implies idle-by-value. Keep the ingress "
+            "--activity-ttl-seconds equal to this value."
+        ),
+    )
+    redis: IdlePauseRedisConfig = Field(
+        default_factory=IdlePauseRedisConfig,
+        description=(
+            "Redis used for activity keys and pause locks; the sweeper cannot "
+            "run without it. In TOML, set keys under the same "
+            "[automation.idle_pause] table as redis.dsn, "
+            "redis.lock_ttl_seconds (dotted keys)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def require_redis_dsn_when_enabled(self) -> "IdlePauseConfig":
+        if self.enabled and (
+            self.redis.dsn is None or not str(self.redis.dsn).strip()
+        ):
+            raise ValueError(
+                "[automation.idle_pause] redis.dsn must be set when "
+                "enabled is true."
+            )
+        return self
+
+
+class AutomationConfig(BaseModel):
+    """Umbrella for server-side lifecycle automation features.
+
+    Today this hosts idle auto-pause (OSEP-0024); future automation features
+    join as sibling sub-tables.
+    """
+
+    idle_pause: IdlePauseConfig = Field(
+        default_factory=IdlePauseConfig,
+        description=(
+            "Idle auto-pause / auto-wake for opted-in fast sandboxes "
+            "(OSEP-0024). Off by default."
+        ),
+    )
+
+
 _KEY_ID_RE = re.compile(r"^[0-9a-z]$")
 
 
@@ -725,6 +810,35 @@ class KubernetesRuntimeConfig(BaseModel):
         description=(
             "Secret (in the platform namespace) holding the object-store "
             "credentials referenced by server-created SandboxTemplates."
+        ),
+    )
+    template_oci_publish_secret: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "dockerconfigjson Secret used as output.publishSecretRef for "
+            "format: overlaybd SandboxTemplate builds. Required when "
+            "creating overlaybd templates."
+        ),
+    )
+    template_mitm_ca_secret: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Secret holding the pinned cluster MITM CA certificate "
+            "(OSEP-0022). When set, server-created SandboxTemplates bake "
+            "spec.egressMitmCertificate from it (certificate entry only, "
+            "never the private key); unset keeps templates CA-free. The "
+            "Secret must exist in each template's namespace (ops-runbook "
+            "distribution); a missed copy fails the build observably."
+        ),
+    )
+    template_mitm_ca_secret_key: str = Field(
+        default="ca.crt",
+        min_length=1,
+        description=(
+            "Secret entry holding the CA certificate when "
+            "kubernetes.template_mitm_ca_secret is set."
         ),
     )
     workload_provider: Optional[str] = Field(
@@ -1200,7 +1314,12 @@ class SecureRuntimeConfig(BaseModel):
 class DockerConfig(BaseModel):
     network_mode: str = Field(
         default="host",
-        description="Docker network mode for sandbox containers (host, bridge, or a custom user-defined network name).",
+        description=(
+            "Network attachment for sandbox containers: 'host', 'bridge', 'none', 'pasta', "
+            "'slirp4netns', or the name of an existing user-defined network. 'pasta' / "
+            "'slirp4netns' are container-runtime user-mode networks (podman) that the host "
+            "reaches through the published ports; egress/networkPolicy still requires 'bridge'."
+        ),
     )
     api_timeout: Optional[int] = Field(
         default=None,
@@ -1471,6 +1590,13 @@ class AppConfig(BaseModel):
         default_factory=RenewIntentConfig,
         description="Auto-renew sandbox expiration when reverse-proxy access is observed.",
     )
+    automation: AutomationConfig = Field(
+        default_factory=AutomationConfig,
+        description=(
+            "Lifecycle automation for fast sandboxes: idle auto-pause today "
+            "(OSEP-0024). Off by default."
+        ),
+    )
     otel: OtelConfig = Field(
         default_factory=OtelConfig,
         description="OpenTelemetry export for SDK metrics ingestion (Phase 1: create latency).",
@@ -1655,6 +1781,9 @@ __all__ = [
     "AppConfig",
     "RenewIntentConfig",
     "RenewIntentRedisConfig",
+    "AutomationConfig",
+    "IdlePauseConfig",
+    "IdlePauseRedisConfig",
     "ServerConfig",
     "LogConfig",
     "RuntimeConfig",

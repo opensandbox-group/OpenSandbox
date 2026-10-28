@@ -17,103 +17,58 @@ Credential Vault is OpenSandbox's outbound credential broker for sandboxed agent
 - Go SDK >= 1.0.3
 - C# SDK >= 0.1.3
 - Server config sets `[egress].image`.
-- Server config sets `[egress].mode = "dns+nft"`. Credential Vault refuses to
-  activate in DNS-only mode because direct-IP connections can bypass DNS policy.
+- Server config sets `[egress].mode = "dns+nft"`. Credential Vault refuses to activate in DNS-only mode because direct-IP connections can bypass DNS policy.
 - Sandbox create request includes an outbound network policy.
-- The outbound network policy should use `defaultAction="deny"` and explicitly
-  allow every host referenced by a credential binding. Default-allow remains
-  temporarily supported for backward compatibility but emits a security warning.
+- The outbound network policy should use `defaultAction="deny"` and explicitly allow every host referenced by a credential binding. Default-allow remains temporarily supported for backward compatibility but emits a security warning.
 - Sandbox create request enables Credential Proxy.
 - Sandbox pods are not running with an additional transparent service-mesh sidecar (for example Istio/Envoy injection) in the same network namespace. Credential Vault currently assumes the OpenSandbox egress sidecar is the only transparent outbound interception layer in the pod.
-- The sandbox image has the tools you want to run. For Claude Code, use an image
-  with Node.js and npm, such as the OpenSandbox code-interpreter image.
+- The sandbox image has the tools you want to run. For Claude Code, use an image with Node.js and npm, such as the OpenSandbox code-interpreter image.
 
 ::: warning Migration notice
-Credential Proxy still requires server `[egress].mode = "dns+nft"`; deployments
-that cannot provide nft enforcement cannot safely enable credential injection.
-Default-allow policies remain accepted during the compatibility period, but emit
-a security warning and should migrate to `defaultAction="deny"` before enforcement
-is tightened in a future release.
+Credential Proxy still requires server `[egress].mode = "dns+nft"`; deployments that cannot provide nft enforcement cannot safely enable credential injection. Default-allow policies remain accepted during the compatibility period, but emit a security warning and should migrate to `defaultAction="deny"` before enforcement is tightened in a future release.
 :::
 
 ## How It Works
 
 ![Credential Vault request flow](../public/images/credential-vault.png)
 
-Credential Vault is implemented by the egress sidecar. A sandbox must be created
-with both an outbound `network_policy` / `networkPolicy` and Credential Proxy
-enabled. The lifecycle API field name is `credentialProxy.enabled`; SDKs expose
-that field using their language-specific naming conventions.
+Credential Vault is implemented by the egress sidecar. A sandbox must be created with both an outbound `network_policy` / `networkPolicy` and Credential Proxy enabled. The lifecycle API field name is `credentialProxy.enabled`; SDKs expose that field using their language-specific naming conventions.
 
 At a high level:
 
 1. The lifecycle server attaches the egress sidecar to the sandbox.
 2. The SDK writes credentials and bindings to the sidecar Credential Vault API.
 3. The sandbox process runs with fake or empty credential environment variables.
-4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar
-   inspects the request metadata.
-5. If exactly one binding matches the request scheme, host, port, method, and
-   path, the sidecar injects the configured auth header and scoped placeholder
-   substitutions.
+4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar inspects the request metadata.
+5. If exactly one binding matches the request scheme, host, port, method, and path, the sidecar injects the configured auth header and scoped placeholder substitutions.
 6. Secret values are redacted from vault responses and response headers.
 
-When the active-vault check succeeds, requests that do not match any credential
-binding are forwarded unchanged. Credential path-safety checks apply only after
-a binding matches and the request would otherwise receive credentials. The
-active-vault check itself runs before binding selection for every intercepted
-flow, including requests to hosts that would not match a binding.
+When the active-vault check succeeds, requests that do not match any credential binding are forwarded unchanged. Credential path-safety checks apply only after a binding matches and the request would otherwise receive credentials. The active-vault check itself runs before binding selection for every intercepted flow, including requests to hosts that would not match a binding.
 
-The active vault used by the MITM process is served over a local Unix domain
-socket inside the sidecar. The sandbox workload cannot fetch this active state
-over the normal server proxy path.
+The active vault used by the MITM process is served over a local Unix domain socket inside the sidecar. The sandbox workload cannot fetch this active state over the normal server proxy path.
 
-Each new flow conditionally reads that private endpoint with the cached opaque
-snapshot tag in `If-None-Match`. A `304 Not Modified` response reuses the same
-immutable in-process snapshot without rendering or transferring secret values;
-a `200 OK` response carries a fully validated replacement snapshot and a new
-opaque `ETag`. Successful create and patch responses are acknowledged only after
-the store has changed that tag, so the next flow immediately observes the new
-credentials without a cache-TTL delay.
+Each new flow conditionally reads that private endpoint with the cached opaque snapshot tag in `If-None-Match`. A `304 Not Modified` response reuses the same immutable in-process snapshot without rendering or transferring secret values; a `200 OK` response carries a fully validated replacement snapshot and a new opaque `ETag`. Successful create and patch responses are acknowledged only after the store has changed that tag, so the next flow immediately observes the new credentials without a cache-TTL delay.
 
-The opaque tag is separate from the public vault revision. Deleting a vault and
-creating it again can reset the public revision to `1`, but the recreated vault
-receives a different tag and cannot reuse plaintext from the deleted snapshot.
-A `404 Not Found` from the private endpoint is the normal "no active vault"
-result: the MITM process clears its cached snapshot and continues without
-credential injection.
+The opaque tag is separate from the public vault revision. Deleting a vault and creating it again can reset the public revision to `1`, but the recreated vault receives a different tag and cannot reuse plaintext from the deleted snapshot. A `404 Not Found` from the private endpoint is the normal "no active vault" result: the MITM process clears its cached snapshot and continues without credential injection.
 
 ::: warning Runtime availability dependency
-The private active-vault socket is a hard availability dependency for all
-traffic intercepted by Credential Proxy, not only traffic that ultimately
-matches a credential binding. A timeout, refused connection, unexpected EOF,
-`5xx` response, malformed snapshot, or invalid `ETag` clears the affected
-plaintext cache and fails the request closed before any upstream forwarding.
-Small requests whose bodies are safely buffered receive a local `503 Service
-Unavailable` response. Requests that are already streaming, may cross the
-streaming threshold, or have an unknown body length are terminated instead,
-because mitmproxy cannot safely synthesize a local response after streaming has
-started. Operators should monitor the sidecar and private socket as part of the
-egress data plane's availability.
+The private active-vault socket is a hard availability dependency for all traffic intercepted by Credential Proxy, not only traffic that ultimately matches a credential binding. A timeout, refused connection, unexpected EOF, `5xx` response, malformed snapshot, or invalid `ETag` clears the affected plaintext cache and fails the request closed before any upstream forwarding. Small requests whose bodies are safely buffered receive a local `503 Service Unavailable` response. Requests that are already streaming, may cross the streaming threshold, or have an unknown body length are terminated instead, because mitmproxy cannot safely synthesize a local response after streaming has started. Operators should monitor the sidecar and private socket as part of the egress data plane's availability.
 :::
 
 ## Persistence Across Pause and Resume
 
 ::: warning In-memory state
-Credential Vault entries are process-local memory in the egress sidecar; they
-are not part of the sandbox root filesystem or the `BatchSandbox` Pod template.
-Kubernetes pause deletes the Pod after snapshotting, so the fresh egress
-sidecar created by resume starts with an empty vault. Credential injection does
-not resume until a trusted client creates the credentials and bindings again.
+Credential Vault entries are process-local memory in the egress sidecar; they are not part of the sandbox root filesystem or the `BatchSandbox` Pod template. Kubernetes pause deletes the Pod after snapshotting, so the fresh egress sidecar created by resume starts with an empty vault. Credential injection does not resume until a trusted client creates the credentials and bindings again.
 
-Keep the original vault request or an equivalent secret-manager reference in a
-trusted control plane outside the sandbox. After the sandbox returns to
-`Running`, call the Credential Vault create API again before allowing work that
-depends on those credentials. Do not persist real credential values in sandbox
-metadata, environment variables, snapshots, or logs.
+Keep the original vault request or an equivalent secret-manager reference in a trusted control plane outside the sandbox. After the sandbox returns to `Running`, call the Credential Vault create API again before allowing work that depends on those credentials. Do not persist real credential values in sandbox metadata, environment variables, snapshots, or logs.
 
-Docker pause/unpause retains the existing container processes, but any egress
-sidecar replacement or restart also creates a new in-memory vault and requires
-the same re-injection procedure.
+Docker pause/unpause retains the existing container processes, but any egress sidecar replacement or restart also creates a new in-memory vault and requires the same re-injection procedure.
+:::
+
+::: info Fast-sandbox profile: server-routed vault
+For template-backed (fsb) sandboxes the vault is egress-held: the server pushes complete vault revisions to the egress vault over the FastPath handler relay and the relay response is the synchronous egress-validated ack. The same SDK entry points (`sandbox.credential_vault` / `credentialVault` / `CredentialVault`) work for template-backed sandboxes through the server-routed API — no sidecar endpoint is resolved. The vault is **not** carried at create time: create the sandbox first, then call the vault API.
+
+Everything else is unchanged for this profile: values are write-only and stripped from every read, `PATCH` is atomic (composed server-side over the relay; a `412` means another writer won the revision — re-read and retry with the fresh `expectedRevision`), and the vault persists egress-locally (memory plus one plaintext v1 file per sandbox under a Pod-scoped `emptyDir`), so an egress container restart inside the live Pod recovers locally when the Fastlet replays the bindings, and a Kubernetes pause/resume carries the vault files in the snapshot bundle (export strictly before teardown, re-stamped import at restore). The vault volume is part of the credential trust surface (mount it with `medium: Memory` to keep plaintext off node disk). See [fast-sandbox networking](/architecture/fast-sandbox/networking#credential-delivery).
 :::
 
 ## Service Mesh Compatibility
@@ -128,23 +83,17 @@ Use one of these operator patterns instead:
 
 For the underlying egress-sidecar limitation, see [Egress](/architecture/network/egress#service-mesh-compatibility).
 
-Credential bindings are intentionally precise. A default-deny egress policy is
-required. Use a narrow path match, for example `/v1/*` for Anthropic API calls.
+Credential bindings are intentionally precise. A default-deny egress policy is required. Use a narrow path match, for example `/v1/*` for Anthropic API calls.
 
 ## Auth Types
 
-Each binding uses an `auth` rule to describe how the referenced credential is
-rendered into the outbound request:
+Each binding uses an `auth` rule to describe how the referenced credential is rendered into the outbound request:
 
 - `bearer`: injects `Authorization: Bearer <credential>`.
-- `basic`: injects `Authorization: Basic <credential>`. The credential value
-  must already be base64-encoded `username:password`.
+- `basic`: injects `Authorization: Basic <credential>`. The credential value must already be base64-encoded `username:password`.
 - `apiKey`: injects the credential value into the configured header name.
-- `customHeaders`: injects multiple configured headers, each backed by its own
-  credential.
-- `passthrough`: does not inject an auth header. Use it with `substitutions`
-  when the upstream API requires a credential in a path, query string, or body
-  placeholder instead of a header.
+- `customHeaders`: injects multiple configured headers, each backed by its own credential.
+- `passthrough`: does not inject an auth header. Use it with `substitutions` when the upstream API requires a credential in a path, query string, or body placeholder instead of a header.
 
 Simple examples:
 
@@ -189,11 +138,7 @@ X-Client-Secret: <client-secret>
 
 ### Scoped Placeholder Substitutions
 
-Some upstream APIs require credentials in a request URL or body instead of a
-dedicated auth header. Credential Vault can handle those APIs without placing the
-real credential in the sandbox process. All auth types accept an optional
-`substitutions` list. Each substitution names a credential, a literal
-placeholder, and the request surfaces where replacement is allowed:
+Some upstream APIs require credentials in a request URL or body instead of a dedicated auth header. Credential Vault can handle those APIs without placing the real credential in the sandbox process. All auth types accept an optional `substitutions` list. Each substitution names a credential, a literal placeholder, and the request surfaces where replacement is allowed:
 
 ```python
 auth={
@@ -208,13 +153,9 @@ auth={
 }
 ```
 
-Use `type="passthrough"` when the binding only performs substitutions and should
-not inject an auth header. You can also combine substitutions with `bearer`,
-`basic`, `apiKey`, or `customHeaders` when the same upstream request needs both
-header injection and placeholder replacement.
+Use `type="passthrough"` when the binding only performs substitutions and should not inject an auth header. You can also combine substitutions with `bearer`, `basic`, `apiKey`, or `customHeaders` when the same upstream request needs both header injection and placeholder replacement.
 
-Substitution is disabled by default and is exact, literal, and case-sensitive.
-Only the configured surfaces are rewritten:
+Substitution is disabled by default and is exact, literal, and case-sensitive. Only the configured surfaces are rewritten:
 
 | Surface | Behavior |
 | --- | --- |
@@ -223,17 +164,9 @@ Only the configured surfaces are rewritten:
 | `header` | Replaces placeholders in the original request headers, excluding hop-by-hop and security-sensitive headers such as `Host`, `Content-Length`, and forwarding headers. Substitutions run before Credential Vault injects auth headers, so the sidecar does not rewrite the credential headers it creates. |
 | `body` | Replaces placeholders in UTF-8 request bodies. For `application/json`, the replacement is encoded as JSON string contents, so put the placeholder inside a quoted JSON string. For `application/x-www-form-urlencoded`, the replacement is form-encoded. Compressed and multipart bodies are skipped. |
 
-The sidecar applies all replacements for a surface against the original request
-text in one pass. Inserted credential values are not scanned again for later
-placeholders, which prevents one secret from accidentally rewriting another
-secret. When a body is rewritten, the sidecar updates `Content-Length` and
-removes `Transfer-Encoding` because the forwarded request now has a fixed-size
-buffered body.
+The sidecar applies all replacements for a surface against the original request text in one pass. Inserted credential values are not scanned again for later placeholders, which prevents one secret from accidentally rewriting another secret. When a body is rewritten, the sidecar updates `Content-Length` and removes `Transfer-Encoding` because the forwarded request now has a fixed-size buffered body.
 
-The placeholder, raw credential value, URL-encoded value, form-encoded value,
-and JSON-escaped values are added to the active redaction set. A binding with
-substitutions that matched the request but did not find any placeholder emits a
-substitution-miss log without exposing credential values.
+The placeholder, raw credential value, URL-encoded value, form-encoded value, and JSON-escaped values are added to the active redaction set. A binding with substitutions that matched the request but did not find any placeholder emits a substitution-miss log without exposing credential values.
 
 Example configuration:
 
@@ -304,16 +237,12 @@ content-type: application/json
 | `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS` | empty | Comma-separated IP addresses or CIDRs allowed to assert `X-Forwarded-Proto: https`. Forwarded transport headers from all other peers are ignored. Configure this when TLS terminates at a reverse proxy before the egress sidecar. |
 | `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH` | off | When enabled, every credential binding must explicitly provide non-empty `match.methods` and `match.paths`, and paths cannot contain the host-wide `/*` pattern. Vault create and patch requests that omit either field are rejected instead of receiving compatibility defaults. Enable this for control planes that translate higher-level API tool definitions into Credential Vault bindings. |
 
-The scoped-match setting is a fail-closed integration guard. It does not infer
-methods or paths from another platform's API tool definition. The caller that
-creates the vault must still copy the intended methods and paths into each
-binding and verify the sanitized binding readback.
+The scoped-match setting is a fail-closed integration guard. It does not infer methods or paths from another platform's API tool definition. The caller that creates the vault must still copy the intended methods and paths into each binding and verify the sanitized binding readback.
 
 
 ## SDK Quick Reference
 
-All sandbox SDKs use the same wire contract. The main differences are naming and
-language style:
+All sandbox SDKs use the same wire contract. The main differences are naming and language style:
 
 | SDK | Enable proxy on sandbox create | Vault entry point | Create / patch methods |
 | --- | --- | --- | --- |
@@ -323,14 +252,13 @@ language style:
 | Kotlin/JVM | `.credentialProxyEnabled(true)` or `.credentialProxy { enabled(true) }` | `sandbox.credentialVault()` | `create(request)`, `patch(request)` |
 | C#/.NET | `CredentialProxy = new CredentialProxyConfig { Enabled = true }` | `sandbox.CredentialVault` or sandbox helpers | `CreateCredentialVaultAsync(...)`, `PatchCredentialVaultAsync(...)` |
 
-The vault APIs return sanitized metadata. Plaintext credential values are
-write-only and are not returned by `get`, `list`, or patch responses.
+The vault APIs return sanitized metadata. Plaintext credential values are write-only and are not returned by `get`, `list`, or patch responses.
+
+The same entry points and methods work for template-backed (fsb) sandboxes: the SDK routes the vault through the lifecycle server, which relays revisions to the egress-held vault. No sidecar endpoint is resolved for them, and the `credentialProxy` create-time flag is ignored on that profile (the vault is set after creation, through the API).
 
 ## Claude Code With Anthropic
 
-This example installs Claude Code in the sandbox and calls the official
-Anthropic API endpoint. The real API key is read on the host and written to
-Credential Vault. The sandbox only sees a fake `ANTHROPIC_API_KEY`.
+This example installs Claude Code in the sandbox and calls the official Anthropic API endpoint. The real API key is read on the host and written to Credential Vault. The sandbox only sees a fake `ANTHROPIC_API_KEY`.
 
 Before running the script:
 
@@ -422,20 +350,13 @@ finally:
     sandbox.close()
 ```
 
-The Claude Code process reads the fake key from `ANTHROPIC_API_KEY`, but the
-outbound HTTPS request to `api.anthropic.com/v1/*` receives the real `x-api-key`
-header from Credential Vault. If your environment uses a private npm mirror,
-replace `registry.npmjs.org` in the network policy and the `npm install`
-command with that mirror host.
+The Claude Code process reads the fake key from `ANTHROPIC_API_KEY`, but the outbound HTTPS request to `api.anthropic.com/v1/*` receives the real `x-api-key` header from Credential Vault. If your environment uses a private npm mirror, replace `registry.npmjs.org` in the network policy and the `npm install` command with that mirror host.
 
 ## Git And Curl With Vault-Injected Credentials
 
-Credential Vault can also protect credentials used by command-line tools such as
-`git` and `curl`. Keep the command free of real secrets and bind the request
-shape to the credential in Vault instead.
+Credential Vault can also protect credentials used by command-line tools such as `git` and `curl`. Keep the command free of real secrets and bind the request shape to the credential in Vault instead.
 
-For a private Git repository, store a base64-encoded `username:token` value and
-bind it with `basic` auth:
+For a private Git repository, store a base64-encoded `username:token` value and bind it with `basic` auth:
 
 ```python
 Credential(name="git-basic", source={"value": "<base64(username:token)>"})
@@ -457,8 +378,7 @@ Then run the normal URL without embedding credentials:
 GIT_TERMINAL_PROMPT=0 git clone https://git.example.com/org/private-repo.git
 ```
 
-For an API request that expects a token header, bind the path and method to an
-`apiKey` auth rule:
+For an API request that expects a token header, bind the path and method to an `apiKey` auth rule:
 
 ```python
 Credential(name="api-token", source={"value": "<token>"})
@@ -483,22 +403,18 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 
 ## Binding Guidance
 
-- Use `defaultAction="deny"` and only allow the service hosts required by the
-  tool. Default-allow policies are deprecated because they may allow credential
-  destination bypass and will emit a security warning.
+- Use `defaultAction="deny"` and only allow the service hosts required by the tool. Default-allow policies are deprecated because they may allow credential destination bypass and will emit a security warning.
 - Scope bindings by path whenever possible, for example `/v1/*`.
-- Avoid overlapping bindings at the same precedence; ambiguous matches are
-  rejected.
-- Rejected requests (ambiguous paths, encoded separators crossing a binding
-  boundary) return `403` when the request body is small and fully known.
-  Requests with bodies above the mitmproxy streaming threshold (~1 MiB) or
-  with unknown length (chunked) cannot be answered with a `403` while the
-  body is being streamed, so the sidecar drops the connection instead —
-  either way the request is never forwarded upstream.
-- Do not put real secrets in sandbox `env`, command arguments, files, or
-  metadata.
-- Keep fake environment variables when a CLI refuses to start without a key; the
-  vault-injected header is what authenticates the outbound request.
+- Avoid overlapping bindings at the same precedence; ambiguous matches are rejected.
+- Rejected requests (ambiguous paths, encoded separators crossing a binding boundary) return `403` when the request body is small and fully known. Requests with bodies above the mitmproxy streaming threshold (~1 MiB) or with unknown length (chunked) cannot be answered with a `403` while the body is being streamed, so the sidecar drops the connection instead — either way the request is never forwarded upstream.
+- Do not put real secrets in sandbox `env`, command arguments, files, or metadata.
+- Keep fake environment variables when a CLI refuses to start without a key; the vault-injected header is what authenticates the outbound request.
+
+## Path Ambiguity Guard
+
+The sidecar inspects the request path only for requests that would receive injected credentials. A request is rejected with `403` when its path contains dot-segments (`..`) or backslashes (`\`, `%5c`) at any percent-decoding depth, or when percent-decoding does not converge within the guard's iteration bound — these are traversal or path-confusion primitives that legitimate clients do not send.
+
+Encoded slashes (`%2f`, including nested forms like `%252f`) are allowed when every decoding depth of the path matches the same credential binding. This keeps legitimate encoded wire formats working — npm scoped registry paths (`/@scope%2fname`) and artifact-store download URLs whose coordinates are double-encoded (for example `pkg%252F1.0`, as produced by some internal pypi proxies) — while a path whose decoding would cross a binding boundary is still rejected before any credential is injected. Requests outside every binding scope pass through untouched.
 
 ## Migrating From `ports`
 
@@ -511,3 +427,29 @@ If you have existing bindings that use `ports` to narrow scope, migrate them to 
 | `schemes: ["http", "https"], ports: [443]` | `schemes: ["https"]` |
 | `schemes: ["http", "https"], ports: [80]` | `schemes: ["http"]` |
 | `schemes: ["https"], ports: [443]` | `schemes: ["https"]` (remove `ports`) |
+
+## Experimental Live Credential-Bound Admission (OSEP-0023)
+
+::: warning Experimental boundary
+The live credential-bound loop is an internal sidecar experiment, not a supported deployment mode. It is documented here to bound what the current implementation actually does; the gate remains off by default and no public configuration surface is added.
+:::
+
+When the experimental revision runtime is enabled, the sidecar installs an immutable decision snapshot into the mitmproxy child over a private authenticated IPC channel and admits traffic per connection and per request:
+
+- **Dynamic decisions use the installed snapshot.** Unbound HTTPS passes through opaquely; bound hosts are decrypted only with a registry admission. Unknown identity denies. For a known identity, ECH, no-SNI and validated static TLS/443 bypass retain their early precedence, including during bootstrap. Other unknown, bootstrapping or mismatched state denies.
+- **Static TLS/443 bypass is operator-owned.** Set `OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS` to a JSON array of exact FQDNs or leftmost `*.` selectors, for example `["status.example.com","*.logs.example.com"]`. A wildcard covers all proper subdomains, including multiple labels, but not its apex. Go normalizes IDNA, case, surrounding whitespace and one root dot, then freezes a sorted unique list. Unset and `[]` mean empty; explicit empty text is an error. JSON input and canonical output each have a 64 KiB limit; at most 256 input entries are allowed before deduplication. IPs, URLs, ports and regexes are rejected.
+- **Migrate native bypass options before enabling live admission.** Both effective mitmproxy `ignore_hosts` and `allow_hosts` must remain empty. Static selectors run in the typed TLS hook at actual destination port 443, not in native regex options. HTTP/80 behavior and network policy are unchanged. Non-empty selectors cannot be combined with a chained upstream proxy. Explicit use of this variable outside live mode is rejected. Legacy regex behavior remains unchanged when the variable is unset. Existing `tcp_hosts` may still bypass HTTP credential handling; this change does not establish a general addon/options isolation boundary.
+- **TLS overlap is rejected before publication.** Any semantic intersection between a static selector and an HTTPS/443 binding rejects the complete Vault or Policy candidate before IPC prepare, policy persistence or nft application. Methods and paths do not exempt an overlap. HTTP-only bindings remain eligible. The child independently rejects overlap before staging. The list cannot be changed by a Vault update and adds no snapshot fields; changing it requires replacing the sidecar process.
+- **Sticky recovery, no same-sidecar restart.** Any terminal outcome with unknown external effects (a mutation whose remote result cannot be confirmed, a session cleanup failure, an unexpected child exit) latches a permanent recovery-required state: readiness drops, outstanding bootstrap tickets are invalidated, nft writes are quiesced, and quarantine is attempted. Packet isolation is established only when quarantine is confirmed. The same sidecar cannot bootstrap a fresh revision session afterwards; a whole-sidecar restart is not a verified safe recovery procedure.
+- **Request admission and cutover.** A vault mutation is applied to the live receiver first and published publicly only after exact confirmation. A rendered snapshot exceeding the IPC size limit is rejected with HTTP 400 before transmission; the current vault and sidecar remain available. In-flight requests finish on their admitted revision; new requests on a connection whose host was removed are fenced immediately: HTTP/1 receives 403; valid HTTP/2 requests refused at `requestheaders` receive `REFUSED_STREAM` without reaching the origin. The retired transport is force-closed at the drain deadline. Deleting the vault affects new requests and new connections; a retired connection can never be revived by re-adding the host. Already-admitted requests may finish only inside the bounded drain window — deletion does not recall requests the remote origin already received or revoke credentials already delivered remotely.
+- **Policy updates share the revision barrier.** Existing `POST`/`PUT`/`PATCH`/`DELETE /policy` operations and automatic `deny.always` / `allow.always` reloads validate the complete Policy/Vault pair. A policy that would deny any active binding is rejected before file, nft or receiver effects. A policy-only update preserves the public Vault revision, pinned credential bytes and bindings; it does not reread credential sources. Its commit order is optional user-policy file persistence, nft application, exact receiver confirmation, then Go proxy/base publication and API success. Reload skips user-policy persistence and publishes the accepted loader view only after receiver confirmation. Subsequent Vault writes and bootstraps use the committed internal Policy epoch rather than resetting it to zero.
+- **Policy visibility and failure.** Disk, nft and receiver updates are not instantaneously atomic: new nft rules may affect traffic before receiver confirmation. A receiver failure after successful nft application requires sticky recovery, quarantine and exact-child cleanup, even if the receiver definitively rejected the candidate. Replaying old nft rules or restoring the file cannot prove that new connections or requests were undone. Unavailable or unconfirmed revision updates and recovery-blocked writes return a fixed, sanitized 503; the initial file/nft error may still be 500. Validation failures before effects do not themselves require recovery.
+- **Policy no-ops and retries.** A DELETE with no matching target and an unchanged always-rule reload do not advance the internal Policy epoch, but cannot bypass recovery checks. Other committed writes, including equal content or a loader-detected rewrite, can advance the epoch and initiate another drain. No public epoch, Policy idempotency key or new SDK method is added. `GET /policy` reports the last Go-published user policy, not an in-progress transaction, always-rule overlay or packet-isolation status.
+- **Drain accounting.** Retired transports carry a bounded retirement deadline (default 30 seconds, internal range 1–300). The drain sweep pages expired transports and closes them; a failed close is retried on the next sweep rather than extending the deadline. An HTTP 101 protocol upgrade (including WebSocket) retains its request admission until the connection disconnects, so credential rotation and policy-only changes also drain an upgraded transport even when its host remains bound. API success waits for publication and retirement-deadline registration, not for the 30-second window to elapse. Repeated updates never extend an older request's earliest deadline. A still-covered connection may admit new-revision requests, but closing it for an expired old request also interrupts those newer requests. A still-covered idle connection with no old request is not retired solely because the Policy epoch changes. Sweep scheduling and failed-close retries can delay actual closure; this is not a deadline for opaque or direct-IP connections outside the registry. HTTP/2 normal retirement delays the single `NO_ERROR` GOAWAY with its frozen admitted-stream upper bound until old streams and their downstream/upstream output obligations are terminal. Deadline expiry is abnormal closure, not graceful completion.
+- **ECH is opaque pass-through.** A ClientHello carrying the `encrypted_client_hello` extension (0xfe0d), including GREASE forms, is forwarded untouched as an opaque tunnel without decryption; uninspectable ClientHello data denies. The implementation does not decrypt the inner ClientHello and does not guarantee that an ECH-enabled origin handshake succeeds.
+- **HTTP/1 authority gate.** On a decrypted HTTP/1 connection every request must carry exactly one syntactically strict `Host` header equal to the intercepted SNI and the admission binding (port omitted or 443). A conflicting absolute-form target, a CONNECT authority-form inside the stream and missing/duplicate/malformed Host values are rejected before any credential can be injected.
+- **HTTP/2 authority gate.** The fixed-version direct/lazy adapter validates original HTTPS pseudo-headers, authority, actual port 443 and SNI association before credential injection; invalid or missing identity fails closed.
+- **`ssl_insecure` is refused in live mode.** The launcher and the addon reject an insecure-upstream configuration when the live admission bundle is active; the legacy installation-only receiver keeps its existing behavior.
+- **Scope.** This mode is scoped to the internal sidecar profile: Docker DNS + nft enforcement, exact-host HTTPS on port 443, HTTP/1.1 origin-form or matching absolute-form requests, and inline credentials injected as headers. Experimental HTTP/2 admission and bounded drain wiring additionally cover only the fixed-dependency direct/lazy path; configured chained upstream proxies remain rejected for this live HTTP/2 path. Long-held responses can still cause Go retries to time out; full client migration and Linux acceptance remain follow-up work. See the [HTTP/2 integration boundary](/architecture/network/osep-0023-h2-integration). The fast-sandbox profile and recovery across a complete sidecar replacement remain out of scope. Dynamic DNS learning and Kubernetes deployments are not covered by this experiment's evidence. Policy participation is part of this implementation; its acceptance evidence is recorded separately from the earlier live-Vault checks below.
+
+The task-level acceptance record for this experiment lives in [Live Vault Acceptance](/guides/live-vault-acceptance).

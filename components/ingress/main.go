@@ -28,7 +28,9 @@ import (
 	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/activity"
 	"github.com/alibaba/opensandbox/ingress/pkg/flag"
+	"github.com/alibaba/opensandbox/ingress/pkg/idlepolicy"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
@@ -36,6 +38,7 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
+	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
 func main() {
@@ -78,12 +81,14 @@ func main() {
 	}
 
 	var sandboxProvider sandbox.Provider
+	var fsbProvider *sandbox.FastSandboxProvider
 	if providerType == sandbox.ProviderTypeFastSandbox {
-		sandboxProvider, err = sandbox.NewFastSandboxProvider(
+		fsbProvider, err = sandbox.NewFastSandboxProvider(
 			flag.FastPathEndpoint,
 			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 			flag.FastPathAccessMode,
 		)
+		sandboxProvider = fsbProvider
 	} else {
 		cfg := injection.ParseAndGetRESTConfigOrDie()
 		cfg.ContentType = runtime.ContentTypeProtobuf
@@ -91,7 +96,6 @@ func main() {
 		providerFactory := sandbox.NewProviderFactory(cfg, time.Second*30)
 		sandboxProvider, err = providerFactory.CreateProvider(providerType)
 		if err == nil && fastPathEnabled {
-			var fsbProvider *sandbox.FastSandboxProvider
 			fsbProvider, err = sandbox.NewFastSandboxProvider(
 				flag.FastPathEndpoint,
 				time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
@@ -133,11 +137,19 @@ func main() {
 		MinDistinctSignalTargets: flag.NetworkReadinessShadowMinSignalTargets,
 		DegradedFailureRatio:     flag.NetworkReadinessShadowDegradedFailureRatio,
 	})
-	proxyOptions := make([]proxy.Option, 0, 1)
+	proxyOptions := make([]proxy.Option, 0, 3)
 	if err != nil {
 		log.Printf("network readiness shadow assessment disabled (invalid configuration): %v", err)
 	} else {
 		proxyOptions = append(proxyOptions, proxy.WithConnectObserver(connectObserver))
+	}
+	activityRecorder, activityOptions := newActivityRecorder(ctx)
+	proxyOptions = append(proxyOptions, activityOptions...)
+	proxyOptions = append(proxyOptions, newWakeOption(ctx, fsbProvider, activityRecorder)...)
+	if flag.WakeEnabled && !flag.ActivityEnabled {
+		log.Printf("--wake-enabled without --activity-enabled: completed resumes are not recorded as activity, " +
+			"so the server-side idle sweeper will re-pause freshly resumed sandboxes after the idle threshold; " +
+			"enable activity recording for a stable wake loop")
 	}
 
 	// Create reverse proxy with sandbox provider.
@@ -150,11 +162,65 @@ func main() {
 		scopeVerifier,
 		proxyOptions...,
 	)
-	mux := newIngressMux(reverseProxy, networkReadiness)
+	handler := newIngressHandler(reverseProxy, networkReadiness)
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), mux); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), handler); err != nil {
 		log.Panicf("Error starting http server: %v", err)
 	}
+}
+
+// newActivityRecorder wires the OSEP-0024 auto-pause activity recorder
+// (Noop when disabled). It also serves as the wake flights' activity writer;
+// with recording disabled the flights write nothing, warned in main.
+func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option) {
+	if !flag.ActivityEnabled {
+		return activity.Noop{}, nil
+	}
+	activityClient, err := activity.RedisClientFromDSN(flag.ActivityRedisDSN)
+	if err != nil {
+		log.Panicf("Failed to create Redis client for activity: %v", err)
+	}
+	recorder, err := activity.NewRedisRecorder(ctx, activityClient, activity.RedisConfig{
+		TTL:         time.Duration(flag.ActivityTTLSeconds) * time.Second,
+		MinInterval: flag.ActivityMinInterval,
+		Logger:      proxy.Logger,
+	})
+	if err != nil {
+		log.Panicf("Invalid activity configuration: %v", err)
+	}
+	return recorder, []proxy.Option{proxy.WithActivityRecorder(recorder)}
+}
+
+// newWakeOption wires the OSEP-0024 wake-on-access orchestrator; every
+// flight is gated on the per-sandbox idle policy read from the Sandbox CR.
+func newWakeOption(ctx context.Context, fsbProvider *sandbox.FastSandboxProvider, activityWriter wake.ActivityWriter) []proxy.Option {
+	if !flag.WakeEnabled {
+		return nil
+	}
+	if fsbProvider == nil {
+		log.Panic("Wake-on-access requires a Fast Sandbox provider (set --provider-type=fast-sandbox or --fastpath-endpoint)")
+	}
+	policySource, err := idlepolicy.NewInClusterCRPolicySource(ctx)
+	if err != nil {
+		log.Panicf("Wake-on-access requires Kubernetes API access to read sandbox idle policies: %v", err)
+	}
+	waker, err := wake.NewWaker(wake.Config{
+		ParkBudget:        flag.WakeParkBudget,
+		ParkMax:           flag.WakeParkMax,
+		RestoreMax:        flag.WakeRestoreMax,
+		MaxFlightLifetime: flag.WakeMaxFlightLifetime,
+		RetryInterval:     flag.WakeRetryInterval,
+		RetryFactor:       flag.WakeRetryFactor,
+		RetryJitter:       flag.WakeRetryJitter,
+	}, fsbProvider, activityWriter, policySource)
+	if err != nil {
+		log.Panicf("Failed to create waker: %v", err)
+	}
+	if flag.WakeParkBudget <= time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond {
+		log.Printf("wake-park-budget (%v) should exceed the FastPath wait timeout (%v) plus one GetSandbox RPC so at least one probe fits inside the budget",
+			flag.WakeParkBudget, time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond)
+	}
+	return []proxy.Option{proxy.WithWaker(waker)}
 }
 
 func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observer, http.Handler, error) {
@@ -186,15 +252,27 @@ func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observ
 	return observer, connectivity.NewReadinessHandler(tracker), nil
 }
 
-func newIngressMux(reverseProxy, networkReadiness http.Handler) *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.Handle("/", reverseProxy)
-	mux.Handle("/status.ok/network-readiness", networkReadiness)
-	mux.HandleFunc("/status.ok", proxy.Healthz)
-	return mux
+// newIngressHandler serves the status endpoints and proxies everything else.
+// It does not use http.ServeMux, which answers paths with "//", "." or ".."
+// segments with a redirect to the cleaned path instead of passing them on;
+// the sandbox application owns its paths. The status paths are matched in
+// escaped form, so a sandbox path such as /status.ok%2Fnetwork-readiness is
+// proxied rather than read as a status endpoint.
+func newIngressHandler(reverseProxy, networkReadiness http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/status.ok":
+			proxy.Healthz(w, r)
+		case "/status.ok/network-readiness":
+			networkReadiness.ServeHTTP(w, r)
+		default:
+			reverseProxy.ServeHTTP(w, r)
+		}
+	})
 }
 
 func withLogger(ctx context.Context, logLevel string) context.Context {
 	logger := slogger.MustNew(slogger.Config{Level: logLevel}).Named("opensandbox.ingress")
+	wake.Logger = logger
 	return proxy.WithLogger(ctx, logger)
 }

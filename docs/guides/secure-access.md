@@ -5,10 +5,7 @@ description: Authenticate inbound HTTP and WebSocket traffic to sandbox endpoint
 
 # Secure Access
 
-Secure Access is OpenSandbox's inbound access control for sandbox endpoints.
-When enabled on a sandbox, the ingress gateway (and the server proxy path)
-require every caller to prove they are authorized before HTTP or WebSocket
-traffic reaches the sandbox.
+Secure Access is OpenSandbox's inbound access control for sandbox endpoints. When enabled on a sandbox, the ingress gateway (and the server proxy path) require every caller to prove they are authorized before HTTP or WebSocket traffic reaches the sandbox.
 
 Its counterparts:
 
@@ -19,29 +16,20 @@ Its counterparts:
 
 - Kubernetes runtime (Docker rejects `secureAccess: true` with `400`).
 - `[ingress] mode = "gateway"`.
-- Signed URLs additionally require `[ingress.secure_access]` with at least
-  one signing key.
+- Signed URLs additionally require `[ingress.secure_access]` with at least one signing key.
 
 ## How It Works
 
 ![Secure Access request flow](../public/images/secure-access.svg)
 
-On the **control plane**, creating a sandbox with `secureAccess: true` and
-calling `GetEndpoint` yields a per-sandbox opaque `SecureAccessToken`.
-Passing `?expires=<unix_seconds>` also mints a signed, time-limited routing
-token using the active key under `[ingress.secure_access]`.
+On the **control plane**, creating a sandbox with `secureAccess: true` and calling `GetEndpoint` yields a per-sandbox opaque `SecureAccessToken`. Passing `?expires=<unix_seconds>` also mints a signed, time-limited routing token using the active key under `[ingress.secure_access]`.
 
-On the **data plane**, the ingress gateway evaluates two mechanisms in a
-fixed order:
+On the **data plane**, the ingress gateway evaluates two mechanisms in a fixed order:
 
-1. **Header present** → constant-time compare against `SecureAccessToken`.
-   Mismatch returns `401` immediately; there is **no** fallback to the
-   signed-URL branch.
-2. **Header absent** → parse the signed token, check `now ≤ expires`, verify
-   the signature.
+1. **Header present** → constant-time compare against `SecureAccessToken`. Mismatch returns `401` immediately; there is **no** fallback to the signed-URL branch.
+2. **Header absent** → parse the signed token, check `now ≤ expires`, verify the signature.
 
-Requests that pass either check are forwarded upstream with the header or
-signed prefix stripped, so the workload never sees the credential.
+Requests that pass either check are forwarded upstream with the header or signed prefix stripped, so the workload never sees the credential.
 
 ## Static Header Token
 
@@ -51,13 +39,11 @@ signed prefix stripped, so the workload never sees the credential.
 OpenSandbox-Secure-Access: <token>
 ```
 
-SDKs pick this header up from the endpoint response automatically, so
-application code usually does not touch it.
+SDKs pick this header up from the endpoint response automatically, so application code usually does not touch it.
 
 ## Signed Short-Lived URLs
 
-Mint a signed URL by adding `?expires=<unix_seconds>` (decimal `uint64`
-epoch seconds, **not** milliseconds):
+Mint a signed URL by adding `?expires=<unix_seconds>` (decimal `uint64` epoch seconds, **not** milliseconds):
 
 ```
 GET /sandboxes/{sandboxId}/endpoints/{port}?expires=<unix_seconds>
@@ -69,9 +55,7 @@ The returned routing token has the shape:
 {sandbox_id}-{port}-{expires_b36}-{signature}
 ```
 
-where `expires_b36` is base-36 seconds and `signature` is 8 hex digits plus
-the 1-character `key_id` that signed it. The gateway accepts it in three
-routing modes:
+where `expires_b36` is base-36 seconds and `signature` is 8 hex digits plus the 1-character `key_id` that signed it. The gateway accepts it in three routing modes:
 
 | Mode     | Where the token appears |
 |----------|------------------------|
@@ -79,8 +63,7 @@ routing modes:
 | header   | Value of the sandbox routing header |
 | uri      | Path prefix: `/{sandbox_id}/{port}/{expires_b36}/{signature}/…` |
 
-Use signed URLs to hand out shareable, time-limited endpoints without
-exposing the static token.
+Use signed URLs to hand out shareable, time-limited endpoints without exposing the static token.
 
 ## Server Configuration
 
@@ -107,25 +90,15 @@ key_id = "a"
 key = "<base64-encoded-secret>"   # raw base64, no "base64:" prefix
 ```
 
-The `opensandbox-server` Helm chart exposes the same shape under
-`server.gateway.secureAccess` and wires the keys into both the server and the
-ingress gateway.
+The `opensandbox-server` Helm chart exposes the same shape under `server.gateway.secureAccess` and wires the keys into both the server and the ingress gateway.
 
-To keep key material out of the config file, the server also accepts the
-`OPENSANDBOX_SECURE_ACCESS_KEYS` (`a=<base64-secret>[,b=...]`) and
-`OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY` (`a`) environment variables, which
-override the TOML block; the chart's
-`server.gateway.secureAccess.existingSecret` option sources them from a Secret.
+To keep key material out of the config file, the server also accepts the `OPENSANDBOX_SECURE_ACCESS_KEYS` (`a=<base64-secret>[,b=...]`) and `OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY` (`a`) environment variables, which override the TOML block; the chart's `server.gateway.secureAccess.existingSecret` option sources them from a Secret.
 
-**Key rotation.** Add a new key entry, deploy, then flip `active_key`.
-Verification loads every configured key, so tokens signed by older keys stay
-valid until you remove them — keep old entries until the longest possible
-token lifetime has elapsed.
+**Key rotation.** Add a new key entry, deploy, then flip `active_key`. Verification loads every configured key, so tokens signed by older keys stay valid until you remove them — keep old entries until the longest possible token lifetime has elapsed.
 
 ## Enabling It
 
-Set `secureAccess: true` on create. SDK equivalents: Python `secure_access=True`,
-JS/TS `secureAccess: true`, C# `SecureAccess = true`.
+Set `secureAccess: true` on create. SDK equivalents: Python `secure_access=True`, JS/TS `secureAccess: true`, C# `SecureAccess = true`.
 
 ```bash
 curl -X POST http://localhost:8080/v1/sandboxes \
@@ -165,20 +138,14 @@ curl -s "http://localhost:8080/v1/sandboxes/${SANDBOX_ID}/endpoints/8080?expires
 | `400` | `secureAccess: true` on Docker; malformed `expires` or routing token; invalid `expires_b36` / `port` / `signature`. |
 | `401` | Header mismatch; signed URL expired; bad signature; unknown key ID; secure access required but no credential presented. |
 
-Omitting `expires` on `GetEndpoint` is not a `400` — it returns the unsigned
-response, still carrying the static `SecureAccessToken`.
+Omitting `expires` on `GetEndpoint` is not a `400` — it returns the unsigned response, still carrying the static `SecureAccessToken`.
 
 ## Notes
 
-- Enforcement covers both ingress gateway and the server proxy path
-  (`/v1/sandboxes/{id}/proxy/...`), HTTP and WebSocket.
-- The gateway strips `OpenSandbox-Secure-Access` and any signed URI prefix
-  before forwarding.
-- In URI mode, path segments that resemble `expires_b36/signature` are only
-  interpreted as a signed prefix when the sandbox actually has secure access
-  enabled; otherwise the full path is forwarded unchanged.
-- Secure Access is independent of the execd access token
-  (`X-EXECD-ACCESS-TOKEN`) and Credential Vault; all can be used together.
+- Enforcement covers both ingress gateway and the server proxy path (`/v1/sandboxes/{id}/proxy/...`), HTTP and WebSocket.
+- The gateway strips `OpenSandbox-Secure-Access` and any signed URI prefix before forwarding.
+- In URI mode, path segments that resemble `expires_b36/signature` are only interpreted as a signed prefix when the sandbox actually has secure access enabled; otherwise the full path is forwarded unchanged.
+- Secure Access is independent of the execd access token (`X-EXECD-ACCESS-TOKEN`) and Credential Vault; all can be used together.
 
 ## See Also
 

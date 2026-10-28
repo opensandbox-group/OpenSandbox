@@ -41,6 +41,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.0'
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Run core e2e tests
         working-directory: kubernetes
@@ -85,6 +86,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -162,6 +164,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -245,6 +248,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -326,6 +330,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -355,6 +360,78 @@ jobs:
         if: always()
         run: |
           kind delete cluster --name "${KIND_CLUSTER}" || true
+
+  # Full fast-sandbox stack (OSEP-0024 idle-pause profile included);
+  # nightly/dispatch only, KVM runner.
+  fast-sandbox-full-stack:
+    name: Fast Sandbox Full-Stack E2E (KVM)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: kvm
+    timeout-minutes: 180
+    env:
+      # Covers up, both e2e steps, and the failure diagnostics.
+      IDLE_PAUSE: "1"
+    steps:
+      # actions/checkout always executes as the runner user; the script
+      # steps below run as root and leave root-owned files (venv, pycache)
+      # in the workspace, so hand ownership back before every checkout.
+      - name: Reset workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run integration tests (idle-pause profile)
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
+
+      - name: Run native template verify
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Run overlaybd template verify
+        # Builds the overlaybd template first; no-op when OCI_STACK=0.
+        timeout-minutes: 90
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
+      - name: Run base SDK e2e
+        timeout-minutes: 30
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      - name: Run idle-pause SDK e2e
+        timeout-minutes: 45
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
+
+      # Collect the env's own failure dump ($WORK/logs/failure-*.txt) plus
+      # live status, BEFORE teardown removes the cluster.
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          mkdir -p diagnostics
+          sudo cp -a "$work/logs" "$work/run.log" diagnostics/ 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" diagnostics || true
+          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status \
+            > diagnostics/live-status.txt 2>&1 || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-sandbox-full-stack-diagnostics-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down
 
   publish-nightly-latest:
     name: Publish latest (${{ matrix.component }} nightly)

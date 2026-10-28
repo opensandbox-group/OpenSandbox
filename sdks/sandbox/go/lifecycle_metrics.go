@@ -68,6 +68,11 @@ func reportSandboxCreateMetric(cfg ConnectionConfig, sandboxID, image string, du
 		if client == nil {
 			client = &http.Client{Timeout: 5 * time.Second}
 		}
+		// Metrics bypass NewClient, but must apply the same redirect protection
+		// without changing a caller-owned client or its redirect policy.
+		cloned := *client
+		cloned.CheckRedirect = protectedHeaderRedirectPolicy(client.CheckRedirect, cfg.GetAuthHeader())
+		client = &cloned
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return

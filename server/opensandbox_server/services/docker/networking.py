@@ -110,6 +110,21 @@ def _docker_error_indicates_unsupported_ipv6_sysctls(exc: DockerException) -> bo
 
 HOST_NETWORK_MODE = "host"
 BRIDGE_NETWORK_MODE = "bridge"
+NONE_NETWORK_MODE = "none"
+# Container-runtime network modes (as opposed to user-defined Docker networks). `pasta`
+# and `slirp4netns` are supported by some container runtimes (podman) and are the natural
+# choice where netavark/nftables is unavailable, e.g. rootless podman inside WSL2.
+PASTA_NETWORK_MODE = "pasta"
+SLIRP4NETNS_NETWORK_MODE = "slirp4netns"
+CONTAINER_RUNTIME_NETWORK_MODES = frozenset(
+    {
+        HOST_NETWORK_MODE,
+        BRIDGE_NETWORK_MODE,
+        NONE_NETWORK_MODE,
+        PASTA_NETWORK_MODE,
+        SLIRP4NETNS_NETWORK_MODE,
+    }
+)
 EGRESS_SIDECAR_LABEL = "opensandbox.io/egress-sidecar-for"
 
 
@@ -117,12 +132,16 @@ class DockerNetworkingMixin:
     """Mixin providing network validation, endpoint resolution, and egress sidecar."""
 
     def _is_user_defined_network(self) -> bool:
-        """Return True when network_mode is a named user-defined network (not host/bridge/none/container:*)."""
-        return self.network_mode not in {
-            HOST_NETWORK_MODE,
-            BRIDGE_NETWORK_MODE,
-            "none",
-        } and not self.network_mode.startswith("container:")
+        """Return True when network_mode is a named user-defined network.
+
+        Anything outside the container-runtime network modes (host/bridge/none/pasta/
+        slirp4netns) and the ``container:*`` form is treated as a Docker network name and
+        must exist before the sandbox is created.
+        """
+        return (
+            self.network_mode not in CONTAINER_RUNTIME_NETWORK_MODES
+            and not self.network_mode.startswith("container:")
+        )
 
     def _validate_network_exists(self) -> None:
         """Verify the configured user-defined Docker network exists before creating a sandbox."""
@@ -166,6 +185,24 @@ class DockerNetworkingMixin:
                 detail={
                     "code": SandboxErrorCodes.INVALID_PARAMETER,
                     "message": "networkPolicy is not supported when docker network_mode=host.",
+                },
+            )
+
+        # `none`, `pasta` and `slirp4netns` provide no bridge network for the egress sidecar
+        # to attach to, so network policy cannot be enforced with them.
+        if self.network_mode in {
+            NONE_NETWORK_MODE,
+            PASTA_NETWORK_MODE,
+            SLIRP4NETNS_NETWORK_MODE,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"networkPolicy is not supported when docker network_mode='{self.network_mode}'. "
+                        "Use network_mode='bridge' to enable network policy enforcement."
+                    ),
                 },
             )
 
@@ -264,6 +301,16 @@ class DockerNetworkingMixin:
             # main container's private IP is not a stable proxy target. In that case, treat the
             # server-proxy target as the server-local host-mapped endpoint instead of a container IP.
             if labels.get(SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY):
+                return self._resolve_host_mapped_endpoint(
+                    self._resolve_proxy_host(),
+                    labels,
+                    port,
+                )
+            # User-mode networks (`pasta`, `slirp4netns`) have no host-routable container IP at
+            # all: the Docker-compatible inspect reports an empty IPAddress and no Networks entry,
+            # and the host reaches the sandbox through the published ports. Resolve those through
+            # the host mapping as well instead of failing with NETWORK_MODE_ENDPOINT_UNAVAILABLE.
+            if self.network_mode in {PASTA_NETWORK_MODE, SLIRP4NETNS_NETWORK_MODE}:
                 return self._resolve_host_mapped_endpoint(
                     self._resolve_proxy_host(),
                     labels,

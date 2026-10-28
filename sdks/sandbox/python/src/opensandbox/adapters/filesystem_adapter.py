@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from io import IOBase, TextIOBase
 from typing import TypedDict
 
@@ -215,7 +215,7 @@ class FilesystemAdapter(Filesystem):
             range_header: str | None = None,
             offset: int | None = None,
             limit: int | None = None,
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         """Stream file content as bytes chunks via HTTP (true streaming)."""
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
         try:
@@ -246,7 +246,15 @@ class FilesystemAdapter(Filesystem):
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-            return response.aiter_bytes(chunk_size=chunk_size)
+
+            async def _iter() -> AsyncGenerator[bytes, None]:
+                try:
+                    async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                        yield chunk
+                finally:
+                    await response.aclose()
+
+            return _iter()
         except Exception as e:
             logger.error(f"Failed to stream file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -548,19 +556,14 @@ class FilesystemAdapter(Filesystem):
     async def replace_contents(self, entries: list[ContentReplaceEntry]) -> None:
         """Replace file contents using auto-generated API."""
         try:
-            from json import JSONDecodeError
-
             from opensandbox.api.execd.api.filesystem import replace_content
 
             client = await self._get_client()
-            try:
-                response_obj = await replace_content.asyncio_detailed(
-                    client=client,
-                    body=FilesystemModelConverter.to_api_replace_content_body(entries),
-                )
-                handle_api_error(response_obj, "Replace contents")
-            except JSONDecodeError:
-                pass
+            response_obj = await replace_content.asyncio_detailed(
+                client=client,
+                body=FilesystemModelConverter.to_api_replace_content_body(entries),
+            )
+            handle_api_error(response_obj, "Replace contents")
 
         except Exception as e:
             logger.error("Failed to replace contents", exc_info=e)

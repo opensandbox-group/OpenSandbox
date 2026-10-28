@@ -8,18 +8,19 @@
 from fastapi import HTTPException
 
 from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
+from opensandbox_server.services.validators import normalize_network_policy_action
 
 
 def normalized_policy(policy: NetworkPolicy) -> dict:
-    default_action = (policy.default_action or "deny").strip().lower() or "deny"
-    if default_action not in ("allow", "deny"):
-        raise HTTPException(400, detail="networkPolicy.defaultAction must be allow or deny.")
+    default_action = normalize_network_policy_action(policy.default_action, "networkPolicy.defaultAction")
     rules = []
     for rule in policy.egress:
-        target = rule.target.strip()
-        action = rule.action.strip().lower() or "deny"
-        if action not in ("allow", "deny"):
-            raise HTTPException(400, detail="networkPolicy rule action must be allow or deny.")
+        target = (rule.target or "").strip()
+        action = normalize_network_policy_action(rule.action, "networkPolicy rule action")
+        if rule.ports:
+            # Not enforceable by the fastlet nft path yet (#2213); accepting
+            # would silently drop deny rules.
+            raise HTTPException(400, detail="networkPolicy ports are not supported for Fast Sandbox policy yet.")
         if not target:
             raise HTTPException(400, detail="networkPolicy rule target cannot be empty.")
         rules.append({"action": action, "target": target})
@@ -48,7 +49,10 @@ def merge_policy_rules(policy: dict, rules: list[NetworkRule]) -> dict:
     """
     incoming: dict[str, dict] = {}
     for rule in rules:
-        target = rule.target.strip()
+        if rule.ports:
+            # Mirrors normalized_policy (#2213).
+            raise HTTPException(400, detail="networkPolicy ports are not supported for Fast Sandbox policy yet.")
+        target = (rule.target or "").strip()
         if target and target not in incoming:
             incoming[target] = {"action": rule.action, "target": target}
     merged: list[dict] = []

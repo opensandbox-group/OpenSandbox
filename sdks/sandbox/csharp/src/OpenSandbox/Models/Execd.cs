@@ -58,6 +58,15 @@ public class ServerStreamEvent
     public int? ExecutionCount { get; set; }
 
     /// <summary>
+    /// Gets or sets the successful foreground command exit status (zero).
+    /// Absent for older servers, background startup, and code execution.
+    /// Non-zero command exits are reported in the error payload instead.
+    /// </summary>
+    [JsonPropertyName("exit_code")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? ExitCode { get; set; }
+
+    /// <summary>
     /// Gets or sets the execution time in milliseconds.
     /// </summary>
     [JsonPropertyName("execution_time")]

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     PagedSandboxInfos,
@@ -150,6 +150,10 @@ class SandboxManagerSync:
         logger.debug(f"Getting info for sandbox: {sandbox_id}")
         return self._sandbox_service.get_sandbox_info(sandbox_id)
 
+    def get_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        """Get backend routing context without connecting to execd."""
+        return self._diagnostics_service.get_context(sandbox_id)
+
     def get_diagnostic_logs(
         self,
         sandbox_id: str,
@@ -191,7 +195,8 @@ class SandboxManagerSync:
 
     def kill_sandbox(self, sandbox_id: str) -> None:
         """
-        Terminate a single sandbox.
+        Request irreversible termination of the remote sandbox. Returns when
+        deletion is accepted; runtime cleanup may continue afterward.
 
         Args:
             sandbox_id: Sandbox ID to terminate
@@ -201,7 +206,7 @@ class SandboxManagerSync:
         """
         logger.info(f"Terminating sandbox: {sandbox_id}")
         self._sandbox_service.kill_sandbox(sandbox_id)
-        logger.info(f"Successfully terminated sandbox: {sandbox_id}")
+        logger.info(f"Sandbox deletion accepted: {sandbox_id}")
 
     def renew_sandbox(
         self, sandbox_id: str, timeout: timedelta

@@ -348,6 +348,8 @@ func clientWithoutRedirects(base *http.Client) *http.Client {
 }
 
 func copyResponse(rw http.ResponseWriter, resp *http.Response) error {
+	// The marker is gateway-owned; upstream responses must not carry it.
+	resp.Header.Del(WakeMarkerHeader)
 	copyHeader(rw.Header(), resp.Header)
 	rw.WriteHeader(resp.StatusCode)
 	defer func() {

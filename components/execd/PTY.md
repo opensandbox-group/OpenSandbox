@@ -40,6 +40,8 @@ Use this when you need a **long-lived shell** driven over **WebSocket**: PTY mod
 
 ## Notes
 
+- PTY sessions default `TERM=xterm-256color` when the sandbox environment has no usable `TERM`, so colors and terminfo-aware programs work out of the box. An explicit `TERM` always wins. Pipe mode does not get a `TERM` default.
+- Shell startup flags are `--noprofile --norc`, so image shell rc files (prompt, aliases, `ls --color=auto`) do not load; configure colors explicitly per program when needed.
 - Commands running under the `sh` fallback must use syntax supported by the image's `sh` implementation.
 - Output is also buffered for **replay**; reconnect with `since=` to catch up.
 - Viewer output is delivered from the bounded replay stream, so WebSocket backpressure from a slow viewer cannot block the read/write holder's live output pipe. In pipe mode this is a combined stream without separate stdout/stderr channels.

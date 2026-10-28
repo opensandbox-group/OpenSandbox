@@ -71,12 +71,9 @@ dotnet add package Alibaba.OpenSandbox
 
 For detailed SDK usage, see the [SDK documentation](/sdks/).
 
-Choose a published SDK version for your application. Replace `{latest_version}` in
-the JVM examples with that version; use the BOM when combining JVM modules such
-as `sandbox` and `sandbox-pool-redis`. See the [release index](https://github.com/opensandbox-group/OpenSandbox/releases).
+Choose a published SDK version for your application. Replace `{latest_version}` in the JVM examples with that version; use the BOM when combining JVM modules such as `sandbox` and `sandbox-pool-redis`. See the [release index](https://github.com/opensandbox-group/OpenSandbox/releases).
 
-Feature availability differs by language. See the [capability matrix](/sdks/#capability-coverage),
-[Client Pool](/guides/client-pool), and [SDK Tracing](/sdks/observability#pool-warmup-tracing).
+Feature availability differs by language. See the [capability matrix](/sdks/#capability-coverage), [Client Pool](/guides/client-pool), and [SDK Tracing](/sdks/observability#pool-warmup-tracing).
 
 ## CLI
 

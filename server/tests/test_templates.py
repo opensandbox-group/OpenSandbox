@@ -19,7 +19,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from kubernetes.client import ApiException, CustomObjectsApi, V1APIResource, V1APIResourceList
 from unittest.mock import Mock, patch
@@ -120,6 +120,15 @@ class _FakeTemplateCRs:
 
     def set_status(self, namespace: str, name: str, status: dict) -> None:
         self.crs[(namespace, name)]["status"] = deepcopy(status)
+
+
+def _converge(service, crs, namespace: str, name: str, event: str = "MODIFIED") -> None:
+    """Deliver the CR store's current state through the watch reactor."""
+    handler = service._on_template_event(namespace)
+    if event == "DELETED":
+        handler("DELETED", {"metadata": {"name": name}})
+        return
+    handler("MODIFIED", deepcopy(crs.crs[(namespace, name)]))
 
 
 @pytest.fixture
@@ -239,6 +248,37 @@ def test_create_projects_crd_with_server_side_inputs(service, crs):
     assert spec["output"]["format"] == "native"
     assert spec["output"]["publish"] == "s3://sandbox-images/publish"
     assert spec["output"]["publishSecretRef"] == {"name": "sandbox-oss-credentials"}
+    # CA wiring is opt-in: unconfigured servers create CA-free templates.
+    assert "egressMitmCertificate" not in spec
+
+
+def test_create_bakes_configured_mitm_ca(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    config = _config()
+    config.kubernetes = KubernetesRuntimeConfig(
+        namespace="ns-1",
+        template_s3_publish_secret="sandbox-oss-credentials",
+        template_mitm_ca_secret="opensandbox-mitm-ca-v1",
+    )
+    svc = FastSandboxTemplateService(config, repository=repo, k8s_client=k8s)
+    try:
+        svc.create_template(_create_request())
+        assert crs.created[-1]["spec"]["egressMitmCertificate"] == {
+            "secretRef": {"name": "opensandbox-mitm-ca-v1"},
+            "key": "ca.crt",
+        }
+
+        config.kubernetes.template_mitm_ca_secret_key = "tls.crt"
+        svc.create_template(_create_request(image="alpine:3.20"))
+        assert crs.created[-1]["spec"]["egressMitmCertificate"] == {
+            "secretRef": {"name": "opensandbox-mitm-ca-v1"},
+            "key": "tls.crt",
+        }
+    finally:
+        svc.close()
 
 
 def test_create_defaults_machine_and_entrypoint(service, crs):
@@ -293,13 +333,14 @@ def test_create_rolls_back_row_on_crd_conflict(service, crs, repo):
     assert excinfo.value.status_code == 409
 
 
-def test_get_syncs_phase_from_crd(service, crs, repo):
+def test_get_reads_watch_converged_row(service, crs, repo):
     record = service.create_template(_create_request())
     crs.set_status(
         "ns-1",
         record.crd_name,
         {"phase": "Succeeded", "manifestRef": "s3://sandbox-images/publish/<build>/manifest.json"},
     )
+    _converge(service, crs, "ns-1", record.crd_name)
     synced = service.get_template(record.template_id)
     assert synced.phase is FastSandboxTemplatePhase.SUCCEEDED
     assert synced.manifest_ref.startswith("s3://")
@@ -309,6 +350,7 @@ def test_get_syncs_phase_from_crd(service, crs, repo):
 def test_get_marks_failed_when_crd_gone(service, crs, repo):
     record = service.create_template(_create_request())
     crs.crs.pop(("ns-1", record.crd_name))
+    _converge(service, crs, "ns-1", record.crd_name, event="DELETED")
     synced = service.get_template(record.template_id)
     assert synced.phase is FastSandboxTemplatePhase.FAILED
     assert synced.manifest_ref is None
@@ -321,15 +363,17 @@ def test_failed_phase_carries_message(service, crs):
         record.crd_name,
         {"phase": "Failed", "conditions": [{"type": "Failed", "message": "kernel panic"}]},
     )
+    _converge(service, crs, "ns-1", record.crd_name)
     synced = service.get_template(record.template_id)
     assert synced.phase is FastSandboxTemplatePhase.FAILED
     assert synced.message == "kernel panic"
 
 
-def test_list_bulk_syncs_and_filters(service, crs):
+def test_list_shows_watch_converged_phases(service, crs):
     first = service.create_template(_create_request(metadata={"env": "prod"}))
     second = service.create_template(_create_request(metadata={"env": "dev"}))
     crs.set_status("ns-1", first.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", first.crd_name)
     items, total = service.list_templates(metadata={"env": "prod"})
     assert total == 1
     assert items[0].template_id == first.template_id
@@ -394,9 +438,175 @@ def test_resolve_artifact_requires_succeeded(service, crs):
     assert excinfo.value.status_code == 404
 
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
     artifact_ref, entrypoint = service.resolve_template_artifact(record.template_id)
     assert artifact_ref == record.template_id
     assert entrypoint == ["sleep", "1"]
+
+
+def test_resolve_gate_trusts_db_row_not_crd(service, crs):
+    """The create gate reads the DB projection only."""
+    record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
+
+    # CR already says Succeeded but the event has not been delivered: 404.
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    with pytest.raises(Exception) as excinfo:
+        service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+
+    # Event lands -> row converges -> gate passes, and it keeps passing even
+    # if the CR store regresses afterwards (the gate never re-reads the CR).
+    _converge(service, crs, "ns-1", record.crd_name)
+    crs.set_status("ns-1", record.crd_name, {"phase": "Failed"})
+    artifact_ref, entrypoint = service.resolve_template_artifact(record.template_id)
+    assert artifact_ref == record.template_id
+    assert entrypoint == ["sleep", "1"]
+
+
+def test_resolve_restarts_watch_for_non_terminal_rows(service, crs, repo):
+    """A non-terminal row re-arms its namespace watch on the create gate."""
+    record = service_record("tpl-stuck", "ns-1")
+    repo.create(record)
+    assert "ns-1" not in service._watched_namespaces
+
+    with pytest.raises(Exception) as excinfo:
+        service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+    assert "ns-1" in service._watched_namespaces
+
+
+# -- overlaybd (OCI publication) ------------------------------------------------
+
+
+def _overlaybd_config(**overrides) -> KubernetesRuntimeConfig:
+    return KubernetesRuntimeConfig(
+        namespace="ns-1",
+        template_s3_publish_secret="sandbox-oss-credentials",
+        template_oci_publish_secret="registry-credentials",
+        **overrides,
+    )
+
+
+@pytest.fixture
+def overlaybd_service(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    config = _config()
+    config.kubernetes = _overlaybd_config()
+    svc = FastSandboxTemplateService(config, repository=repo, k8s_client=k8s)
+    yield svc
+    svc.close()
+
+
+def _overlaybd_request(**overrides) -> CreateFsbTemplateRequest:
+    overrides.setdefault("publish", "oci://registry.example.com/sandbox/templates")
+    overrides.setdefault("format", "overlaybd")
+    return _create_request(**overrides)
+
+
+def test_create_overlaybd_projects_oci_output(overlaybd_service, crs):
+    record = overlaybd_service.create_template(_overlaybd_request())
+    spec = crs.created[-1]["spec"]
+    assert spec["output"] == {
+        "rootfsSize": "5Gi",
+        "format": "overlaybd",
+        "publish": "oci://registry.example.com/sandbox/templates",
+        "publishSecretRef": {"name": "registry-credentials"},
+    }
+    assert record.spec["format"] == "overlaybd"
+
+
+def test_resolve_overlaybd_returns_manifest_ref(overlaybd_service, crs):
+    record = overlaybd_service.create_template(_overlaybd_request(entrypoint=["sleep", "1"]))
+    manifest_ref = "oci://registry.example.com/sandbox/templates@sha256:abc123"
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": manifest_ref})
+    _converge(overlaybd_service, crs, "ns-1", record.crd_name)
+    artifact_ref, entrypoint = overlaybd_service.resolve_template_artifact(record.template_id)
+    assert artifact_ref == manifest_ref
+    assert entrypoint == ["sleep", "1"]
+
+
+def test_resolve_overlaybd_without_manifest_ref_404(overlaybd_service, crs):
+    record = overlaybd_service.create_template(_overlaybd_request())
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded"})
+    _converge(overlaybd_service, crs, "ns-1", record.crd_name)
+    with pytest.raises(HTTPException) as excinfo:
+        overlaybd_service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+
+
+def test_resolve_overlaybd_legacy_s3_manifest_demands_rebuild(overlaybd_service, crs):
+    """Legacy overlaybd+S3 rows are unrunnable: resolve says so."""
+    record = overlaybd_service.create_template(_overlaybd_request())
+    crs.set_status(
+        "ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/legacy/manifest"}
+    )
+    _converge(overlaybd_service, crs, "ns-1", record.crd_name)
+    with pytest.raises(HTTPException) as excinfo:
+        overlaybd_service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+    assert "rebuild" in str(excinfo.value.detail).lower()
+
+
+def test_create_overlaybd_requires_oci_publish_secret(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    svc = FastSandboxTemplateService(_config(), repository=repo, k8s_client=k8s)
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            svc.create_template(_overlaybd_request())
+        assert excinfo.value.status_code == 400
+        assert "template_oci_publish_secret" in str(excinfo.value.detail)
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize(
+    "publish",
+    [
+        "s3://sandbox-images/publish",
+        "registry.example.com/sandbox/templates",
+        "oci://registry.example.com",
+        "oci:///templates",
+        "oci://registry.example.com/sandbox/templates:v1",
+        "oci://registry.example.com/sandbox/templates@sha256:abc",
+        "oci://registry.example.com/sandbox/templates/",
+        "oci://user:pass@registry.example.com/sandbox/templates",
+    ],
+)
+def test_create_overlaybd_rejects_invalid_publish(service, publish):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_overlaybd_request(publish=publish))
+    assert excinfo.value.status_code == 400
+
+
+def test_create_overlaybd_allows_registry_host_port(overlaybd_service, crs):
+    overlaybd_service.create_template(
+        _overlaybd_request(publish="oci://registry.example.com:5000/sandbox/templates")
+    )
+    assert crs.created[-1]["spec"]["output"]["publish"] == (
+        "oci://registry.example.com:5000/sandbox/templates"
+    )
+
+
+def test_create_native_rejects_oci_publish(service):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(
+            _create_request(publish="oci://registry.example.com/sandbox/templates")
+        )
+    assert excinfo.value.status_code == 400
+    assert "s3://" in str(excinfo.value.detail)
+
+
+def test_create_native_rejects_bucketless_publish(service):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(publish="s3://"))
+    assert excinfo.value.status_code == 400
+    assert "bucket" in str(excinfo.value.detail)
 
 
 @pytest.fixture
@@ -408,7 +618,7 @@ def client(service, monkeypatch):
         yield test_client
 
 
-def test_routes_template_lifecycle(client, crs):
+def test_routes_template_lifecycle(client, crs, service):
     response = client.post(
         "/v1/templates",
         json={
@@ -426,6 +636,7 @@ def test_routes_template_lifecycle(client, crs):
     template_id = body["templateId"]
 
     crs.set_status("ns-1", template_id, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", template_id)
 
     detail = client.get(f"/v1/templates/{template_id}")
     assert detail.status_code == 200
@@ -522,6 +733,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
 
     record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
@@ -576,6 +788,7 @@ def test_composite_routes_template_id_create_to_fsb(service, crs):
 
     record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())

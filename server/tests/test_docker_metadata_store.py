@@ -14,8 +14,11 @@
 
 """Unit tests for DockerMetadataStore (per-sandbox file-backed)."""
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from opensandbox_server.services.docker.metadata import (
     DockerMetadataStore,
@@ -56,6 +59,22 @@ class TestExtractUserLabels:
 
     def test_empty_returns_empty(self):
         assert _extract_user_labels({}) == {}
+
+    def test_keeps_only_recorded_metadata_keys(self):
+        labels = {
+            "team": "infra",
+            "maintainer": "from the image",
+            "opensandbox.io/metadata-keys": '["team"]',
+        }
+        assert _extract_user_labels(labels) == {"team": "infra"}
+
+    def test_recorded_empty_metadata(self):
+        labels = {"maintainer": "from the image", "opensandbox.io/metadata-keys": "[]"}
+        assert _extract_user_labels(labels) == {}
+
+    def test_malformed_metadata_keys_fall_back_to_user_labels(self):
+        labels = {"team": "infra", "opensandbox.io/metadata-keys": "not json"}
+        assert _extract_user_labels(labels) == {"team": "infra"}
 
 
 class TestDockerMetadataStore:
@@ -224,6 +243,19 @@ class TestDockerMetadataStore:
 
     # -- crash recovery ------------------------------------------------------
 
+    def test_transition_is_state_associated_and_separate_from_user_metadata(self, tmp_path: Path):
+        store = self._make_store(tmp_path)
+        transitioned_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        store.set_transition("sbx-001", "Paused", transitioned_at)
+        store.patch("sbx-001", {}, {"state": "user-value"})
+
+        reconstructed = self._make_store(tmp_path)
+        assert reconstructed.get_transition_time("sbx-001", "Paused") == transitioned_at.isoformat()
+        assert reconstructed.get_transition_time("sbx-001", "Running") is None
+        assert reconstructed.get("sbx-001", {}) == {"state": "user-value"}
+        reconstructed.delete("sbx-001")
+        assert reconstructed.get_transition_time("sbx-001", "Paused") is None
+
     def test_tmp_file_not_read_on_reload(self, tmp_path: Path):
         """Tmp files written during atomic save must not be picked up by get()."""
         root = tmp_path / "metadata"
@@ -237,3 +269,50 @@ class TestDockerMetadataStore:
         store2 = DockerMetadataStore(root=root)
         result = store2.get("sbx-001", {"hello": "world"})
         assert result == {"hello": "world", "team": "platform"}
+
+    def test_failed_rename_leaves_no_temporary_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A write whose rename fails must raise and leave no temporary file behind."""
+        root = tmp_path / "metadata"
+        store = DockerMetadataStore(root=root)
+        store.patch("sbx-001", {}, {"team": "platform"})
+
+        def failing_replace(self: Path, target: Path) -> Path:
+            raise PermissionError(f"{self} -> {target}")
+
+        monkeypatch.setattr(Path, "replace", failing_replace)
+        with pytest.raises(PermissionError):
+            store.patch("sbx-001", {}, {"owner": "alice"})
+
+        assert [p.name for p in root.iterdir()] == ["sbx-001.json"]
+        assert store.get("sbx-001", {}) == {"team": "platform"}
+
+    # -- concurrency ---------------------------------------------------------
+
+    def test_concurrent_patches_of_distinct_keys_keep_every_key(self, tmp_path: Path):
+        """Concurrent patches of one sandbox must neither fail nor drop each other's keys."""
+        store = self._make_store(tmp_path)
+        labels = {"team": "infra"}
+        writers, rounds = 8, 40
+        barrier = threading.Barrier(writers)
+        errors: list[Exception] = []
+
+        def run(writer: int) -> None:
+            for round_no in range(rounds):
+                barrier.wait()
+                try:
+                    store.patch("sbx-001", labels, {f"w{writer}-r{round_no}": "x"})
+                except Exception as exc:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(writer,)) for writer in range(writers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        result = store.get("sbx-001", labels) or {}
+        expected = {f"w{writer}-r{round_no}" for writer in range(writers) for round_no in range(rounds)}
+        assert expected - set(result) == set()

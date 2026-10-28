@@ -46,6 +46,7 @@ receiver = load("revision_receiver")
 selectors = load("host_selectors")
 previous_validator = sys.modules.get("decision_snapshot")
 reload_module("decision_snapshot")
+load("static_passthrough")
 tls_decision = load("tls_decision")
 if previous_validator is None:
     del sys.modules["decision_snapshot"]
@@ -121,6 +122,7 @@ class TLSDecisionTest(unittest.TestCase):
             sni=sni,
             ech_hidden=ech,
             static_passthrough=static,
+            destination_port=443,
             view=self.compile() if view is _DEFAULT else view,
         )
 

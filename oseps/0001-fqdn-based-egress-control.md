@@ -1040,16 +1040,14 @@ The sidecar holds the only elevated capability (`CAP_NET_ADMIN`) needed for ipta
 - Create an egress sidecar container with `--cap-add=NET_ADMIN` (no root required).
 - Run the application container with `--network container:<sidecar>` so they share one network namespace.
 - Sidecar starts DNS proxy on `127.0.0.1:15353`, installs iptables REDIRECT 53→15353, probes nftables.
-- Server waits for sidecar `/healthz` 200, then POSTs the declared sandbox network policy to sidecar `/policy`
-  with header `OPENSANDBOX-EGRESS-AUTH: <token>` (token injected via env `OPENSANDBOX_EGRESS_TOKEN`).
+- Server waits for sidecar `/healthz` 200, then POSTs the declared sandbox network policy to sidecar `/policy` with header `OPENSANDBOX-EGRESS-AUTH: <token>` (token injected via env `OPENSANDBOX_EGRESS_TOKEN`).
 - No `OPENSANDBOX_NETWORK_POLICY` env/config injection path is used anymore.
 
 #### Deployment Flow (Kubernetes)
 
 - Pod spec includes two containers: `egress-sidecar` (with `capabilities.add: [NET_ADMIN]`) and the application container (no extra caps).
 - Both containers share the pod network namespace by default; sidecar listens on `127.0.0.1:15353`.
-- Server (inside cluster) waits for sidecar `/healthz` 200 on the Pod IP, then POSTs the sandbox `networkPolicy`
-  to `/policy` with `OPENSANDBOX-EGRESS-AUTH` header. Token comes from `OPENSANDBOX_EGRESS_TOKEN` env on the sidecar.
+- Server (inside cluster) waits for sidecar `/healthz` 200 on the Pod IP, then POSTs the sandbox `networkPolicy` to `/policy` with `OPENSANDBOX-EGRESS-AUTH` header. Token comes from `OPENSANDBOX_EGRESS_TOKEN` env on the sidecar.
 - HostNetwork + network_policy is rejected.
 
 #### Behavior When CAP_NET_ADMIN Is Unavailable

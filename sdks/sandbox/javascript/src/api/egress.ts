@@ -1,11 +1,11 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -58,9 +58,14 @@ export interface paths {
          * Delete egress rules
          * @description Remove specific egress rules from the currently enforced policy by target.
          *
-         *     - Accepts a list of target strings (FQDNs or wildcard domains).
+         *     - Accepts a list of target strings (FQDNs, wildcard domains, IPs, or
+         *       CIDRs).
          *     - Matching rules are removed; targets not found in the current policy
          *       are silently ignored (idempotent).
+         *     - An explicit empty string ("") addresses port-only rules (rules with
+         *       `ports` and no `target`): listing it removes every port-only rule.
+         *       Port-only rules cannot be addressed individually by target since
+         *       they have none.
          */
         delete: {
             parameters: {
@@ -75,7 +80,14 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Rules removed successfully. */
+                /**
+                 * @description Rules removed successfully, or no matching rules were found. With
+                 *     the internal experimental revision runtime enabled, an applied
+                 *     change is confirmed by the receiver after optional policy-file
+                 *     persistence and nft application, before local policy publication
+                 *     and success. It does not wait for the default 30-second old-request
+                 *     drain or promise atomic visibility before confirmation.
+                 */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -87,6 +99,21 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 500: components["responses"]["InternalServerError"];
+                /**
+                 * @description The internal experimental revision runtime is unavailable, the
+                 *     mutation outcome could not be confirmed, or sticky recovery is
+                 *     required. This response does not prove that external effects were
+                 *     rolled back or that packets are isolated. No policy epoch is
+                 *     exposed by this API.
+                 */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": string;
+                    };
+                };
             };
         };
         options?: never;
@@ -98,7 +125,9 @@ export interface paths {
          *     This endpoint uses merge semantics:
          *     - Existing rules remain unless overridden by incoming rules.
          *     - Incoming rules are applied with higher priority than existing rules.
-         *     - If multiple incoming rules refer to the same `target`, the first one wins.
+         *     - If multiple incoming rules resolve to the same match scope (same
+         *       `target` and the same set of `ports`), the first one wins; rules
+         *       that differ in `target` or in `ports` coexist.
          */
         patch: {
             parameters: {
@@ -113,7 +142,13 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Patch applied successfully. */
+                /**
+                 * @description Patch applied successfully. With the internal experimental revision
+                 *     runtime enabled, success follows optional policy-file persistence,
+                 *     nft application, exact receiver confirmation and local policy
+                 *     publication. It does not wait for the default 30-second old-request
+                 *     drain or promise atomic visibility before confirmation.
+                 */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -125,6 +160,21 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 500: components["responses"]["InternalServerError"];
+                /**
+                 * @description The internal experimental revision runtime is unavailable, the
+                 *     mutation outcome could not be confirmed, or sticky recovery is
+                 *     required. This response does not prove that external effects were
+                 *     rolled back or that packets are isolated. No policy epoch is
+                 *     exposed by this API.
+                 */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": string;
+                    };
+                };
             };
         };
         trace?: never;
@@ -445,6 +495,7 @@ export interface components {
             /** @description List of egress rules evaluated in order. */
             egress?: components["schemas"]["NetworkRule"][];
         };
+        /** @description Egress rule. At least one of `target` or `ports` must be provided; when both are present the rule applies to `ports` on `target` only. Enforced by the server and the egress sidecar. */
         NetworkRule: {
             /**
              * @description Whether to allow or deny matching targets.
@@ -452,10 +503,30 @@ export interface components {
              */
             action: "allow" | "deny";
             /**
-             * @description FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-             *     IP/CIDR not yet supported in the egress MVP.
+             * @description FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP
+             *     address, or CIDR. May be omitted when `ports` is set (see below);
+             *     otherwise required.
              */
-            target: string;
+            target?: string;
+            /**
+             * @description Restricts this rule to specific TCP destination ports.
+             *
+             *     - `target` omitted, `ports` set: the rule applies to these ports
+             *       across all IPv4/IPv6 destinations.
+             *     - `target` is an IP or CIDR, `ports` set: the rule applies to that
+             *       destination only on these ports.
+             *     - `target` is a domain: `ports` is rejected with a validation
+             *       error. Domain rules are evaluated at the DNS layer, which has no
+             *       port dimension; combining them is not supported yet.
+             *
+             *     TCP only for now; UDP port scoping is not supported.
+             *
+             *     Under `defaultAction: deny`, the DNS proxy still denies hostname
+             *     lookups for targetless allow rules (it matches domain rules
+             *     only), so this shape serves direct-IP clients; hostname access
+             *     requires explicit domain rules or stable IPs.
+             */
+            ports?: number[];
         };
         CredentialVaultCreateRequest: {
             credentials: components["schemas"]["Credential"][];

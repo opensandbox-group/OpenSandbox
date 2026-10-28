@@ -72,6 +72,11 @@ func buildUpstreamProxyStatic(table string, ep *UpstreamProxyEndpoint) string {
 // AddUpstreamProxyIPs feeds DNS-learned proxy addresses into the scoped sets.
 // Elements carry the (clamped) answer TTL, like the sandbox dynamic sets.
 func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.quiesced.Load() {
+		return ErrQuiesced
+	}
 	if m.opts.UpstreamProxy == nil {
 		return nil
 	}
@@ -93,8 +98,6 @@ func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) err
 	if script.Len() == 0 {
 		return nil
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, err := m.run(ctx, script.String()); err != nil {
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpUpstreamProxyAdd)
 		return err

@@ -14,6 +14,7 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - `kubernetes/`: Kubernetes operator, CRDs, task-executor, and Kind e2e tests
 - `manifests/charts/`: Helm charts (base, controller, server, ingress-gateway, node-agent, fast-sandbox, opensandbox umbrella)
 - `cli/`: `osb` command-line client and bundled CLI skills
+- `console/`: developer console (React SPA + FastAPI BFF), optional K8s examples; no server/spec changes
 - `tests/`: cross-language end-to-end SDK tests
 - `docs/`, `examples/`, `oseps/`: documentation, samples, and proposals
 
@@ -26,6 +27,7 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - For cross-cutting changes spanning spec, server, and SDKs, start with `specs/AGENTS.md` and then read affected consumer guides.
 - For runtime component changes under `components/**`, read the nearest `README.md` or `DEVELOPMENT.md`; keep component APIs aligned with `specs/` and SDK consumers.
 - For CLI changes under `cli/**`, read `cli/README.md` and verify command help/output behavior alongside unit tests.
+- For console changes under `console/**`, read `console/README.md` and `console/docs/`; run `console/web` build and keep BFF env docs aligned with `console/k8s/*.example.yaml`.
 - For cross-language e2e tests under `tests/**`, read the language-local README and keep test assumptions aligned with current server and SDK behavior.
 - For areas without a local `AGENTS.md`, use the nearest `README.md`, `DEVELOPMENT.md`, and CI workflow as the next source of truth.
 
@@ -40,14 +42,12 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 
 Always:
 
-- Keep changes focused on the user request.
 - Treat `specs/*` as public contract sources.
-- Keep spec, implementation, SDKs, docs, examples, config, and CLI behavior aligned when user-visible behavior changes.
+- Keep spec, implementation, SDKs, docs, examples, config, and CLI behavior aligned when user-visible behavior changes; update `docs/` first.
 - When changing `specs/*`, also update or verify affected server, SDK, docs, and release outputs when practical.
 - When changing CRDs or Kubernetes public behavior, update or verify generated manifests, Helm/Kustomize deployment output, server Kubernetes integration, and docs when practical.
 - Prefer additive, backward-compatible changes for public interfaces.
 - Regenerate derived outputs when the source-of-truth file changes.
-- Update tests when behavior changes or bugs are fixed.
 - Mention unrun or blocked verification in the final handoff.
 - Prefer file-scoped or package-scoped checks before full-suite validation.
 
@@ -69,32 +69,27 @@ Never:
 
 | Content type | Source of truth | Rule |
 |---|---|---|
-| User and operations docs | `docs/` | Keep long-form docs here |
 | Root README | repo root `README.md` | GitHub homepage |
-| SDK, CLI, Helm, and other publishable package READMEs | package directory | Keep install, quick start, and package entry points |
+| SDK, CLI, Helm, and other publishable package READMEs | package directory | Keep install, quick start, and package entry points; no long-form docs |
 | Non-publishable component/module READMEs | component/module directory | Keep minimal pointers to `docs/` when a docs page exists |
 | Examples | `docs/examples/` + runnable code under `examples/` | Put docs in `docs/examples/`; keep example READMEs as thin pointers |
 | OSEPs | `oseps/` | `docs/community/oseps.md` only indexes GitHub proposals |
 | CONTRIBUTING, CODE_OF_CONDUCT, DEVELOPMENT | repo root / component directory | `docs/community/` links to them, does not duplicate them |
 
-**When modifying user-visible or operations-visible behavior**: update `docs/` first.
-
-**When editing READMEs**: avoid long-form docs outside root or publishable package READMEs.
-
-**When adding examples**: keep runnable code under `examples/`, and document it under `docs/examples/`.
-
-**When linking from README files to docs**: prefer repository-relative `docs/*.md` links so links match the checked-out branch or tag. Use `https://open-sandbox.ai` as a public site entry point, not as the only source link from versioned code directories.
+**When adding design/how-it-works content**: high-level architecture design and implementation principles go under `docs/architecture/`; user-facing usage instructions go under `docs/guides/`. Do not mix usage how-tos into architecture pages, or internals into guides.
 
 **When handling localized READMEs**: do not add new localized copies for SDKs, examples, or non-special modules.
+
+**When linking from README files to docs**: prefer repository-relative `docs/*.md` links (they match the checked-out branch/tag); use `https://open-sandbox.ai` only as a public site entry point, not as the only source link from versioned code directories.
 
 ### Docs site structure
 
 ```
 docs/
   getting-started/     # Quick start, installation, configuration
-  architecture/        # Layered system docs: overview, control-plane/, data-plane/, network/
+  architecture/        # High-level architecture design and implementation principles (overview, control-plane/, data-plane/, network/, fast-sandbox/)
   deployment/          # Deployment and operations (Kubernetes install, storage, metrics)
-  guides/              # Feature guides (credential vault, secure container, etc.)
+  guides/              # User-facing usage and feature guides (credential vault, secure container, pause/resume, etc.)
   sdks/                # SDK reference (one page per language per SDK)
   api/                 # OpenAPI spec reference
   cli/                 # CLI reference
@@ -113,10 +108,12 @@ docs/
 - Use VitePress custom containers (`::: tip`, `::: warning`, `::: info`) and code groups where appropriate.
 - Build and verify: `cd docs && pnpm docs:build` — must complete with zero errors.
 - The README.md in `docs/` is for docs-site contributors only (how to run dev server), and must stay excluded from the published site.
+- Markdown prose style, for all `.md` files in the repo: do not hard-wrap prose — a sentence or paragraph is written on a single line and editors soft-wrap. One line per list item and per blockquote paragraph.
+- Hard breaks (two trailing spaces or a trailing backslash) are only for intentional rendering, never for prose wrapping. Keep verbatim blocks untouched: code blocks, tables, YAML frontmatter, HTML blocks, ASCII diagrams. Never reflow generated markdown (e.g., helm-docs chart READMEs under `manifests/charts/*/README.md`) — change its source template and regenerate instead.
+- Never insert a blank line inside a paragraph, and never reflow or re-structure unrelated markdown while editing a file. When generating markdown programmatically, join soft-wrapped lines with a single space (no space between adjacent CJK characters).
 
 ## Review Focus
 
-- Prioritize breaking changes in specs, SDK interfaces, config, CLI behavior, and protocols.
-- Flag protocol changes that are unnecessary, inconsistent, or hard to implement.
+- Prioritize breaking changes in specs, SDK interfaces, config, CLI behavior, and protocols; flag protocol changes that are unnecessary, inconsistent, or hard to implement.
 - Flag changes that break source-of-truth boundaries or intended layering.
 - Call out missing tests and compatibility risks explicitly.

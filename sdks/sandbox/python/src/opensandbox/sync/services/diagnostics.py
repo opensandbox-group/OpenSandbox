@@ -17,11 +17,15 @@
 
 from typing import Protocol
 
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 
 
 class DiagnosticsSync(Protocol):
     """Synchronous sandbox diagnostics service."""
+
+    def get_context(self, sandbox_id: str) -> DiagnosticContext:
+        """Get backend routing context without connecting to execd."""
+        ...
 
     def get_logs(
         self,

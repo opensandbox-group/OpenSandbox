@@ -1,17 +1,13 @@
 # OpenSandbox Code Interpreter SDK for Python
 
 
-A Python SDK for executing code in secure, isolated sandboxes. It provides a high-level API for running Python, Java,
-Go, TypeScript, and other languages safely, with support for code execution contexts.
+A Python SDK for executing code in secure, isolated sandboxes. It provides a high-level API for running Python, Java, Go, TypeScript, and other languages safely, with support for code execution contexts.
 
 ## Prerequisites
 
-This SDK requires a Docker image containing the Code Interpreter runtime environment. You must use the
-`opensandbox/code-interpreter` image (or a derivative) which includes pre-installed runtimes for Python, Java, Go,
-Node.js, etc.
+This SDK requires a Docker image containing the Code Interpreter runtime environment. You must use the `opensandbox/code-interpreter` image (or a derivative) which includes pre-installed runtimes for Python, Java, Go, Node.js, etc.
 
-For detailed information about supported languages and versions, refer to the
-[Environment Documentation](https://github.com/opensandbox-group/sandbox-images).
+For detailed information about supported languages and versions, refer to the [Environment Documentation](https://github.com/opensandbox-group/sandbox-images).
 
 ## Installation
 
@@ -29,8 +25,7 @@ uv add opensandbox-code-interpreter
 
 ## Quick Start
 
-The following example demonstrates how to create a sandbox with a specific runtime configuration and execute a simple
-script.
+The following example demonstrates how to create a sandbox with a specific runtime configuration and execute a simple script.
 
 ```python
 import asyncio
@@ -137,13 +132,11 @@ execution = await sandbox.commands.run("pip install pandas numpy")
 
 ### Docker Image
 
-The Code Interpreter SDK relies on a specialized environment. Ensure your sandbox provider has the
-`opensandbox/code-interpreter` image available.
+The Code Interpreter SDK relies on a specialized environment. Ensure your sandbox provider has the `opensandbox/code-interpreter` image available.
 
 ### Language Version Selection
 
-You can specify the desired version of a programming language by setting the corresponding environment variable when
-creating the `Sandbox`.
+You can specify the desired version of a programming language by setting the corresponding environment variable when creating the `Sandbox`.
 
 | Language | Environment Variable | Example Value | Default (if unset) |
 | -------- | -------------------- | ------------- | ------------------ |
@@ -156,9 +149,7 @@ creating the `Sandbox`.
 
 ### 0. Run with `language` (default language context)
 
-You can pass `language` directly (recommended: `SupportedLanguage.*`) and skip `create_context`.
-When `context.id` is omitted, **execd will create/reuse a default session for that language**, so
-state can persist across runs:
+You can pass `language` directly (recommended: `SupportedLanguage.*`) and skip `create_context`. When `context.id` is omitted, **execd will create/reuse a default session for that language**, so state can persist across runs:
 
 ```python
 from code_interpreter import SupportedLanguage

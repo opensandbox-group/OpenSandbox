@@ -15,6 +15,7 @@
 package isolation
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,10 +27,19 @@ import (
 
 func newTestMergedView(t *testing.T, mode WorkspaceMode) *MergedView {
 	t.Helper()
+	// Resolve symlinks: MergedView rejects symlinked path components, and
+	// t.TempDir() sits under the /var symlink on macOS.
 	lower := filepath.Join(t.TempDir(), "lower")
 	upper := filepath.Join(t.TempDir(), "upper")
 	require.NoError(t, os.MkdirAll(lower, 0o755))
 	require.NoError(t, os.MkdirAll(upper, 0o755))
+	var err error
+	if lower, err = filepath.EvalSymlinks(lower); err != nil {
+		t.Fatal(err)
+	}
+	if upper, err = filepath.EvalSymlinks(upper); err != nil {
+		t.Fatal(err)
+	}
 	return NewMergedView(lower, upper, mode, uint32(os.Getuid()), uint32(os.Getgid()))
 }
 
@@ -254,4 +264,104 @@ func TestMergedView_ReadOnly_AllWritesDenied(t *testing.T) {
 	assert.Error(t, mv.MkdirAll("d", 0o755))
 	assert.Error(t, mv.Rename("a", "b"))
 	assert.Error(t, mv.Chmod("x.txt", 0o755))
+}
+
+func TestMergedView_AbsolutePathOutsideLowerRejected(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceOverlay)
+
+	// Every operation rejects an absolute path outside LowerDir instead of
+	// silently resolving it against the workspace.
+	outside := []string{"/tmp/escape.txt", "/etc/passwd", "/etc", "/"}
+	for _, p := range outside {
+		_, err := mv.Stat(p)
+		assert.True(t, errors.Is(err, ErrPathOutsideOverlays), "Stat %s = %v", p, err)
+
+		_, err = mv.ReadFile(p)
+		assert.True(t, errors.Is(err, ErrPathOutsideOverlays), "ReadFile %s = %v", p, err)
+
+		_, err = mv.Open(p)
+		assert.True(t, errors.Is(err, ErrPathOutsideOverlays), "Open %s = %v", p, err)
+
+		_, err = mv.ReadDir(p)
+		assert.True(t, errors.Is(err, ErrPathOutsideOverlays), "ReadDir %s = %v", p, err)
+
+		assert.True(t, errors.Is(mv.WriteFile(p, []byte("x"), 0o644), ErrPathOutsideOverlays), "WriteFile %s", p)
+		assert.True(t, errors.Is(mv.MkdirAll(p, 0o755), ErrPathOutsideOverlays), "MkdirAll %s", p)
+		assert.True(t, errors.Is(mv.Remove(p), ErrPathOutsideOverlays), "Remove %s", p)
+		assert.True(t, errors.Is(mv.RemoveAll(p), ErrPathOutsideOverlays), "RemoveAll %s", p)
+		assert.True(t, errors.Is(mv.Chmod(p, 0o644), ErrPathOutsideOverlays), "Chmod %s", p)
+		assert.True(t, errors.Is(mv.ReplaceContent(p, "a", "b"), ErrPathOutsideOverlays), "ReplaceContent %s", p)
+	}
+	_, err := mv.Search("/tmp", "*")
+	assert.True(t, errors.Is(err, ErrPathOutsideOverlays), "Search /tmp = %v", err)
+	assert.True(t, errors.Is(mv.Rename("a.txt", "/tmp/b.txt"), ErrPathOutsideOverlays), "Rename to /tmp/b.txt")
+	assert.True(t, errors.Is(mv.Rename("/tmp/a.txt", "b.txt"), ErrPathOutsideOverlays), "Rename from /tmp/a.txt")
+
+	// Nothing leaked into the upper directory.
+	entries, err := os.ReadDir(mv.UpperDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "rejected paths must not land in the upper dir")
+}
+
+func TestMergedView_AbsolutePathUnderLowerStillWorks(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceOverlay)
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "ws.txt"), []byte("lower"), 0o644))
+
+	// Absolute path under LowerDir is stripped and served normally.
+	info, err := mv.Stat(filepath.Join(mv.LowerDir, "ws.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "ws.txt", info.Name())
+
+	require.NoError(t, mv.WriteFile(filepath.Join(mv.LowerDir, "abs.txt"), []byte("via-abs"), 0o644))
+	data, err := os.ReadFile(filepath.Join(mv.UpperDir, "abs.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "via-abs", string(data))
+
+	require.NoError(t, mv.Remove(filepath.Join(mv.LowerDir, "abs.txt")))
+	_, err = os.Stat(filepath.Join(mv.UpperDir, "abs.txt"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestMergedView_RootLowerServesAllAbsolutePaths(t *testing.T) {
+	// A "/" overlay is the namespace root: every absolute path belongs to it.
+	upper := filepath.Join(t.TempDir(), "upper")
+	require.NoError(t, os.MkdirAll(upper, 0o755))
+	upper, err := filepath.EvalSymlinks(upper)
+	require.NoError(t, err)
+	mv := NewMergedView("/", upper, WorkspaceOverlay, 0, 0)
+
+	_, statErr := mv.Stat("/definitely-not-a-real-path-87953550")
+	assert.False(t, errors.Is(statErr, ErrPathOutsideOverlays), "root view must not reject absolute paths")
+	assert.True(t, os.IsNotExist(statErr))
+
+	// The returned path is workspace-relative, including for the root view.
+	rel, err := mv.safePath("/etc/passwd")
+	require.NoError(t, err)
+	assert.Equal(t, "etc/passwd", rel)
+
+	rel, err = mv.safePath("/")
+	require.NoError(t, err)
+	assert.Equal(t, ".", rel)
+}
+
+func TestMergedView_EmptyLowerRejectsAbsolutePaths(t *testing.T) {
+	// Defensive: a view without a lower root has no namespace scope to
+	// resolve absolute paths against.
+	mv := NewMergedView("", t.TempDir(), WorkspaceOverlay, 0, 0)
+
+	_, err := mv.Stat("/tmp/x")
+	assert.True(t, errors.Is(err, ErrPathOutsideOverlays))
+}
+
+func TestMergedView_TraversalDenialUnchanged(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+
+	_, err := mv.Stat("../etc/passwd")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "traversal")
+
+	// A path that escapes LowerDir via .. cleans to an absolute path
+	// outside the workspace and is rejected as out-of-scope.
+	_, err = mv.Stat(filepath.Join(mv.LowerDir, "..", "etc", "passwd"))
+	assert.True(t, errors.Is(err, ErrPathOutsideOverlays))
 }

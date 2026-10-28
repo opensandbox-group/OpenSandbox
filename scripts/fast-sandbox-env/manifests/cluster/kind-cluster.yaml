@@ -15,6 +15,11 @@
 #   /var/lib/fast-sandbox  StateRoot; prepared by integration-env.sh up
 #                          (XFS loop image when XFS_STATEROOT=1 so
 #                          per-sandbox rootfs copies are CoW reflinks)
+#   # @UBLK_DEV_MOUNT@  when OCI_STACK=1, rendered FIRST: a full bind of
+#                          the host /dev, so ublk device nodes (created by
+#                          the kernel at add time, block majors dynamic)
+#                          are visible inside the node. FIRST so the
+#                          private /dev/shm bind below shadows it back.
 #
 # Node state roots are PRIVATE per node: each node container binds its
 # own host subdirectory (control-plane/ or worker/) at the same
@@ -46,6 +51,7 @@ name: fast-sandbox-integration
 nodes:
 - role: control-plane
   extraMounts:
+  # @UBLK_DEV_MOUNT@
   - hostPath: /dev/kvm
     containerPath: /dev/kvm
   - hostPath: /sys/devices/virtual/misc/kvm
@@ -58,6 +64,7 @@ nodes:
     containerPath: /var/lib/fast-sandbox
 - role: worker
   extraMounts:
+  # @UBLK_DEV_MOUNT@
   - hostPath: /dev/kvm
     containerPath: /dev/kvm
   - hostPath: /sys/devices/virtual/misc/kvm

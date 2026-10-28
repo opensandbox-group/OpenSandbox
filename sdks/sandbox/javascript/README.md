@@ -66,10 +66,7 @@ try {
 
 ## Client-side sandbox pool
 
-`SandboxPool` maintains a best-effort buffer of clean, ready sandboxes. An
-acquired sandbox becomes caller-owned and is never returned to the pool; kill
-it when the work is complete. The pool replenishes the idle buffer in the
-background.
+`SandboxPool` maintains a best-effort buffer of clean, ready sandboxes. An acquired sandbox becomes caller-owned and is never returned to the pool; kill it when the work is complete. The pool replenishes the idle buffer in the background.
 
 ```ts
 import {
@@ -101,9 +98,7 @@ try {
 }
 ```
 
-`InMemoryPoolStateStore` is process-local. For a distributed pool, install a
-Redis client only in the application that needs it and import the optional
-pool subpath:
+`InMemoryPoolStateStore` is process-local. For a distributed pool, install a Redis client only in the application that needs it and import the optional pool subpath:
 
 ```bash
 npm install redis
@@ -119,25 +114,11 @@ await redis.connect();
 const stateStore = new RedisPoolStateStore({ client: redis });
 ```
 
-The SDK does not import `redis` from its main entry point and does not create,
-connect, or close the injected client. Any compatible client that implements
-`sendCommand(string[])` can be used.
+The SDK does not import `redis` from its main entry point and does not create, connect, or close the injected client. Any compatible client that implements `sendCommand(string[])` can be used.
 
-Pool warmup is admitted at `warmupCreateQps` per one-second reconcile tick.
-Creation is asynchronous; `warmupConcurrency` limits the post-create readiness,
-preparation, renewal, and commit stages. Use `warmupSandboxPreparer`,
-`warmupPostPrepareHealthCheck`, and the corresponding timeout/polling options
-for staged warmup. Set `connectionConfig.enableTracing` to emit OpenTelemetry
-`pool.warmup` traces with one child span per stage.
+Pool warmup is admitted at `warmupCreateQps` per one-second reconcile tick. Creation is asynchronous; `warmupConcurrency` limits the post-create readiness, preparation, renewal, and commit stages. Use `warmupSandboxPreparer`, `warmupPostPrepareHealthCheck`, and the corresponding timeout/polling options for staged warmup. Set `connectionConfig.enableTracing` to emit OpenTelemetry `pool.warmup` traces with one child span per stage.
 
-`SandboxPoolManager.destroy(poolName)` writes a shared `DESTROYING` fence,
-drains and best-effort kills visible idle sandboxes, clears persistent pool
-state, and writes a `DESTROYED` tombstone. `drainTimeoutSeconds` is checked
-before each drain attempt and bounds in-flight sandbox deletion; set it to `0`
-to disable that bound. State-store calls remain subject to the store client's
-own request timeout. If drain or persistent-state cleanup cannot finish, the
-namespace remains fenced as `DESTROYING`. Retry `destroy()` with the same pool
-name to finish cleanup.
+`SandboxPoolManager.destroy(poolName)` writes a shared `DESTROYING` fence, drains and best-effort kills visible idle sandboxes, clears persistent pool state, and writes a `DESTROYED` tombstone. `drainTimeoutSeconds` is checked before each drain attempt and bounds in-flight sandbox deletion; set it to `0` to disable that bound. State-store calls remain subject to the store client's own request timeout. If drain or persistent-state cleanup cannot finish, the namespace remains fenced as `DESTROYING`. Retry `destroy()` with the same pool name to finish cleanup.
 
 ## Usage Examples
 
@@ -241,8 +222,7 @@ const url = await sandbox.getEndpointUrl(44772);
 
 ### 6. Snapshots (Manager)
 
-`SandboxManager` administers sandbox snapshots — capture a sandbox's
-state and restore new sandboxes from it via `snapshotId`:
+`SandboxManager` administers sandbox snapshots — capture a sandbox's state and restore new sandboxes from it via `snapshotId`:
 
 ```ts
 import { SandboxManager } from "@alibaba-group/opensandbox";
@@ -275,8 +255,7 @@ await manager.deleteSnapshot(snapshot.id);
 
 ### 7. Isolated Sessions
 
-Isolated sessions run multi-step code in a hardened, resource-bounded
-environment with bind mounts — reachable through `sandbox.isolation`:
+Isolated sessions run multi-step code in a hardened, resource-bounded environment with bind mounts — reachable through `sandbox.isolation`:
 
 ```ts
 const session = await sandbox.isolation.create({
@@ -356,6 +335,7 @@ The `ConnectionConfig` class manages API server connection settings.
 Runtime notes:
 
 - In browsers, the SDK uses the global `fetch` implementation.
+- `requestTimeoutSeconds` bounds the wait for a response: it stops applying once the response headers arrive (streaming responses are not cut off). It never caps a healthy file upload body, which can legitimately take longer than the timeout; on Node.js a stalled upload, or an upload that gets no response headers within the timeout once the body has been sent, is aborted instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract).
 - In Node.js, every `Sandbox` and `SandboxManager` gets its own transport via `withTransportIfMissing()` unless you pass an already-initialized `ConnectionConfig`; shared configs are reused, and the SDK only closes transports it allocated itself. Call `sandbox.close()` or `manager.close()` when you are done so the SDK can release the agent it owns.
 
 | Parameter               | Description                                                                                                  | Default          | Environment Variable   |
@@ -412,8 +392,7 @@ const config2 = new ConnectionConfig({
 | `healthCheckPollingInterval` | Poll interval while waiting (milliseconds)       | 200 ms                       |
 | `signal`                     | Abort creation and readiness requests             | -                            |
 
-Note: metadata keys under `opensandbox.io/` are reserved for system-managed
-labels and will be rejected by the server.
+Note: metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -428,8 +407,7 @@ const sandbox = await Sandbox.create({
 
 ### 3. Runtime Egress Policy Updates
 
-Runtime egress reads and patches go directly to the sandbox egress sidecar.
-The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+Runtime egress reads and patches go directly to the sandbox egress sidecar. The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `target`.
@@ -448,10 +426,7 @@ await sandbox.patchEgressRules([
 
 ### 4. Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `credentialProxy` enabled, then write credentials
-and bindings through `sandbox.credentialVault`.
+Credential Vault injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `credentialProxy` enabled, then write credentials and bindings through `sandbox.credentialVault`.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -480,18 +455,15 @@ await sandbox.credentialVault.create({
 });
 ```
 
-See [Credential Vault](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/credential-vault.md) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.
 
 ### 5. Resource cleanup
 
-Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js
-so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting
-with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to
-release the underlying agent.
+Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
 
 ## Browser Notes
 
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.
 - If you pass `ReadableStream` or `AsyncIterable` for `writeFiles`, the browser will fall back to **buffering in memory** before upload.
 - Reason: browsers do not support streaming `multipart/form-data` bodies with custom boundaries (required by the execd upload API).
+- Redirects: same-origin redirects keep request headers, while cross-origin redirects drop `OPEN-SANDBOX-*` / `OPENSANDBOX-*` headers (plus `Authorization`, `Cookie`, and `Proxy-Authorization`) so credentials are never replayed. File uploads never follow redirects. Browsers cannot inspect a manual redirect target, so a request carrying protected headers fails closed when a redirect is received; Node.js is unaffected. See [Redirects and protected headers](../../../docs/sdks/javascript.md#redirects-and-protected-headers).

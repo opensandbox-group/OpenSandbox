@@ -43,7 +43,7 @@ limitations under the License.`;
 function asLineCommentHeader(text) {
   return text
     .split("\n")
-    .map((line) => `// ${line}`)
+    .map((line) => line ? `// ${line}` : "//")
     .join("\n");
 }
 
@@ -80,6 +80,7 @@ const packageRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(__dirname, "../../../../");
 
 const specs = {
+  diagnostic: path.join(repoRoot, "specs", "diagnostic-api.yml"),
   execd: path.join(repoRoot, "specs", "execd-api.yaml"),
   egress: path.join(repoRoot, "specs", "egress-api.yaml"),
   lifecycle: path.join(repoRoot, "specs", "sandbox-lifecycle.yml"),
@@ -95,6 +96,7 @@ const outDir = path.join(packageRoot, "src", "api");
 mkdirSync(outDir, { recursive: true });
 
 const outFiles = {
+  diagnostic: path.join(outDir, "diagnostic.ts"),
   execd: path.join(outDir, "execd.ts"),
   egress: path.join(outDir, "egress.ts"),
   lifecycle: path.join(outDir, "lifecycle.ts"),
@@ -105,6 +107,8 @@ console.log(`- repoRoot: ${repoRoot}`);
 console.log(`- outDir:   ${outDir}`);
 
 // Use pnpm as requested by the project rules.
+run("pnpm", ["exec", "openapi-typescript", specs.diagnostic, "-o", outFiles.diagnostic], packageRoot);
+ensureLicenseHeader(outFiles.diagnostic);
 run("pnpm", ["exec", "openapi-typescript", specs.execd, "-o", outFiles.execd], packageRoot);
 run("pnpm", ["exec", "openapi-typescript", specs.egress, "-o", outFiles.egress], packageRoot);
 run(
@@ -143,7 +147,31 @@ function ensureExecdSessionNote(filePath) {
 
 ensureExecdSessionNote(outFiles.execd);
 
+// openapi-typescript v7 emits properties that carry a schema `default` as
+// required, while the spec treats them as optional (the server applies the
+// default). Relax exactly those properties in the lifecycle output so TS
+// consumers can rely on the documented defaults without passing the fields.
+function relaxDefaultedProperties(filePath) {
+  const body = readFileSync(filePath, "utf8");
+  const replacements = [
+    // IdlePolicy.wakeOnAccess (spec: optional, default true).
+    [/^(\s*)wakeOnAccess: boolean;$/m, "$1wakeOnAccess?: boolean;"],
+    // ActivityProbe.timeoutSeconds (spec: optional, default 2).
+    [/^(\s*)timeoutSeconds: number;$/m, "$1timeoutSeconds?: number;"],
+  ];
+  let updated = body;
+  for (const [pattern, replacement] of replacements) {
+    updated = updated.replace(pattern, replacement);
+  }
+  if (updated !== body) {
+    writeFileSync(filePath, updated, "utf8");
+  }
+}
+
+relaxDefaultedProperties(outFiles.lifecycle);
+
 console.log("\n✅ API type generation completed:");
+console.log(`- ${path.relative(packageRoot, outFiles.diagnostic)}`);
 console.log(`- ${path.relative(packageRoot, outFiles.execd)}`);
 console.log(`- ${path.relative(packageRoot, outFiles.egress)}`);
 console.log(`- ${path.relative(packageRoot, outFiles.lifecycle)}`);

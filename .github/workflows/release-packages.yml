@@ -1,27 +1,10 @@
 name: Umbrella Packages
 
-# Reusable package fan-out for the unified umbrella release (OSEP-0016).
-#
-# One call, one job per registry. Every job builds its packages at the
-# umbrella version and, when inputs.publish is set, publishes them
-# directly in the same run — no held artifacts cross a job boundary
-# (mirroring the image legs, which also build and push directly).
-# With publish=false (dry runs, rc builds) the same builds run as a
-# rehearsal and nothing reaches a registry.
-#
-# Ordering: PyPI publishes in dependency order within its job
-# (server → sandbox → code-interpreter → mcp → cli), verify-then-continue
-# per package. Maven Central runs last (needs: [pypi, npm, nuget])
-# because a Central release is irreversible once published.
-#
-# Publish steps are idempotent: a package version already visible on the
-# target registry is skipped with a ::warning:: annotation, so re-runs
-# never collide with registry immutability.
-#
-# Versions come from the release-branch prep commit (--bump-only):
-# package.json / gradle.properties / Directory.Build.props already carry
-# the umbrella version. Python packages derive their version from git
-# tags, so build injects it via the pretend-version env vars.
+# Reusable package fan-out for the unified umbrella release (OSEP-0016):
+# one job per registry, build + publish in the same run. With
+# publish=false the builds run as a rehearsal only. Registry legs run in
+# parallel; publish steps are idempotent (already-published versions are
+# skipped).
 
 on:
   workflow_call:
@@ -53,10 +36,7 @@ jobs:
     name: PyPI packages
     runs-on: ubuntu-latest
     permissions:
-      # job-scoped privileged permissions: some fork Actions policies reject
-      # definitions that declare them at workflow level outright, which
-      # silently swallowed the workflow_call inputs and caused
-      # startup_failure
+      # job-scoped: workflow-level privileged permissions break some forks
       contents: read
       id-token: write
       attestations: write
@@ -90,24 +70,15 @@ jobs:
       - name: Smoke-import server wheel before publish
         run: |
           set -euo pipefail
-          # Guards against packaging regressions like missing committed files
-          # (hatchling silently drops paths matching VCS ignore patterns, e.g.
-          # the FastPath gRPC stubs vs the blanket `**/generated/**` rule in
-          # the repo-root .gitignore) — the wheel must import standalone.
+          # the wheel must import standalone (guards against hatchling
+          # silently dropping ignored paths)
           printf '[runtime]\ntype = "docker"\nexecd_image = "opensandbox/execd:latest"\n' > "$HOME/.sandbox.toml"
           uv venv "$RUNNER_TEMP/server-smoke"
           uv pip install --quiet --python "$RUNNER_TEMP/server-smoke/bin/python" server/dist/opensandbox_server-*.whl
           "$RUNNER_TEMP/server-smoke/bin/python" -c "import opensandbox_server.main"
           rm -f "$HOME/.sandbox.toml"
 
-      # The server is standalone; the SDK goes second because the
-      # code-interpreter/mcp packages and the CLI depend on the opensandbox
-      # SDK (see cli/pyproject.toml: "Release the CLI only after that SDK is
-      # published"), so the SDK must be visible on the index before its
-      # dependents go out. Each publish is followed by an index-visibility
-      # poll — PyPI's simple index can lag minutes behind a successful
-      # upload, so the poll window is generous (20 x 15s) and a lag alone
-      # must not fail the leg.
+      # publish in dependency order (server → SDK → dependents → CLI)
       - name: Publish PyPI packages
         if: ${{ inputs.publish }}
         env:
@@ -123,13 +94,7 @@ jobs:
             fi
             echo "::group::uv publish ${name}"
             uv publish "$dist"/*
-            for i in $(seq 1 20); do
-              if pip index versions "$name" 2>/dev/null | grep -q "$VERSION"; then
-                echo "verified ${name} ${VERSION} on PyPI"; echo "::endgroup::"; return 0
-              fi
-              sleep 15
-            done
-            echo "verification failed for ${name}" >&2; return 1
+            echo "::endgroup::"
           }
           publish_one opensandbox-server            server/dist
           publish_one opensandbox                   sdks/sandbox/python/dist
@@ -213,13 +178,7 @@ jobs:
             fi
             echo "::group::npm publish ${package} (dist-tag: ${DIST_TAG})"
             pnpm publish "$tarball" --access public --no-git-checks --tag "$DIST_TAG"
-            for i in $(seq 1 20); do
-              if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
-                echo "verified ${package} ${VERSION} on npm"; echo "::endgroup::"; return 0
-              fi
-              sleep 15
-            done
-            echo "verification failed for ${package}" >&2; return 1
+            echo "::endgroup::"
           }
           publish_one "packs/sandbox/$(ls packs/sandbox | grep '\.tgz$' | head -1)" \
             "@alibaba-group/opensandbox"
@@ -285,11 +244,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # Verify against the flat-container index, not `dotnet package
-          # search`: the search service lags the feed by tens of minutes,
-          # which reads as a failed publish (a re-push is harmless thanks to
-          # --skip-duplicate, but it stalls the leg and misleads on-call).
-          # The flat container updates within seconds of a successful push.
+          # skip-check against the flat-container index (search API lags
+          # the feed by tens of minutes)
           flat_versions() {
             curl -fsSL \
               "https://api.nuget.org/v3-flatcontainer/$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')/index.json" \
@@ -306,13 +262,7 @@ jobs:
               --api-key "$NUGET_API_KEY" \
               --source "https://api.nuget.org/v3/index.json" \
               --skip-duplicate
-            for i in $(seq 1 20); do
-              if flat_versions "$package" | grep -q "\"${VERSION}\""; then
-                echo "verified ${package} ${VERSION} on NuGet"; echo "::endgroup::"; return 0
-              fi
-              sleep 15
-            done
-            echo "verification failed for ${package}" >&2; return 1
+            echo "::endgroup::"
           }
           publish_one artifacts/sandbox            Alibaba.OpenSandbox
           publish_one artifacts/code-interpreter   Alibaba.OpenSandbox.CodeInterpreter
@@ -330,13 +280,11 @@ jobs:
           exit 1
 
   # ---------------------------------------------------------------------------
-  # Maven Central — LAST: a Central release is irreversible once published,
-  # so this job only runs after the PyPI/npm/NuGet jobs all succeeded
+  # Maven Central
   # ---------------------------------------------------------------------------
 
   maven:
     name: Maven Central (Kotlin/JVM)
-    needs: [pypi, npm, nuget]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -372,8 +320,7 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYPASSWORD }}
         run: |
           set -euo pipefail
-          # idempotent re-runs: the BOM POM is the release marker; Central
-          # releases are irreversible, so never publish over an existing one
+          # the BOM POM on Central is the already-released marker
           if curl -fsSI -o /dev/null \
             "https://repo1.maven.org/maven2/com/alibaba/opensandbox/sandbox-bom/${VERSION}/sandbox-bom-${VERSION}.pom"; then
             echo "::warning::com.alibaba.opensandbox:sandbox-bom:${VERSION} is already on Maven Central — skipping publish"

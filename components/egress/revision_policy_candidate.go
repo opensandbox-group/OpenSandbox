@@ -45,7 +45,7 @@ type effectivePolicyInputs struct {
 // effectivePolicyBase is an immutable baseline handle, independent of Vault
 // revision and policy content. Every replacement must construct a fresh handle,
 // even if epoch/content repeat. It is deliberately NOT a live publication owner.
-// Future integration must retain the authoritative current handle and use it to
+// The mutation owner retains the authoritative current handle and uses it to
 // validate candidates under the shared policy/Vault barrier. Validating against
 // a candidate's saved old handle cannot establish that the policy is current.
 type effectivePolicyBase struct {
@@ -84,7 +84,7 @@ func newEffectivePolicyBase(inputs effectivePolicyInputs, epoch int64) (*effecti
 // base/inputs and preparing/validating a candidate. No external effects or active
 // epoch publication are implemented here, and there is intentionally no Commit.
 // Identical inputs still produce base+1: deciding whether a change is a no-op
-// belongs to the future publication owner. Preparing again does not reserve or
+// belongs to the publication owner. Preparing again does not reserve or
 // consume another epoch, and yields the same bytes for the same inputs/Vault.
 func (b *effectivePolicyBase) Prepare(store *credentialvault.Store, next effectivePolicyInputs) (*effectivePolicyCandidate, error) {
 	if b == nil || store == nil || b.epoch < 0 || b.epoch == math.MaxInt64 {
@@ -134,7 +134,7 @@ func (c *effectivePolicyCandidate) Payload() []byte { return append([]byte(nil),
 
 // Digest authenticates only the canonical decision payload (Vault and epoch),
 // not these policy inputs. Different candidates from one base may share a digest.
-// A future effect owner must associate its effects with the exact candidate;
+// The effect owner must associate its effects with the exact candidate;
 // this foundation does not reserve an epoch or authenticate a full policy.
 func (c *effectivePolicyCandidate) Digest() string { return c.digest }
 func (c *effectivePolicyCandidate) Inputs() effectivePolicyInputs {
@@ -170,6 +170,15 @@ func freezeEffectivePolicyInputs(inputs effectivePolicyInputs) (effectivePolicyI
 	freezeRules := func(name string, rules []policy.EgressRule, action string) ([]policy.EgressRule, error) {
 		out := make([]policy.EgressRule, len(rules))
 		for i, rule := range rules {
+			if len(rule.PortRanges) > 0 {
+				// Floor rules: already-validated intervals with no target
+				// string to re-parse; freeze as-is.
+				if rule.Action != action {
+					return nil, fmt.Errorf("%w: %s rule %d: action %q, want %q", errInvalidEffectivePolicyCandidate, name, i, rule.Action, action)
+				}
+				out[i] = rule
+				continue
+			}
 			parsed, err := policy.ParseValidatedEgressRule(rule.Action, rule.Target)
 			if err != nil {
 				return nil, fmt.Errorf("%w: %s rule %d: %w", errInvalidEffectivePolicyCandidate, name, i, err)

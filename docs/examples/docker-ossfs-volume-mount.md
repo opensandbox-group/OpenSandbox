@@ -24,9 +24,7 @@ Make sure your server host has:
 - FUSE support enabled
 - writable local mount root for OSSFS (default `storage.ossfs_mount_root=/mnt/ossfs`)
 
-`storage.ossfs_mount_root` is **optional** if you use the default `/mnt/ossfs`.
-Even with on-demand mounting, the runtime still needs a deterministic host-side
-base directory to place dynamic mounts (`<mount_root>/<bucket>/<subPath?>`).
+`storage.ossfs_mount_root` is **optional** if you use the default `/mnt/ossfs`. Even with on-demand mounting, the runtime still needs a deterministic host-side base directory to place dynamic mounts (`<mount_root>/<bucket>/<subPath?>`).
 
 Optional config example:
 

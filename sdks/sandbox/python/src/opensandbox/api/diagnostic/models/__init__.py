@@ -19,11 +19,15 @@
 from .diagnostic_content_response import DiagnosticContentResponse
 from .diagnostic_content_response_delivery import DiagnosticContentResponseDelivery
 from .diagnostic_content_response_kind import DiagnosticContentResponseKind
+from .diagnostic_context_response import DiagnosticContextResponse
+from .diagnostic_context_response_backend_identifiers import DiagnosticContextResponseBackendIdentifiers
 from .error_response import ErrorResponse
 
 __all__ = (
     "DiagnosticContentResponse",
     "DiagnosticContentResponseDelivery",
     "DiagnosticContentResponseKind",
+    "DiagnosticContextResponse",
+    "DiagnosticContextResponseBackendIdentifiers",
     "ErrorResponse",
 )

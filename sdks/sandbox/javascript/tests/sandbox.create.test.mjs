@@ -535,6 +535,35 @@ test("Sandbox.create reports create metrics after ready", async () => {
   assert.match(ua, /^OpenSandbox-JS-SDK\//);
 });
 
+for (const headerName of ["open-sandbox-api-key", "Open-Sandbox-Api-Key"]) {
+  test(`Sandbox.create metrics preserves explicit ${headerName}`, async (t) => {
+    const { adapterFactory } = createAdapterFactory();
+    const config = new ConnectionConfig({
+      domain: "http://127.0.0.1:8080",
+      apiKey: "fallback-key",
+      headers: { [headerName]: "explicit-key" },
+    }).withTransportIfMissing();
+    t.after(() => config.closeTransport());
+    const requests = [];
+    Object.defineProperty(config, "fetch", {
+      get: () => async (url, init) => {
+        requests.push(new Request(url, init));
+        return new Response(null);
+      },
+    });
+    const sandbox = await Sandbox.create({
+      adapterFactory,
+      connectionConfig: config,
+      image: "python:3.12",
+      skipHealthCheck: true,
+    });
+    t.after(() => sandbox.close());
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /\/metrics\/events$/);
+    assert.equal(requests[0].headers.get("open-sandbox-api-key"), "explicit-key");
+  });
+}
+
 test("Sandbox.create metrics failure does not change create error", async () => {
   const { adapterFactory } = createAdapterFactory();
   adapterFactory.createExecdStack = () => ({
@@ -697,4 +726,177 @@ test("Sandbox.create metrics synchronous throw does not change create error", as
       return true;
     }
   );
+});
+
+test("Sandbox.create forwards lifecycle.idlePolicy", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+  const idlePolicy = {
+    idleTimeoutSeconds: 300,
+    onIdle: "pause",
+    wakeOnAccess: true,
+    activeProbe: { port: 8080, path: "/active" },
+  };
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    lifecycle: { idlePolicy },
+    skipHealthCheck: true,
+  });
+
+  assert.equal(recordedRequests.length, 1);
+  assert.deepEqual(recordedRequests[0].lifecycle, { idlePolicy });
+});
+
+test("Sandbox.create forwards lifecycle.renewalPolicy", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+  const renewalPolicy = { extendSeconds: 3600 };
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    lifecycle: { renewalPolicy },
+    skipHealthCheck: true,
+  });
+
+  assert.equal(recordedRequests.length, 1);
+  assert.deepEqual(recordedRequests[0].lifecycle, { renewalPolicy });
+});
+
+test("Sandbox.create rejects an invalid renewal policy before allocating transport resources", async () => {
+  // withTransportIfMissing must never run (same guard as the idlePolicy test).
+  const guardedConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });
+  guardedConfig.withTransportIfMissing = () => {
+    throw new Error("transport must not be allocated for an invalid renewal policy");
+  };
+  for (const extendSeconds of [299, 86401, 3600.5, "3600"]) {
+    await assert.rejects(
+      Sandbox.create({
+        adapterFactory: {
+          createLifecycleStack() {
+            throw new Error("lifecycle stack must not be built for an invalid renewal policy");
+          },
+        },
+        connectionConfig: guardedConfig,
+        image: "python:3.12",
+        lifecycle: { renewalPolicy: { extendSeconds } },
+        skipHealthCheck: true,
+      }),
+      /extendSeconds must be an integer between 300 and 86400/
+    );
+  }
+
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+  for (const extendSeconds of [300, 86400]) {
+    await Sandbox.create({
+      adapterFactory,
+      connectionConfig: { domain: "http://127.0.0.1:8080" },
+      image: "python:3.12",
+      lifecycle: { renewalPolicy: { extendSeconds } },
+      skipHealthCheck: true,
+    });
+  }
+  assert.deepEqual(recordedRequests[0].lifecycle, { renewalPolicy: { extendSeconds: 300 } });
+  assert.deepEqual(recordedRequests[1].lifecycle, { renewalPolicy: { extendSeconds: 86400 } });
+});
+
+test("Sandbox.create rejects an invalid idle policy before allocating transport resources", async () => {
+  // Observe allocation order directly: withTransportIfMissing must never run.
+  const guardedConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });
+  guardedConfig.withTransportIfMissing = () => {
+    throw new Error("transport must not be allocated for an invalid idle policy");
+  };
+  await assert.rejects(
+    Sandbox.create({
+      adapterFactory: {
+        createLifecycleStack() {
+          throw new Error("lifecycle stack must not be built for an invalid idle policy");
+        },
+      },
+      connectionConfig: guardedConfig,
+      image: "python:3.12",
+      lifecycle: { idlePolicy: { idleTimeoutSeconds: 29, onIdle: "pause" } },
+      skipHealthCheck: true,
+    }),
+    /idleTimeoutSeconds must be an integer/
+  );
+
+  for (const [idlePolicy, message] of [
+    [{ idleTimeoutSeconds: 29, onIdle: "pause" }, /idleTimeoutSeconds must be an integer between 30 and 86400/],
+    [{ idleTimeoutSeconds: 86401, onIdle: "pause" }, /idleTimeoutSeconds must be an integer between 30 and 86400/],
+    [{ idleTimeoutSeconds: 300.5, onIdle: "pause" }, /idleTimeoutSeconds must be an integer between 30 and 86400/],
+    [{ idleTimeoutSeconds: 300 }, /onIdle is required when idleTimeoutSeconds is set/],
+    [{ onIdle: "pause" }, /onIdle must be omitted when idleTimeoutSeconds is omitted/],
+    [{ idleTimeoutSeconds: 300, onIdle: "terminate" }, /onIdle must be "pause"/],
+    [{ wakeOnAccess: false, activeProbe: { port: 8080, path: "/active" } }, /activeProbe requires idleTimeoutSeconds/],
+    [{ idleTimeoutSeconds: 300, onIdle: "pause", activeProbe: { port: 0, path: "/active" } }, /port must be an integer between 1 and 65535/],
+    [{ idleTimeoutSeconds: 300, onIdle: "pause", activeProbe: { port: 8080, path: "active" } }, /path must be an absolute HTTP path/],
+    [{ idleTimeoutSeconds: 300, onIdle: "pause", activeProbe: { port: 8080, path: "/a b" } }, /path must not contain whitespace/],
+    [{ idleTimeoutSeconds: 300, onIdle: "pause", activeProbe: { port: 8080, path: "/active", timeoutSeconds: 11 } }, /timeoutSeconds must be an integer between 1 and 10/],
+  ]) {
+    await assert.rejects(
+      Sandbox.create({
+        adapterFactory: {
+          createLifecycleStack() {
+            throw new Error("transport must not be allocated for an invalid idle policy");
+          },
+        },
+        connectionConfig: { domain: "http://127.0.0.1:8080" },
+        image: "python:3.12",
+        lifecycle: { idlePolicy },
+        skipHealthCheck: true,
+      }),
+      message
+    );
+  }
+});
+
+test("Sandbox.create accepts idle policy boundaries and wake-only shapes", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+
+  const policies = [
+    // Valid timeout boundaries.
+    { idleTimeoutSeconds: 30, onIdle: "pause" },
+    { idleTimeoutSeconds: 86400, onIdle: "pause" },
+    // Wake-only shapes: never auto-paused, wakes on access.
+    {},
+    { wakeOnAccess: false },
+    // Probe boundaries.
+    {
+      idleTimeoutSeconds: 300,
+      onIdle: "pause",
+      activeProbe: { port: 1, path: "/active" },
+    },
+    {
+      idleTimeoutSeconds: 300,
+      onIdle: "pause",
+      activeProbe: { port: 65535, path: "/active", timeoutSeconds: 1 },
+    },
+    {
+      idleTimeoutSeconds: 300,
+      onIdle: "pause",
+      activeProbe: { port: 8080, path: "/active", timeoutSeconds: 10 },
+    },
+  ];
+
+  for (const idlePolicy of policies) {
+    await Sandbox.create({
+      adapterFactory,
+      connectionConfig: { domain: "http://127.0.0.1:8080" },
+      image: "python:3.12",
+      lifecycle: { idlePolicy },
+      skipHealthCheck: true,
+    });
+  }
+
+  assert.equal(recordedRequests.length, policies.length);
+  for (let i = 0; i < policies.length; i++) {
+    assert.deepEqual(
+      recordedRequests[i].lifecycle,
+      { idlePolicy: policies[i] },
+      `policy #${i} should be forwarded as-is`
+    );
+  }
 });

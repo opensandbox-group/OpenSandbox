@@ -23,6 +23,7 @@ using openapi-python-client, which generates httpx-based async clients
 that support custom httpx.AsyncClient injection.
 """
 
+import re
 import shutil
 import subprocess
 import sys
@@ -325,10 +326,74 @@ def post_process_execd_filesystem(root: Path) -> None:
             replace_operation.write_text(content.replace(branch, guarded_branch, 1), encoding="utf-8")
 
 
+_ERROR_RESPONSE_PARSE = re.compile(
+    r"^(    if response\.status_code == (\d{3}):\n)"
+    r"        (response_\2 = ErrorResponse\.from_dict\(response\.json\(\)\))\n",
+    re.MULTILINE,
+)
+
+
+def tolerate_unparsable_error_bodies(root: Path) -> None:
+    """Leave error bodies that are not an ErrorResponse unparsed.
+
+    A gateway or proxy can answer with an HTML, plain-text or empty body. The
+    generated parser would raise while decoding it, and the SDK would report
+    that as an invalid argument without the status code. Returning ``None``
+    lets ``handle_api_error`` raise ``SandboxApiException`` with the status and
+    the raw body instead.
+    """
+    replacement = (
+        r"\1        try:\n"
+        r"            \3\n"
+        r"        except (ValueError, TypeError, KeyError):\n"
+        r"            return None\n"
+    )
+    for path in root.rglob("*.py"):
+        content = path.read_text(encoding="utf-8")
+        updated = _ERROR_RESPONSE_PARSE.sub(replacement, content)
+        if updated != content:
+            path.write_text(updated, encoding="utf-8")
+
+
+def redact_credential_reprs() -> None:
+    """Keep write-only credential values out of generated-model reprs.
+
+    attrs synthesizes ``__repr__`` over any class-level definition, so a
+    module-level override is appended instead: ``InlineCredentialSource.value``
+    is write-only material and must never surface in logs, exception messages
+    (pydantic/attrs reprs included), or debug output.
+    """
+    redaction = (
+        "\n\n"
+        "# Redacted repr: the credential value is write-only and must never\n"
+        "# surface in logs, exception messages, or debug output. attrs would\n"
+        "# overwrite a class-level __repr__, so the override is applied on the\n"
+        "# class object after definition.\n"
+        "def _redacted_repr(self: InlineCredentialSource) -> str:\n"
+        '    return f"{type(self).__name__}(value=***)"\n'
+        "\n\n"
+        "InlineCredentialSource.__repr__ = _redacted_repr  # type: ignore[method-assign]\n"
+    )
+    for rel in (
+        "src/opensandbox/api/lifecycle/models/inline_credential_source.py",
+        "src/opensandbox/api/egress/models/inline_credential_source.py",
+    ):
+        path = Path(rel)
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8")
+        if "_redacted_repr" in content:
+            continue
+        path.write_text(content.rstrip("\n") + "\n" + redaction, encoding="utf-8")
+        print(f"✅ Redacted credential repr in {rel}")
+
+
 def post_process_generated_code() -> None:
     """Post-process the generated code to ensure proper package structure."""
     print("\n🔧 Post-processing generated code...")
     post_process_execd_filesystem(Path("src/opensandbox/api/execd"))
+    redact_credential_reprs()
+    tolerate_unparsable_error_bodies(Path("src/opensandbox/api"))
 
     # Ensure API directory has __init__.py
     api_dir = Path("src/opensandbox/api")

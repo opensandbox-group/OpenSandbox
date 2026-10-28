@@ -101,6 +101,22 @@ class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
             )
             return
 
+        # Artifact-store download URLs double-encode their coordinate paths
+        # (e.g. ``%252F``), so the exact route varies with the encoded
+        # coordinates; match on the binding prefix instead.
+        if route.startswith("/pypi-proxy/"):
+            received = {name.lower(): value for name, value in self.headers.items()}
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "case": "pypi-proxy",
+                    "receivedPath": route,
+                    "authorization": received.get("authorization"),
+                },
+            )
+            return
+
         if route == "/tenant/vault-path-secret/resource":
             query = parse_qs(parsed.query, keep_blank_values=True)
             ok = query.get("tenant") == ["__path_secret__"]

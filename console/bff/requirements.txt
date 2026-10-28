@@ -1,0 +1,8 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+httpx>=0.27.0
+pydantic-settings>=2.6.0
+itsdangerous>=2.2.0
+tomli>=2.0.0; python_version < '3.11'
+kubernetes>=31.0.0
+oss2>=2.18.0

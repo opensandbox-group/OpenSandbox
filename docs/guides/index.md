@@ -5,8 +5,7 @@ description: Guides to sandbox lifecycle, isolation, networking, and security.
 
 # Feature Guides
 
-Use these guides to add capabilities to a working [sandbox application](/getting-started/).
-Check the [SDK capability matrix](/sdks/#capability-coverage) for language support.
+Use these guides to add capabilities to a working [sandbox application](/getting-started/). Check the [SDK capability matrix](/sdks/#capability-coverage) for language support.
 
 ## Lifecycle and security
 
@@ -17,5 +16,10 @@ Check the [SDK capability matrix](/sdks/#capability-coverage) for language suppo
 - [Chained upstream proxy](/guides/egress-upstream-proxy)
 - [Secure access](/guides/secure-access)
 - [Secure container runtimes](/guides/secure-container)
+- [Network isolation on Kubernetes](/guides/network-isolation)
 - [Multi-tenancy](/guides/multi-tenancy)
 - [Windows sandboxes](/guides/windows-sandbox)
+
+## Operations
+
+- [Telemetry](/guides/telemetry)

@@ -513,38 +513,34 @@ func TestTaskManager_DeleteNonExistent(t *testing.T) {
 
 func TestTaskManager_SyncRestartsRecoveredActiveTaskWhenRuntimeStateIsLost(t *testing.T) {
 	ctx := context.Background()
-	cfg := &config.Config{
-		DataDir:           t.TempDir(),
-		EnableSidecarMode: false,
-		ReconcileInterval: time.Hour,
-	}
+	cfg := &config.Config{DataDir: t.TempDir(), ReconcileInterval: time.Hour}
 	taskStore, err := store.NewFileStore(cfg.DataDir)
 	require.NoError(t, err)
-
-	persisted := &types.Task{
+	desired := &types.Task{
 		Name: "resume-task",
 		Process: &api.Process{
 			Command: []string{"sleep", "3600"},
-		},
-		Status: types.Status{
-			State: types.TaskStateRunning,
+			Lifecycle: &api.ProcessLifecycle{PostStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"true"}},
+			}},
 		},
 	}
-	require.NoError(t, taskStore.Create(ctx, persisted))
-
 	exec := newFakeExecutor()
-	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	mgr, err := NewTaskManager(cfg, taskStore, exec)
 	require.NoError(t, err)
+	mgr.Start(ctx)
+	_, err = mgr.Create(ctx, desired)
+	require.NoError(t, err)
+	mgr.Stop()
+	assert.Zero(t, exec.StopCount(), "executor shutdown must not finish a still-desired task")
 
-	mgr := mgrIface.(*taskManager)
-	require.NoError(t, mgr.recoverTasks(ctx))
-
-	tasks, err := mgr.Sync(ctx, []*types.Task{{
-		Name: "resume-task",
-		Process: &api.Process{
-			Command: []string{"sleep", "3600"},
-		},
-	}})
+	// A restarted executor sees the lost process but retains the same file store.
+	exec = newFakeExecutor()
+	mgr, err = NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+	mgr.Start(ctx)
+	defer mgr.Stop()
+	tasks, err := mgr.Sync(ctx, []*types.Task{desired})
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, 1, exec.StartCount(), "sync should recreate an active task whose recovered runtime state was lost")

@@ -44,11 +44,15 @@ classifiers = [
 dependencies = [
     # `command run --argv` passes a list to commands.run; the SDK accepts a
     # list there from 0.1.17. Release the CLI only after that SDK is published.
-    "opensandbox>=1.1.0,<2.0.0",
+    "opensandbox>=1.2.0,<2.0.0",
     "click>=8.1.0,<9.0",
     "rich>=13.0.0,<14.0",
     "pyyaml>=6.0,<7.0",
+    "tomlkit>=0.13.0,<1.0",
     "tomli>=2.0.0; python_version < '3.11'",
+    # `osb terminal` drives the execd PTY WebSocket; 14+ renamed extra_headers
+    # to additional_headers, which the terminal client uses.
+    "websockets>=14.0",
 ]
 
 [project.urls]

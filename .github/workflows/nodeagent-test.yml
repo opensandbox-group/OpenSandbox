@@ -41,7 +41,7 @@ jobs:
         working-directory: components/nodeagent
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 libbpf-dev=1:1.3.0-2build2
+          sudo apt-get install -y clang-18 llvm-18 libbpf-dev=1:1.3.0-2build2
           make verify-syscalls-bpf CLANG=clang-18
       - name: Vet, test, and build
         working-directory: components/nodeagent

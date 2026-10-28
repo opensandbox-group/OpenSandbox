@@ -15,11 +15,14 @@
 #
 from __future__ import annotations
 
+import json
+
+import httpx
 import pytest
 
 from opensandbox.adapters.network_policy_adapter import NetworkPolicyAdapter
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import SandboxApiException, SandboxException
+from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.sandboxes import NetworkRule
 
 
@@ -166,11 +169,218 @@ async def test_policy_read_error_maps_to_sandbox_exception(
 
 
 @pytest.mark.asyncio
-async def test_credential_vault_unsupported_for_template_sandboxes() -> None:
-    adapter = NetworkPolicyAdapter(ConnectionConfig(), "sbx-1")
-    with pytest.raises(SandboxException, match="Credential Vault"):
-        await adapter.create(credentials=[], bindings=[])
-    with pytest.raises(SandboxException, match="Credential Vault"):
-        await adapter.get()
-    with pytest.raises(SandboxException, match="Credential Vault"):
-        await adapter.list_credentials()
+async def test_credential_vault_create_and_get_routes_to_lifecycle() -> None:
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                201,
+                json={
+                    "revision": 1,
+                    "credentials": [
+                        {"name": "tok", "sourceType": "inline", "revision": 1}
+                    ],
+                    "bindings": [
+                        {
+                            "name": "b",
+                            "revision": 1,
+                            "match": {"hosts": ["api.test"]},
+                            "auth": {"type": "bearer"},
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "revision": 1,
+                "credentials": [
+                    {"name": "tok", "sourceType": "inline", "revision": 1}
+                ],
+                "bindings": [
+                    {
+                        "name": "b",
+                        "revision": 1,
+                        "match": {"hosts": ["api.test"]},
+                        "auth": {"type": "apiKey", "name": "X-API-Key"},
+                    }
+                ],
+            },
+        )
+
+    config = ConnectionConfig(
+        domain="example.com:8080",
+        transport=httpx.MockTransport(_handler),
+    )
+    adapter = NetworkPolicyAdapter(config, "sbx-1")
+
+    state = await adapter.create(
+        credentials=[
+            {"name": "tok", "source": {"type": "inline", "value": "sekrit"}}
+        ],
+        bindings=[
+            {
+                "name": "b",
+                "match": {"hosts": ["api.test"]},
+                "auth": {"type": "bearer", "credential": "tok"},
+            }
+        ],
+    )
+
+    assert [r.method for r in requests] == ["POST"]
+    assert requests[0].url.path == "/v1/sandboxes/sbx-1/credential-vault"
+    body = json.loads(requests[0].content)
+    assert body["credentials"][0]["source"] == {"type": "inline", "value": "sekrit"}
+    assert state.revision == 1
+    assert state.credentials[0].source_type == "inline"
+
+    got = await adapter.get()
+    assert got.bindings[0].auth is not None
+    assert got.bindings[0].auth.type == "apiKey"
+    assert got.bindings[0].auth.name == "X-API-Key"
+
+
+@pytest.mark.asyncio
+async def test_credential_vault_patch_sends_expected_revision_and_maps_412() -> None:
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            412,
+            json={
+                "code": "FSB::API_ERROR",
+                "message": "credential vault revision conflict",
+            },
+        )
+
+    config = ConnectionConfig(
+        domain="example.com:8080",
+        transport=httpx.MockTransport(_handler),
+    )
+    adapter = NetworkPolicyAdapter(config, "sbx-1")
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.patch(
+            expected_revision=3,
+            credentials={"delete": ["tok"]},
+        )
+
+    assert exc_info.value.status_code == 412
+    assert "revision conflict" in str(exc_info.value)
+    body = json.loads(requests[0].content)
+    assert body["expectedRevision"] == 3
+    assert body["credentials"] == {"delete": ["tok"]}
+    assert "bindings" not in body
+
+
+@pytest.mark.asyncio
+async def test_credential_vault_metadata_reads_route_to_subresources() -> None:
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = request.url.path
+        if path.endswith("/credentials/api key"):
+            return httpx.Response(
+                200,
+                json={"name": "api key", "sourceType": "inline", "revision": 2},
+            )
+        if path.endswith("/credentials"):
+            return httpx.Response(
+                200,
+                json={
+                    "revision": 2,
+                    "credentials": [
+                        {"name": "api key", "sourceType": "inline", "revision": 2}
+                    ],
+                },
+            )
+        if path.endswith("/bindings/ext"):
+            return httpx.Response(
+                200,
+                json={
+                    "name": "ext",
+                    "revision": 2,
+                    "match": {"hosts": ["ext.test"]},
+                    "auth": {"type": "basic"},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "revision": 2,
+                "bindings": [
+                    {
+                        "name": "ext",
+                        "revision": 2,
+                        "match": {"hosts": ["ext.test"]},
+                        "auth": {"type": "basic"},
+                    }
+                ],
+            },
+        )
+
+    config = ConnectionConfig(
+        domain="example.com:8080",
+        transport=httpx.MockTransport(_handler),
+    )
+    adapter = NetworkPolicyAdapter(config, "sbx-1")
+
+    listing = await adapter.list_credentials()
+    one = await adapter.get_credential("api key")
+    binding = await adapter.get_binding("ext")
+
+    assert [r.url.path for r in requests] == [
+        "/v1/sandboxes/sbx-1/credential-vault/credentials",
+        "/v1/sandboxes/sbx-1/credential-vault/credentials/api key",
+        "/v1/sandboxes/sbx-1/credential-vault/bindings/ext",
+    ]
+    assert listing[0].name == "api key"
+    assert one.revision == 2
+    assert binding.match is not None
+    assert binding.match.hosts == ["ext.test"]
+
+
+def test_sync_credential_vault_round_trip() -> None:
+    from opensandbox.config import ConnectionConfigSync
+    from opensandbox.sync.adapters.network_policy_adapter import (
+        NetworkPolicyAdapterSync,
+    )
+
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(
+            200,
+            json={
+                "revision": 7,
+                "credentials": [],
+                "bindings": [],
+            },
+        )
+
+    adapter = NetworkPolicyAdapterSync(
+        ConnectionConfigSync(
+            domain="example.com:8080",
+            transport=httpx.MockTransport(_handler),
+        ),
+        "sbx-1",
+    )
+
+    state = adapter.patch(
+        expected_revision=6,
+        bindings={"add": [{"name": "n", "match": {"hosts": ["h.test"]}, "auth": {"type": "passthrough"}}]},
+    )
+    adapter.delete()
+
+    assert state.revision == 7
+    assert [r.method for r in requests] == ["PATCH", "DELETE"]
+    assert requests[0].url.path == "/v1/sandboxes/sbx-1/credential-vault"
+    assert json.loads(requests[0].content)["expectedRevision"] == 6
+    assert requests[1].url.path == "/v1/sandboxes/sbx-1/credential-vault"

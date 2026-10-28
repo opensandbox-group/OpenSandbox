@@ -17,7 +17,7 @@ The architecture distinguishes three primary interaction paths:
 
 - **Lifecycle management** (orange arrows): Applications, agents, and operators send lifecycle requests (creating, listing, renewing, pausing, resuming, or deleting sandboxes, as well as managing snapshots and templates) to the FastAPI lifecycle server. The server persists metadata and delegates provisioning and orchestration to the configured runtime backend.
 - **Execution and service access** (blue arrows): For command, file, PTY, and Jupyter code execution, or reaching user workload services, clients bypass lifecycle orchestration and connect directly to resolved endpoints—via direct host/pod addresses, the lifecycle server proxy, or an optional Kubernetes ingress gateway.
-- **Outbound controls** (green arrows): Outbound requests from the sandbox to external APIs, model providers, or web services can be filtered and secured through egress controls (a per-sandbox sidecar for container workloads or a shared Fastlet egress profile for FastSandbox), with support for DNS/nftables policies and optional Credential Vault secret injection.
+- **Outbound controls** (green arrows): Outbound requests from the sandbox to external APIs, model providers, or web services can be filtered and secured through egress controls (a per-sandbox sidecar for container workloads or a shared egress process per Fastlet pod for FastSandbox), with support for DNS/nftables policies and optional Credential Vault secret injection.
 
 Runtime and networking capabilities depend on the selected backend; the diagram shows the shared architecture, not a requirement to deploy every component.
 
@@ -38,7 +38,7 @@ The implementation is documented by architectural layer under `architecture/`:
 |---|---|---|
 | Control plane | Lifecycle orchestration, workload orchestration, snapshots | [Server](/architecture/control-plane/server), [Kubernetes Controller](/architecture/control-plane/operator) |
 | Data plane | In-sandbox execution, node-side collection | [Execd](/architecture/data-plane/execd), [Node Agent](/architecture/data-plane/node-agent) |
-| Network | Inbound access, outbound policy, isolation design | [Ingress](/architecture/network/ingress), [Egress](/architecture/network/egress), [Single-Host Network](/architecture/network/single-host-network), [Network Isolation](/architecture/network/network-isolation) |
+| Network | Inbound access, outbound policy | [Ingress](/architecture/network/ingress), [Egress](/architecture/network/egress), [Single-Host Network](/architecture/network/single-host-network) |
 | Backend integration | Template-backed sandboxes on the fast-sandbox platform | [Fast Sandbox](/architecture/fast-sandbox/) |
 
 ## 1. Client Surface
@@ -135,7 +135,7 @@ Command and code execution use Server-Sent Events for streaming output. The curr
 - **Policy**: `GET /policy` to inspect the current policy; `PATCH /policy` to mutate rules at runtime.
 - **Credential Vault**: `GET`, `POST`, `PATCH`, and `DELETE` on `/credential-vault` to manage sandbox-local credential bindings and token injection without exposing raw secrets to the workload.
 
-For container backends, callers resolve the sandbox endpoint for the egress sidecar port and connect directly (forwarding endpoint authentication headers when sidecar auth is enabled). For FastSandbox, runtime network policy is managed through the lifecycle API (`/sandboxes/{sandboxId}/networkpolicy`), while the shared Fastlet profile routes policy and per-subject credential vault operations using internal request headers.
+For container backends, callers resolve the sandbox endpoint for the egress sidecar port and connect directly (forwarding endpoint authentication headers when sidecar auth is enabled). For FastSandbox, runtime network policy is managed through the lifecycle API (`/sandboxes/{sandboxId}/networkpolicy`), while the shared egress process (one per Fastlet pod) routes policy and per-subject credential vault operations using internal request headers.
 
 ## 3. Lifecycle Control Plane
 
@@ -174,9 +174,7 @@ The lifecycle endpoint API returns the reachable address for a service port insi
 - A Kubernetes ingress gateway endpoint.
 - A server-proxied URL under `/sandboxes/{sandboxId}/proxy/{port}` when `use_server_proxy=true`.
 
-Header-routed ingress endpoints include `OpenSandbox-Ingress-To` in their endpoint metadata.
-When the endpoint is rewritten to a server-proxied URL, the server removes only this
-ingress routing header and preserves other required endpoint headers.
+Header-routed ingress endpoints include `OpenSandbox-Ingress-To` in their endpoint metadata. When the endpoint is rewritten to a server-proxied URL, the server removes only this ingress routing header and preserves other required endpoint headers.
 
 The server proxy supports HTTP and WebSocket traffic and is also integrated with optional renew-on-access behavior. For HTTP responses, it strips hop-by-hop headers and the backend `Server` header while preserving an origin `Date`; the server adds a current `Date` only when the response does not already contain one. A root-relative `Location` value that starts with a single `/` is rebased under the same sandbox proxy route, while absolute URLs, network-path references (`//host/path`), and ordinary path-relative values are forwarded unchanged.
 
@@ -193,16 +191,14 @@ Core responsibilities:
 - Pull public or private images, including per-request registry authentication.
 - Create containers with CPU, memory, GPU, platform, capability, AppArmor, seccomp, PID, and secure-runtime settings.
 - Stage the `execd` binary from `[runtime].execd_image` into the sandbox and install a bootstrap launcher before starting the user entrypoint.
-- Support network modes `host`, `bridge`, and custom user-defined networks.
+- Support network modes `host`, `bridge`, `none`, `pasta`, `slirp4netns`, and custom user-defined networks. The user-mode modes (`pasta`, `slirp4netns`) expose no host-routable container IP and are reached through the published host ports.
 - Allocate host ports for `execd` and user service endpoints in non-host network modes.
 - Restore expiration timers for existing managed containers after server restart.
 - Support host bind mounts, Docker named volumes via the `pvc` volume model, and OSSFS-backed mounts.
 - Attach an egress sidecar when `networkPolicy` is requested and Docker networking is compatible.
 - Create Docker-backed persistent snapshots as local images and restore sandboxes from those snapshot images.
 
-Docker pause/resume uses container-level pause/resume. For sandboxes with an egress sidecar,
-pause freezes the sandbox container before the sidecar, while resume unfreezes the sidecar
-before the sandbox container. Docker snapshots are exposed through the public snapshot API.
+Docker pause/resume uses container-level pause/resume. For sandboxes with an egress sidecar, pause freezes the sandbox container before the sidecar, while resume unfreezes the sidecar before the sandbox container. Docker snapshots are exposed through the public snapshot API.
 
 ### 4.2 Kubernetes Runtime
 
@@ -248,7 +244,7 @@ In Kubernetes mode, `FastSandboxService` connects OpenSandbox to the external `f
 - **Control Protocol**: Communicates with an external `fast-sandbox` control plane via gRPC FastPath v2 (port 9090).
 - **State**: FastPath owns mutations and live runtime operations; Kubernetes LIST/WATCH reads persisted `sandbox.fast.io/v1alpha2` resources and their observations.
 - **Pause/resume**: Delegates to FastPath, which restores the checkpoint on resume. Clients must resolve endpoints again after restoration.
-- **Networking**: The configured Fastlet pool supplies a shared Egress profile; the adapter sends network policy through FastPath Actions. This differs from attaching a per-sandbox container sidecar. The current server adapter rejects the `credentialProxy.enabled` creation flag and volume mounts on this path.
+- **Networking**: The configured Fastlet pool supplies a shared egress process (one per Fastlet pod); the adapter sends network policy through FastPath Actions. This differs from attaching a per-sandbox container sidecar. The current server adapter rejects the `credentialProxy.enabled` creation flag and volume mounts on this path.
 
 The adapter and endpoint integration live in this repository; FastPath and the microVM runtime are provided by the external platform. See the [service dispatch](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/composite_service.py) and [FastSandbox adapter](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/services/fast_sandbox/service.py) for the implementation boundaries, and the [Fast Sandbox integration](/architecture/fast-sandbox/) documentation for the full design.
 
@@ -306,7 +302,7 @@ Capabilities:
 - Optional sidecar authentication.
 - Optional platform-enforced always-allow and always-deny overlays.
 
-Docker starts the egress sidecar as a separate container and runs the main sandbox container in the sidecar network namespace. Kubernetes container providers append the egress sidecar to the pod spec and drop `NET_ADMIN` from the main sandbox container so only the sidecar mutates network rules. FastSandbox uses the shared Fastlet profile outside the microVM guest, receiving policy actions through FastPath.
+Docker starts the egress sidecar as a separate container and runs the main sandbox container in the sidecar network namespace. Kubernetes container providers append the egress sidecar to the pod spec and drop `NET_ADMIN` from the main sandbox container so only the sidecar mutates network rules. FastSandbox uses the shared egress process (one per Fastlet pod, outside the microVM guest), receiving policy actions through FastPath.
 
 ## 6. Networking and Access
 
@@ -330,7 +326,7 @@ For FastSandbox routes, ingress asks FastPath to resolve the endpoint and forwar
 
 ### 6.3 Auto-Renew on Access
 
-The optional renew-intent integration extends sandbox TTL when access is observed. It can be triggered by server proxy requests or by ingress gateway events delivered through Redis. Per-sandbox opt-in is controlled by the `extensions["access.renew.extend.seconds"]` create parameter.
+The optional renew-intent integration extends sandbox TTL when access is observed. It can be triggered by server proxy requests or by ingress gateway events delivered through Redis. Per-sandbox opt-in is controlled by the `lifecycle.renewalPolicy` create field (OSEP-0009); the deprecated `extensions["access.renew.extend.seconds"]` key remains supported throughout 1.x.
 
 ## 7. Core Flows
 
@@ -372,7 +368,7 @@ Client
 ```text
 Create request with networkPolicy
   -> server validates runtime-specific network policy settings
-  -> runtime attaches egress sidecar or binds policy actions to shared Fastlet profile
+  -> runtime attaches egress sidecar or binds policy actions to the shared Fastlet egress process
   -> sandbox outbound DNS/network traffic is filtered
   -> FastSandbox clients manage policy via GET/PUT/PATCH/DELETE /v1/sandboxes/{sandboxId}/networkpolicy
   -> container clients resolve the egress endpoint and PATCH /policy
@@ -424,27 +420,3 @@ Sandbox state includes `state`, `reason`, `message`, and transition time. `execd
 - **Remote development**: expose VS Code Web, desktops, VNC, or development servers through sandbox endpoints.
 - **RL and evaluation workloads**: use Kubernetes BatchSandbox, Pool, and task orchestration for high-throughput sandbox delivery.
 - **Enterprise isolation**: combine secure runtimes, ingress, egress, endpoint access headers, and Kubernetes deployment controls.
-
-## 10. References
-
-- [Getting Started](/getting-started/)
-- [Sandbox Lifecycle Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml)
-- [Diagnostics Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/diagnostic-api.yml)
-- [Sandbox Execution Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml)
-- [Egress Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/egress-api.yaml)
-- [Server](/architecture/control-plane/server)
-- [Server Configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md)
-- [Execd](/architecture/data-plane/execd)
-- [Node Agent](/architecture/data-plane/node-agent)
-- [Ingress](/architecture/network/ingress)
-- [Egress](/architecture/network/egress)
-- [Kubernetes Controller](/architecture/control-plane/operator)
-- [Kubernetes Deployment](/deployment/)
-- [Fast Sandbox](/architecture/fast-sandbox/)
-- [Pause and Resume](/guides/pause-resume)
-- [Secure Container Runtime Guide](/guides/secure-container)
-- [Credential Vault](/guides/credential-vault)
-- [Network Isolation](/architecture/network/network-isolation)
-- [CLI](/cli/)
-- [MCP Server](/sdks/mcp)
-- [Examples](/examples/)

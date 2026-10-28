@@ -3,6 +3,3 @@ kind: RuntimeClass
 metadata:
   name: gvisor
 handler: runsc
-scheduling:
-  nodeSelector:
-    kubernetes.io/arch: amd64

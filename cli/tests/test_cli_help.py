@@ -39,6 +39,7 @@ class TestRootCLI:
             "template",
             "snapshot",
             "command",
+            "terminal",
             "file",
             "egress",
             "credential-vault",
@@ -94,6 +95,14 @@ class TestFileHelp:
             assert subcmd in result.output
 
 
+class TestTerminalHelp:
+    def test_terminal_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["terminal", "--help"])
+        assert result.exit_code == 0
+        assert "SANDBOX_ID" in result.output
+        assert "--workdir" in result.output
+
+
 class TestEgressHelp:
     def test_egress_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["egress", "--help"])
@@ -134,6 +143,12 @@ class TestDevopsHelp:
 
 
 class TestDiagnosticsHelp:
+    def test_context_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["diagnostics", "context", "--help"])
+        assert result.exit_code == 0
+        assert "SANDBOX_ID" in result.output
+        assert "--output" in result.output
+
     def test_diagnostics_help_documents_scopes(self, runner: CliRunner) -> None:
         logs = runner.invoke(cli, ["diagnostics", "logs", "--help"])
         events = runner.invoke(cli, ["diagnostics", "events", "--help"])

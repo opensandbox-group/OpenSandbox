@@ -27,19 +27,19 @@ from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
 from opensandbox.adapters.converter.response_handler import (
-    extract_request_id,
+    build_api_exception_from_httpx,
     handle_api_error,
     require_parsed,
 )
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution
 from opensandbox.models.execd_sync import ExecutionHandlersSync
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcherSync,
 )
-from opensandbox.transport import unwrap_retry_transport
+from opensandbox.transport import streaming_transport
 
 from code_interpreter.models.code_sync import CodeContextSync, SupportedLanguageSync
 from code_interpreter.sync.services.code import CodesSync
@@ -123,9 +123,8 @@ class CodesAdapterSync(CodesSync):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
-        # SSE bootstraps bypass the retry wrapper: request bodies are
-        # not replayable and a non-idempotent status opt-in would cause
-        # duplicate execution on a resent SSE POST.
+        # SSE bootstraps keep only the wake-timeout retry: a non-idempotent
+        # status opt-in would cause duplicate execution on a resent SSE POST.
         sse_transport = (
             self.connection_config.new_owned_transport()
             if self._owns_clients
@@ -136,7 +135,7 @@ class CodesAdapterSync(CodesSync):
             timeout=httpx.Timeout(
                 connect=timeout_seconds, read=None, write=timeout_seconds, pool=None
             ),
-            transport=unwrap_retry_transport(sse_transport),
+            transport=streaming_transport(sse_transport),
         )
 
     def _get_execd_url(self, path: str) -> str:
@@ -310,17 +309,13 @@ class CodesAdapterSync(CodesSync):
 
             url = self._get_execd_url(self.RUN_CODE_PATH)
             execution = Execution(id=None, execution_count=None, result=[], error=None)
+            execution._is_code_execution = True
             dispatcher = ExecutionEventDispatcherSync(execution, handlers)
 
             with self._sse_client.stream("POST", url, json=api_request) as response:
                 if response.status_code != 200:
                     response.read()
-                    error_body = response.text
-                    raise SandboxApiException(
-                        message=f"Failed to run code. Status code: {response.status_code}, Body: {error_body}",
-                        status_code=response.status_code,
-                        request_id=extract_request_id(response.headers),
-                    )
+                    raise build_api_exception_from_httpx(response, "Run code")
 
                 for line in response.iter_lines():
                     if not line or not line.strip():

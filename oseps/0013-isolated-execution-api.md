@@ -46,55 +46,30 @@ status: implementing
 
 ## Summary
 
-Introduce [bubblewrap](https://github.com/containers/bubblewrap) into execd to
-provide per-execution namespace isolation within a running sandbox Pod. A new
-HTTP API prefix (`/v1/isolated/*`) exposes isolated sessions with independent
-PID/mount/tmpfs/env namespaces, workspace overlay with artifact recovery, and a
-full filesystem proxy — all with < 1ms cold-start overhead. Existing execd
-endpoints remain unchanged.
+Introduce [bubblewrap](https://github.com/containers/bubblewrap) into execd to provide per-execution namespace isolation within a running sandbox Pod. A new HTTP API prefix (`/v1/isolated/*`) exposes isolated sessions with independent PID/mount/tmpfs/env namespaces, workspace overlay with artifact recovery, and a full filesystem proxy — all with < 1ms cold-start overhead. Existing execd endpoints remain unchanged.
 
 ## Motivation
 
-Today, execd forks child processes in the sandbox container's main namespace.
-Multiple executions within the same Pod share `/tmp`, PID namespace, network,
-and environment variables. This creates two classes of problems:
+Today, execd forks child processes in the sandbox container's main namespace. Multiple executions within the same Pod share `/tmp`, PID namespace, network, and environment variables. This creates two classes of problems:
 
-**Security**: a prior execution can poison the filesystem for subsequent ones,
-ptrace sibling processes, or read sensitive tokens from `/proc/<pid>/environ`.
-The attack surface grows linearly with execution count.
+**Security**: a prior execution can poison the filesystem for subsequent ones, ptrace sibling processes, or read sensitive tokens from `/proc/<pid>/environ`. The attack surface grows linearly with execution count.
 
-**Throughput**: in RL training and evaluation, one sandbox = one task. Switching
-between adjacent steps or shards requires a full Pod creation cycle (runc
-startup 40–100ms+, consuming one Pool buffer slot). Per-execution cold-start
-inside a single Pod can be compressed to < 1ms with namespace isolation,
-reducing control plane QPS and Pool pressure by an order of magnitude.
+**Throughput**: in RL training and evaluation, one sandbox = one task. Switching between adjacent steps or shards requires a full Pod creation cycle (runc startup 40–100ms+, consuming one Pool buffer slot). Per-execution cold-start inside a single Pod can be compressed to < 1ms with namespace isolation, reducing control plane QPS and Pool pressure by an order of magnitude.
 
-bubblewrap (~200KB static C binary, the Flatpak sandbox core) uses Linux
-mount/pid namespaces to provide process-level isolation with sub-millisecond
-startup and automatic namespace cleanup on process exit. This design avoids
-user namespaces (which require CRI-level nesting support) and instead uses real
-UID setuid for per-session privilege separation.
+bubblewrap (~200KB static C binary, the Flatpak sandbox core) uses Linux mount/pid namespaces to provide process-level isolation with sub-millisecond startup and automatic namespace cleanup on process exit. This design avoids user namespaces (which require CRI-level nesting support) and instead uses real UID setuid for per-session privilege separation.
 
 ### Goals
 
-- New API (`/v1/isolated/*`) — callers explicitly opt into isolated execution;
-  existing API behavior is unchanged.
-- Independent PID/mount/tmpfs/env namespace per isolated execution within a
-  single sandbox Pod.
-- Workspace overlay mounting with artifact recovery: tar download (diff, option
-  A) or write-back to workspace (commit, option B), composable in any order.
-- Full filesystem operations (info/download/upload/delete/mv/chmod/search/
-  replace/mkdir/rmdir) within isolated sessions, proxied by execd outside the
-  namespace.
-- Abstract `Isolator` interface — bwrap is the first implementation, extensible
-  to future backends.
-- Static bwrap distribution — execd embeds a musl-compiled static bwrap binary
-  (~800KB), no base image pre-installation required.
+- New API (`/v1/isolated/*`) — callers explicitly opt into isolated execution; existing API behavior is unchanged.
+- Independent PID/mount/tmpfs/env namespace per isolated execution within a single sandbox Pod.
+- Workspace overlay mounting with artifact recovery: tar download (diff, option A) or write-back to workspace (commit, option B), composable in any order.
+- Full filesystem operations (info/download/upload/delete/mv/chmod/search/ replace/mkdir/rmdir) within isolated sessions, proxied by execd outside the namespace.
+- Abstract `Isolator` interface — bwrap is the first implementation, extensible to future backends.
+- Static bwrap distribution — execd embeds a musl-compiled static bwrap binary (~800KB), no base image pre-installation required.
 
 ### Non-Goals
 
-- Modifying existing endpoints (`/command`, `/session`, `/code`, `/pty`,
-  `/files`, `/metrics`).
+- Modifying existing endpoints (`/command`, `/session`, `/code`, `/pty`, `/files`, `/metrics`).
 - Jupyter kernel isolation (`/v1/isolated/code`).
 - PTY isolation (`/v1/isolated/pty`).
 - Replacing the outer container runtime (runc/gVisor/Firecracker).
@@ -103,27 +78,19 @@ UID setuid for per-session privilege separation.
 
 ## Requirements
 
-- Isolated sessions must create independent PID, mount, and tmpfs namespaces per
-  session.
+- Isolated sessions must create independent PID, mount, and tmpfs namespaces per session.
 - Namespace startup overhead must be < 1ms.
-- Namespace destruction must be automatic on session close (process exit →
-  kernel cleanup).
-- Workspace overlay mode must support copy-on-write with optional artifact
-  persistence.
-- Both diff (tar export) and commit (merge back) must be available on the same
-  upper directory, composable in any order.
-- The filesystem proxy must handle overlay semantics (whiteout, opaque markers)
-  transparently outside the namespace.
-- Capabilities endpoint must reflect runtime probe results so callers can make
-  explicit fallback decisions.
+- Namespace destruction must be automatic on session close (process exit → kernel cleanup).
+- Workspace overlay mode must support copy-on-write with optional artifact persistence.
+- Both diff (tar export) and commit (merge back) must be available on the same upper directory, composable in any order.
+- The filesystem proxy must handle overlay semantics (whiteout, opaque markers) transparently outside the namespace.
+- Capabilities endpoint must reflect runtime probe results so callers can make explicit fallback decisions.
 - SDK must not silently fall back to non-isolated APIs — callers decide.
 - Authentication reuses the existing `ServerAccessToken` mechanism.
-- bwrap binary must be embedded in execd and extracted at startup — no external
-  dependency on base image packaging.
+- bwrap binary must be embedded in execd and extracted at startup — no external dependency on base image packaging.
 - Must not require nested user namespace support from the CRI/container runtime.
 - execd must run as root or with `CAP_SYS_ADMIN` to create mount/PID namespaces.
-- UID/GID isolation must use real setuid, not user namespace mapping — callers
-  declare uid/gid at session creation time.
+- UID/GID isolation must use real setuid, not user namespace mapping — callers declare uid/gid at session creation time.
 
 ## Proposal
 
@@ -145,9 +112,7 @@ GET    /v1/isolated/capabilities         Probe runtime capabilities
 
 ### Isolation Model
 
-Session wrapper: execd creates a bwrap + bash long-lived process. Multiple `run`
-calls execute within the same namespace. Session deletion terminates the bwrap
-process group, destroying the namespace and all child processes.
+Session wrapper: execd creates a bwrap + bash long-lived process. Multiple `run` calls execute within the same namespace. Session deletion terminates the bwrap process group, destroying the namespace and all child processes.
 
 ```text
 execd (root)
@@ -156,11 +121,7 @@ execd (root)
            └── run: sh -c <code> (forked per run)
 ```
 
-bwrap runs as root to create mount/PID namespaces (requires `CAP_SYS_ADMIN`),
-then drops privileges to the requested uid/gid via `setpriv` before exec'ing
-the user shell. No user namespace is created (`--unshare-user` is not used),
-avoiding CRI nesting requirements. Different sessions use different real UIDs,
-providing file permission isolation at the host level.
+bwrap runs as root to create mount/PID namespaces (requires `CAP_SYS_ADMIN`), then drops privileges to the requested uid/gid via `setpriv` before exec'ing the user shell. No user namespace is created (`--unshare-user` is not used), avoiding CRI nesting requirements. Different sessions use different real UIDs, providing file permission isolation at the host level.
 
 Filesystem inheritance follows a "read-only root + selective overlay" strategy:
 
@@ -174,8 +135,7 @@ Filesystem inheritance follows a "read-only root + selective overlay" strategy:
 --proc /proc                       # With --unshare-pid for isolated PID view
 ```
 
-Two profiles (`strict` and `balanced`) provide preset defaults. All fields can
-be overridden per-session.
+Two profiles (`strict` and `balanced`) provide preset defaults. All fields can be overridden per-session.
 
 ### Workspace Modes and Artifact Recovery
 
@@ -192,38 +152,27 @@ Artifact recovery (overlay mode with `persist.enabled = true`):
 | A: `GET .../diff` | Export upper as tar.gz | Streaming tar output |
 | B: `POST .../commit` | Merge upper into workspace via overlayfs semantics | Re-mount overlayfs + rsync |
 
-A and B operate on the same upper directory. B does not consume the upper (reads
-upper, writes lower). They compose in any order. Concurrency is controlled by a
-per-session `sync.RWMutex`: B holds a write lock; A and run hold read locks.
+A and B operate on the same upper directory. B does not consume the upper (reads upper, writes lower). They compose in any order. Concurrency is controlled by a per-session `sync.RWMutex`: B holds a write lock; A and run hold read locks.
 
 ### Filesystem Proxy
 
-execd proxies filesystem operations outside the bwrap namespace, simulating the
-overlay merged view without mounting:
+execd proxies filesystem operations outside the bwrap namespace, simulating the overlay merged view without mounting:
 
-- **Read** (info/download): check upper first; whiteout → 404; miss → fall
-  through to lower.
+- **Read** (info/download): check upper first; whiteout → 404; miss → fall through to lower.
 - **Search**: walk upper + lower, merge and deduplicate, skip whiteout paths.
 - **Write** (upload/replace): write to upper; `os.Chown` with session uid/gid.
-- **Delete**: create whiteout in upper (character device 0,0); directory deletion
-  creates opaque xattr.
+- **Delete**: create whiteout in upper (character device 0,0); directory deletion creates opaque xattr.
 - **Move**: create whiteout at source + write at destination in upper.
-- **Permissions**: upper has file → operate directly; lower only → copy-up to
-  upper first.
+- **Permissions**: upper has file → operate directly; lower only → copy-up to upper first.
 - **ro mode**: write operations return `403 Forbidden`.
 
 ### Notes/Constraints/Caveats
 
-- Session isolation parameters are immutable after creation — `run` cannot
-  override isolation fields (namespace immutability).
-- `run.envs` has the highest priority and overrides `env_passthrough` for
-  conflicting keys.
+- Session isolation parameters are immutable after creation — `run` cannot override isolation fields (namespace immutability).
+- `run.envs` has the highest priority and overrides `env_passthrough` for conflicting keys.
 - Workspace path is auto-created (`mkdir -p`) if it does not exist.
-- `idle_timeout_seconds = 0` disables idle GC; the caller must explicitly DELETE,
-  otherwise the bwrap process lives until Pod destruction.
-- In multi-user scenarios, workspace isolation is write-only — other users'
-  workspaces are read-only visible via `--ro-bind / /`. Full read isolation
-  requires `--tmpfs <parent>` masking (deferred to v2).
+- `idle_timeout_seconds = 0` disables idle GC; the caller must explicitly DELETE, otherwise the bwrap process lives until Pod destruction.
+- In multi-user scenarios, workspace isolation is write-only — other users' workspaces are read-only visible via `--ro-bind / /`. Full read isolation requires `--tmpfs <parent>` masking (deferred to v2).
 
 ### Risks and Mitigations
 
@@ -234,7 +183,7 @@ overlay merged view without mounting:
 | Mount order sensitivity — argv builder is a bug-prone area | Fixed segment order with unit test coverage for every segment |
 | seccomp blocklist only — does not prevent 0-day syscalls | Defense-in-depth; primary boundary remains namespace isolation |
 | No per-execution cgroup — CPU/memory/pids quota falls to outer Pod | Accept for v1; cgroup wrapper planned for v2 |
-| gVisor mount restrictions — commit unavailable | Capabilities endpoint marks `commit_supported = false`; diff and isolated execution still work |
+| Mount restrictions — commit unavailable | Capabilities endpoint marks `commit_supported = false`; diff and isolated execution still work |
 | Overlay upper not persistent across Pods | Upper lives on Pod filesystem; cross-Pod persistence requires caller-side upload to object storage |
 
 ## Design Details
@@ -263,12 +212,9 @@ DELETE /v1/isolated/session/<id>/directories         Delete directory
 GET    /v1/isolated/capabilities         Probe capabilities and defaults
 ```
 
-SSE/state-machine/hook protocol is identical to existing APIs. SDKs can reuse
-parsing logic.
+SSE/state-machine/hook protocol is identical to existing APIs. SDKs can reuse parsing logic.
 
-Filesystem endpoint request/response schemas are identical to existing
-`/files/*` and `/directories/*`. The only difference is path resolution strategy
-(see [§11](#11-filesystem-proxy-implementation)).
+Filesystem endpoint request/response schemas are identical to existing `/files/*` and `/directories/*`. The only difference is path resolution strategy (see [§11](#11-filesystem-proxy-implementation)).
 
 ### 2. Request Schema
 
@@ -337,10 +283,7 @@ Default profile = `strict`.
 AWS_*, ALI_*, ALIYUN_*, K8S_*, KUBE_*
 ```
 
-`strict` defaults to `share_net = true` because execd runs inside a Pod where
-egress policy is enforced by the egress sidecar. Cutting network would break
-`pip install`, API calls, and other routine operations. Callers explicitly set
-`share_net: false` when full network isolation is needed.
+`strict` defaults to `share_net = true` because execd runs inside a Pod where egress policy is enforced by the egress sidecar. Cutting network would break `pip install`, API calls, and other routine operations. Callers explicitly set `share_net: false` when full network isolation is needed.
 
 ### 4. Response Schema
 
@@ -396,14 +339,9 @@ egress policy is enforced by the egress sidecar. Cutting network would break
 }
 ```
 
-- `available = false`: all `/v1/isolated/*` write operations return
-  `503 Service Unavailable`. Callers should fall back to the existing API or
-  error. **SDK does not silently fall back.**
-- `persist.available = false`: `--isolation-upper-root` emptyDir not mounted.
-  diff/commit/`persist.enabled=true` unavailable; isolated execution still works
-  (upper on tmpfs).
-- `commit_supported = false`: no mount permission (typical in gVisor). diff
-  still works; commit returns 503.
+- `available = false`: all `/v1/isolated/*` write operations return `503 Service Unavailable`. Callers should fall back to the existing API or error. **SDK does not silently fall back.**
+- `persist.available = false`: `--isolation-upper-root` emptyDir not mounted. diff/commit/`persist.enabled=true` unavailable; isolated execution still works (upper on tmpfs).
+- `commit_supported = false`: no mount permission (can be caused by missing `CAP_SYS_ADMIN` or a restrictive seccomp/AppArmor profile). diff still works; commit returns 503.
 
 ### 6. Isolator Interface
 
@@ -434,14 +372,11 @@ type WorkspaceSpec struct {
 }
 ```
 
-Call site (`isolated_session.go`) constructs `*exec.Cmd` then calls
-`isolator.Wrap(cmd, opts)`. Wrap rewrites `cmd.Path` and `cmd.Args` to inject
-the bwrap wrapper.
+Call site (`isolated_session.go`) constructs `*exec.Cmd` then calls `isolator.Wrap(cmd, opts)`. Wrap rewrites `cmd.Path` and `cmd.Args` to inject the bwrap wrapper.
 
 ### 7. bwrap argv Fixed Segment Order
 
-Mount order is fixed by segment to prevent ordering bugs (e.g., Gemini CLI's
-`--tmpfs /tmp` erasing `--bind /tmp/sub`):
+Mount order is fixed by segment to prevent ordering bugs (e.g., Gemini CLI's `--tmpfs /tmp` erasing `--bind /tmp/sub`):
 
 ```text
 1.  Namespace flags: --unshare-pid --unshare-uts --unshare-ipc etc. (no --unshare-user)
@@ -457,8 +392,7 @@ Mount order is fixed by segment to prevent ordering bugs (e.g., Gemini CLI's
 11. -- setpriv --reuid=<n> --regid=<n> --init-groups <user cmd>
 ```
 
-The builder outputs the complete argv. Unit tests cover segment order and mutual
-exclusion.
+The builder outputs the complete argv. Unit tests cover segment order and mutual exclusion.
 
 ### 8. Startup Probing
 
@@ -473,19 +407,12 @@ Results are reflected in `/v1/isolated/capabilities`.
 
 ### 9. Upper Directory Management
 
-- Root path: execd flag `--isolation-upper-root` (default
-  `/var/lib/execd/isolation`).
-- **Required**: Pod spec must mount emptyDir at this path. execd checks at
-  startup via `/proc/self/mountinfo`. Failure → `persist.available = false`.
+- Root path: execd flag `--isolation-upper-root` (default `/var/lib/execd/isolation`).
+- **Required**: Pod spec must mount emptyDir at this path. execd checks at startup via `/proc/self/mountinfo`. Failure → `persist.available = false`.
 - Per-session subdirectory: `<id>/upper`, `<id>/work`.
-- Size limit: default 2 GiB, hard limit 8 GiB (execd flag
-  `--isolation-upper-max-bytes`). Periodic `du` check; exceeding limit →
-  SIGKILL wrapper process and mark execution failed.
-- GC: background goroutine scans expired directories every 60s. Startup scan
-  cleans orphaned directories.
-- Abnormal exits (non-zero, SIGKILL, timeout) are treated identically to
-  success — upper is retained until `retain_seconds` expires, enabling diff
-  for crash artifact inspection.
+- Size limit: default 2 GiB, hard limit 8 GiB (execd flag `--isolation-upper-max-bytes`). Periodic `du` check; exceeding limit → SIGKILL wrapper process and mark execution failed.
+- GC: background goroutine scans expired directories every 60s. Startup scan cleans orphaned directories.
+- Abnormal exits (non-zero, SIGKILL, timeout) are treated identically to success — upper is retained until `retain_seconds` expires, enabling diff for crash artifact inspection.
 
 ### 10. Commit Implementation
 
@@ -503,30 +430,21 @@ if reset_upper_after:
   rm -rf <upper>/* <work>/*
 ```
 
-Handles whiteout (character device 0,0 → delete corresponding workspace path)
-and opaque (`trusted.overlay.opaque=y` xattr → delete subtree then copy upper).
+Handles whiteout (character device 0,0 → delete corresponding workspace path) and opaque (`trusted.overlay.opaque=y` xattr → delete subtree then copy upper).
 
-v1 supports only `strategy = overwrite`. `skip-existing`, `fail-on-conflict`,
-and selective commit (path whitelist) are deferred to v2.
+v1 supports only `strategy = overwrite`. `skip-existing`, `fail-on-conflict`, and selective commit (path whitelist) are deferred to v2.
 
-gVisor typically cannot mount overlayfs — commit is marked
-`commit_supported = false` in capabilities; diff and isolated execution remain
-available.
+Where overlayfs cannot be mounted (either missing `CAP_SYS_ADMIN` or a restrictive seccomp/AppArmor profile), commit is marked `commit_supported = false` in capabilities; diff and isolated execution remain available.
 
-Diff output: `GET .../diff` streams tar.gz via `Transfer-Encoding: chunked`.
-execd flag `--isolation-diff-max-bytes` (default 4 GiB) rejects oversized
-downloads with 413.
+Diff output: `GET .../diff` streams tar.gz via `Transfer-Encoding: chunked`. execd flag `--isolation-diff-max-bytes` (default 4 GiB) rejects oversized downloads with 413.
 
 ### 11. Filesystem Proxy Implementation
 
-execd proxies filesystem operations outside the bwrap namespace. Path resolution
-varies by workspace mode:
+execd proxies filesystem operations outside the bwrap namespace. Path resolution varies by workspace mode:
 
 #### rw mode
 
-Direct operations on `workspace.path`. Equivalent to existing `/files/*` with
-path prefix validation (workspace escape → 400). Write operations `os.Chown`
-with session uid/gid.
+Direct operations on `workspace.path`. Equivalent to existing `/files/*` with path prefix validation (workspace escape → 400). Write operations `os.Chown` with session uid/gid.
 
 #### overlay mode
 
@@ -546,14 +464,11 @@ Whiteout handling reuses `commit.go` logic, extracted to `merged_view.go`.
 
 #### ro mode
 
-Read operations work normally. Write operations (upload/replace/mv/delete/mkdir/
-rmdir/chmod/chown) return `403 Forbidden`.
+Read operations work normally. Write operations (upload/replace/mv/delete/mkdir/ rmdir/chmod/chown) return `403 Forbidden`.
 
 #### Path Safety
 
-All path parameters go through `filepath.Clean` + prefix validation. Only
-`workspace.path` subtree is accessible. `..` escape returns 400. Upload checks
-upper size against `persist.max_size_bytes`.
+All path parameters go through `filepath.Clean` + prefix validation. Only `workspace.path` subtree is accessible. `..` escape returns 400. Upload checks upper size against `persist.max_size_bytes`.
 
 ### 12. Concurrency Model
 
@@ -568,26 +483,19 @@ Per-session `sync.RWMutex`:
 | commit (option B) | Write |
 | reset upper | Write |
 
-`reset_upper_after = true`: commit clears upper/work after completion. No active
-run can be in progress (enforced by lock).
+`reset_upper_after = true`: commit clears upper/work after completion. No active run can be in progress (enforced by lock).
 
 ### 13. Session Idle GC
 
 - Sessions record `lastRunAt` timestamp, updated on each `run` completion.
-- Background goroutine scans every 60s. `now - lastRunAt > idle_timeout_seconds`
-  triggers automatic destruction (equivalent to DELETE).
-- Destruction order: kill bwrap process group → wait for bash exit → namespace
-  auto-reclaim → upper enters `retain_seconds` GC queue.
+- Background goroutine scans every 60s. `now - lastRunAt > idle_timeout_seconds` triggers automatic destruction (equivalent to DELETE).
+- Destruction order: kill bwrap process group → wait for bash exit → namespace auto-reclaim → upper enters `retain_seconds` GC queue.
 - `idle_timeout_seconds = 0` disables idle GC for that session.
-- Session GET endpoint returns `created_at`, `last_run_at`,
-  `idle_remaining_seconds` for caller-side keepalive decisions.
+- Session GET endpoint returns `created_at`, `last_run_at`, `idle_remaining_seconds` for caller-side keepalive decisions.
 
 ### 14. Static bwrap Distribution
 
-bwrap is statically compiled with musl (~800KB, zero runtime dependencies) and
-embedded in the execd binary via Go `//go:embed`. At startup, execd extracts it
-to `<execd binary directory>/bwrap`, sets `chmod +x`, and uses that path for all
-bwrap invocations.
+bwrap is statically compiled with musl (~800KB, zero runtime dependencies) and embedded in the execd binary via Go `//go:embed`. At startup, execd extracts it to `<execd binary directory>/bwrap`, sets `chmod +x`, and uses that path for all bwrap invocations.
 
 Benefits:
 - No base image dependency on the `bubblewrap` package.
@@ -600,14 +508,12 @@ Cost: execd binary grows by ~800KB (negligible).
 
 ### Unit Tests
 
-- bwrap argv builder produces correct segment order for each profile × workspace
-  mode combination.
+- bwrap argv builder produces correct segment order for each profile × workspace mode combination.
 - Segment mutual exclusion: strict vs balanced `/tmp` handling.
 - `extra_writable` paths validated against allowlist; out-of-bounds → 400.
 - Capabilities reflect probe results (available, commit_supported, persist).
 - Upper directory allocation and cleanup lifecycle.
-- Merged view resolution: upper priority, whiteout handling, opaque directory
-  semantics.
+- Merged view resolution: upper priority, whiteout handling, opaque directory semantics.
 - Env passthrough: deny mode blacklist filtering, allow mode whitelist injection.
 - `run.envs` overrides `env_passthrough` for conflicting keys.
 - Idle GC fires at correct intervals; `idle_timeout_seconds = 0` disables.
@@ -617,15 +523,12 @@ Cost: execd binary grows by ~800KB (negligible).
 ### Integration Tests
 
 - End-to-end session lifecycle: create → run → run → diff → commit → delete.
-- Overlay CoW: write in session does not modify original workspace; commit
-  merges correctly.
+- Overlay CoW: write in session does not modify original workspace; commit merges correctly.
 - PID isolation: `ps` inside session shows only session processes.
-- `/tmp` isolation: files written to `/tmp` in one session are invisible to
-  another.
-- Filesystem proxy: upload → download round-trip through overlay; delete creates
-  whiteout; search merges upper + lower.
+- `/tmp` isolation: files written to `/tmp` in one session are invisible to another.
+- Filesystem proxy: upload → download round-trip through overlay; delete creates whiteout; search merges upper + lower.
 - `persist.enabled = false`: upper destroyed on session close; diff returns 404.
-- `commit_supported = false` (simulated gVisor): commit returns 503; diff works.
+- `commit_supported = false` (simulated mount denial): commit returns 503; diff works.
 - Multi-session: two concurrent sessions have independent namespaces.
 - Idle GC: session auto-destroyed after timeout; `run` resets timer.
 
@@ -634,94 +537,62 @@ Cost: execd binary grows by ~800KB (negligible).
 - Verify bwrap namespace startup overhead is < 1ms under typical workload.
 - Verify upper size enforcement triggers SIGKILL at configured limit.
 - Verify commit correctly handles overlayfs whiteout and opaque semantics.
-- Verify multi-user scenario: workspace write isolation confirmed, read-only
-  cross-visibility documented.
+- Verify multi-user scenario: workspace write isolation confirmed, read-only cross-visibility documented.
 
 ## Drawbacks
 
-- bwrap shares the kernel with the outer container. This is explicitly not a
-  security boundary replacement — it is a performance and isolation enhancement
-  within a trusted Pod.
-- Overlay upper is not persistent across Pod migrations. Cross-Pod artifact
-  persistence requires caller-side upload to object storage.
-- Workspace isolation in multi-user scenarios is write-only; other users'
-  workspaces are read-only visible via the root bind mount.
-- seccomp uses a blocklist, not an allowlist — it does not prevent unknown
-  syscall exploitation.
+- bwrap shares the kernel with the outer container. This is explicitly not a security boundary replacement — it is a performance and isolation enhancement within a trusted Pod.
+- Overlay upper is not persistent across Pod migrations. Cross-Pod artifact persistence requires caller-side upload to object storage.
+- Workspace isolation in multi-user scenarios is write-only; other users' workspaces are read-only visible via the root bind mount.
+- seccomp uses a blocklist, not an allowlist — it does not prevent unknown syscall exploitation.
 - No per-session cgroup resource limits in v1.
 
 ## Alternatives
 
 ### SDK-side bwrap integration
 
-Investigated in
-[sdk-bwrap-integration-feasibility.md](https://github.com/opensandbox-group/opensandbox/blob/main/docs/investigation/2026-04-30-sdk-bwrap-integration-feasibility.md).
-Complementary but not overlapping — SDK-side cannot provide the filesystem proxy,
-artifact recovery, or session management that execd-side integration offers.
+Investigated in [sdk-bwrap-integration-feasibility.md](https://github.com/opensandbox-group/opensandbox/blob/main/docs/investigation/2026-04-30-sdk-bwrap-integration-feasibility.md). Complementary but not overlapping — SDK-side cannot provide the filesystem proxy, artifact recovery, or session management that execd-side integration offers.
 
 ### Per-path allowlist instead of read-only root
 
-Rejected. AI agent commands have unpredictable path dependencies (`/usr/local/
-bin/`, `/etc/ssl/`, `/opt/`). Maintaining a per-path allowlist is impractical and
-results in "command not found" failures. Read-only root with selective overlay is
-the same strategy used by Gemini CLI's LinuxSandboxManager.
+Rejected. AI agent commands have unpredictable path dependencies (`/usr/local/ bin/`, `/etc/ssl/`, `/opt/`). Maintaining a per-path allowlist is impractical and results in "command not found" failures. Read-only root with selective overlay is the same strategy used by Gemini CLI's LinuxSandboxManager.
 
 ### cgroup-based isolation
 
-cgroup provides resource limits but not filesystem or PID isolation. bwrap
-namespaces and cgroup are complementary; cgroup wrapper is planned for v2.
+cgroup provides resource limits but not filesystem or PID isolation. bwrap namespaces and cgroup are complementary; cgroup wrapper is planned for v2.
 
 ### User namespace isolation instead of real setuid
 
-bwrap natively supports `--unshare-user` with `--uid`/`--gid` for user namespace
-UID mapping. This would allow execd to run as non-root. Rejected because:
+bwrap natively supports `--unshare-user` with `--uid`/`--gid` for user namespace UID mapping. This would allow execd to run as non-root. Rejected because:
 
-- Nested user namespaces require CRI/runtime support (`user.max_user_namespaces`,
-  runtime seccomp profiles allowing `clone(CLONE_NEWUSER)`). gVisor and hardened
-  runtimes often restrict this.
-- User namespace UID mapping is virtual — all sessions map to the same host UID,
-  so file permissions do not provide real isolation between sessions.
-- Real setuid provides stronger guarantees: different sessions have different
-  host UIDs, so file permission checks are enforced by the kernel at the host
-  level.
-- The tradeoff (execd must run as root) is acceptable because execd already runs
-  in a dedicated sandbox container, not on shared infrastructure.
+- Nested user namespaces require CRI/runtime support (`user.max_user_namespaces`, runtime seccomp profiles allowing `clone(CLONE_NEWUSER)`). Hardened runtimes often restrict this.
+- User namespace UID mapping is virtual — all sessions map to the same host UID, so file permissions do not provide real isolation between sessions.
+- Real setuid provides stronger guarantees: different sessions have different host UIDs, so file permission checks are enforced by the kernel at the host level.
+- The tradeoff (execd must run as root) is acceptable because execd already runs in a dedicated sandbox container, not on shared infrastructure.
 
 ### Dedicated container per execution
 
-Full container isolation (runc/gVisor) provides stronger guarantees but at
-40–100ms+ startup cost, which is prohibitive for RL step-level execution at
-scale. bwrap fills the gap between no isolation and full container isolation.
+Full container isolation (runc/gVisor) provides stronger guarantees but at 40–100ms+ startup cost, which is prohibitive for RL step-level execution at scale. bwrap fills the gap between no isolation and full container isolation.
 
 ## Infrastructure Needed
 
-- execd must run as root or with `CAP_SYS_ADMIN` (required to create mount/PID
-  namespaces without user namespace).
-- emptyDir volume mounted at `--isolation-upper-root` in Pod spec for overlay
-  persistence.
+- execd must run as root or with `CAP_SYS_ADMIN` (required to create mount/PID namespaces without user namespace).
+- emptyDir volume mounted at `--isolation-upper-root` in Pod spec for overlay persistence.
 - Optional: seccomp BPF file at `/etc/execd/seccomp.bpf` (shipped with execd).
 
 ## Upgrade & Migration Strategy
 
 This change is fully additive:
 
-- Existing execd endpoints (`/command`, `/session`, `/code`, `/pty`, `/files`)
-  are unchanged. Zero modifications to existing code paths.
-- Existing SDKs continue to work. New typed methods
-  (`CreateIsolatedSession`, `RunInIsolatedSession`, `IsolatedSessionFiles.*`)
-  are additive.
-- Callers opt in by using `/v1/isolated/*` endpoints. No implicit behavior
-  change.
-- If bwrap is unavailable at startup (probe failure), `/v1/isolated/*` returns
-  503 and existing APIs work normally.
-- Base images do not need to pre-install bubblewrap — execd handles distribution
-  internally via static embedding.
+- Existing execd endpoints (`/command`, `/session`, `/code`, `/pty`, `/files`) are unchanged. Zero modifications to existing code paths.
+- Existing SDKs continue to work. New typed methods (`CreateIsolatedSession`, `RunInIsolatedSession`, `IsolatedSessionFiles.*`) are additive.
+- Callers opt in by using `/v1/isolated/*` endpoints. No implicit behavior change.
+- If bwrap is unavailable at startup (probe failure), `/v1/isolated/*` returns 503 and existing APIs work normally.
+- Base images do not need to pre-install bubblewrap — execd handles distribution internally via static embedding.
 
 Rollout sequence:
 
 1. Deploy updated execd with embedded bwrap.
 2. Update SDK with new typed methods.
 3. Callers migrate to `/v1/isolated/*` at their own pace.
-4. Update Pod specs to mount emptyDir at `--isolation-upper-root` for overlay
-   persistence (optional — isolation works without it, only persist is
-   unavailable).
+4. Update Pod specs to mount emptyDir at `--isolation-upper-root` for overlay persistence (optional — isolation works without it, only persist is unavailable).

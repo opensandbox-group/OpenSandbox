@@ -1,0 +1,242 @@
+{
+  "external": [
+    {
+      "name": "absent",
+      "present": false,
+      "input": "",
+      "valid": true,
+      "canonical": []
+    },
+    {
+      "name": "empty",
+      "present": true,
+      "input": "[]",
+      "valid": true,
+      "canonical": []
+    },
+    {
+      "name": "normalize",
+      "present": true,
+      "input": "[\" B.Example.COM. \",\"a.example.com\",\"b.example.com\",\"b\u00fccher.example\"]",
+      "valid": true,
+      "canonical": [
+        "a.example.com",
+        "b.example.com",
+        "xn--bcher-kva.example"
+      ]
+    },
+    {
+      "name": "blank",
+      "present": true,
+      "input": "",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "whitespace",
+      "present": true,
+      "input": " ",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "null",
+      "present": true,
+      "input": "null",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "object",
+      "present": true,
+      "input": "{}",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "scalar",
+      "present": true,
+      "input": "\"a.example.com\"",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "number",
+      "present": true,
+      "input": "[1]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "null-element",
+      "present": true,
+      "input": "[null]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "surrogate",
+      "present": true,
+      "input": "[\"\\ud800.example\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "trailing",
+      "present": true,
+      "input": "[] []",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "ip",
+      "present": true,
+      "input": "[\"127.0.0.1\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "url",
+      "present": true,
+      "input": "[\"https://a.example.com\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "port",
+      "present": true,
+      "input": "[\"a.example.com:443\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "regex",
+      "present": true,
+      "input": "[\"^.*example.com$\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "star",
+      "present": true,
+      "input": "[\"a.*.example.com\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "empty-item",
+      "present": true,
+      "input": "[\"\"]",
+      "valid": false,
+      "canonical": []
+    }
+  ],
+  "canonical": [
+    {
+      "name": "missing",
+      "present": false,
+      "input": "",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "empty",
+      "present": true,
+      "input": "[]",
+      "valid": true,
+      "canonical": []
+    },
+    {
+      "name": "valid",
+      "present": true,
+      "input": "[\"*.example.com\",\"a.example.net\"]",
+      "valid": true,
+      "canonical": [
+        "*.example.com",
+        "a.example.net"
+      ]
+    },
+    {
+      "name": "uppercase",
+      "present": true,
+      "input": "[\"A.example.com\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "unicode",
+      "present": true,
+      "input": "[\"b\u00fccher.example\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "root",
+      "present": true,
+      "input": "[\"a.example.com.\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "unsorted",
+      "present": true,
+      "input": "[\"z.example.com\",\"a.example.com\"]",
+      "valid": false,
+      "canonical": []
+    },
+    {
+      "name": "duplicate",
+      "present": true,
+      "input": "[\"a.example.com\",\"a.example.com\"]",
+      "valid": false,
+      "canonical": []
+    }
+  ],
+  "overlaps": [
+    {
+      "left": "a.example.com",
+      "right": "a.example.com",
+      "overlap": true
+    },
+    {
+      "left": "a.example.com",
+      "right": "*.example.com",
+      "overlap": true
+    },
+    {
+      "left": "*.example.com",
+      "right": "a.example.com",
+      "overlap": true
+    },
+    {
+      "left": "*.example.com",
+      "right": "*.example.com",
+      "overlap": true
+    },
+    {
+      "left": "*.example.com",
+      "right": "*.sub.example.com",
+      "overlap": true
+    },
+    {
+      "left": "*.example.com",
+      "right": "*.other.com",
+      "overlap": false
+    },
+    {
+      "left": "*.example.com",
+      "right": "example.com",
+      "overlap": false
+    },
+    {
+      "left": "*.example.com",
+      "right": "badexample.com",
+      "overlap": false
+    },
+    {
+      "left": "*.example.com",
+      "right": "a.b.example.com",
+      "overlap": true
+    }
+  ]
+}

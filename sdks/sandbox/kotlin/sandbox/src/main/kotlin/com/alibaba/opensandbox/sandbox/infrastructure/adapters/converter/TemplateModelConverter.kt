@@ -22,15 +22,18 @@ import com.alibaba.opensandbox.sandbox.api.models.FsbTemplate
 import com.alibaba.opensandbox.sandbox.api.models.FsbTemplateReadiness
 import com.alibaba.opensandbox.sandbox.api.models.ListFsbTemplatesResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedTemplateInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFormat
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateReadiness
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateStatus
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toApiIdlePolicy
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toApiNetworkPolicy
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toPaginationInfo
 import java.time.Duration
+import com.alibaba.opensandbox.sandbox.api.models.SandboxLifecycle as ApiSandboxLifecycle
 
 /**
  * Converter between public template models and lifecycle API models.
@@ -101,10 +104,12 @@ internal object TemplateModelConverter {
      * Builds a template-mode create sandbox request.
      *
      * Template mode fixes the workload shape on the server: only the template id,
-     * timeout, metadata, network policy and extensions may accompany the request.
-     * Workload-shaping fields (image, snapshotId, entrypoint, env, resource limits,
-     * volumes, platform, credential proxy, lifecycle) must stay unset because the
-     * server rejects them in template mode.
+     * timeout, metadata, network policy, extensions and the idle policy may
+     * accompany the request. Workload-shaping fields (image, snapshotId,
+     * entrypoint, env, resource limits, volumes, platform, credential proxy,
+     * lifecycle hooks) must stay unset because the server rejects them in
+     * template mode. The idle policy is control-plane state (OSEP-0024), so it
+     * rides the lifecycle object while hooks stay template-owned.
      */
     fun toApiCreateTemplateSandboxRequest(
         templateId: String,
@@ -112,6 +117,7 @@ internal object TemplateModelConverter {
         metadata: Map<String, String>,
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
+        idlePolicy: IdlePolicy? = null,
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
             templateId = templateId,
@@ -119,6 +125,12 @@ internal object TemplateModelConverter {
             metadata = metadata,
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
             extensions = extensions,
+            // Same guard as the standard create path: an empty policy is
+            // omitted rather than serialized as `"idlePolicy": {}`.
+            lifecycle =
+                idlePolicy?.takeUnless { it.isEmpty }?.let { idlePolicyValue ->
+                    ApiSandboxLifecycle(idlePolicy = idlePolicyValue.toApiIdlePolicy())
+                },
         )
     }
 

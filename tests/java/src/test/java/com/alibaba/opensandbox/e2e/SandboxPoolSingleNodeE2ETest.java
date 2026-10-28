@@ -167,7 +167,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
         assertNotNull(result);
         assertNull(result.getError());
         assertFalse(result.getLogs().getStdout().isEmpty());
-        assertEquals("pool-basic-ok", result.getLogs().getStdout().get(0).getText());
+        assertEquals("pool-basic-ok\n", result.getLogs().getStdout().get(0).getText());
     }
 
     @Test
@@ -1388,7 +1388,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                             .build());
             assertNull(result.getError());
             assertEquals(
-                    "kotlin-retry-next-idle-ok", result.getLogs().getStdout().get(0).getText());
+                    "kotlin-retry-next-idle-ok\n", result.getLogs().getStdout().get(0).getText());
 
             // Stale id must not silently reappear in the idle queue.
             List<IdleEntry> remaining = mixedStore.snapshotIdleEntries(mixedPoolName);
@@ -1481,7 +1481,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                             .build());
             assertNull(result.getError());
             assertEquals(
-                    "kotlin-retry-then-create-ok", result.getLogs().getStdout().get(0).getText());
+                    "kotlin-retry-then-create-ok\n", result.getLogs().getStdout().get(0).getText());
 
             // Acquire starts before the first fixed reconcile tick. If its retry loop truly
             // exhausted all 3 stale candidates before falling through to direct-create, all

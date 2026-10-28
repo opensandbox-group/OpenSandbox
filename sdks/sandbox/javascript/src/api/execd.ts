@@ -1,11 +1,11 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -186,6 +186,12 @@ export interface paths {
          * @description Executes a shell command in an existing bash session and streams the output in real-time via SSE
          *     (Server-Sent Events). The session must have been created by create_session. Supports
          *     optional working directory override and timeout (milliseconds).
+         *     The run streams a single merged `stdout` event stream (session stderr is merged into it).
+         *     Stdout event text preserves the original line endings (`\n`, `\r`, or `\r\n`). Concatenate
+         *     text from the stdout events to recover the run's output; blank lines appear as events
+         *     containing only the line ending, and the final event may be an unterminated fragment.
+         *     A line longer than 16 MiB is split across several events, and only the last of them
+         *     ends with the line ending.
          */
         post: operations["runInSession"];
         delete?: never;
@@ -229,6 +235,9 @@ export interface paths {
          * @description Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply exactly one input mode.
          *     The command can run in foreground or background mode. The response includes stdout, stderr,
          *     execution status, and completion events.
+         *     In foreground mode, stdout and stderr event text preserves the original line endings
+         *     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
+         *     the final event may contain an unterminated fragment.
          *     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
          *     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
          *     with specific user/group IDs, and `envs` to inject environment variables.
@@ -962,7 +971,7 @@ export interface paths {
         put?: never;
         /**
          * Run code in an isolated session
-         * @description Runs code inside an existing isolated session. Foreground mode (default) streams output via SSE (200). Background mode (`background: true`) starts the command detached and returns a JSON run handle with 202 Accepted for polling status and logs via `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds` applies to foreground runs only; background runs are not time-limited (idle GC is suspended while one is active) and are bounded by the session lifetime.
+         * @description Runs code inside an existing isolated session. Foreground mode (default) streams output via SSE (200). Background mode (`background: true`) starts the command detached and returns a JSON run handle with 202 Accepted for polling status and logs via `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds` applies to foreground runs only; background runs are not time-limited (idle GC is suspended while one is active) and are bounded by the session lifetime. Foreground streams emit periodic `ping` keepalive events so idle gateway timeouts do not reap the connection while the command produces no output; clients must ignore unrecognized event types.
          */
         post: operations["runInIsolatedSession"];
         delete?: never;
@@ -1418,6 +1427,11 @@ export interface components {
              */
             execution_count?: number;
             /**
+             * @description Successful foreground POST /command process exit status (0), present only on its execution_complete event after the process has exited. Omitted for background startup acknowledgements, code execution, and other events. Absence does not imply success; older servers omit this field. Non-zero command exits use error.exit_code instead.
+             * @example 0
+             */
+            exit_code?: number;
+            /**
              * Format: int64
              * @description Execution duration in milliseconds
              * @example 150
@@ -1446,7 +1460,7 @@ export interface components {
                  */
                 ename?: string;
                 /**
-                 * @description Error value/message
+                 * @description Error value/message. For `CommandExecError` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when the process could not be started; use `exit_code` to tell the two apart.
                  * @example name 'undefined_var' is not defined
                  */
                 evalue?: string;
@@ -1459,6 +1473,11 @@ export interface components {
                  *     ]
                  */
                 traceback?: string[];
+                /**
+                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` events emitted after the process ran; omitted when the process failed to start and for non-command errors.
+                 * @example 3
+                 */
+                exit_code?: number;
             };
         };
         /** @description File metadata including path and permissions */
@@ -1630,15 +1649,18 @@ export interface components {
              */
             message: string;
         };
-        /** @description Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are present `workspace` is prepended to `overlays`. */
+        /** @description Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are present `workspace` is prepended to `overlays`. The session files API serves exactly the overlay and bind mounts: paths under each mount resolve as the namespace sees them, and absolute paths outside every overlay or bind are rejected instead of resolving against the workspace (unlike binds, extra_writable paths are not served by the files API unless an overlay covers them). The strict profile's private `/tmp` is a session-owned bind under the upper root and is part of that view; a caller bind or overlay on `/tmp` shadows it as inside the namespace. */
         CreateIsolatedSessionRequest: {
-            /** @enum {string} */
+            /**
+             * @description Isolation profile. `strict` (default) gives the session a private `/tmp` backed by a host directory that the session files API also serves; `balanced` shares the sandbox's own `/tmp`, which the files API does not serve.
+             * @enum {string}
+             */
             profile?: "strict" | "balanced";
             workspace?: components["schemas"]["IsolatedWorkspaceSpec"];
             /** @description Independent overlay mounts inside one namespace. Each entry gets its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a nested overlay (for example `/workspace` on top of a `/` root overlay) shadows its ancestors within its own subtree. Paths must be absolute, unique, and clean (no trailing slash, `.` or `..` segments); at most 16 mounts per session (including the legacy `workspace`). */
             overlays?: components["schemas"]["IsolatedOverlaySpec"][];
             extra_writable?: string[];
-            /** @description Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist. */
+            /** @description Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist. The session files API also serves paths under each dest from the host source directory: reads and writes are live in both directions, symlinked entries are followed like the namespace view, and writes are rejected for readonly binds. Destinations must be unique across entries and must not be a strict ancestor of another mount destination (binds, overlays, extra_writable) or fall under /run, /dev, or /proc; such overlapping configurations are rejected at session creation. */
             binds?: components["schemas"]["BindMount"][];
             share_net?: boolean;
             env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
@@ -1658,7 +1680,7 @@ export interface components {
             /** @enum {string} */
             mode?: "rw" | "overlay" | "ro";
         };
-        /** @description One overlay mount inside the isolated namespace. `mode=overlay` mounts a copy-on-write view: with `persist=true` (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the session ends. `rw` and `ro` bind the host path directly; `persist` applies to overlay mode only and must be omitted for them (execd rejects the request otherwise). */
+        /** @description One overlay mount inside the isolated namespace. `mode=overlay` mounts a copy-on-write view: with `persist=true` (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the session ends. `rw` and `ro` bind the host path directly; `persist` applies to overlay mode only and must be omitted for them (execd rejects the request otherwise). Overlay mode is one-directional for the session files API: while the session runs, files-API writes land in the host upper directory and are not visible to runs inside the namespace (the kernel caches overlayfs directory entries at mount time), while the run-to-files direction works; use `rw` or `binds` for bidirectional file exchange. */
         IsolatedOverlaySpec: {
             /**
              * @description Mount destination inside the namespace (absolute).
@@ -1834,12 +1856,16 @@ export interface components {
             available?: boolean;
             isolator?: string;
             version?: string;
-            /** @description Diagnostic message when isolation is unavailable */
+            /** @description Diagnostic message when isolation is unavailable or degraded (for example, share_net=true sessions work but no uid mode can create the private network namespace required by share_net=false) */
             message?: string;
             /** @description Whether sessions using uid_mode setpriv can be created with execd's default UID/GID. Requests that select different UID/GID values may still return 503 NOT_SUPPORTED when identity switching is unavailable. */
             setpriv_available?: boolean;
             /** @description Whether sessions using uid_mode userns can be created */
             userns_available?: boolean;
+            /** @description Whether sessions using uid_mode setpriv can also create the private network namespace required by share_net=false (bwrap --unshare-net; its loopback setup needs CAP_NET_ADMIN in the execd container). Create rejects share_net=false requests with 503 NOT_SUPPORTED when the requested mode's flag is false. */
+            setpriv_net_available?: boolean;
+            /** @description Whether sessions using uid_mode userns can also create the private network namespace required by share_net=false. */
+            userns_net_available?: boolean;
             commit_supported?: boolean;
             diff_supported?: boolean;
             /** @description execd init-mode and workload-hardening state (OSEP-0018): whether execd is the sandbox init and which of its controls are in effect. Not an isolation capability; reported here so operators see enforcement state in one place. */

@@ -673,3 +673,73 @@ class TestUnwrapRetryTransport:
         from opensandbox.transport import unwrap_retry_transport
 
         assert unwrap_retry_transport(None) is None
+
+
+class TestStreamingTransport:
+    """SSE clients keep the wake-timeout retry and nothing else."""
+
+    @staticmethod
+    def _wake_503() -> httpx.Response:
+        return httpx.Response(
+            503, headers={"OpenSandbox-Wake": "expired", "Retry-After": "0"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_async_keeps_wake_retry(self) -> None:
+        from opensandbox.transport import streaming_transport
+
+        inner = _CountingAsyncTransport([self._wake_503(), httpx.Response(200)])
+        transport = streaming_transport(RetryAsyncTransport(inner, _fast_policy()))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://x"
+        ) as client:
+            response = await client.post("/command", json={"command": "true"})
+        assert response.status_code == 200
+        assert inner.calls == 2
+
+    @pytest.mark.asyncio
+    async def test_async_drops_general_retries(self) -> None:
+        from opensandbox.transport import streaming_transport
+
+        inner = _CountingAsyncTransport([httpx.Response(503)])
+        policy = _fast_policy(
+            retryable_status_codes_non_idempotent=frozenset(
+                {HTTPStatus.SERVICE_UNAVAILABLE}
+            )
+        )
+        transport = streaming_transport(RetryAsyncTransport(inner, policy))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://x"
+        ) as client:
+            response = await client.post("/command", json={"command": "true"})
+        assert response.status_code == 503
+        assert inner.calls == 1
+
+    def test_sync_keeps_wake_retry_and_drops_general_retries(self) -> None:
+        from opensandbox.transport import streaming_transport
+
+        inner = _CountingSyncTransport([self._wake_503(), httpx.Response(503)])
+        policy = _fast_policy(
+            retryable_status_codes_non_idempotent=frozenset(
+                {HTTPStatus.SERVICE_UNAVAILABLE}
+            )
+        )
+        transport = streaming_transport(RetrySyncTransport(inner, policy))
+        with httpx.Client(transport=transport, base_url="http://x") as client:
+            response = client.post("/command", json={"command": "true"})
+        assert response.status_code == 503
+        assert inner.calls == 2
+
+    def test_returns_inner_when_wake_retry_disabled(self) -> None:
+        from opensandbox.transport import streaming_transport
+
+        inner = httpx.AsyncHTTPTransport()
+        wrapper = RetryAsyncTransport(inner, RetryPolicy(wake_retry_enabled=False))
+        assert streaming_transport(wrapper) is inner
+
+    def test_passes_through_other_transports(self) -> None:
+        from opensandbox.transport import streaming_transport
+
+        raw = httpx.AsyncHTTPTransport()
+        assert streaming_transport(raw) is raw
+        assert streaming_transport(None) is None

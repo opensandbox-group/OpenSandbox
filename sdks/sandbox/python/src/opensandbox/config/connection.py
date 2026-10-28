@@ -18,6 +18,7 @@ Connection configuration for OpenSandbox operations.
 """
 
 import os
+import ssl
 from datetime import timedelta
 
 import httpx  # type: ignore[reportMissingImports]
@@ -52,6 +53,7 @@ class ConnectionConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _owns_transport: bool = PrivateAttr(default=True)
+    _ssl_context: ssl.SSLContext | None = PrivateAttr(default=None)
 
     api_key: str | None = Field(
         default=None, description="API key for authentication with sandbox service"
@@ -68,7 +70,7 @@ class ConnectionConfig(BaseModel):
         default=False, description="Enable debug logging for HTTP requests"
     )
     user_agent: str = Field(
-        default="OpenSandbox-Python-SDK/1.1.0", description="User agent string"
+        default="OpenSandbox-Python-SDK/1.2.0", description="User agent string"
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
@@ -101,8 +103,9 @@ class ConnectionConfig(BaseModel):
     retry_policy: RetryPolicy = Field(
         default_factory=RetryPolicy,
         description=(
-            "Retry policy applied to non-streaming requests going through "
-            "the shared transport. Pass RetryPolicy.disabled() for fast-fail."
+            "Retry policy applied to requests going through the shared "
+            "transport. Streaming (SSE) requests only get its wake-timeout "
+            "retry. Pass RetryPolicy.disabled() for fast-fail."
         ),
     )
     use_server_proxy: bool = Field(
@@ -171,7 +174,10 @@ class ConnectionConfig(BaseModel):
         shared `transport` on this config is never touched. Callers that
         close what they build (e.g. adapter clients) can do so safely.
         """
+        if self._ssl_context is None:
+            self._ssl_context = httpx.create_ssl_context()
         inner = httpx.AsyncHTTPTransport(
+            verify=self._ssl_context,
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_keepalive_connections,
@@ -253,7 +259,12 @@ class ConnectionConfig(BaseModel):
 
     def get_base_url(self) -> str:
         """Get the full base URL for API requests."""
-        domain = self.get_domain()
+        # Ignore a trailing "/" or "/v1" like the other SDKs, so the version
+        # prefix is never doubled ("//v1", "/v1/v1").
+        domain = self.get_domain().rstrip("/")
+        version_suffix = f"/{self._API_VERSION}"
+        if domain.endswith(version_suffix):
+            domain = domain[: -len(version_suffix)]
         # Allow domain to override protocol if it explicitly starts with a scheme
         if domain.startswith("http://") or domain.startswith("https://"):
             return f"{domain}/{self._API_VERSION}"

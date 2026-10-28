@@ -19,6 +19,7 @@ Sandbox-related data models.
 Models for sandbox creation, configuration, status, and lifecycle management.
 """
 
+import ipaddress
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
@@ -28,6 +29,26 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 if TYPE_CHECKING:
     from opensandbox.config import ConnectionConfig
     from opensandbox.config.connection_sync import ConnectionConfigSync
+
+
+def _is_ip_or_cidr(value: str) -> bool:
+    """Mirror the sidecar's netip-based target classification."""
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    if "/" in value and not value.partition("/")[2].isdigit():
+        return False
+    # netip.ParsePrefix rejects scoped prefixes ("fe80::1%eth0/64") even
+    # though Python's ipaddress accepts them; classify those as domains too.
+    if "/" in value and "%" in value:
+        return False
+    try:
+        ipaddress.ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
 
 
 class SandboxImageAuth(BaseModel):
@@ -122,16 +143,57 @@ class NetworkRule(BaseModel):
     action: Literal["allow", "deny"] = Field(
         description='Whether to allow or deny matching targets. One of "allow" or "deny".'
     )
-    target: str = Field(
-        description='FQDN or wildcard domain (e.g., "example.com", "*.example.com").'
+    target: str | None = Field(
+        default=None,
+        description=(
+            'FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP address, or CIDR. '
+            "May be omitted when `ports` is set; otherwise required."
+        ),
+    )
+    ports: list[int] | None = Field(
+        default=None,
+        description=(
+            "Restricts this rule to specific TCP destination ports (1-65535, max 256, no "
+            "duplicates). Omitted target with ports set applies to all IPv4/IPv6 destinations; "
+            "a domain target with ports is rejected. TCP only."
+        ),
+        min_length=1,
+        max_length=256,
     )
 
     @field_validator("target")
     @classmethod
-    def target_must_not_be_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("Network rule target cannot be blank")
+    def target_must_not_be_empty(cls, v: str | None) -> str | None:
+        # Blank = omitted (sidecar read-back emits "target": ""); trim like
+        # the server does.
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("ports")
+    @classmethod
+    def ports_must_be_valid_tcp_ports(cls, v: list[int] | None) -> list[int] | None:
+        if v is None:
+            return v
+        seen: set[int] = set()
+        for port in v:
+            if port < 1 or port > 65535:
+                raise ValueError(f"Network rule port {port} out of range 1-65535")
+            if port in seen:
+                raise ValueError(f"Network rule has duplicate port {port}")
+            seen.add(port)
         return v
+
+    @model_validator(mode="after")
+    def target_or_ports_required(self) -> "NetworkRule":
+        if self.target is None and not self.ports:
+            raise ValueError("Network rule requires target, ports, or both")
+        # Classify the trimmed target the way the sidecar does, so " 10.0.0.5"
+        # is an IP locally too instead of a misleading domain+ports error.
+        if self.ports and self.target is not None and not _is_ip_or_cidr(self.target.strip()):
+            raise ValueError("Network rule ports are not supported for domain targets")
+        return self
 
 
 class NetworkPolicy(BaseModel):
@@ -212,11 +274,161 @@ class PeriodicLifecycleHook(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class ActivityProbe(BaseModel):
+    """
+    Application-declared activity probe (OSEP-0024 ``idlePolicy.activeProbe``).
+
+    The server issues ``GET {path}`` on ``{port}`` when the sandbox is
+    otherwise idle; ``200 {"active": true}`` counts as activity and resets
+    the idle clock, while ``{"active": false}``, any failure, or a timeout
+    records nothing.
+    """
+
+    port: int = Field(
+        ge=1,
+        le=65535,
+        description="Sandbox port serving the probe endpoint.",
+    )
+    path: str = Field(
+        min_length=1,
+        max_length=512,
+        pattern=r"^/",
+        description=(
+            "Absolute HTTP path of the probe endpoint. Must not contain "
+            "whitespace or control characters."
+        ),
+    )
+    timeout_seconds: int | None = Field(
+        default=None,
+        alias="timeoutSeconds",
+        ge=1,
+        le=10,
+        description=(
+            "Probe request budget in seconds. The server defaults to 2 when omitted."
+        ),
+    )
+
+    @field_validator("path")
+    @classmethod
+    def path_must_not_contain_whitespace_or_control_chars(
+        cls, value: str
+    ) -> str:
+        if any(ord(c) < 0x20 or c == "\x7f" or c.isspace() for c in value):
+            raise ValueError(
+                "Probe path must not contain whitespace or control characters"
+            )
+        return value
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class IdlePolicy(BaseModel):
+    """
+    Idle behavior declared by the sandbox (OSEP-0024).
+
+    With ``idle_timeout_seconds``, the sandbox is auto-paused after that many
+    seconds without ingress-observed activity (fast-sandbox backend only).
+    Without it, the policy is wake-only: the sandbox is never auto-paused,
+    but a (manually) paused sandbox wakes on access.
+
+    Omitting ``idlePolicy`` from :class:`SandboxLifecycle` preserves
+    non-automated behavior exactly: never auto-paused, never auto-woken.
+    """
+
+    idle_timeout_seconds: int | None = Field(
+        default=None,
+        alias="idleTimeoutSeconds",
+        ge=30,
+        le=86400,
+        description=(
+            "Idle threshold X in seconds: the sandbox is auto-paused after X "
+            "continuously idle seconds. Must not exceed the server's "
+            "configured activity TTL (default 1800)."
+        ),
+    )
+    on_idle: Literal["pause"] | None = Field(
+        default=None,
+        alias="onIdle",
+        description=(
+            "Action taken at the idle threshold. Required with, and only "
+            "valid with, idle_timeout_seconds. Only 'pause' exists today."
+        ),
+    )
+    wake_on_access: bool = Field(
+        default=True,
+        alias="wakeOnAccess",
+        description=(
+            "Whether incoming traffic may wake the sandbox from Paused. "
+            "false keeps today's paused behavior (permanent 503 through the "
+            "gateway) and only the resume API restores the sandbox."
+        ),
+    )
+    active_probe: ActivityProbe | None = Field(
+        default=None,
+        alias="activeProbe",
+        description=(
+            "Application-declared activity probe; relevant only with auto-pause."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def on_idle_requires_idle_timeout(self) -> "IdlePolicy":
+        if self.idle_timeout_seconds is None:
+            if self.on_idle is not None:
+                raise ValueError(
+                    "onIdle must be omitted when idleTimeoutSeconds is omitted "
+                    "(a policy without a timeout is wake-only)"
+                )
+        elif self.on_idle != "pause":
+            raise ValueError("onIdle must be 'pause' when idleTimeoutSeconds is set")
+        return self
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class RenewalPolicy(BaseModel):
+    """
+    Renew-on-access behavior (OSEP-0009): observed access moves the
+    expiration to ``max(now + extend_seconds, current)``. Control-plane
+    policy; supersedes the deprecated ``access.renew.extend.seconds``
+    extensions key.
+    """
+
+    extend_seconds: int = Field(
+        alias="extendSeconds",
+        ge=300,
+        le=86400,
+        description=(
+            "Extension window X in seconds for each access-driven renewal: "
+            "the expiration is moved to max(now + X, current expiresAt)."
+        ),
+    )
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
 class SandboxLifecycle(BaseModel):
     """Optional lifecycle hooks applied when a sandbox is created."""
 
     pre_start: LifecycleHook | None = Field(default=None, alias="preStart")
     periodic: list[PeriodicLifecycleHook] | None = None
+    idle_policy: IdlePolicy | None = Field(
+        default=None,
+        alias="idlePolicy",
+        description=(
+            "Auto-pause and wake-on-access behavior (OSEP-0024). Control-plane "
+            "policy only: it never reaches the guest. Supported only by the "
+            "fast-sandbox backend."
+        ),
+    )
+    renewal_policy: RenewalPolicy | None = Field(
+        default=None,
+        alias="renewalPolicy",
+        description=(
+            "Renew-on-access behavior (OSEP-0009). Control-plane policy; "
+            "supersedes the deprecated extensions['access.renew.extend.seconds'] key."
+        ),
+    )
 
     @model_validator(mode="after")
     def periodic_names_must_be_unique(self) -> "SandboxLifecycle":

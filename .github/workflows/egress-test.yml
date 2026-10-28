@@ -22,6 +22,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -30,14 +31,17 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/egress/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.10'
+          cache: pip
+          cache-dependency-path: components/egress/requirements-mitmproxy.txt
 
       - name: Install mitmproxy
-        run: pip install mitmproxy==11.0.2
+        run: pip install -r components/egress/requirements-mitmproxy.txt
 
       - name: Check gofmt
         working-directory: components/egress
@@ -59,18 +63,224 @@ jobs:
         run: |
           go test ./...
 
-      - name: Run timed nft element regression
+      - name: Test privileged regression runners
+        working-directory: components/egress
+        run: python -m unittest discover -v -s scripts -p "test_*.py"
+
+      - name: Run privileged atomic policy mount regressions
+        working-directory: components/egress
+        shell: bash
+        run: |
+          bash scripts/ci-privileged-go-test.sh ./pkg/policy \
+            TestAtomicPolicyDirectoryBindMount \
+            TestAtomicPolicyAbsentDirectoryBindMount \
+            TestAtomicPolicySingleFileBindMountRejected \
+            TestAtomicPolicyReadOnlyDirectoryBindMountRejected \
+            TestAtomicPolicySymlinkRejected
+
+      - name: Run privileged atomic policy owner regressions
+        working-directory: components/egress
+        shell: bash
+        run: |
+          bash scripts/ci-privileged-go-test.sh . \
+            TestRevisionAtomicPolicyDirectoryBindMount \
+            TestRevisionAtomicPolicySingleFileBindMountRejected
+
+      - name: Run privileged nft regressions
         working-directory: components/egress
         run: |
           sudo apt-get update
-          sudo apt-get install -y nftables
-          go test -c -o /tmp/egress-nft.test ./pkg/nftables
-          sudo env OPENSANDBOX_NFT_TEST=1 /tmp/egress-nft.test -test.run '^TestDynamicElementRenewal$' -test.v
+          sudo apt-get install -y nftables iproute2 util-linux
+          bash scripts/ci-nft-go-test.sh ./pkg/nftables \
+            TestDynamicElementRenewal \
+            TestNftQuiescenceAfterCommittedStaticError \
+            TestNftStartFailurePreservesKernelAndRetry \
+            TestNftRealMissingTableFallback
+          bash scripts/ci-nft-go-test.sh ./pkg/iptables \
+            TestGatewayDNSRedirectKernelPrivateNS
+          bash scripts/ci-nft-go-test.sh . \
+            TestRevisionNftEffectsRealFileAndKernel \
+            TestTransitionRealNftChangedIPKernelRules
+
+      - name: Run privileged quarantine packet regressions
+        working-directory: components/egress
+        run: |
+          bash scripts/ci-nft-go-test.sh ./pkg/quarantine \
+            TestQuarantineFenceKernelTraffic \
+            TestQuarantineFenceKernelFaults
+
+      - name: Run real runtime recovery quarantine image regression
+        run: |
+          docker build -f components/egress/Dockerfile \
+            -t opensandbox-egress:quarantine-ci .
+          python components/egress/scripts/test_quarantine_image.py \
+            --image opensandbox-egress:quarantine-ci --artifacts /tmp/quarantine-image-evidence
+
+      - name: Upload quarantine image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quarantine-image-evidence
+          path: /tmp/quarantine-image-evidence
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Run live vault binding image regression
+        run: |
+          docker build -f components/egress/Dockerfile \
+            -t opensandbox-egress:live-vault-ci .
+          python components/egress/scripts/test_live_vault_image.py \
+            --image opensandbox-egress:live-vault-ci --artifacts /tmp/live-vault-image-evidence
+
+      - name: Upload live vault image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-vault-image-evidence
+          path: /tmp/live-vault-image-evidence
+          if-no-files-found: ignore
+          retention-days: 5
 
       - name: Run mitmscripts unit and runtime tests
         working-directory: components/egress
         run: |
           python -m unittest discover -v -s tests -p "test_*.py"
+
+      - name: Set up exact Go for held-old HTTP/2 fixture
+        # Keep the repository's Go 1.25.9 tests above on their pinned toolchain.
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Test and build held-old Go fixture
+        env:
+          GOTOOLCHAIN: local
+          GOWORK: off
+          GOPROXY: off
+          GO111MODULE: off
+          GOCACHE: ${{ runner.temp }}/go1272-cache
+          GOMODCACHE: ${{ runner.temp }}/go1272-modcache
+        run: |
+          test "$(go version)" = "go version go1.27.2 linux/amd64"
+          mkdir -p "$GOCACHE" "$GOMODCACHE"
+          go test components/egress/tests/fixtures/h2_retry_client.go \
+            components/egress/tests/fixtures/h2_retry_client_test.go
+          go build -trimpath \
+            -o "$RUNNER_TEMP/h2_retry_client-go1.27.2" \
+            components/egress/tests/fixtures/h2_retry_client.go
+
+      - name: Set up Python for H2 runtime coverage
+        # Unit discovery above covers 3.10; exercise real runtime on 3.11 too.
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: components/egress/requirements-mitmproxy.txt
+
+      - name: Prepare pinned H2 runtime environment
+        run: |
+          python -m venv "$RUNNER_TEMP/h2-runtime-venv"
+          "$RUNNER_TEMP/h2-runtime-venv/bin/python" -m pip install \
+            -r components/egress/requirements-mitmproxy.txt
+
+      - name: Run pinned H2 lifecycle and watchdog regressions
+        run: |
+          "$RUNNER_TEMP/h2-runtime-venv/bin/python" -m unittest discover -v \
+            -s components/egress/tests -p 'test_credential_bound_h2*.py'
+
+      - name: Run H2 loopback runtime regressions
+        id: h2_loopback_runtime
+        # A real loopback destination on port 443 is part of this fixture.
+        # This does not cover transparent redirects, the production UID or quarantine.
+        # With no --go-client, this selects only the manual-peer denominator,
+        # including the real pre_admission_barrier_h2 runtime case; it does not
+        # select optional Go diagnostics or imply client interoperability.
+        run: |
+          sudo "$RUNNER_TEMP/h2-runtime-venv/bin/python" \
+            components/egress/tests/test_credential_bound_h2_runtime.py \
+            --run-real-runtime --artifacts "$RUNNER_TEMP/h2-runtime-evidence"
+
+      - name: Run Go held-old early-notice H1 and H2 cases
+        # Only the two explicit early-notice cases provide standard-client
+        # parser/interoperability evidence. Historical go_retry cases remain
+        # non-gating diagnostics and are not selected here. Raw stderr is
+        # discarded by the fixture; only filtered GOAWAY JSON enters artifacts.
+        if: steps.h2_loopback_runtime.outcome == 'success'
+        run: |
+          sudo env -u GODEBUG \
+            "$RUNNER_TEMP/h2-runtime-venv/bin/python" \
+            components/egress/tests/test_credential_bound_h2_runtime.py \
+            --run-real-runtime \
+            --artifacts "$RUNNER_TEMP/h2-runtime-evidence/go-early-notice" \
+            --case go_early_notice_h1_origin \
+            --case go_early_notice_h2_origin \
+            --go-client "$RUNNER_TEMP/h2_retry_client-go1.27.2" \
+            --require-go-version go1.27.2
+
+      - name: Run static TLS passthrough runtime regressions
+        # Actual destination 443 and authenticated Unix IPC are required here.
+        # Explicit CONNECT proves neither transparent redirects nor nft enforcement.
+        # REQUIRE converts unavailable prerequisites to failures, never green skips.
+        run: |
+          expected_parent_netns="$(readlink /proc/self/ns/net)"
+          sudo env \
+            EXPECTED_PARENT_NETNS="$expected_parent_netns" \
+            H2_RUNTIME_PYTHON="$RUNNER_TEMP/h2-runtime-venv/bin/python" \
+            PATH="$RUNNER_TEMP/h2-runtime-venv/bin:$PATH" \
+            OPENSANDBOX_STATIC_RUNTIME_TESTS=1 \
+            OPENSANDBOX_STATIC_RUNTIME_REQUIRE=1 \
+            unshare --net bash -euo pipefail -c '
+              parent_netns="$(readlink "/proc/$PPID/ns/net")"
+              child_netns="$(readlink /proc/self/ns/net)"
+              pid1_netns="$(readlink /proc/1/ns/net)"
+              printf "netns_guard child=%s expected_parent=%s actual_parent=%s pid1=%s\\n" \
+                "$child_netns" "$EXPECTED_PARENT_NETNS" "$parent_netns" "$pid1_netns"
+              test "$parent_netns" = "$EXPECTED_PARENT_NETNS"
+              test "$child_netns" != "$EXPECTED_PARENT_NETNS"
+              test "$child_netns" != "$pid1_netns"
+              ip link set lo up
+              exec "$H2_RUNTIME_PYTHON" -m unittest discover -v \
+                -s components/egress/tests -p "static_passthrough_runtime_test.py"
+            '
+
+      - name: Make H2 runtime evidence readable by the runner
+        if: always()
+        run: |
+          if [ -d "$RUNNER_TEMP/h2-runtime-evidence" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/h2-runtime-evidence"
+          fi
+
+      - name: Upload H2 runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: h2-runtime-evidence
+          path: ${{ runner.temp }}/h2-runtime-evidence
+          if-no-files-found: warn
+          retention-days: 5
+
+      - name: Set up unsupported Python for fail-closed checks
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: components/egress/requirements-mitmproxy.txt
+
+      - name: Prepare unsupported-interpreter test environment
+        run: |
+          python -m venv "$RUNNER_TEMP/h2-unsupported-venv"
+          "$RUNNER_TEMP/h2-unsupported-venv/bin/python" -m pip install \
+            -r components/egress/requirements-mitmproxy.txt
+
+      - name: Verify Python 3.12 rejection and admission cleanup
+        # Negative compatibility checks only, not positive H2 runtime coverage.
+        working-directory: components/egress/tests
+        run: |
+          "$RUNNER_TEMP/h2-unsupported-venv/bin/python" -m unittest -v \
+            test_credential_bound_h2_compatibility \
+            test_system_h2.SystemH2Hooks.test_unsupported_interpreter_denies_before_adapter_or_request_admission \
+            test_credential_bound_h2_lifecycle.H2RuntimeLifecycleTest.test_actual_system_rejects_unsupported_interpreter_without_retaining_tls
 
   smoke:
     needs: changes
@@ -133,6 +343,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/egress/go.sum
 
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install -y nftables
@@ -142,7 +353,7 @@ jobs:
           sudo apt-get install -y python3-venv
           sudo useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy
           sudo python3 -m venv /opt/mitmproxy
-          sudo /opt/mitmproxy/bin/pip install --no-cache-dir 'mitmproxy==11.0.2'
+          sudo /opt/mitmproxy/bin/pip install --no-cache-dir -r components/egress/requirements-mitmproxy.txt
           sudo ln -sf /opt/mitmproxy/bin/mitmdump /usr/local/bin/mitmdump
 
       - name: Run fast-sandbox profile smoke test (dns+nft+mitm)

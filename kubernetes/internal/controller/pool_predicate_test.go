@@ -108,6 +108,17 @@ func TestPoolBatchSandboxUpdateFilters(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "task-cleanup-handoff",
+			update: func(e *event.UpdateEvent) {
+				timestamp := metav1.Now()
+				e.ObjectOld.SetDeletionTimestamp(&timestamp)
+				e.ObjectNew.SetDeletionTimestamp(&timestamp)
+				e.ObjectOld.SetFinalizers([]string{finalizerTaskCleanup, finalizerPoolAllocation})
+				e.ObjectNew.SetFinalizers([]string{finalizerPoolAllocation})
+			},
+			want: true,
+		},
+		{
 			name: "already-terminating",
 			update: func(e *event.UpdateEvent) {
 				timestamp := metav1.Now()

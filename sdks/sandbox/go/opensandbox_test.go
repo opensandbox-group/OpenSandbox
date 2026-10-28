@@ -609,10 +609,54 @@ func TestGetPolicy(t *testing.T) {
 	}
 }
 
-func TestPatchPolicy(t *testing.T) {
+// TestNetworkRule_PortScopedJSONRoundTrip guards the port-only wire shape:
+// marshaling a rule without a target must omit the key entirely (not send
+// ""), and decoding the sidecar's response shape ("target":"", since Go's
+// sidecar marshals target without omitempty) must not lose Ports.
+func TestNetworkRule_PortScopedJSONRoundTrip(t *testing.T) {
+	data, err := json.Marshal(NetworkRule{Action: "deny", Ports: []int{25}})
+	require.NoError(t, err)
+	require.Equal(t, `{"action":"deny","ports":[25]}`, string(data), "target must be omitted, not sent as an empty string")
+
+	var decoded NetworkRule
+	require.NoError(t, json.Unmarshal([]byte(`{"action":"deny","target":"","ports":[25]}`), &decoded))
+	require.Equal(t, "", decoded.Target)
+	require.Equal(t, []int{25}, decoded.Ports)
+
+	// An IP/CIDR target combined with ports must also round-trip.
+	data, err = json.Marshal(NetworkRule{Action: "allow", Target: "10.0.0.5", Ports: []int{22, 80}})
+	require.NoError(t, err)
+	require.Equal(t, `{"action":"allow","target":"10.0.0.5","ports":[22,80]}`, string(data))
+}
+
+func TestGetPolicy_PortOnlyRule(t *testing.T) {
 	want := PolicyStatusResponse{
 		Status: "active",
-		Mode:   "enforce",
+		Policy: &NetworkPolicy{
+			DefaultAction: "deny",
+			Egress: []NetworkRule{
+				{Action: "deny", Target: "", Ports: []int{25}},
+			},
+		},
+	}
+
+	_, client := newEgressServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, http.StatusOK, want)
+	})
+
+	got, err := client.GetPolicy(context.Background())
+	require.NoErrorf(t, err, "GetPolicy")
+	require.NotNil(t, got.Policy)
+	require.Len(t, got.Policy.Egress, 1)
+	require.Equal(t, "", got.Policy.Egress[0].Target, "a port-only rule reads back with an empty target")
+	require.Equal(t, []int{25}, got.Policy.Egress[0].Ports)
+}
+
+func TestPatchPolicy(t *testing.T) {
+	want := PolicyStatusResponse{
+		Status:          "ok",
+		Mode:            "deny_all",
+		EnforcementMode: "dns+nft",
 		Policy: &NetworkPolicy{
 			DefaultAction: "deny",
 			Egress: []NetworkRule{
@@ -627,11 +671,12 @@ func TestPatchPolicy(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("expected PATCH, got %s", r.Method))
 		}
 
+		require.Equal(t, "/policy", r.URL.Path)
+		require.Equal(t, "test-egress-token", r.Header.Get(egressAuthHeader))
+
 		var rules []NetworkRule
-		json.NewDecoder(r.Body).Decode(&rules)
-		if len(rules) != 1 {
-			assert.Fail(t, fmt.Sprintf("expected 1 rule in request, got %d", len(rules)))
-		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&rules))
+		require.Equal(t, []NetworkRule{{Action: "allow", Target: "cdn.example.com"}}, rules)
 
 		jsonResponse(w, http.StatusOK, want)
 	})
@@ -640,14 +685,15 @@ func TestPatchPolicy(t *testing.T) {
 		{Action: "allow", Target: "cdn.example.com"},
 	})
 	require.NoErrorf(t, err, "PatchPolicy")
-	require.NotNil(t, got.Policy)
-	require.Len(t, got.Policy.Egress, 2)
+	require.NotNil(t, got)
+	require.Equal(t, want, *got)
 }
 
 func TestDeletePolicy(t *testing.T) {
 	want := PolicyStatusResponse{
-		Status: "ok",
-		Mode:   "deny_all",
+		Status:          "ok",
+		Mode:            "deny_all",
+		EnforcementMode: "dns+nft",
 		Policy: &NetworkPolicy{
 			DefaultAction: "deny",
 			Egress: []NetworkRule{
@@ -660,6 +706,9 @@ func TestDeletePolicy(t *testing.T) {
 		if r.Method != http.MethodDelete {
 			assert.Fail(t, fmt.Sprintf("expected DELETE, got %s", r.Method))
 		}
+
+		require.Equal(t, "/policy", r.URL.Path)
+		require.Equal(t, "test-egress-token", r.Header.Get(egressAuthHeader))
 
 		var targets []string
 		if err := json.NewDecoder(r.Body).Decode(&targets); err != nil {
@@ -680,9 +729,38 @@ func TestDeletePolicy(t *testing.T) {
 		"*.blocked.org",
 	})
 	require.NoErrorf(t, err, "DeletePolicy")
-	require.NotNil(t, got.Policy)
-	require.Len(t, got.Policy.Egress, 1)
-	require.Equal(t, "api.example.com", got.Policy.Egress[0].Target)
+	require.NotNil(t, got)
+	require.Equal(t, want, *got)
+}
+
+func TestPolicyMutationServiceUnavailable(t *testing.T) {
+	for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			const message = "revision policy publication unavailable"
+			_, client := newEgressServer(t, func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, method, r.Method)
+				require.Equal(t, "/policy", r.URL.Path)
+				require.Equal(t, "test-egress-token", r.Header.Get(egressAuthHeader))
+				http.Error(w, message, http.StatusServiceUnavailable)
+			})
+
+			var got *PolicyStatusResponse
+			var err error
+			if method == http.MethodPatch {
+				got, err = client.PatchPolicy(context.Background(), []NetworkRule{
+					{Action: "allow", Target: "api.example.com"},
+				})
+			} else {
+				got, err = client.DeletePolicy(context.Background(), []string{"api.example.com"})
+			}
+			require.True(t, got == nil, "503 must not return a policy response")
+			var apiErr *APIError
+			require.ErrorAs(t, err, &apiErr)
+			require.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+			require.Equal(t, http.StatusText(http.StatusServiceUnavailable), apiErr.Response.Code)
+			require.Equal(t, message+"\n", apiErr.Response.Message)
+		})
+	}
 }
 
 func TestPing(t *testing.T) {
@@ -2353,6 +2431,39 @@ func TestWatchMetrics_ContextCancel(t *testing.T) {
 	}
 }
 
+func TestExecution_Text(t *testing.T) {
+	tests := []struct {
+		name   string
+		stdout []string
+		want   string
+	}{
+		{name: "no events"},
+		{name: "terminated lines", stdout: []string{"a\n", "b\n"}, want: "a\nb\n"},
+		{name: "CRLF lines", stdout: []string{"a\r\n", "b\r\n"}, want: "a\r\nb\r\n"},
+		{name: "split CRLF boundaries", stdout: []string{"a\r", "\n", "b\r", "\n"}, want: "a\r\nb\r\n"},
+		{name: "CR lines", stdout: []string{"a\r", "b\r"}, want: "a\rb\r"},
+		{name: "mixed line endings", stdout: []string{"a\n", "b\r\n", "c\r", "d"}, want: "a\nb\r\nc\rd"},
+		{name: "blank lines", stdout: []string{"\n", "a\n", "\n", "b\n", "\n"}, want: "\na\n\nb\n\n"},
+		{name: "unterminated final fragment", stdout: []string{"a\n", "b"}, want: "a\nb"},
+		{name: "single terminated event", stdout: []string{"hello\n"}, want: "hello\n"},
+		{name: "single unterminated event", stdout: []string{"hello"}, want: "hello"},
+		{name: "single empty event", stdout: []string{""}},
+		{name: "legacy stripped lines", stdout: []string{"a", "b"}, want: "a\nb"},
+		{name: "legacy blank lines", stdout: []string{"", "a", "", "b", ""}, want: "\na\n\nb\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &Execution{}
+			for _, text := range tc.stdout {
+				exec.Stdout = append(exec.Stdout, OutputMessage{Text: text})
+			}
+			if got := exec.Text(); got != tc.want {
+				t.Errorf("Text() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExecution_ProcessStreamEvents(t *testing.T) {
 	// Test the full Execution aggregation pipeline with all event types
 	exec := &Execution{}
@@ -2414,6 +2525,96 @@ func TestExecution_ErrorEvent(t *testing.T) {
 	}
 	if len(exec.Error.Traceback) != 1 {
 		assert.Fail(t, fmt.Sprintf("Traceback len = %d, want 1", len(exec.Error.Traceback)))
+	}
+}
+
+func TestExecution_ErrorEventExitCode(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	tests := []struct {
+		name          string
+		data          string
+		wantErrorCode *int
+		wantExitCode  *int
+	}{
+		{
+			name:          "exit_code is authoritative",
+			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"3","traceback":["exit status 3"],"exit_code":3}}`,
+			wantErrorCode: intPtr(3),
+			wantExitCode:  intPtr(3),
+		},
+		{
+			name:          "signal kill reports -1",
+			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1}}`,
+			wantErrorCode: intPtr(-1),
+			wantExitCode:  intPtr(-1),
+		},
+		{
+			name: "start failure has no exit code",
+			data: `{"type":"error","error":{"ename":"CommandExecError","evalue":"fork/exec /bin/sh: argument list too long"}}`,
+		},
+		{
+			name:         "older server falls back to evalue",
+			data:         `{"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}`,
+			wantExitCode: intPtr(7),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &Execution{}
+			var handled *ExecutionError
+			handlers := &ExecutionHandlers{
+				OnError: func(e ExecutionError) error { handled = &e; return nil },
+			}
+			require.NoError(t, processStreamEvent(exec, StreamEvent{Event: "error", Data: tc.data}, handlers))
+
+			require.NotNil(t, exec.Error)
+			require.NotNil(t, handled)
+			require.Equal(t, tc.wantErrorCode, exec.Error.ExitCode)
+			require.Equal(t, tc.wantErrorCode, handled.ExitCode)
+			require.Equal(t, tc.wantExitCode, exec.ExitCode)
+			require.True(t, exec.Complete == nil, "error event must not mark the execution complete")
+		})
+	}
+}
+
+func TestExecution_CompleteEventExitCode(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	tests := []struct {
+		name              string
+		data              string
+		wantCompleteCode  *int
+		wantExecutionCode *int
+	}{
+		{
+			name:              "wire exit_code is surfaced on complete and execution",
+			data:              `{"type":"execution_complete","timestamp":10,"execution_time":5,"exit_code":0}`,
+			wantCompleteCode:  intPtr(0),
+			wantExecutionCode: intPtr(0),
+		},
+		{
+			name:              "older server without exit_code still infers zero",
+			data:              `{"type":"execution_complete","timestamp":10,"execution_time":5}`,
+			wantCompleteCode:  nil,
+			wantExecutionCode: intPtr(0),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &Execution{}
+			var handled *ExecutionComplete
+			handlers := &ExecutionHandlers{
+				OnComplete: func(c ExecutionComplete) error { handled = &c; return nil },
+			}
+			require.NoError(t, processStreamEvent(exec, StreamEvent{Event: "execution_complete", Data: tc.data}, handlers))
+
+			require.NotNil(t, exec.Complete)
+			require.NotNil(t, handled)
+			require.Equal(t, tc.wantCompleteCode, exec.Complete.ExitCode)
+			require.Equal(t, tc.wantCompleteCode, handled.ExitCode)
+			require.Equal(t, tc.wantExecutionCode, exec.ExitCode)
+		})
 	}
 }
 

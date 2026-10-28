@@ -5,36 +5,28 @@ description: Use OpenSandbox Credential Vault commands to manage sandbox-local o
 
 # OpenSandbox Credential Vault
 
-Manage outbound credential injection with `osb credential-vault`. Treat vault
-changes as a controlled runtime workflow: confirm the sandbox was created with
-Credential Proxy, write secrets only through payload files or stdin, inspect
-sanitized state, then verify actual outbound behavior from inside the sandbox.
+Manage outbound credential injection with `osb credential-vault`. Treat vault changes as a controlled runtime workflow: confirm the sandbox was created with Credential Proxy, write secrets only through payload files or stdin, inspect sanitized state, then verify actual outbound behavior from inside the sandbox.
 
 ## When To Use
 
 - the user needs real credentials injected into outbound HTTP or HTTPS requests
 - the user wants to create, inspect, patch, or delete Credential Vault state
 - the user needs to add, replace, or remove runtime credentials or bindings
-- the user wants to keep plaintext credentials out of sandbox env vars, files,
-  shell history, and command arguments
+- the user wants to keep plaintext credentials out of sandbox env vars, files, shell history, and command arguments
 
 ## Prerequisites
 
-Credential Vault requires an egress sidecar with transparent MITM enabled. Create
-the sandbox with both a network policy and Credential Proxy:
+Credential Vault requires an egress sidecar with transparent MITM enabled. Create the sandbox with both a network policy and Credential Proxy:
 
 ```bash
 osb sandbox create --image python:3.12 --network-policy-file network-policy.json --credential-proxy -o json
 ```
 
-If `credential-vault create`, `patch`, or `delete` returns a precondition error,
-the sandbox was likely not created with Credential Proxy, the egress API auth
-token is missing, mitmproxy is not ready, or insecure upstream TLS mode is set.
+If `credential-vault create`, `patch`, or `delete` returns a precondition error, the sandbox was likely not created with Credential Proxy, the egress API auth token is missing, mitmproxy is not ready, or insecure upstream TLS mode is set.
 
 ## Payload Rules
 
-Use JSON or YAML payload files, or `--file -` for stdin. Do not put real secret
-values in command-line flags.
+Use JSON or YAML payload files, or `--file -` for stdin. Do not put real secret values in command-line flags.
 
 Create payload shape:
 
@@ -107,8 +99,7 @@ credentials:
 
 ## Inspect Metadata
 
-Vault read APIs return sanitized metadata only. Plaintext credential values are
-write-only and should not appear in command output.
+Vault read APIs return sanitized metadata only. Plaintext credential values are write-only and should not appear in command output.
 
 ```bash
 osb credential-vault credential get <sandbox-id> api-token -o json
@@ -117,8 +108,7 @@ osb credential-vault binding get <sandbox-id> api -o json
 
 ## Cleanup
 
-Delete all sandbox-local vault state when credential injection is no longer
-needed:
+Delete all sandbox-local vault state when credential injection is no longer needed:
 
 ```bash
 osb credential-vault delete <sandbox-id> -o json
@@ -132,5 +122,4 @@ When helping a user:
 2. Confirm the sandbox was created with `--credential-proxy` and network policy.
 3. Keep secret material in payload files or stdin, never in CLI flags.
 4. Use `get` or `list` to inspect sanitized state.
-5. Verify behavior with `osb command run ... -o raw -- curl ...` when injection
-   behavior matters.
+5. Verify behavior with `osb command run ... -o raw -- curl ...` when injection behavior matters.

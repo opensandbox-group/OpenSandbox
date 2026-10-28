@@ -21,10 +21,14 @@ RESERVED_LABEL_PREFIX = "opensandbox.io/"
 SANDBOX_ID_LABEL = "opensandbox.io/id"
 SANDBOX_TENANT_LABEL = "opensandbox.io/tenant"
 SANDBOX_EXPIRES_AT_LABEL = "opensandbox.io/expires-at"
+SANDBOX_CREATED_AT_LABEL = "opensandbox.io/created-at"
 SANDBOX_MANUAL_CLEANUP_LABEL = "opensandbox.io/manual-cleanup"
 SANDBOX_PLATFORM_OS_LABEL = "opensandbox.io/platform-os"
 SANDBOX_PLATFORM_ARCH_LABEL = "opensandbox.io/platform-arch"
 SANDBOX_SNAPSHOT_ID_LABEL = "opensandbox.io/snapshot-id"
+# JSON list of the user metadata keys set at create (Docker): the container
+# also carries labels inherited from its image, which are not metadata.
+SANDBOX_METADATA_KEYS_LABEL = "opensandbox.io/metadata-keys"
 # Host-mapped ports recorded on containers (bridge mode).
 SANDBOX_EMBEDDING_PROXY_PORT_LABEL = (
     "opensandbox.io/embedding-proxy-port"  # maps container 44772 -> host port
@@ -202,6 +206,7 @@ __all__ = [
     "SANDBOX_ID_LABEL",
     "SANDBOX_TENANT_LABEL",
     "SANDBOX_EXPIRES_AT_LABEL",
+    "SANDBOX_CREATED_AT_LABEL",
     "SANDBOX_MANUAL_CLEANUP_LABEL",
     "SANDBOX_PLATFORM_OS_LABEL",
     "SANDBOX_PLATFORM_ARCH_LABEL",

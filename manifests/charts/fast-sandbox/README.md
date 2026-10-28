@@ -24,6 +24,7 @@ boxlite, containerd-based runtimes and the upstream central sandbox-proxy are ou
   ```
 
 - Nodes that should serve Firecracker sandboxes need bare-metal KVM (`/dev/kvm`). There is NO manual labeling step: the firecracker-runtime readiness loop verifies each host, installs the Firecracker assets, and applies the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` labels plus the `FirecrackerReady` condition itself (rechecking every 5 minutes).
+- OverlayBD OCI on-demand loading (`runtime.oci.enabled=true`) additionally needs kernel ublk support on every runtime node (`CONFIG_BLK_DEV_UBLK`, `/dev/ublkc*`; `modprobe ublk_drv` when built as a module) and an OCI registry reachable from the cluster: SandboxTemplates publish `oci://` artifacts there and nodes read blocks on demand. The SandboxPool's fastlet containers must set `FAST_SANDBOX_OCI_ENABLED=true` separately — pools are not managed by this chart. See the fast-sandbox [OverlayBD OCI guide](https://github.com/opensandbox-group/fast-sandbox/blob/main/docs/guides/overlaybd-oci-sandboxes.md) for the credential (registry Secret + `fast-sandbox-registry` ConfigMap) and StateRoot-sharing requirements.
 
 - The agent registry Secret with artifact-store pull credentials (compiled `registry.json`):
 
@@ -54,7 +55,7 @@ The following table lists the configurable parameters of the chart and their def
 | artifactStore.endpoint | string | `""` | S3-compatible endpoint (empty = AWS default) |
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.1.1-rc.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.0"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
 | controller.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
@@ -84,10 +85,14 @@ The following table lists the configurable parameters of the chart and their def
 | runtime.image.repository | string | `"opensandbox/fsb-firecracker-runtime"` | Runtime image repository (built by manifests/release/build-fast-sandbox.sh) |
 | runtime.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
 | runtime.nodeSelector | object | `{}` | Node selector. Empty by default: the runtime applies the firecracker scheduling labels itself, so it must run on every candidate node. Pin it with your own coarse selector only if the cluster hosts unrelated node pools. |
+| runtime.oci | object | `{"cacheSizeGB":16,"enabled":false}` | OverlayBD OCI on-demand loading: installs the fsb-vm + OverlayBD tools bundle (init container), sets FAST_SANDBOX_OCI_ENABLED on the agent, and runs one overlaybd-ublkd sidecar per node. Nodes need KVM plus kernel ublk support. Pool fastlets set the flag separately (pools are not managed by this chart). |
+| runtime.oci.cacheSizeGB | int | `16` | Shared overlaybd block cache capacity (OVERLAYBD_CACHE_SIZE_GB). |
+| runtime.oci.enabled | bool | `false` | Whether the node OCI stack (tools init + overlaybd-ublkd sidecar + agent flag + janitor oci-state-root) is installed |
 | runtime.registrySecret | string | `"fast-sandbox-agent-registry"` | Secret carrying the compiled agent registry configuration (registry.json key with artifact-store pull credentials); must be provisioned by the operator. |
-| runtime.resources | object | `{"agent":{},"janitor":{}}` | Container resources for the DaemonSet. Setting requests matters more than limits here: without them the pod is BestEffort and is evicted first under node pressure, taking down the management API for every fastlet on the node. Limits stay off by default so artifact pulls and the readiness loop are not throttled or OOM-killed at their spikes. |
+| runtime.resources | object | `{"agent":{},"janitor":{},"ublkd":{}}` | Container resources for the DaemonSet. Setting requests matters more than limits here: without them the pod is BestEffort and is evicted first under node pressure, taking down the management API for every fastlet on the node. Limits stay off by default so artifact pulls and the readiness loop are not throttled or OOM-killed at their spikes. |
 | runtime.resources.agent | object | `{}` | Resources for the firecracker-runtime agent container. |
 | runtime.resources.janitor | object | `{}` | Resources for the janitor sidecar container. |
+| runtime.resources.ublkd | object | `{}` | Resources for the overlaybd-ublkd sidecar container (runtime.oci.enabled only). |
 | runtime.socketDir | string | `"/run/fast-sandbox/firecracker"` | Node hostPath sharing the agent UDS socket with fastlet Pods |
 | runtime.stateRoot | string | `"/var/lib/fast-sandbox/firecracker"` | Node hostPath holding per-node Firecracker state (rootfs, snapshots). Each node needs its own directory; do not share across nodes. |
 | runtime.tolerations | list | `[]` | Additional tolerations for the firecracker-runtime DaemonSet pod, appended to the built-in control-plane toleration. Needed when target nodes carry infra taints (e.g. sigma.ali resource-pool taints). |

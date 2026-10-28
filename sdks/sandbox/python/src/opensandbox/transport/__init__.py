@@ -48,6 +48,21 @@ def unwrap_retry_transport(transport: _T) -> _T:
     return transport
 
 
+def streaming_transport(transport: _T) -> _T:
+    """
+    Return the transport for a streaming (SSE) client.
+
+    SSE requests run commands, so general retries must not resend them: a
+    caller ``retryable_status_codes_non_idempotent`` opt-in would cause
+    duplicate execution. A retry wrapper is replaced by one that keeps only
+    the OSEP-0024 wake-timeout retry, which is safe because the gateway
+    never forwarded the request. Other transports are returned unchanged.
+    """
+    if isinstance(transport, (RetryAsyncTransport, RetrySyncTransport)):
+        return transport.for_streaming()  # type: ignore[return-value]
+    return transport
+
+
 __all__ = [
     "JitterMode",
     "RetryAsyncTransport",
@@ -55,5 +70,6 @@ __all__ = [
     "RetryEvent",
     "RetryPolicy",
     "RetrySyncTransport",
+    "streaming_transport",
     "unwrap_retry_transport",
 ]

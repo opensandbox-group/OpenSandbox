@@ -1417,6 +1417,51 @@ class TLSRetirementDeadlineTest(unittest.TestCase):
                 self.assertEqual(registry._connection_deadlines, {})
                 self.assertEqual(registry.acquire_request(token).action, "allow")
 
+    def test_policy_only_idle_connection_and_completed_request_do_not_expire(self):
+        registry, active = self.setup_registry()
+        token = self.admit(registry).token
+        old = registry.acquire_request(token)
+        target, uncovered = self.rotate(
+            registry, active, policy_epoch=2, vault_revision=1, secret="private-old-value",
+        )
+        self.assertEqual(uncovered, ())
+        self.assertEqual(registry._connection_deadlines, {})
+        new = registry.acquire_request(token)
+        self.assertEqual(new.snapshot.revision, target.revision)
+        self.assertEqual(old.snapshot.revision.vault_revision, new.snapshot.revision.vault_revision)
+        self.assertEqual(old.snapshot.revision.policy_epoch, 1)
+        self.assertEqual(new.snapshot.revision.policy_epoch, 2)
+        self.assertIn(b"private-old-value", new.snapshot.payload)
+        self.assertTrue(registry.finish_request(old.handle))
+        self.clock.return_value = 150.0
+        self.assertEqual(registry.expired_connections(), ())
+        self.assertTrue(registry.finish_request(new.handle))
+        self.rotate(registry, active, epoch=3, policy_epoch=3, vault_revision=1, secret="private-old-value")
+        self.clock.return_value = 1000.0
+        self.assertEqual(registry.expired_connections(), ())
+        self.assertEqual(registry.acquire_request(token).action, "allow")
+
+    def test_policy_only_earliest_request_deadline_closes_entire_connection(self):
+        registry, active = self.setup_registry()
+        token = self.admit(registry).token
+        old = registry.acquire_request(token)
+        self.rotate(registry, active, policy_epoch=2, vault_revision=1, secret="private-old-value")
+        middle = registry.acquire_request(token)
+        self.clock.return_value = 120.0
+        self.rotate(registry, active, epoch=3, policy_epoch=3, vault_revision=1, secret="private-old-value")
+        newest = registry.acquire_request(token)
+        self.assertEqual(registry._request_deadlines, {
+            old.handle.serial: 130.0, middle.handle.serial: 150.0,
+        })
+        self.clock.return_value = 130.0
+        self.assertEqual(registry.expired_connections(), (token,))
+        # The existing transport owner closes the entire connection, including
+        # a new request pinned after the latest policy cutover.
+        self.assertTrue(registry.release(token))
+        self.assertEqual(registry.request_count, 0)
+        for request in (old, middle, newest):
+            self.assertFalse(registry.finish_request(request.handle))
+
     def test_repeated_rotations_keep_first_deadline_and_deduplicate_connections(self):
         registry, active = self.setup_registry(request_capacity=8)
         first, second = [self.admit(registry).token for _ in range(2)]
@@ -1635,6 +1680,239 @@ class TLSRetirementDeadlineTest(unittest.TestCase):
                 self.assertEqual(registry.expired_connections(), ())
                 self.assertEqual(registry.request_count, 0)
                 self.assertEqual(registry.count, 1)
+
+
+class TLSH2RequestAdmissionTest(unittest.TestCase):
+    identity = TLSRequestAdmissionTest.identity
+    snapshot = TLSRequestAdmissionTest.snapshot
+    admit = TLSRequestAdmissionTest.admit
+    new_receiver = TLSRequestAdmissionTest.new_receiver
+    commit = TLSRequestAdmissionTest.commit
+    setup_registry = TLSRequestAdmissionTest.setup_registry
+    assert_consistent = TLSRequestLifecycleTest.assert_consistent
+
+    def test_client_ids_are_exact_immutable_and_h1_stays_optional(self):
+        registry, active = self.setup_registry(request_capacity=4)
+        token = self.admit(registry).token
+        for stream_id in (None, 1, 0x7fffffff):
+            request = registry.acquire_request(token, client_stream_id=stream_id)
+            self.assertEqual(request.action, "allow")
+            self.assertEqual(request.handle.client_stream_id, stream_id)
+            self.assertIs(request.handle.snapshot, active.acquire())
+            self.assertIs(request.handle.snapshot, request.snapshot)
+            with self.assertRaises(FrozenInstanceError):
+                request.handle.client_stream_id = 3
+        self.assertEqual(registry.drain_state(token).max_admitted_stream_id, 0x7fffffff)
+        self.assertEqual(registry.acquire_request(token).action, "allow")
+        self.assert_consistent(registry)
+
+    def test_invalid_client_ids_never_pin_or_change_high_water(self):
+        class IntSubclass(int):
+            def __lt__(self, other):
+                raise AssertionError("untrusted comparison")
+
+        registry, active = self.setup_registry()
+        token = self.admit(registry).token
+        before = registry.drain_state(token)
+        invalid = (-1, 0, 2, 4, 0x80000000, 0x80000001, True, False,
+                   1.0, "1", [], {}, object(), IntSubclass(1))
+        with patch.object(active, "acquire", wraps=active.acquire) as acquire:
+            for stream_id in invalid:
+                with self.subTest(stream_id_type=type(stream_id).__name__):
+                    request = registry.acquire_request(token, client_stream_id=stream_id)
+                    self.assertEqual(
+                        (request.action, request.reason, request.handle, request.snapshot),
+                        ("deny", "invalid_client_stream_id", None, None),
+                    )
+                    self.assertEqual(registry.drain_state(token), before)
+                    self.assertEqual(registry.request_count, 0)
+            acquire.assert_not_called()
+        self.assertEqual(registry._max_admitted_stream_ids, {})
+
+    def test_duplicate_ids_are_connection_scoped_and_only_active_ids_are_indexed(self):
+        registry, active = self.setup_registry(request_capacity=3)
+        first, second = (self.admit(registry).token for _ in range(2))
+        original = registry.acquire_request(first, client_stream_id=7)
+        parallel = registry.acquire_request(second, client_stream_id=7)
+        with patch.object(active, "acquire", wraps=active.acquire) as acquire:
+            duplicate = registry.acquire_request(first, client_stream_id=7)
+            self.assertEqual(duplicate.reason, "duplicate_client_stream_id")
+            self.assertIsNone(duplicate.handle)
+            self.assertIsNone(duplicate.snapshot)
+            acquire.assert_not_called()
+        self.assertEqual(registry.request_count, 2)
+        self.assertTrue(registry.finish_request(original.handle))
+        # The protocol adapter prevents post-terminal reuse. The registry keeps
+        # only active request membership, not an unbounded stream-ID history.
+        repeated = registry.acquire_request(first, client_stream_id=7)
+        self.assertEqual(repeated.action, "allow")
+        self.assertGreater(repeated.handle.serial, original.handle.serial)
+        self.assertEqual(registry.drain_state(first).max_admitted_stream_id, 7)
+        self.assertTrue(registry.finish_request(parallel.handle))
+        self.assertTrue(registry.finish_request(repeated.handle))
+        self.assert_consistent(registry)
+
+    def test_concurrent_duplicate_admissions_register_exactly_once(self):
+        registry, _ = self.setup_registry(request_capacity=2)
+        token = self.admit(registry).token
+        barrier = threading.Barrier(3)
+
+        def admit():
+            barrier.wait(5)
+            return registry.acquire_request(token, client_stream_id=11)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            requests = [pool.submit(admit) for _ in range(2)]
+            barrier.wait(5)
+            results = [request.result(5) for request in requests]
+        self.assertEqual(sorted(result.reason for result in results),
+                         ["admitted", "duplicate_client_stream_id"])
+        self.assertEqual(registry.request_count, 1)
+        self.assertEqual(registry.drain_state(token).max_admitted_stream_id, 11)
+        self.assert_consistent(registry)
+
+    def test_capacity_and_snapshot_denials_do_not_advance_high_water(self):
+        registry, active = self.setup_registry(request_capacity=1)
+        token = self.admit(registry).token
+        first = registry.acquire_request(token, client_stream_id=3)
+        denied = registry.acquire_request(token, client_stream_id=99)
+        self.assertEqual(denied.reason, "request_registry_exhausted")
+        self.assertEqual(registry.drain_state(token).max_admitted_stream_id, 3)
+        self.assertTrue(registry.finish_request(first.handle))
+        self.commit(active, self.snapshot(epoch=2))
+        denied = registry.acquire_request(token, client_stream_id=99)
+        self.assertEqual(denied.reason, "snapshot_mismatch")
+        self.assertEqual(registry.drain_state(token).max_admitted_stream_id, 3)
+        self.assert_consistent(registry)
+
+    def test_finished_max_is_frozen_once_even_with_a_lower_live_id(self):
+        registry, active = self.setup_registry()
+        token = self.admit(registry).token
+        high = registry.acquire_request(token, client_stream_id=13)
+        self.assertTrue(registry.finish_request(high.handle))
+        low = registry.acquire_request(token, client_stream_id=3)
+        removed = self.snapshot(epoch=2, host=None)
+        with patch.object(registry_module.time, "monotonic", return_value=10):
+            self.commit(active, removed)
+            registry.activate(removed)
+        frozen = registry.drain_state(token)
+        self.assertEqual(frozen, registry_module.DrainState(True, 13, 40, 13))
+        self.assertTrue(registry.finish_request(low.handle))
+        self.assertEqual(registry.drain_state(token), frozen)
+        restored = self.snapshot(epoch=3)
+        self.commit(active, restored)
+        registry.activate(restored)
+        with patch.object(registry_module.time, "monotonic", return_value=100):
+            registry.activate(self.snapshot(epoch=4, host=None))
+        self.assertEqual(registry.drain_state(token), frozen)
+        self.assertEqual(registry.acquire_request(token, client_stream_id=15).reason,
+                         "connection_fenced")
+
+    def test_drain_state_and_request_capacity_are_readonly_and_exact_token_scoped(self):
+        registry, _ = self.setup_registry(request_capacity=7)
+        token = self.admit(registry).token
+        state = registry.drain_state(token)
+        self.assertEqual(state, registry_module.DrainState(False, None, None, 0))
+        self.assertFalse(hasattr(state, "__dict__"))
+        for field, value in (("fenced", True), ("frozen_last_stream_id", 9),
+                             ("deadline", 123), ("max_admitted_stream_id", 9)):
+            with self.assertRaises(FrozenInstanceError):
+                setattr(state, field, value)
+        self.assertEqual(registry.request_capacity, 7)
+        with self.assertRaises(AttributeError):
+            registry.request_capacity = 8
+        self.assertEqual(registry_module.BoundConnectionRegistry(capacity=3).request_capacity, 3)
+        other, _ = self.setup_registry()
+        foreign = self.admit(other).token
+        for invalid in (None, {}, foreign, replace(token), replace(token, serial=[]),
+                        replace(token, serial=True)):
+            self.assertIsNone(registry.drain_state(invalid))
+        registry.acquire_request(token, client_stream_id=5)
+        self.assertEqual(state.max_admitted_stream_id, 0)
+        self.assertEqual(registry.drain_state(token).max_admitted_stream_id, 5)
+        registry.deactivate()
+        self.assertEqual(registry.drain_state(token),
+                         registry_module.DrainState(True, None, None, 5))
+        self.assertTrue(registry.release(token))
+        self.assertIsNone(registry.drain_state(token))
+
+    def test_h2_registration_faults_preserve_indexes_and_previous_high_water(self):
+        class FailingDict(dict):
+            def __setitem__(self, key, value):
+                super().__setitem__(key, value)
+                raise MemoryError("private-request-value")
+
+        class FailingSet(set):
+            def add(self, value):
+                super().add(value)
+                raise MemoryError("private-request-value")
+
+        class FailingCopy(dict):
+            def copy(self):
+                raise MemoryError("private-request-value")
+
+        class FailingPreparedCopy(dict):
+            def copy(self):
+                return FailingDict(self)
+
+        for prior_request in (False, True):
+            for stage in ("high_water_copy", "high_water_write", "requests", "index", "members"):
+                with self.subTest(prior_request=prior_request, stage=stage):
+                    registry, _ = self.setup_registry(request_capacity=2)
+                    token = self.admit(registry).token
+                    if prior_request:
+                        registry.acquire_request(token, client_stream_id=7)
+                    before_requests = registry.pending_requests()
+                    before_drain = registry.drain_state(token)
+                    if stage == "high_water_copy":
+                        registry._max_admitted_stream_ids = FailingCopy(registry._max_admitted_stream_ids)
+                    elif stage == "high_water_write":
+                        registry._max_admitted_stream_ids = FailingPreparedCopy(registry._max_admitted_stream_ids)
+                    elif stage == "requests":
+                        registry._requests = FailingDict(registry._requests)
+                    elif stage == "index":
+                        registry._requests_by_connection = FailingDict(registry._requests_by_connection)
+                    elif prior_request:
+                        registry._requests_by_connection[token.serial] = FailingSet(
+                            registry._requests_by_connection[token.serial],
+                        )
+                    factory = FailingSet if stage == "members" else set
+                    with patch.object(registry_module, "set", factory, create=True):
+                        try:
+                            registry.acquire_request(token, client_stream_id=101)
+                        except registry_module.RegistryError as error:
+                            self.assertEqual(str(error), "request registration failed")
+                            self.assertIsNone(error.__context__)
+                            self.assertNotIn("private-request-value", "".join(traceback.format_exception(error)))
+                        else:
+                            self.fail("failed H2 registration was admitted")
+                    self.assertEqual(registry.pending_requests(), before_requests)
+                    self.assertEqual(registry.drain_state(token), before_drain)
+                    self.assert_consistent(registry)
+
+    def test_h2_finish_has_constant_history_and_release_reclaims_all_metadata(self):
+        registry, active = self.setup_registry(capacity=1, request_capacity=2)
+        token = self.admit(registry).token
+        for stream_id in range(1, 1000, 2):
+            request = registry.acquire_request(token, client_stream_id=stream_id)
+            self.assertTrue(registry.finish_request(request.handle))
+            self.assertEqual(registry.request_count, 0)
+            self.assertEqual(registry._requests_by_connection, {})
+            self.assertEqual(registry._max_admitted_stream_ids, {token.serial: stream_id})
+            self.assertEqual(registry._frozen_last_stream_ids, {})
+        held = registry.acquire_request(token, client_stream_id=1001)
+        removed = self.snapshot(epoch=2, host=None)
+        self.commit(active, removed)
+        registry.activate(removed)
+        self.assertTrue(registry.release(token))
+        self.assertFalse(registry.release(token))
+        self.assertFalse(registry.finish_request(held.handle))
+        for records in (registry._max_admitted_stream_ids, registry._frozen_last_stream_ids,
+                        registry._requests, registry._requests_by_connection,
+                        registry._connection_deadlines, registry._request_deadlines):
+            self.assertEqual(records, {})
+        self.assertEqual(registry._request_fenced, set())
+        self.assert_consistent(registry)
 
 
 if __name__ == "__main__":

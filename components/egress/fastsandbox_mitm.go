@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
@@ -36,19 +37,32 @@ import (
 )
 
 // startFastSandboxMitmproxyIfEnabled starts the shared mitmdump (transparent mode,
-// all interfaces), waits for the listener, and exports the CA into the fast-sandbox
-// subdir that fastlet bind-mounts into every sandbox. Returns nil when
-// OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT is unset.
-func startFastSandboxMitmproxyIfEnabled() (*mitmTransparent, error) {
+// all interfaces) on the pool-pinned CA and surfaces the CA fingerprint on the
+// healthz gate. Returns nil when OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT is
+// unset. A missing or unloadable pinned CA fails the MITM addon closed — the
+// error is returned (the caller keeps egress serving) and the gate carries the
+// explicit addon-down reason; mitmdump is never allowed to generate a CA.
+func startFastSandboxMitmproxyIfEnabled(gate *mitmproxy.HealthGate) (*mitmTransparent, error) {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return nil, nil
 	}
 
 	mpPort := constants.EnvIntOrDefault(constants.EnvMitmproxyPort, constants.DefaultMitmproxyPort)
-	mpUID, _, mpHome, err := mitmproxy.LookupUser(mitmproxy.RunAsUser)
+	mpUID, mpGID, mpHome, err := mitmproxy.LookupUser(mitmproxy.RunAsUser)
 	if err != nil {
 		return nil, fmt.Errorf("lookup user %q: %w (ensure this user exists in the image)", mitmproxy.RunAsUser, err)
 	}
+	confDir := filepath.Join(mpHome, ".mitmproxy")
+
+	// Seed the pinned CA BEFORE the first launch: mitmdump loads a confdir CA
+	// when present and only generates when missing — in this profile it must
+	// never generate (OSEP-0022 MITM Trust Anchor).
+	fp, err := mitmproxy.SeedPinnedCA(os.Getenv(constants.EnvMitmCaSeedDir), confDir, int(mpUID), int(mpGID))
+	if err != nil {
+		gate.MarkDown(fmt.Sprintf("pinned CA unavailable: %v", err))
+		return nil, fmt.Errorf("pinned CA seed: %w", err)
+	}
+	gate.SetCAFingerprint(fp)
 
 	cfg := mitmproxy.Config{
 		ListenPort:  mpPort,
@@ -71,11 +85,17 @@ func startFastSandboxMitmproxyIfEnabled() (*mitmTransparent, error) {
 	}
 	log.Infof("fast-sandbox mitmproxy: shared transparent listener on 0.0.0.0:%d (interception via per-subject prerouting DNAT)", mpPort)
 
-	// No Pod-netns OUTPUT REDIRECT (would intercept the Pod's own traffic);
-	// the fast-sandbox server installs the per-subject prerouting DNAT instead.
-	if err := mitmproxy.SyncRootCAFastSandbox("", mpHome); err != nil {
-		return nil, fmt.Errorf("mitm CA export: %w", err)
+	// Startup consistency check (supersedes the fast-sandbox CA export, which
+	// this profile drops — the guest trusts the template-baked certificate):
+	// BOTH confdir CA files — the bundle mitmdump actually loads and the
+	// public certificate copy — must match the pinned cert; a mismatch means
+	// a CA was generated or swapped behind our back. Fail the addon closed.
+	if err := mitmproxy.VerifyConfdirPinnedCA(confDir, fp); err != nil {
+		gate.MarkDown(fmt.Sprintf("confdir CA mismatch: %v", err))
+		mitmproxy.GracefulShutdown(running, 2*time.Second)
+		return nil, fmt.Errorf("pinned CA consistency check: %w", err)
 	}
+	log.Infof("fast-sandbox mitmproxy: pinned CA loaded (fingerprint %s)", fp)
 	return &mitmTransparent{
 		running:    running,
 		currentGen: initialGen,

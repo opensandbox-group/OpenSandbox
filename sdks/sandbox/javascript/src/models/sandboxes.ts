@@ -50,17 +50,23 @@ export type ResourceLimits = Record<string, string>;
 
 export type NetworkRuleAction = "allow" | "deny";
 
-export interface NetworkRule extends Record<string, unknown> {
-  /**
-   * Whether to allow or deny matching targets.
-   */
-  action: NetworkRuleAction;
-  /**
-   * FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-   * IP/CIDR is not supported in the egress MVP.
-   */
-  target: string;
-}
+/**
+ * An egress rule: `target`, `ports`, or both. The union encodes that
+ * invariant at compile time (`target` used to be required).
+ *
+ * - `target`: FQDN, wildcard domain ("*.example.com"), IP, or CIDR.
+ * - `ports`: TCP destination ports (each 1-65535, at least one, at most 256
+ *   per rule — enforced server-side). Without a target the rule applies
+ *   across all IPv4/IPv6 destinations, but under `defaultAction: deny` the
+ *   DNS proxy only matches domain rules, so hostname lookups still fail —
+ *   this shape serves direct-IP clients.
+ * - A domain `target` combined with `ports` is rejected (domain rules have
+ *   no port dimension).
+ */
+export type NetworkRule = (
+  | { action: NetworkRuleAction; target: string; ports?: number[] }
+  | { action: NetworkRuleAction; target?: string; ports: number[] }
+) & Record<string, unknown>;
 
 export interface NetworkPolicy extends Record<string, unknown> {
   /**
@@ -485,7 +491,66 @@ export interface PeriodicLifecycleHook extends Record<string, unknown> {
   timeoutSeconds?: number;
 }
 
-/** Extensible container for sandbox lifecycle hooks. */
+/**
+ * Application-declared activity probe (OSEP-0024).
+ *
+ * Endpoint inside the sandbox that answers `{"active": bool, "message"?: string}`
+ * with 200 while work is in progress. When the sandbox is otherwise idle, the
+ * server issues `GET {path}` on `{port}`; a busy answer counts as activity and
+ * resets the idle clock, while an explicit "not active", any failure, or a
+ * timeout records nothing.
+ */
+export interface ActivityProbe extends Record<string, unknown> {
+  /** Sandbox port serving the probe endpoint. */
+  port: number;
+  /**
+   * Absolute HTTP path of the probe endpoint. Must start with `/` and must not
+   * contain whitespace or control characters.
+   */
+  path: string;
+  /** Probe request budget in seconds (1-10). Defaults to 2. */
+  timeoutSeconds?: number;
+}
+
+/**
+ * Idle behavior declared by the sandbox (OSEP-0024, fast-sandbox only).
+ *
+ * With `idleTimeoutSeconds`, the sandbox is auto-paused after that many seconds
+ * without ingress-observed activity. Without it, the policy is wake-only: the
+ * sandbox is never auto-paused, but a (manually) paused sandbox wakes on access.
+ * Omitting the whole policy preserves non-automated behavior exactly.
+ */
+export interface IdlePolicy extends Record<string, unknown> {
+  /**
+   * Idle threshold X in seconds (30-86400): the sandbox is auto-paused after X
+   * continuously idle seconds. Required together with `onIdle`; absent together
+   * with it means a wake-only policy.
+   */
+  idleTimeoutSeconds?: number;
+  /**
+   * Action taken at the idle threshold. Only `pause` exists today. Required
+   * with, and only valid with, `idleTimeoutSeconds`.
+   */
+  onIdle?: "pause";
+  /** Whether incoming traffic may wake the sandbox from `Paused`. Defaults to true. */
+  wakeOnAccess?: boolean;
+  /** Application-declared activity probe (relevant only with auto-pause). */
+  activeProbe?: ActivityProbe;
+}
+
+/**
+ * Renew-on-access behavior (OSEP-0009): observed access moves the expiration
+ * to `max(now + extendSeconds, current)`. Control-plane policy; supersedes the
+ * deprecated `extensions["access.renew.extend.seconds"]` key.
+ */
+export interface RenewalPolicy extends Record<string, unknown> {
+  /**
+   * Extension window X in seconds (300-86400) for each access-driven renewal.
+   */
+  extendSeconds: number;
+}
+
+/** Extensible container for sandbox lifecycle configuration. */
 export interface SandboxLifecycle extends Record<string, unknown> {
   /**
    * Runs after execd is ready and before the user entrypoint on every container
@@ -497,6 +562,17 @@ export interface SandboxLifecycle extends Record<string, unknown> {
    * never overlap; a scheduled run is skipped while its previous run is active.
    */
   periodic?: PeriodicLifecycleHook[];
+  /**
+   * Auto-pause and wake-on-access behavior (OSEP-0024). Supported only by the
+   * fast-sandbox backend; other backends reject the field. Control-plane
+   * policy: it never reaches the guest.
+   */
+  idlePolicy?: IdlePolicy;
+  /**
+   * Renew-on-access behavior (OSEP-0009). Control-plane policy; supersedes
+   * the deprecated `extensions["access.renew.extend.seconds"]` key.
+   */
+  renewalPolicy?: RenewalPolicy;
 }
 
 export interface CreateSandboxRequest extends Record<string, unknown> {
@@ -537,8 +613,8 @@ export interface CreateSandboxFromTemplateRequest extends Record<string, unknown
    * Succeeded fsb template to create the sandbox from.
    *
    * Template mode fixes the workload shape on the server: only metadata,
-   * network policy and extensions may accompany the template id, and the
-   * timeout is required.
+   * network policy, extensions and the idle policy may accompany the template
+   * id, and the timeout is required.
    */
   templateId: string;
   /**
@@ -550,6 +626,11 @@ export interface CreateSandboxFromTemplateRequest extends Record<string, unknown
    * Optional outbound network policy for the sandbox.
    */
   networkPolicy?: NetworkPolicy;
+  /**
+   * Optional idle behavior (OSEP-0024, fast-sandbox only). Control-plane
+   * state, not workload shape, so template mode accepts it.
+   */
+  idlePolicy?: IdlePolicy;
   /**
    * Opaque extension parameters passed through to the server as-is.
    */
@@ -654,7 +735,8 @@ export interface Endpoint extends Record<string, unknown> {
 export enum SandboxOrigin {
   /**
    * Runs on a fsb golden-image template (no sandbox-side egress sidecar;
-   * egress policy goes through the lifecycle control plane).
+   * egress policy and the Credential Vault go through the lifecycle
+   * control plane).
    */
   TEMPLATE = "template",
   /**

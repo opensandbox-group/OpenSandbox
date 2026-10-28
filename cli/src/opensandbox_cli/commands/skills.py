@@ -69,11 +69,13 @@ _TARGETS = cast(dict[str, TargetConfig], {
             "project": {
                 "strategy": "copy",
                 "dest_dir": Path(".claude") / "skills",
+                "dest_file_template": "{slug}/SKILL.md",
                 "preserve_frontmatter": True,
             },
             "global": {
                 "strategy": "copy",
                 "dest_dir": Path.home() / ".claude" / "skills",
+                "dest_file_template": "{slug}/SKILL.md",
                 "preserve_frontmatter": True,
             }
         },
@@ -122,7 +124,7 @@ _TARGETS = cast(dict[str, TargetConfig], {
             },
             "global": {
                 "strategy": "append",
-                "dest_file": Path.home() / ".github" / "copilot-instructions.md",
+                "dest_file": Path.home() / ".copilot" / "copilot-instructions.md",
                 "preserve_frontmatter": False,
             }
         },
@@ -151,8 +153,9 @@ _TARGETS = cast(dict[str, TargetConfig], {
                 "preserve_frontmatter": False,
             },
             "global": {
-                "strategy": "append",
-                "dest_file": Path.home() / ".clinerules",
+                "strategy": "copy",
+                "dest_dir": Path.home() / ".cline" / "rules",
+                "dest_file_template": "opensandbox-{slug}.md",
                 "preserve_frontmatter": False,
             }
         },

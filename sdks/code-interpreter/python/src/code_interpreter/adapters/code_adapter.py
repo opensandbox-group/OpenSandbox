@@ -33,15 +33,15 @@ from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
 )
 from opensandbox.adapters.converter.response_handler import (
-    extract_request_id,
+    build_api_exception_from_httpx,
     handle_api_error,
     require_parsed,
 )
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.sandboxes import SandboxEndpoint
-from opensandbox.transport import unwrap_retry_transport
+from opensandbox.transport import streaming_transport
 
 from code_interpreter.adapters.converter.code_execution_converter import (
     CodeExecutionConverter,
@@ -128,9 +128,8 @@ class CodesAdapter(Codes):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
-        # SSE bootstraps bypass the retry wrapper: request bodies are
-        # not replayable and a non-idempotent status opt-in would cause
-        # duplicate execution on a resent SSE POST.
+        # SSE bootstraps keep only the wake-timeout retry: a non-idempotent
+        # status opt-in would cause duplicate execution on a resent SSE POST.
         sse_transport = (
             self.connection_config.new_owned_transport()
             if self._owns_clients
@@ -144,7 +143,7 @@ class CodesAdapter(Codes):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=unwrap_retry_transport(sse_transport),
+            transport=streaming_transport(sse_transport),
         )
 
     async def _get_client(self):
@@ -316,6 +315,7 @@ class CodesAdapter(Codes):
                 result=[],
                 error=None,
             )
+            execution._is_code_execution = True
 
             # Use SSE client for streaming responses (read timeout disabled)
             client = await self._get_sse_client()
@@ -324,15 +324,10 @@ class CodesAdapter(Codes):
             async with client.stream("POST", url, json=api_request) as response:
                 if response.status_code != 200:
                     await response.aread()
-                    error_body = response.text
                     logger.error(
-                        f"Failed to run code. Status: {response.status_code}, Body: {error_body}"
+                        f"Failed to run code. Status: {response.status_code}, Body: {response.text}"
                     )
-                    raise SandboxApiException(
-                        message=f"Failed to run code. Status code: {response.status_code}, Body: {error_body}",
-                        status_code=response.status_code,
-                        request_id=extract_request_id(response.headers),
-                    )
+                    raise build_api_exception_from_httpx(response, "Run code")
 
                 dispatcher = ExecutionEventDispatcher(execution, handlers)
 

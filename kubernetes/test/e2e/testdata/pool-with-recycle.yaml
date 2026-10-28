@@ -9,7 +9,11 @@ spec:
       containers:
       - name: sandbox-container
         image: {{.SandboxImage}}{{ if .Command}}
-        command: {{.Command}}{{ end}}
+        command: {{.Command}}{{ end}}{{ if .PreStopSeconds}}
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep {{.PreStopSeconds}}"]{{ end}}
   capacitySpec:
     bufferMax: {{.BufferMax}}
     bufferMin: {{.BufferMin}}

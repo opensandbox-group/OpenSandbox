@@ -146,9 +146,10 @@ def parse_timestamp(timestamp: Optional[str]) -> datetime:
     """
     Parse RFC3339 timestamp into timezone-aware datetime. Fallback to now.
 
-    Docker often returns RFC3339Nano (up to 9 fractional digits). Python's
-    datetime.fromisoformat only supports microseconds (6 digits), so we
-    truncate the fractional part to 6 digits before parsing.
+    Docker often returns RFC3339Nano (up to 9 fractional digits, trailing
+    zeros dropped). Python 3.10's datetime.fromisoformat only accepts 3 or 6
+    fractional digits, so we truncate or pad the fractional part to 6 digits
+    before parsing.
     """
     if not timestamp or timestamp == "0001-01-01T00:00:00Z":
         return datetime.now(timezone.utc)
@@ -172,7 +173,7 @@ def parse_timestamp(timestamp: Optional[str]) -> datetime:
             frac = rest[:tz_sep]
             tz = rest[tz_sep:]
         frac = frac[:6]  # truncate to microseconds precision
-        normalized = f"{main}.{frac}{tz}" if frac else f"{main}{tz}"
+        normalized = f"{main}.{frac:0<6}{tz}" if frac else f"{main}{tz}"
 
     try:
         return datetime.fromisoformat(normalized)

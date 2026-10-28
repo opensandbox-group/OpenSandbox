@@ -56,8 +56,7 @@ For Kotlin/Java, see [Installation](/getting-started/installation).
 
 ## 3. Create and Use a Sandbox
 
-This example uses the sandbox SDK and a standard Python image. If the server has
-an API key configured, set `OPEN_SANDBOX_API_KEY` in your client environment.
+This example uses the sandbox SDK and a standard Python image. If the server has an API key configured, set `OPEN_SANDBOX_API_KEY` in your client environment.
 
 ```python
 import asyncio
@@ -94,10 +93,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-`use_server_proxy=True` routes sandbox traffic through the lifecycle server,
-which is useful when the client cannot reach container addresses directly.
-`destroy()` terminates the remote sandbox and closes local SDK resources.
-Closing the client alone does not terminate the remote sandbox.
+`use_server_proxy=True` routes sandbox traffic through the lifecycle server, which is useful when the client cannot reach container addresses directly. `destroy()` terminates the remote sandbox and closes local SDK resources. Closing the client alone does not terminate the remote sandbox.
 
 ## 4. Try the CLI
 

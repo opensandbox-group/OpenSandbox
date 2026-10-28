@@ -292,19 +292,27 @@ class TestK8sClient:
         assert informer._resource_version == "rv:deleted"
         assert informer._invalidation_generation == generation
 
-    def test_mutation_forces_get_and_list_to_live_api(self, k8s_runtime_config):
+    @pytest.mark.parametrize("operation", ["create", "foreground_delete"])
+    def test_mutation_forces_get_and_list_to_live_api(self, k8s_runtime_config, operation):
         """Reads cannot serve the pre-mutation cache until LIST republishes it."""
         c = self._make_client(k8s_runtime_config)
         old = {"metadata": {"name": "foo", "resourceVersion": "old"}}
         informer = self._attach_real_informer(c, [old])
-        c._custom_objects_api.create_namespaced_custom_object.return_value = {
-            "metadata": {"name": "bar"}
-        }
         live = {"metadata": {"name": "foo", "resourceVersion": "live"}}
+        if operation == "foreground_delete":
+            live["metadata"].update(
+                deletionTimestamp="2026-10-09T07:00:00Z",
+                finalizers=["foregroundDeletion"],
+            )
+            c._custom_objects_api.delete_namespaced_custom_object.return_value = live
         c._custom_objects_api.get_namespaced_custom_object.return_value = live
         c._custom_objects_api.list_namespaced_custom_object.return_value = {"items": [live]}
 
-        c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "bar"}})
+        if operation == "create":
+            c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "bar"}})
+        else:
+            c.delete_custom_object("g", "v1", "ns", "foos", "foo", propagation_policy="Foreground")
+        assert informer.get_if_synced("foo") is None
         assert c.get_custom_object("g", "v1", "ns", "foos", "foo") is live
         assert c.list_custom_objects("g", "v1", "ns", "foos") == [live]
         c._custom_objects_api.get_namespaced_custom_object.assert_called_once()
@@ -493,12 +501,18 @@ class TestK8sClient:
         assert [obj["metadata"]["name"] for obj in result] == ["from-api"]
         c._custom_objects_api.list_namespaced_custom_object.assert_called_once()
 
-    def test_delete_custom_object_delegates_to_api(self, k8s_runtime_config):
+    @pytest.mark.parametrize("propagation_policy", [None, "Foreground"])
+    def test_delete_custom_object_delegates_to_api(
+        self, k8s_runtime_config, propagation_policy
+    ):
         c = self._make_client(k8s_runtime_config)
-        c.delete_custom_object("g", "v1", "ns", "foos", "foo-1", grace_period_seconds=0)
+        c.delete_custom_object(
+            "g", "v1", "ns", "foos", "foo-1",
+            grace_period_seconds=0, propagation_policy=propagation_policy,
+        )
         c._custom_objects_api.delete_namespaced_custom_object.assert_called_once_with(
             group="g", version="v1", namespace="ns", plural="foos",
-            name="foo-1", grace_period_seconds=0
+            name="foo-1", grace_period_seconds=0, propagation_policy=propagation_policy,
         )
 
     def test_patch_custom_object_delegates_to_api(self, k8s_runtime_config):

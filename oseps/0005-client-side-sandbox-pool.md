@@ -48,24 +48,15 @@ status: implemented
 
 ## Summary
 
-This proposal introduces a client-side `SandboxPool` in the SDK for acquiring
-ready sandboxes with predictable latency. The pool is an SDK-local component,
-strictly decoupled from runtime-side pooling and infrastructure internals.
+This proposal introduces a client-side `SandboxPool` in the SDK for acquiring ready sandboxes with predictable latency. The pool is an SDK-local component, strictly decoupled from runtime-side pooling and infrastructure internals.
 
-Pool-managed sandboxes are created through standard lifecycle create APIs.
-Idle records use a fixed key TTL of 24h in the state store and are naturally
-evicted on expiry. Callers can specify sandbox timeout duration at `acquire`
-time.
+Pool-managed sandboxes are created through standard lifecycle create APIs. Idle records use a fixed key TTL of 24h in the state store and are naturally evicted on expiry. Callers can specify sandbox timeout duration at `acquire` time.
 
-Sandboxes are still treated as ephemeral and non-reusable. The pool only
-maintains an idle buffer target; runtime remains the source of truth for hard
-resource limits.
+Sandboxes are still treated as ephemeral and non-reusable. The pool only maintains an idle buffer target; runtime remains the source of truth for hard resource limits.
 
 ## Motivation
 
-Per-request sandbox creation introduces avoidable cold-start cost. A client-side
-reserve of clean, ready sandboxes improves first-byte latency while preserving a
-clear caller-owned capacity model.
+Per-request sandbox creation introduces avoidable cold-start cost. A client-side reserve of clean, ready sandboxes improves first-byte latency while preserving a clear caller-owned capacity model.
 
 ### Goals
 
@@ -96,8 +87,7 @@ clear caller-owned capacity model.
 
 ## Proposal
 
-Add SDK-level `SandboxPool` that pre-creates and manages a target idle buffer
-of clean, borrowable sandboxes.
+Add SDK-level `SandboxPool` that pre-creates and manages a target idle buffer of clean, borrowable sandboxes.
 
 Callers:
 - `acquire` a sandbox,
@@ -141,14 +131,9 @@ This OSEP explicitly defines the following boundaries:
 
 ### Risks and Mitigations
 
-- Risk: Frequent empty-idle events under burst traffic.
-  Mitigation: configurable empty behavior (`DIRECT_CREATE` or `FAIL_FAST`) and metrics.
-- Risk: Backend state/lifecycle changes break assumptions.
-  Mitigation: connect-on-acquire validation, stale-id cleanup, and adapter-based
-  state handling.
-- Risk: Multi-process replenish may issue duplicate create attempts.
-  Mitigation: distributed primary-lock ownership, idempotent store operations,
-  backoff, and runtime-side quota protection.
+- Risk: Frequent empty-idle events under burst traffic. Mitigation: configurable empty behavior (`DIRECT_CREATE` or `FAIL_FAST`) and metrics.
+- Risk: Backend state/lifecycle changes break assumptions. Mitigation: connect-on-acquire validation, stale-id cleanup, and adapter-based state handling.
+- Risk: Multi-process replenish may issue duplicate create attempts. Mitigation: distributed primary-lock ownership, idempotent store operations, backoff, and runtime-side quota protection.
 
 ## Design Details
 
@@ -167,8 +152,7 @@ Recommended reading order for implementation and review:
 - **Idle sandbox**: healthy sandbox ID currently available for borrow.
 - **Authoritative store**: the single source of truth for idle membership.
 - **Best-effort maxIdle**: convergence target, not a strict availability guarantee.
-- **Leader (Primary)**: current lock owner for one `poolName`; allowed to run
-  reconcile maintenance write paths.
+- **Leader (Primary)**: current lock owner for one `poolName`; allowed to run reconcile maintenance write paths.
 - **Follower (Non-Leader)**: node that does not currently hold leader lock.
 
 ### Class Model
@@ -291,12 +275,9 @@ PoolStateStore
 ```
 
 Method intent:
-- `acquire`: primary pool operation; it takes/creates a sandbox ID internally and
-  returns a connected sandbox instance (`Sandbox` in host SDK terms).
-- `PoolStateStore`: stores only IDs and pool coordination state; it must not store
-  language runtime sandbox objects.
-- `runPrimaryReplenishOnce` (internal): primary-only maintenance write path;
-  independent from caller-facing `acquire` flow.
+- `acquire`: primary pool operation; it takes/creates a sandbox ID internally and returns a connected sandbox instance (`Sandbox` in host SDK terms).
+- `PoolStateStore`: stores only IDs and pool coordination state; it must not store language runtime sandbox objects.
+- `runPrimaryReplenishOnce` (internal): primary-only maintenance write path; independent from caller-facing `acquire` flow.
 
 ### Core Model: Properties and Constraints
 
@@ -307,8 +288,7 @@ Model entities:
 
 Constraints:
 - Soft target: pool tries to keep `idle` near `maxIdle`
-- Idle eligibility is validated at `acquire` connection time; stale IDs are
-  removed and fallback to direct create is applied.
+- Idle eligibility is validated at `acquire` connection time; stale IDs are removed and fallback to direct create is applied.
 - Runtime authority: hard capacity/quota is enforced by runtime, not by SDK pool.
 
 Counter transition rules:
@@ -331,17 +311,13 @@ Default derivation (when omitted):
 - `warmupConcurrency = max(1, ceil(maxIdle * 0.2))`
 - `primaryLockTtl` should be larger than one reconcile tick interval.
 - `idleTtl` is fixed at 24h (non-configurable in V1).
-- `emptyBehavior = DIRECT_CREATE` (default). Caller may explicitly set
-  `FAIL_FAST` for fail-fast semantics.
-- `putIdle` may use an implementation-defined safety margin and write
-  `effectiveIdleTtl = idleTtl - ttlSafetyMargin`; `effectiveIdleTtl` should stay
-  greater than one reconcile tick interval.
+- `emptyBehavior = DIRECT_CREATE` (default). Caller may explicitly set `FAIL_FAST` for fail-fast semantics.
+- `putIdle` may use an implementation-defined safety margin and write `effectiveIdleTtl = idleTtl - ttlSafetyMargin`; `effectiveIdleTtl` should stay greater than one reconcile tick interval.
 - caller-provided numeric values override defaults for configurable keys.
 
 ### State Store Abstraction
 
-The SDK pool logic is implementation-invariant and always uses a `PoolStateStore`
-interface. Deployment mode is decided by which implementation is injected:
+The SDK pool logic is implementation-invariant and always uses a `PoolStateStore` interface. Deployment mode is decided by which implementation is injected:
 
 - `InMemoryPoolStateStore`: single-node/local mode.
 - User-provided remote datastore implementation: distributed mode.
@@ -350,30 +326,23 @@ Contract semantics (normative):
 - Pool scoping: all operations are namespaced by `poolName`; no cross-pool leakage.
 - Atomic take: one idle sandbox can only be taken by one acquire operation.
 - Idempotent put/remove operations for idle membership.
-- Ordering: `tryTakeIdle` should prefer FIFO (oldest idle first) as a
-  best-effort implementation goal. Strict FIFO is not required across all
-  backends.
+- Ordering: `tryTakeIdle` should prefer FIFO (oldest idle first) as a best-effort implementation goal. Strict FIFO is not required across all backends.
 - Snapshot consistency at least eventually consistent for counters.
 
 Lock semantics (normative):
 - Primary lock semantics for distributed safety:
-  - Only the current leader lock holder may execute **reconcile maintenance**
-    writes (`putIdle`, `reapExpiredIdle`).
-  - Foreground acquire-path write (`tryTakeIdle`) is allowed on **all** nodes,
-    including leader and followers.
-  - `removeIdle` on stale-id cleanup is an acquire-path cleanup write and is
-    allowed on all nodes.
+  - Only the current leader lock holder may execute **reconcile maintenance** writes (`putIdle`, `reapExpiredIdle`).
+  - Foreground acquire-path write (`tryTakeIdle`) is allowed on **all** nodes, including leader and followers.
+  - `removeIdle` on stale-id cleanup is an acquire-path cleanup write and is allowed on all nodes.
   - Lock ownership must be time-bounded (`ttl`) and renewable by owner only.
   - `tryAcquirePrimaryLock` is best-effort mutually exclusive by `poolName`.
   - Lock loss must cause immediate stop of replenish attempts on that node.
 
 Idle TTL semantics (normative):
   - Idle entries are written with logical `idleTtl=24h`.
-  - Store may apply a small `ttlSafetyMargin` when writing keys, as long as
-    `effectiveIdleTtl > reconcileTickInterval`.
+  - Store may apply a small `ttlSafetyMargin` when writing keys, as long as `effectiveIdleTtl > reconcileTickInterval`.
   - Distributed stores should rely on backend TTL expiry.
-  - Single-node in-memory store must track `expiresAt` and evict expired entries
-    via lazy-on-acquire and periodic sweep.
+  - Single-node in-memory store must track `expiresAt` and evict expired entries via lazy-on-acquire and periodic sweep.
   - `reapExpiredIdle` is a unified store hook invoked by reconcile:
     - In-memory store: performs active sweep.
     - TTL-capable distributed store: may be no-op.
@@ -382,11 +351,9 @@ Idle TTL semantics (normative):
   - Store must not require serialization of SDK language objects.
 
 Implementation-owned settings:
-- Any optional coordination/locking policy for distributed replenish is managed
-  by each `PoolStateStore` implementation, not top-level `SandboxPool` config keys.
+- Any optional coordination/locking policy for distributed replenish is managed by each `PoolStateStore` implementation, not top-level `SandboxPool` config keys.
 
-This keeps SDK behavior unified across modes while avoiding coupling to any
-specific distributed system.
+This keeps SDK behavior unified across modes while avoiding coupling to any specific distributed system.
 
 Distributed role boundary (normative):
 
@@ -402,8 +369,7 @@ Distributed role boundary (normative):
 Rule of thumb:
 - Leader is a **background maintenance role**, not a request-routing role.
 - Leader must continue serving foreground acquires exactly like any other node.
-- Losing leader lock only stops reconcile maintenance on that node; it must not
-  stop foreground acquire handling.
+- Losing leader lock only stops reconcile maintenance on that node; it must not stop foreground acquire handling.
 
 Pool naming rules:
 - `poolName` is user-defined and human-readable.
@@ -412,8 +378,7 @@ Pool naming rules:
 
 #### PoolStateStore compliance matrix (required)
 
-User-provided distributed stores must pass the following contract checks before
-being considered production-ready:
+User-provided distributed stores must pass the following contract checks before being considered production-ready:
 
 | Contract area | Scenario | Expected result |
 |---|---|---|
@@ -430,8 +395,7 @@ being considered production-ready:
 | Eventual counters | Mixed put/take/create/fail under load | `snapshotCounters` converges to actual membership within implementation SLA |
 
 Implementation note:
-- The SDK should provide a reusable compliance test suite that runs the above
-  scenarios against any `PoolStateStore` implementation.
+- The SDK should provide a reusable compliance test suite that runs the above scenarios against any `PoolStateStore` implementation.
 
 ### Pool and Sandbox Lifecycle
 
@@ -481,8 +445,7 @@ function shutdown(pool, graceful=true):
 
 Sandbox state model:
 
-This is a runtime-facing reference model used by pool logic. It is descriptive,
-not a strict SDK-owned lifecycle contract.
+This is a runtime-facing reference model used by pool logic. It is descriptive, not a strict SDK-owned lifecycle contract.
 
 ```mermaid
 stateDiagram-v2
@@ -501,8 +464,7 @@ stateDiagram-v2
 
 `acquire` flow:
 
-Diagram note: this flowchart is an overview. Normative behavior is defined by
-the pseudocode and method semantics below.
+Diagram note: this flowchart is an overview. Normative behavior is defined by the pseudocode and method semantics below.
 
 ```mermaid
 flowchart TD
@@ -522,10 +484,7 @@ flowchart TD
 ```
 
 Method semantics:
-- `acquire`: returns a connected sandbox instance. Internally it first tries atomic idle-take
-  by `sandboxId`, validates by connect, cleans stale IDs on connect failure, then
-  applies empty behavior (`DIRECT_CREATE` default, or `FAIL_FAST` if configured).
-  It may apply `sandboxTimeout` by calling lifecycle `renew`.
+- `acquire`: returns a connected sandbox instance. Internally it first tries atomic idle-take by `sandboxId`, validates by connect, cleans stale IDs on connect failure, then applies empty behavior (`DIRECT_CREATE` default, or `FAIL_FAST` if configured). It may apply `sandboxTimeout` by calling lifecycle `renew`.
 
 #### Acquire pseudocode (normative)
 
@@ -605,17 +564,13 @@ Kill-only model:
 Important behavior:
 - Borrowing from idle at `idle == maxIdle` is expected and correct.
 - Runtime capacity/quota remains authoritative under burst.
-- 24h idle-key TTL reduces stale-id probability but does not guarantee runtime
-  state is still `Running`; acquire handles this small-probability case by
-  cleaning stale id and degrading to direct create.
+- 24h idle-key TTL reduces stale-id probability but does not guarantee runtime state is still `Running`; acquire handles this small-probability case by cleaning stale id and degrading to direct create.
 
 ### Reconcile Loop
 
-The pool runs a background reconcile loop that fires on a periodic tick. Each
-tick drives through four ordered phases:
+The pool runs a background reconcile loop that fires on a periodic tick. Each tick drives through four ordered phases:
 
-Diagram note: this flowchart is an overview. Normative behavior is defined by
-the pseudocode below.
+Diagram note: this flowchart is an overview. Normative behavior is defined by the pseudocode below.
 
 ```mermaid
 flowchart TD
@@ -715,19 +670,14 @@ sequenceDiagram
 
 Reconcile policy notes:
 - Replenishment is background work to restore standby reserve.
-- Under high foreground demand or runtime quota pressure, idle may drain below
-  `maxIdle`; this is expected.
-- In distributed mode, replenish is leader-gated: only the current leader lock
-  holder performs reconcile maintenance create paths for a given `poolName`.
-- Nodes that fail to acquire/renew primary lock skip replenish on that tick and
-  retry lock acquisition on subsequent reconcile ticks.
-- Caller-facing `acquire` path remains independent and is served by all nodes
-  (leader included); it does not require leader ownership.
+- Under high foreground demand or runtime quota pressure, idle may drain below `maxIdle`; this is expected.
+- In distributed mode, replenish is leader-gated: only the current leader lock holder performs reconcile maintenance create paths for a given `poolName`.
+- Nodes that fail to acquire/renew primary lock skip replenish on that tick and retry lock acquisition on subsequent reconcile ticks.
+- Caller-facing `acquire` path remains independent and is served by all nodes (leader included); it does not require leader ownership.
 - Source of truth:
   - Single-node mode: in-memory state store is authoritative.
   - Distributed mode: centralized state store is authoritative.
-- `PoolReconciler` never mutates state directly; all state changes go through
-  `PoolStateStore`.
+- `PoolReconciler` never mutates state directly; all state changes go through `PoolStateStore`.
 
 **Pool health state transitions:**
 
@@ -738,44 +688,34 @@ Reconcile policy notes:
 | `HEALTHY` / `DEGRADED` | `DRAINING` | `shutdown(graceful=true)` called |
 | any | `STOPPED` | `shutdown(graceful=false)` or drain completes |
 
-When `DEGRADED`, the reconciler applies exponential backoff to create attempts,
-preventing cascading pressure on a failing backend while continuing to serve
-from existing idle sandboxes (validated by connect-on-acquire).
+When `DEGRADED`, the reconciler applies exponential backoff to create attempts, preventing cascading pressure on a failing backend while continuing to serve from existing idle sandboxes (validated by connect-on-acquire).
 
 ### Failure Handling and Recovery
 
 Expected deterministic outcomes:
 
 - `FAIL_FAST`: no idle sandbox available -> `SandboxException(code=POOL_EMPTY)`.
-- `DIRECT_CREATE`: no idle -> attempt direct create; create/connect failure ->
-  propagate original lifecycle error code.
-- `sandboxTimeout` application fails ->
-  propagate original lifecycle timeout/apply error code.
+- `DIRECT_CREATE`: no idle -> attempt direct create; create/connect failure -> propagate original lifecycle error code.
+- `sandboxTimeout` application fails -> propagate original lifecycle timeout/apply error code.
 - Backend quota/capacity errors -> typed create failures, no silent fallback.
-- Empty idle + repeated replenish failure -> degraded pool with user-configured
-  fallback (`DIRECT_CREATE` or `FAIL_FAST`).
+- Empty idle + repeated replenish failure -> degraded pool with user-configured fallback (`DIRECT_CREATE` or `FAIL_FAST`).
 - Idle connect failure on acquire -> remove stale idle ID and fallback to direct create.
 - State-store contention on idle-take/put -> retry with bounded backoff.
 - State-store unavailability -> degrade to policy-defined empty behavior.
 
 Error-model alignment:
 - SDK should surface pool failures through existing `SandboxException` hierarchy.
-- Pool-specific error codes should be minimal and used only for pool-owned
-  deterministic states (for example `POOL_EMPTY` under `FAIL_FAST`).
-- Lifecycle create/connect/timeout failures should propagate original SDK/server
-  error codes rather than being remapped into pool-only codes.
+- Pool-specific error codes should be minimal and used only for pool-owned deterministic states (for example `POOL_EMPTY` under `FAIL_FAST`).
+- Lifecycle create/connect/timeout failures should propagate original SDK/server error codes rather than being remapped into pool-only codes.
 
 Minimal error-code contract (normative):
 
-1. Pool may emit pool-specific codes only for pool-owned deterministic outcomes
-   that lifecycle APIs cannot represent (for example `POOL_EMPTY`).
+1. Pool may emit pool-specific codes only for pool-owned deterministic outcomes that lifecycle APIs cannot represent (for example `POOL_EMPTY`).
 2. Pool must not wrap or remap lifecycle create errors.
 3. Pool must not wrap or remap lifecycle connect errors.
 4. Pool must not wrap or remap lifecycle timeout-apply/renew errors.
-5. If pool performs best-effort cleanup (`removeIdle`, `tryKill`) after failure,
-   cleanup errors must not replace the original lifecycle error returned to caller.
-6. Store-layer failures may use pool/store-specific codes when no existing
-   lifecycle error is applicable.
+5. If pool performs best-effort cleanup (`removeIdle`, `tryKill`) after failure, cleanup errors must not replace the original lifecycle error returned to caller.
+6. Store-layer failures may use pool/store-specific codes when no existing lifecycle error is applicable.
 
 Error code action matrix:
 
@@ -851,8 +791,7 @@ Metrics and logs are emitted at SDK layer:
 - SDK does not prescribe or bundle a specific distributed datastore backend.
 - All store records and coordination are isolated by `poolName`.
 - Runtime remains authoritative for hard capacity and quota limits.
-- State handling is forward-compatible: unknown backend lifecycle states are treated
-  conservatively (fallback to direct create on connect failure).
+- State handling is forward-compatible: unknown backend lifecycle states are treated conservatively (fallback to direct create on connect failure).
 - Pool adapts through lifecycle adapters rather than runtime-specific paths.
 
 ## Test Plan
@@ -863,12 +802,9 @@ Test plan includes:
 - Concurrency tests for `acquire` and replenish races under empty-idle conditions.
 - State-store contract tests (atomic idle-take, idempotent put/remove, pool scoping).
 - Reference in-memory store tests and user-store compliance test suite.
-- Idle TTL tests: fixed 24h expiry behavior for distributed TTL-backed stores and
-  in-memory `expiresAt` sweep/lazy eviction.
-- Acquire fallback tests: idle connect failure triggers stale-id cleanup and
-  direct-create fallback path.
-- Replenish boundedness tests: leader-only create path respects `warmupConcurrency`
-  and allows small best-effort overshoot under concurrent acquire/reconcile races.
+- Idle TTL tests: fixed 24h expiry behavior for distributed TTL-backed stores and in-memory `expiresAt` sweep/lazy eviction.
+- Acquire fallback tests: idle connect failure triggers stale-id cleanup and direct-create fallback path.
+- Replenish boundedness tests: leader-only create path respects `warmupConcurrency` and allows small best-effort overshoot under concurrent acquire/reconcile races.
 - Fault-injection tests for backend creation failures and timeouts.
 - Integration tests in local and remote environments.
 - Compatibility tests for non-pool SDK usage.
@@ -888,8 +824,7 @@ Test plan includes:
 
 ## Infrastructure Needed
 
-No new mandatory infrastructure is required. Optional benchmark and soak-test
-environments are recommended for tuning default pool parameters.
+No new mandatory infrastructure is required. Optional benchmark and soak-test environments are recommended for tuning default pool parameters.
 
 ## Upgrade & Migration Strategy
 

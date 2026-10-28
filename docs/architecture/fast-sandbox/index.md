@@ -5,14 +5,14 @@ description: OpenSandbox integration with the fast-sandbox platform — template
 
 # Fast Sandbox Integration
 
-Fast Sandbox is a runtime backend that connects OpenSandbox to the external [fast-sandbox](https://github.com/opensandbox-group/fast-sandbox) platform. It provisions template-backed sandboxes — containers, gVisor, Kata, or Firecracker microVMs — inside pre-warmed **Fastlet** pods, removing the per-sandbox Kubernetes scheduler, watch propagation, and kubelet path from the creation hot path.
+Fast Sandbox is a runtime backend that connects OpenSandbox to the external [fast-sandbox](https://github.com/opensandbox-group/fast-sandbox) platform. It provisions template-backed **Firecracker microVM** sandboxes inside pre-warmed **Fastlet** pods, removing the per-sandbox Kubernetes scheduler, watch propagation, and kubelet path from the creation hot path.
 
 The adapter and endpoint integration live in this repository. FastPath, the Fastlet runtime, and the `sandbox.fast.io` CRDs are owned by the fast-sandbox platform and consumed as-is.
 
 ## How it fits
 
 - **Backend selection**: Fast Sandbox is not a separate `runtime.type`. Under `runtime.type = "kubernetes"`, `CompositeSandboxService` routes create requests carrying `templateId` to `FastSandboxService`, and dispatches operations on existing `fsb-` prefixed sandbox IDs to it. Image- and snapshot-based requests keep using the Kubernetes workload providers.
-- **Control protocol**: the server and ingress talk to the fast-sandbox control plane (FastPath v2) over gRPC. FastPath owns mutations and live runtime operations; reads of persisted state use Kubernetes LIST/WATCH on `sandbox.fast.io` custom resources.
+- **Control protocol**: the server and ingress talk to the fast-sandbox control plane (FastPath v2) over gRPC. gRPC ends at FastPath: the FastPath/Reconciler-to-Fastlet control protocol is JSON over HTTP (`/api/v2/fastlet/*`). FastPath owns mutations and live runtime operations; reads of persisted state use Kubernetes LIST/WATCH on `sandbox.fast.io` custom resources.
 - **Tenancy**: a tenant provider maps each authenticated tenant to a fast-sandbox namespace; request-scoped operations resolve it from context, background work falls back to a lookup by sandbox ID.
 
 ![Fast Sandbox architecture](../../public/images/fast-sandbox-architecture.svg)
@@ -39,7 +39,7 @@ The adapter and endpoint integration live in this repository. FastPath, the Fast
 - **CRD-first control**: durable per-sandbox intent lives in `sandbox.fast.io` resources; FastPath gRPC carries the mutation hot path. The Kubernetes scheduler, watch propagation, and kubelet leave the create path — the durable write does not.
 - **Fail-closed multi-tenant egress**: every subject denies traffic from registration until its data plane is ready — policy delivery can be late, never early-open.
 - **Authenticated routing**: sandbox routes are signed `f1.` scopes verified at ingress; endpoint issuance is decoupled from readiness.
-- **MicroVM-ready**: one integration serves container and Firecracker golden images, selected by template rather than by request.
+- **Firecracker by template**: golden images are built for Firecracker microVMs — the runtime shape is fixed at build time, not per request.
 
 ## Documentation
 

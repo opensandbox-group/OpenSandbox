@@ -85,6 +85,12 @@ def resolve_config(
 ) -> dict[str, Any]:
     """Merge config from all sources and return a flat dict.
 
+    Values that come from the config file are coerced to the type declared for
+    each key. A file may legitimately encode a value with a different TOML type
+    than the CLI expects (for example an all-digit ``connection.api_key`` or a
+    ``defaults.timeout`` given in seconds), and callers downstream rely on the
+    declared type.
+
     Keys returned:
       - api_key, domain, protocol, request_timeout (int seconds), use_server_proxy (bool)
       - default_image, default_timeout (str like "10m")
@@ -97,27 +103,27 @@ def resolve_config(
     return {
         "api_key": cli_api_key
         or os.getenv("OPEN_SANDBOX_API_KEY")
-        or conn.get("api_key"),
+        or _str_or_none(conn.get("api_key")),
         "domain": cli_domain
         or os.getenv("OPEN_SANDBOX_DOMAIN")
-        or conn.get("domain"),
+        or _str_or_none(conn.get("domain")),
         "protocol": cli_protocol
         or os.getenv("OPEN_SANDBOX_PROTOCOL")
-        or conn.get("protocol")
+        or _str_or_none(conn.get("protocol"))
         or "http",
         "request_timeout": cli_timeout
         or _int_or_none(os.getenv("OPEN_SANDBOX_REQUEST_TIMEOUT"))
-        or conn.get("request_timeout")
+        or _int_or_none(conn.get("request_timeout"))
         or 30,
         "use_server_proxy": _coalesce(
             cli_use_server_proxy,
             _bool_or_none(os.getenv("OPEN_SANDBOX_USE_SERVER_PROXY")),
-            conn.get("use_server_proxy"),
+            _bool_or_none(conn.get("use_server_proxy")),
             False,
         ),
-        "color": output_cfg.get("color", True),
-        "default_image": defaults.get("image"),
-        "default_timeout": defaults.get("timeout"),
+        "color": _coalesce(_bool_or_none(output_cfg.get("color")), True),
+        "default_image": _str_or_none(defaults.get("image")),
+        "default_timeout": _str_or_none(defaults.get("timeout")),
     }
 
 
@@ -133,23 +139,50 @@ def init_config_file(config_path: Path | None = None, *, force: bool = False) ->
     return path
 
 
-def _int_or_none(value: str | None) -> int | None:
-    if value is None:
+def _int_or_none(value: Any) -> int | None:
+    """Coerce a configured value to ``int``, or ``None`` when it is not numeric."""
+    if value is None or isinstance(value, bool):
         return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (str, float)):
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return None
 
 
-def _bool_or_none(value: str | None) -> bool | None:
+def _bool_or_none(value: Any) -> bool | None:
+    """Coerce a configured value to ``bool``, or ``None`` when it is not boolean.
+
+    ``0``/``1`` are accepted so hand-edited files that write a TOML integer for a
+    boolean key keep resolving instead of silently falling back to the default.
+    """
     if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value) if value in (0, 1) else None
+    if not isinstance(value, str):
         return None
     normalized = value.strip().lower()
     if normalized in ("1", "true", "yes", "on"):
         return True
     if normalized in ("0", "false", "no", "off"):
         return False
+    return None
+
+
+def _str_or_none(value: Any) -> str | None:
+    """Coerce a configured value to ``str``, or ``None`` when it has no text form."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
     return None
 
 

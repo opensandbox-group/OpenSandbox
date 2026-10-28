@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -85,24 +86,27 @@ func mergeEgressRules(base, additions []policy.EgressRule) []policy.EgressRule {
 	return out
 }
 
-// removeRulesByTarget returns a new slice with rules matching targets removed,
-// plus the removed rules. Domain targets are matched case-insensitively.
-// Targets not found are silently ignored.
+// removeRulesByTarget removes rules matching targets (domains
+// case-insensitively, misses ignored). An explicit empty entry addresses
+// port-only rules: listing "" removes all of them.
 func removeRulesByTarget(rules []policy.EgressRule, targets []string) (kept, removed []policy.EgressRule) {
 	if len(targets) == 0 || len(rules) == 0 {
 		return rules, nil
 	}
 	removeSet := make(map[string]struct{}, len(targets))
+	removePortOnly := false
 	for _, t := range targets {
 		key := strings.ToLower(strings.TrimSpace(t))
 		if key == "" {
+			removePortOnly = true
 			continue
 		}
 		removeSet[key] = struct{}{}
 	}
 	kept = make([]policy.EgressRule, 0, len(rules))
 	for _, r := range rules {
-		if _, ok := removeSet[strings.ToLower(r.Target)]; ok {
+		_, targetListed := removeSet[strings.ToLower(r.Target)]
+		if targetListed || (removePortOnly && r.Target == "") {
 			removed = append(removed, r)
 		} else {
 			kept = append(kept, r)
@@ -111,12 +115,20 @@ func removeRulesByTarget(rules []policy.EgressRule, targets []string) (kept, rem
 	return kept, removed
 }
 
-// mergeKey: domain targets lowercased for dedupe; IP/CIDR left as-is.
+// mergeKey: (lowercased target, sorted ports) — differently-scoped rules
+// must not evict each other.
 func mergeKey(r policy.EgressRule) string {
-	if r.Target == "" {
-		return r.Target
+	key := strings.ToLower(r.Target)
+	if len(r.Ports) == 0 {
+		return key
 	}
-	return strings.ToLower(r.Target)
+	ports := append([]int(nil), r.Ports...)
+	sort.Ints(ports)
+	portStrs := make([]string, len(ports))
+	for i, port := range ports {
+		portStrs[i] = strconv.Itoa(port)
+	}
+	return key + "|ports=" + strings.Join(portStrs, ",")
 }
 
 func maxEgressRulesFromEnv() int {

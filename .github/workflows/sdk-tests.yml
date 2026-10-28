@@ -291,6 +291,18 @@ jobs:
             --results-directory TestResults \
             --collect:"XPlat Code Coverage"
 
+      # The transfer-deadline tests run a second time against the netstandard2.0 asset of the
+      # SDK, so the compile-time branches that only exist below .NET 5 are covered in CI.
+      - name: Run netstandard2.0 compatibility tests
+        if: matrix.package_name == 'sandbox'
+        working-directory: ${{ matrix.package_dir }}
+        run: |
+          dotnet test tests/OpenSandbox.NetStandardCompat.Tests/OpenSandbox.NetStandardCompat.Tests.csproj \
+            --configuration Release \
+            --no-build \
+            --logger "trx;LogFileName=netstandard2.0-results.trx" \
+            --results-directory TestResults
+
       - name: Upload C# reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -312,6 +324,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.20"
+          cache-dependency-path: sdks/sandbox/go/go.sum
 
       - name: Check gofmt
         working-directory: sdks/sandbox/go

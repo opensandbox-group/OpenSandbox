@@ -39,6 +39,7 @@ class SandboxError:
     TIMEOUT = "TIMEOUT"
     CONNECTION = "CONNECTION"
     RATE_LIMIT = "RATE_LIMIT"
+    WAKE_TIMEOUT = "WAKE_TIMEOUT"
 
     def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
@@ -146,6 +147,44 @@ class SandboxRateLimitException(SandboxApiException):
             is_retryable=is_retryable,
         )
         self.retry_after = retry_after
+
+
+class SandboxWakeTimeoutException(SandboxApiException):
+    """
+    Thrown when the OSEP-0024 wake retry budget is exhausted.
+
+    The gateway answered ``503`` with the ``OpenSandbox-Wake: expired``
+    marker on every attempt: the sandbox restore did not finish within
+    the wake retry policy's budget. The request was never forwarded, so
+    retrying later is safe — the server-side resume continues in the
+    background regardless.
+
+    ``attempts`` carries the number of marked wake-timeout responses
+    received; ``waited`` carries the total wall-clock time spent across
+    waits, retries, and request time.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        cause: Exception | None = None,
+        attempts: int = 0,
+        waited: timedelta | None = None,
+        error: SandboxError | None = None,
+        request_id: str | None = None,
+        response_body: bytes | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            status_code=503,
+            error=error or SandboxError(SandboxError.WAKE_TIMEOUT, message),
+            request_id=request_id,
+            response_body=response_body,
+            is_retryable=False,
+        )
+        self.attempts = attempts
+        self.waited = waited if waited is not None else timedelta(0)
 
 
 class SandboxInternalException(SandboxException):

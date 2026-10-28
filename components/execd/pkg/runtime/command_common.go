@@ -124,6 +124,18 @@ func removeCommandOutputFiles(paths ...string) {
 			continue
 		}
 		seen[path] = struct{}{}
+		// Truncate before unlinking: forked children may outlive the command
+		// while still holding the output fd, so the unlinked inode's data
+		// blocks would stay allocated (invisible "(deleted)" growth) until the
+		// last holder exits. Truncation releases them immediately, without
+		// needing to track or kill grandchildren. The helper never follows
+		// symlinks: a workload can swap the entry between a directory scan and
+		// this call, and a following truncate would zero an arbitrary file
+		// where the remove below would only unlink the link.
+		// See opensandbox-group/OpenSandbox#2291.
+		if err := truncateCommandOutputFile(path); err != nil && !os.IsNotExist(err) {
+			log.Warn("command output: truncate %s: %v", path, err)
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			log.Warn("command output: remove %s: %v", path, err)
 		}
@@ -238,9 +250,8 @@ func (c *Controller) StartCommandOutputJanitor(ctx context.Context) error {
 // commandOutputTail retains an unfinished line while reading only appended bytes.
 // Each stdout/stderr tail goroutine owns its own state.
 type commandOutputTail struct {
-	offset    int64
-	pending   bytes.Buffer
-	lastWasCR bool
+	offset  int64
+	pending bytes.Buffer
 }
 
 func (t *commandOutputTail) read(path string, onExecute func(string), flushIncomplete bool) {
@@ -265,23 +276,11 @@ func (t *commandOutputTail) read(path string, onExecute func(string), flushIncom
 			break
 		}
 		t.offset++
-
-		if b == '\n' || b == '\r' {
-			switch {
-			case t.pending.Len() > 0:
-				onExecute(t.pending.String())
-				t.pending.Reset()
-			case b == '\n' && t.lastWasCR:
-				// The preceding CR already emitted this line.
-			default:
-				onExecute("\n")
-			}
-			t.lastWasCR = b == '\r'
-			continue
-		}
-
-		t.lastWasCR = false
 		t.pending.WriteByte(b)
+		if b == '\n' || b == '\r' {
+			onExecute(t.pending.String())
+			t.pending.Reset()
+		}
 	}
 	// Reuse storage within a poll, but release completed long lines between polls.
 	if t.pending.Len() == 0 {

@@ -62,12 +62,7 @@ The sandbox transitions through both stable and intermediate states:
 
 The Lifecycle API exposes only the coarse-grained sandbox states above. For detailed snapshot progress, inspect the internal `SandboxSnapshot` resource:
 
-Pod termination can continue after the controller reports `Paused`. A resume request
-can be submitted during this interval; the controller waits for the old Pod to be
-removed before recreating its replacement. Pods with a deletion timestamp do not
-contribute new runtime failure conditions, including terminal exit statuses reported
-by Kubernetes during deletion. Failures already recorded on the sandbox remain
-terminal, and failures of replacement Pods are still reported normally.
+Pod termination can continue after the controller reports `Paused`. A resume request can be submitted during this interval; the controller waits for the old Pod to be removed before recreating its replacement. Pods with a deletion timestamp do not contribute new runtime failure conditions, including terminal exit statuses reported by Kubernetes during deletion. Failures already recorded on the sandbox remain terminal, and failures of replacement Pods are still reported normally.
 
 - `Pending`: snapshot request accepted, waiting to resolve source Pod / create commit Job
 - `Committing`: commit Job is running and pushing snapshot images
@@ -86,35 +81,17 @@ terminal, and failures of replacement Pods are still reported normally.
 
 Pause/resume is currently single-replica only. The internal pause snapshot records one source Pod's container images and does not store per-replica state, so the Kubernetes controller rejects pause requests unless `BatchSandbox.spec.replicas=1`.
 
-See [Credential Vault](/guides/credential-vault#persistence-across-pause-and-resume)
-for the required post-resume credential re-injection procedure.
+See [Credential Vault](/guides/credential-vault#persistence-across-pause-and-resume) for the required post-resume credential re-injection procedure.
 
 ### Durability and abnormal termination
 
-The root filesystem is durable only after the snapshot reaches `Succeed` and the
-OCI image has been pushed to the configured registry. A pause request being
-accepted, or a snapshot being in `Pending` or `Committing`, does not provide a
-durability guarantee.
+The root filesystem is durable only after the snapshot reaches `Succeed` and the OCI image has been pushed to the configured registry. A pause request being accepted, or a snapshot being in `Pending` or `Committing`, does not provide a durability guarantee.
 
-Changes made after the last successful snapshot remain in the container's
-writable layer. They are not automatically snapshotted when the process exits,
-the container is OOM-killed, the Pod enters `Failed`, the Pod is evicted, or the
-node becomes unavailable. The lifecycle API does not currently expose a
-post-failure snapshot or recovery operation, and a new container created by a
-Kubernetes restart does not inherit the old writable layer.
+Changes made after the last successful snapshot remain in the container's writable layer. They are not automatically snapshotted when the process exits, the container is OOM-killed, the Pod enters `Failed`, the Pod is evicted, or the node becomes unavailable. The lifecycle API does not currently expose a post-failure snapshot or recovery operation, and a new container created by a Kubernetes restart does not inherit the old writable layer.
 
-The image-committer can sometimes read a stopped container directly from
-containerd while its metadata and writable snapshot still exist on the source
-node. This is a best-effort operator recovery path, not a supported durability
-contract: the normal snapshot API requires a `Running` sandbox, and containerd
-or kubelet garbage collection, Pod replacement, node loss, or a reused
-container identity can make the old layer unavailable or ambiguous.
+The image-committer can sometimes read a stopped container directly from containerd while its metadata and writable snapshot still exist on the source node. This is a best-effort operator recovery path, not a supported durability contract: the normal snapshot API requires a `Running` sandbox, and containerd or kubelet garbage collection, Pod replacement, node loss, or a reused container identity can make the old layer unavailable or ambiguous.
 
-For data that must survive an unexpected termination, store it in a persistent
-volume or an external service and take explicit root filesystem snapshots for
-reproducible environment state. Files in mounted volumes follow the persistence
-and backup behavior of that volume; they are not included in the OCI rootfs
-snapshot.
+For data that must survive an unexpected termination, store it in a persistent volume or an external service and take explicit root filesystem snapshots for reproducible environment state. Files in mounted volumes follow the persistence and backup behavior of that volume; they are not included in the OCI rootfs snapshot.
 
 ---
 
@@ -279,8 +256,7 @@ curl -X POST http://localhost:8080/v1/sandboxes/{sandbox_id}/pause \
 
 **Response:** `202 Accepted` with an empty body.
 
-The pause is asynchronous. The sandbox transitions through:
-`running` → `pausing` → `paused`
+The pause is asynchronous. The sandbox transitions through: `running` → `pausing` → `paused`
 
 ### Check pause status
 
@@ -299,8 +275,7 @@ curl -X POST http://localhost:8080/v1/sandboxes/{sandbox_id}/resume \
 
 **Response:** `202 Accepted` with an empty body.
 
-The sandbox transitions through:
-`paused` → `resuming` → `running`
+The sandbox transitions through: `paused` → `resuming` → `running`
 
 ### Multiple pause/resume cycles
 
@@ -333,22 +308,16 @@ For example, with `--snapshot-registry=registry.example.com/sandboxes`, sandbox 
 registry.example.com/sandboxes/my-sandbox-sandbox:snap-gen1
 ```
 
-Server-managed public snapshots use the same repository layout but a stable
-snapshot-id-derived tag:
+Server-managed public snapshots use the same repository layout but a stable snapshot-id-derived tag:
 ```
 <snapshot-registry>/<sandboxName>-<containerName>:snap-<snapshotIdHex>
 ```
 
-The controller distinguishes the two modes by owner reference. Pause/resume
-snapshots are created by the `BatchSandbox` controller and have a controller
-ownerReference to the owning `BatchSandbox`; public snapshots are created by the
-Lifecycle server and do not use that ownerReference.
+The controller distinguishes the two modes by owner reference. Pause/resume snapshots are created by the `BatchSandbox` controller and have a controller ownerReference to the owning `BatchSandbox`; public snapshots are created by the Lifecycle server and do not use that ownerReference.
 
 #### Custom image names
 
-Set `--snapshot-image-uri-template` on the controller manager, or
-`controller.snapshot.imageURITemplate` in the controller Helm chart, to replace the
-naming rule. An empty value uses this Go `text/template`:
+Set `--snapshot-image-uri-template` on the controller manager, or `controller.snapshot.imageURITemplate` in the controller Helm chart, to replace the naming rule. An empty value uses this Go `text/template`:
 
 ```text
 {{.Registry}}/{{.SandboxName}}-{{.ContainerName}}:{{.SnapshotTag}}
@@ -377,8 +346,7 @@ controller:
     imageURITemplate: '{{.Registry}}/snapshots:{{.SnapshotUID}}-{{.ArtifactKind}}-{{.ContainerName}}'
 ```
 
-To group images by the snapshot creation date in the controller's local
-timezone while retaining the sandbox, container, and snapshot tag:
+To group images by the snapshot creation date in the controller's local timezone while retaining the sandbox, container, and snapshot tag:
 
 ```yaml
 controller:
@@ -387,8 +355,7 @@ controller:
     imageURITemplate: '{{.Registry}}/library/snapshots-{{date "2006-01-02" .SnapshotCreationTime}}:{{.SandboxName}}-{{.ContainerName}}-{{.SnapshotTag}}'
 ```
 
-The date functions follow Helm's names and argument order and accept a Go
-`time.Time`, such as `SnapshotCreationTime`:
+The date functions follow Helm's names and argument order and accept a Go `time.Time`, such as `SnapshotCreationTime`:
 
 ```text
 {{date "2006-01-02" .SnapshotCreationTime}}
@@ -397,73 +364,31 @@ The date functions follow Helm's names and argument order and accept a Go
 {{dateInZone "2006-01-02" .SnapshotCreationTime "America/New_York"}}
 ```
 
-`date` uses Go's `time.Local`. `dateInZone` accepts `Local` or an empty timezone
-for the same default, `UTC` or `Z`, a signed `HH:MM` offset (hours 00–23, minutes
-00–59), or an IANA `Area/Location` name. Fixed offsets such as `+05:30` do not
-change with daylight saving time; named zones follow the rules for the snapshot's
-creation instant. Unknown zones and malformed offsets fail template execution.
-These helpers reject a zero timestamp instead of substituting the current time.
+`date` uses Go's `time.Local`. `dateInZone` accepts `Local` or an empty timezone for the same default, `UTC` or `Z`, a signed `HH:MM` offset (hours 00–23, minutes 00–59), or an IANA `Area/Location` name. Fixed offsets such as `+05:30` do not change with daylight saving time; named zones follow the rules for the snapshot's creation instant. Unknown zones and malformed offsets fail template execution. These helpers reject a zero timestamp instead of substituting the current time.
 
-On Unix, the local timezone comes from `TZ`, or `/etc/localtime` when `TZ` is
-unset. In Kubernetes this is the controller container's timezone; set its `TZ`
-environment variable or provide its timezone files to select the intended local
-zone. The controller embeds timezone data for named zones when the OS has none.
+On Unix, the local timezone comes from `TZ`, or `/etc/localtime` when `TZ` is unset. In Kubernetes this is the controller container's timezone; set its `TZ` environment variable or provide its timezone files to select the intended local zone. The controller embeds timezone data for named zones when the OS has none.
 
-Formatting uses Go's standard layouts: `2006-01-02` for a date,
-`20060102-150405` for a compact timestamp, and `2006-01-02-15-04-05.000` for
-milliseconds. Java-style `yyyy-MM-dd` patterns are not supported. Layouts must
-produce a valid image reference in their template position: spaces, colons, or
-uppercase month names are unsuitable in a repository name and fail validation.
+Formatting uses Go's standard layouts: `2006-01-02` for a date, `20060102-150405` for a compact timestamp, and `2006-01-02-15-04-05.000` for milliseconds. Java-style `yyyy-MM-dd` patterns are not supported. Layouts must produce a valid image reference in their template position: spaces, colons, or uppercase month names are unsuitable in a repository name and fail validation.
 
-Native methods remain available: `.SnapshotCreationTime.Format "2006-01-02"`
-uses the local timezone, while `.SnapshotCreationTime.UTC.Format "2006-01-02"`
-selects UTC explicitly. Templates written for the earlier UTC-only field should
-select UTC explicitly to preserve their date when the controller's local zone is
-not UTC.
+Native methods remain available: `.SnapshotCreationTime.Format "2006-01-02"` uses the local timezone, while `.SnapshotCreationTime.UTC.Format "2006-01-02"` selects UTC explicitly. Templates written for the earlier UTC-only field should select UTC explicitly to preserve their date when the controller's local zone is not UTC.
 
-The source is always the snapshot creation timestamp, so retries after midnight
-keep the same date with the same timezone configuration. Existing commit Jobs
-retain their resolved targets when the template or timezone setting changes.
+The source is always the snapshot creation timestamp, so retries after midnight keep the same date with the same timezone configuration. Existing commit Jobs retain their resolved targets when the template or timezone setting changes.
 
-For the umbrella chart, nest these values under `opensandbox-controller`.
-Helm passes the template literally; it does not evaluate the Go template fields.
-For Kustomize or a direct Deployment, add an argument to the manager container:
+For the umbrella chart, nest these values under `opensandbox-controller`. Helm passes the template literally; it does not evaluate the Go template fields. For Kustomize or a direct Deployment, add an argument to the manager container:
 
 ```yaml
 - '--snapshot-image-uri-template={{.Registry}}/snapshots:{{.SnapshotUID}}-{{.ArtifactKind}}-{{.ContainerName}}'
 ```
 
-The controller renders the URI before creating the commit Job. The image
-committer pushes directly to that URI, and restore uses the recorded reference;
-there is no intermediate push or rename. QEMU rootfs and VM-state artifacts use
-the same template and original snapshot tag.
+The controller renders the URI before creating the commit Job. The image committer pushes directly to that URI, and restore uses the recorded reference; there is no intermediate push or rename. QEMU rootfs and VM-state artifacts use the same template and original snapshot tag.
 
-Templates must produce valid tagged OCI image references without a digest.
-Custom template results are normalized to fully qualified references before
-they are recorded and passed to the image committer: `snapshots:tag` becomes
-`docker.io/library/snapshots:tag`, and `team/snapshots:tag` becomes
-`docker.io/team/snapshots:tag`. Include an explicit registry host (a hostname
-containing a dot, a host with a port, or `localhost`) to target another registry.
-An empty template keeps the original naming rule and registry prefix unchanged.
-Names are not automatically sanitized or truncated. Include fields that keep
-artifacts and snapshots distinct; the controller rejects duplicate targets
-within a snapshot, but cannot detect collisions with other snapshots. Template
-syntax errors prevent controller startup; rendering errors, invalid references,
-and duplicate targets fail the snapshot before a commit Job is created.
-Changes apply when creating new commit Jobs; existing Jobs keep their resolved
-targets, and completed snapshots retain their recorded restore references.
+Templates must produce valid tagged OCI image references without a digest. Custom template results are normalized to fully qualified references before they are recorded and passed to the image committer: `snapshots:tag` becomes `docker.io/library/snapshots:tag`, and `team/snapshots:tag` becomes `docker.io/team/snapshots:tag`. Include an explicit registry host (a hostname containing a dot, a host with a port, or `localhost`) to target another registry. An empty template keeps the original naming rule and registry prefix unchanged. Names are not automatically sanitized or truncated. Include fields that keep artifacts and snapshots distinct; the controller rejects duplicate targets within a snapshot, but cannot detect collisions with other snapshots. Template syntax errors prevent controller startup; rendering errors, invalid references, and duplicate targets fail the snapshot before a commit Job is created. Changes apply when creating new commit Jobs; existing Jobs keep their resolved targets, and completed snapshots retain their recorded restore references.
 
 ### Runtime compatibility
 
-The built-in `rootfs-v1` image committer requires a container runtime that
-exposes compatible containerd task pause/resume and writable-snapshot APIs.
-gVisor RuntimeClasses whose handler is `runsc` do not currently satisfy that
-contract. The Lifecycle server rejects public snapshot creation for those
-workloads before it persists a snapshot record or creates a `SandboxSnapshot`
-resource, leaving the running sandbox untouched.
+The built-in `rootfs-v1` image committer requires a container runtime that exposes compatible containerd task pause/resume and writable-snapshot APIs. gVisor RuntimeClasses whose handler is `runsc` do not currently satisfy that contract. The Lifecycle server rejects public snapshot creation for those workloads before it persists a snapshot record or creates a `SandboxSnapshot` resource, leaving the running sandbox untouched.
 
-Native gVisor checkpoint/restore requires a dedicated snapshot backend and is
-not provided by the `rootfs-v1` committer.
+Native gVisor checkpoint/restore requires a dedicated snapshot backend and is not provided by the `rootfs-v1` committer.
 
 ### Commit Job
 
@@ -678,6 +603,4 @@ kubectl logs -n opensandbox-system deployment/opensandbox-controller-manager
 
 ## Measure resume latency
 
-See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an
-opt-in rootfs benchmark with raw samples, P50/P95, failure reporting, and explicit
-cache conditions.
+See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an opt-in rootfs benchmark with raw samples, P50/P95, failure reporting, and explicit cache conditions.

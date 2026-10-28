@@ -14,10 +14,38 @@
 # limitations under the License.
 #
 
+import httpx
+import pytest
+
 from opensandbox.adapters.command_adapter import CommandsAdapter
 from opensandbox.config import ConnectionConfig
+from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.models.sandboxes import SandboxEndpoint
-from opensandbox.transport import RetryAsyncTransport
+from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
+from opensandbox.transport import RetryAsyncTransport, RetryPolicy, RetrySyncTransport
+
+_SSE_BODY = (
+    b'data: {"type":"init","text":"exec-1","timestamp":1}\n\n'
+    b'data: {"type":"execution_complete","timestamp":2,"execution_time":1}\n\n'
+)
+
+
+def _wake_then_stream_handler(calls: list[str]):
+    """First /command answer is a gateway wake timeout, then the SSE stream."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if len(calls) == 1:
+            return httpx.Response(
+                503,
+                headers={"OpenSandbox-Wake": "expired", "Retry-After": "0"},
+                json={"code": "sandbox_wake_timeout", "message": "restore in progress"},
+            )
+        return httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"}, content=_SSE_BODY
+        )
+
+    return handler
 
 
 def test_sse_client_has_event_stream_headers_and_no_read_timeout() -> None:
@@ -31,21 +59,49 @@ def test_sse_client_has_event_stream_headers_and_no_read_timeout() -> None:
     assert sse_client.timeout.read is None
 
 
-def test_sse_client_bypasses_retry_wrapper() -> None:
+def test_sse_client_keeps_only_wake_retry() -> None:
     """
-    SSE bootstraps must not go through the retry wrapper: request bodies
-    are not replayable, and a caller that opts into non-idempotent
-    status retries would otherwise trigger duplicate execution.
+    SSE bootstraps must not go through the general retries: a caller that
+    opts into non-idempotent status retries would otherwise trigger
+    duplicate execution. The wake-timeout retry stays, since the gateway
+    never forwarded a request it answered with a wake timeout.
     """
     cfg = ConnectionConfig(protocol="http").with_transport_if_missing()
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapter(cfg, endpoint)
 
-    # Sanity: the normal client goes through the retry wrapper.
-    assert isinstance(adapter._httpx_client._transport, RetryAsyncTransport)
-    # SSE client's transport is the raw inner of the wrapper.
-    assert not isinstance(adapter._sse_client._transport, RetryAsyncTransport)
-    assert (
-        adapter._sse_client._transport
-        is adapter._httpx_client._transport.inner  # type: ignore[union-attr]
+    client_transport = adapter._httpx_client._transport
+    sse_transport = adapter._sse_client._transport
+    assert isinstance(client_transport, RetryAsyncTransport)
+    assert isinstance(sse_transport, RetryAsyncTransport)
+    assert sse_transport is not client_transport
+    assert sse_transport.inner is client_transport.inner
+
+
+@pytest.mark.asyncio
+async def test_run_retries_gateway_wake_timeout() -> None:
+    calls: list[str] = []
+    transport = RetryAsyncTransport(
+        httpx.MockTransport(_wake_then_stream_handler(calls)), RetryPolicy()
     )
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    adapter = CommandsAdapter(cfg, SandboxEndpoint(endpoint="localhost:44772"))
+
+    execution = await adapter.run("echo hi")
+
+    assert execution.id == "exec-1"
+    assert calls == ["/command", "/command"]
+
+
+def test_sync_run_retries_gateway_wake_timeout() -> None:
+    calls: list[str] = []
+    transport = RetrySyncTransport(
+        httpx.MockTransport(_wake_then_stream_handler(calls)), RetryPolicy()
+    )
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    adapter = CommandsAdapterSync(cfg, SandboxEndpoint(endpoint="localhost:44772"))
+
+    execution = adapter.run("echo hi")
+
+    assert execution.id == "exec-1"
+    assert calls == ["/command", "/command"]

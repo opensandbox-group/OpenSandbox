@@ -103,8 +103,8 @@ func BenchmarkCommandOutputGrowing1MiBLine(b *testing.B) {
 		if want := int64(appendCount*appendSize + 1); tail.offset != want {
 			b.Fatalf("final position = %d, want %d", tail.offset, want)
 		}
-		if lines != 1 || outputBytes != appendCount*appendSize {
-			b.Fatalf("output = %d lines/%d bytes, want 1 line/%d bytes", lines, outputBytes, appendCount*appendSize)
+		if lines != 1 || outputBytes != appendCount*appendSize+1 {
+			b.Fatalf("output = %d lines/%d bytes, want 1 line/%d bytes", lines, outputBytes, appendCount*appendSize+1)
 		}
 	}
 }
@@ -136,7 +136,7 @@ func BenchmarkCommandOutputShortLines100(b *testing.B) {
 	if pos != int64(len(content)) {
 		b.Fatalf("final position = %d, want %d", pos, len(content))
 	}
-	if lines != 100 || outputBytes != 100*len(line) {
-		b.Fatalf("output = %d lines/%d bytes, want 100 lines/%d bytes", lines, outputBytes, 100*len(line))
+	if lines != 100 || outputBytes != len(content) {
+		b.Fatalf("output = %d lines/%d bytes, want 100 lines/%d bytes", lines, outputBytes, len(content))
 	}
 }

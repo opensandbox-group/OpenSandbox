@@ -59,6 +59,18 @@ _DIM_COLUMNS = {"created_at", "expires_at", "modified_at", "updated_at"}
 _ID_COLUMNS = {"id", "sandbox_id", "execution_id", "context_id"}
 
 
+def _stdout_can_encode(text: str) -> bool:
+    """Return whether stdout can represent ``text`` without substitution."""
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding is None:
+        return True
+    try:
+        text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
+
 def _style_value(col: str, value: str) -> Text:
     """Apply contextual styling to a cell value."""
     lower = value.lower()
@@ -248,7 +260,15 @@ class OutputFormatter:
                 "PyYAML is not installed. Use --output json instead.", fg="red", err=True
             )
             sys.exit(1)
-        click.echo(yaml.dump(data, default_flow_style=False, allow_unicode=True).rstrip())
+        text = yaml.dump(data, default_flow_style=False, allow_unicode=True).rstrip()
+        if not _stdout_can_encode(text):
+            # Keep machine-readable output valid on limited code pages: escape
+            # non-ASCII into round-trippable sequences instead of letting the
+            # stream replace characters with "?".
+            text = yaml.dump(
+                data, default_flow_style=False, allow_unicode=False
+            ).rstrip()
+        click.echo(text)
 
     def _print_kv_table(self, data: dict[str, Any], *, title: str | None = None) -> None:
         table = Table(

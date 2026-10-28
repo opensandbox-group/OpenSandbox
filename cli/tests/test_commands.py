@@ -20,21 +20,26 @@ so the root ``cli`` callback creates our mock instead of a real SDK client.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import stat
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import websockets
 from click.testing import CliRunner
 from opensandbox.exceptions import SandboxApiException
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.execd import Execution, ExecutionComplete, ExecutionError
 from opensandbox.models.sandboxes import (
     PagedSnapshotInfos,
     PaginationInfo,
+    SandboxEndpoint,
     SandboxImageSpec,
     SnapshotInfo,
     SnapshotStatus,
@@ -46,6 +51,8 @@ from opensandbox.models.templates import (
     TemplateStatus,
 )
 
+from opensandbox_cli.commands.terminal import _make_stdin_reader, stream_pty
+from opensandbox_cli.config import load_config_file
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
 
@@ -138,6 +145,19 @@ class TestConfigShow:
         assert data["config_path"].endswith(".opensandbox/config.toml")
         assert "config_file_exists" in data
 
+    def test_show_masks_numeric_api_key_from_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\napi_key = 1234567890\n")
+        result = runner.invoke(
+            cli, ["--config", str(cfg_path), "config", "show", "-o", "json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        # A numeric-looking key is still a string, so it is masked and not dropped.
+        assert data["api_key"] == "12******90"
+
     def test_show_table_output(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--api-key", "test-key", "config", "show"])
         assert result.exit_code == 0
@@ -183,6 +203,144 @@ class TestConfigSet:
         )
         assert result.exit_code != 0
         assert "Run 'osb config init' first." in result.output
+
+    def test_set_escapes_special_characters(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", 'a"b\\c'],
+        )
+
+        assert result.exit_code == 0
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["domain"] == 'a"b\\c'
+
+    def test_set_preserves_comments_and_unrelated_sections(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            "# top comment\n"
+            "[connection]\n"
+            "# keep this note\n"
+            'api_key = "k"\n\n'
+            "[output]\n"
+            "color = true\n"
+        )
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code == 0
+        text = cfg_path.read_text()
+        assert "# top comment" in text
+        assert "# keep this note" in text
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["api_key"] == "k"
+        assert parsed["connection"]["domain"] == "team.host"
+        assert parsed["output"]["color"] is True
+
+    def test_set_creates_missing_section(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "defaults.image", "python:3.12"],
+        )
+
+        assert result.exit_code == 0
+        parsed = load_config_file(cfg_path)
+        assert parsed["defaults"]["image"] == "python:3.12"
+
+    def test_set_infers_scalar_types(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.request_timeout", "45"],
+        )
+        runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.use_server_proxy", "true"],
+        )
+
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["request_timeout"] == 45
+        assert parsed["connection"]["use_server_proxy"] is True
+
+    def test_set_reports_invalid_existing_toml(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection\nbroken =")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code != 0
+        assert "not valid TOML" in result.output
+
+    def test_set_rejects_nested_key(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.retry.count", "3"],
+        )
+
+        assert result.exit_code != 0
+        assert "section.field" in result.output
+        # The value must not be silently misfiled as a quoted literal key.
+        assert load_config_file(cfg_path) == {"connection": {}}
+
+    def test_set_handles_out_of_order_tables(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            "[connection]\n"
+            'domain = "old"\n\n'
+            "[output]\n"
+            "color = true\n\n"
+            "[connection.retry]\n"
+            "count = 3\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code == 0
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["domain"] == "team.host"
+        assert parsed["connection"]["retry"]["count"] == 3
+        assert parsed["output"]["color"] is True
+
+    def test_set_preserves_non_ascii_config(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            "# café comment\n[connection]\ndomain = \"old\"\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code == 0
+        # Reads and writes must stay UTF-8 regardless of the platform locale.
+        assert "café comment" in cfg_path.read_text(encoding="utf-8")
+        assert load_config_file(cfg_path)["connection"]["domain"] == "team.host"
 
 
 # Sandbox commands
@@ -1145,8 +1303,8 @@ class TestSandboxKill:
         assert mock_mgr.kill_sandbox.call_count == 2
         data = json.loads(result.output)
         assert data == [
-            {"sandbox_id": "id1", "status": "terminated"},
-            {"sandbox_id": "id2", "status": "terminated"},
+            {"sandbox_id": "id1", "status": "deletion_requested"},
+            {"sandbox_id": "id2", "status": "deletion_requested"},
         ]
 
 
@@ -2290,6 +2448,19 @@ class TestDevopsCommands:
 
 
 class TestDiagnosticsCommands:
+    def test_context_prints_structured_backend(self, runner: CliRunner) -> None:
+        manager = MagicMock()
+        manager.get_diagnostic_context.return_value = DiagnosticContext(
+            sandboxId="sb-1", backendType="kubernetes",
+            backendIdentifiers={"namespace": "tenant-ns"}, state="Pending",
+        )
+        result = _invoke(
+            runner, ["diagnostics", "context", "sb-1", "-o", "json"], manager=manager,
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["backend_identifiers"] == {"namespace": "tenant-ns"}
+        manager.get_diagnostic_context.assert_called_once_with("sb-1")
+
     def test_logs_raw_prints_inline_content(self, runner: CliRunner) -> None:
         manager = MagicMock()
         manager.get_diagnostic_logs.return_value = DiagnosticContent(
@@ -2386,3 +2557,287 @@ class TestDiagnosticsCommands:
 
         assert result.exit_code == 0
         assert result.output.strip() == "https://example.com/logs.txt"
+
+
+class _FakePTYWebSocket:
+    """Minimal stand-in for a websockets client connection."""
+
+    def __init__(self, incoming: list) -> None:
+        self._incoming = list(incoming)
+        self.sent: list = []
+
+    async def __aenter__(self) -> _FakePTYWebSocket:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+    def __aiter__(self) -> _FakePTYWebSocket:
+        return self
+
+    async def __anext__(self) -> object:
+        if not self._incoming:
+            raise StopAsyncIteration
+        return self._incoming.pop(0)
+
+    async def send(self, data: object) -> None:
+        self.sent.append(data)
+
+
+def _replay_frame(payload: bytes, offset: int = 0) -> bytes:
+    return b"\x03" + offset.to_bytes(8, "big") + payload
+
+
+def _invoke_terminal(
+    runner: CliRunner,
+    args: list[str],
+    *,
+    incoming: list,
+    stdin_chunks: list[bytes] | None = None,
+):
+    """Run `osb terminal` with the execd PTY boundary fully mocked.
+
+    Returns (result, fake_ws, create_mock, delete_mock, connect_calls, stdout).
+    """
+    sandbox = MagicMock()
+    sandbox.get_endpoint.return_value = SandboxEndpoint(
+        endpoint="execd.example:44772"
+    )
+    mock_ctx = _build_mock_client_context(sandbox=sandbox)
+    connection = mock_ctx.connection_config
+    connection.user_agent = "osb-test"
+    connection.headers = {}
+    connection.use_server_proxy = False
+    connection.protocol = "http"
+    connection.get_api_key.return_value = ""
+
+    ws = _FakePTYWebSocket(incoming)
+    stdout = bytearray()
+    connect_calls: list = []
+    chunks = list(stdin_chunks or [])
+
+    async def fake_stdin_read() -> bytes:
+        if chunks:
+            return chunks.pop(0)
+        return b""
+
+    def fake_connect(url: str, additional_headers: dict | None = None):
+        connect_calls.append((url, additional_headers))
+        return ws
+
+    with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
+         patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
+         patch("opensandbox_cli.commands.terminal._require_posix_tty"), \
+         patch(
+             "opensandbox_cli.commands.terminal._posix_tty_io",
+             return_value=(fake_stdin_read, stdout.extend, lambda: (80, 24), 0),
+         ), \
+         patch(
+             "opensandbox_cli.commands.terminal._raw_mode",
+             return_value=nullcontext(),
+         ), \
+         patch(
+             "opensandbox_cli.commands.terminal._create_pty_session",
+             return_value="sess-1",
+         ) as create, \
+         patch("opensandbox_cli.commands.terminal._delete_pty_session") as delete, \
+         patch(
+             "opensandbox_cli.commands.terminal.websockets.connect",
+             side_effect=fake_connect,
+         ):
+        mock_resolve.return_value = mock_ctx.resolved_config
+        result = runner.invoke(cli, args, catch_exceptions=False)
+    return result, ws, create, delete, connect_calls, stdout
+
+
+class TestTerminal:
+    def test_renders_output_sends_stdin_and_exits_with_remote_code(
+        self, runner: CliRunner
+    ) -> None:
+        incoming = [
+            '{"type":"connected","mode":"pty","role":"holder"}',
+            b"\x01hello",
+            _replay_frame(b" world"),
+            '{"type":"exit","exit_code":7}',
+        ]
+
+        result, ws, create, delete, connect_calls, stdout = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=incoming,
+            stdin_chunks=[b"echo hi\n"],
+        )
+
+        assert result.exit_code == 7
+        assert bytes(stdout) == b"hello world"
+        assert json.loads(ws.sent[0]) == {"type": "resize", "cols": 80, "rows": 24}
+        assert ws.sent[1] == b"\x00echo hi\n"
+        create.assert_called_once()
+        assert create.call_args.args[0] == "http://execd.example:44772"
+        assert create.call_args.kwargs["workdir"] is None
+        assert connect_calls == [
+            ("ws://execd.example:44772/pty/sess-1/ws", {"User-Agent": "osb-test"})
+        ]
+        assert delete.call_args.args[2] == "sess-1"
+
+    def test_workdir_is_forwarded_to_session_creation(
+        self, runner: CliRunner
+    ) -> None:
+        incoming = ['{"type":"exit","exit_code":0}']
+
+        result, _, create, _, _, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1", "-w", "/tmp"],
+            incoming=incoming,
+        )
+
+        assert result.exit_code == 0
+        assert create.call_args.kwargs["workdir"] == "/tmp"
+
+    def test_closed_without_exit_frame_fails_and_keeps_session(
+        self, runner: CliRunner
+    ) -> None:
+        incoming = ['{"type":"connected","mode":"pty","role":"holder"}']
+
+        result, _, _, delete, _, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=incoming,
+        )
+
+        assert result.exit_code == 1
+        assert "kept on the sandbox: sess-1" in result.stderr
+        assert "DELETE http://execd.example:44772/pty/sess-1" in result.stderr
+        delete.assert_not_called()
+
+    def test_startup_failure_deletes_session_and_reports_error(
+        self, runner: CliRunner
+    ) -> None:
+        incoming = ['{"type":"error","code":"START_FAILED","error":"no such dir"}']
+
+        result, _, _, delete, _, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=incoming,
+        )
+
+        assert result.exit_code == 1
+        assert "Shell startup failed" in result.stderr
+        assert "no such dir" in result.stderr
+        assert delete.call_args.args[2] == "sess-1"
+
+    def test_server_error_frames_are_reported_on_stderr(
+        self, runner: CliRunner
+    ) -> None:
+        incoming = [
+            '{"type":"error","code":"STDIN_WRITE_FAILED","error":"boom"}',
+            '{"type":"exit","exit_code":0}',
+        ]
+
+        result, _, _, _, _, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=incoming,
+        )
+
+        assert result.exit_code == 0
+        assert "boom" in result.stderr
+
+
+class TestStdinReader:
+    def test_reads_data_and_cancels_promptly_without_reader_left_registered(
+        self,
+    ) -> None:
+        async def scenario() -> bytes:
+            read_fd, write_fd = os.pipe()
+            try:
+                stdin_read = _make_stdin_reader(read_fd)
+
+                # With nothing written, cancellation must complete promptly
+                # (a blocking worker thread would hang here instead).
+                task = asyncio.create_task(stdin_read())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=2)
+
+                os.write(write_fd, b"hi")
+                return await asyncio.wait_for(stdin_read(), timeout=2)
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
+
+        assert asyncio.run(scenario()) == b"hi"
+
+
+class TestStreamPTY:
+    def test_abnormal_close_preserves_collected_error_frames(self) -> None:
+        class _AbnormalCloseWS(_FakePTYWebSocket):
+            async def __anext__(self) -> object:
+                try:
+                    return await super().__anext__()
+                except StopAsyncIteration:
+                    # execd closes without a WebSocket close frame on startup
+                    # failure; the error frame must not be lost.
+                    raise websockets.ConnectionClosedError(None, None) from None
+
+        async def scenario():
+            ws = _AbnormalCloseWS(
+                [
+                    '{"type":"error","code":"START_FAILED","error":"no such dir"}',
+                    b"\x01partial",
+                ]
+            )
+
+            async def stdin_read() -> bytes:
+                return b""
+
+            chunks = bytearray()
+            streamed = bytearray()
+            result = await stream_pty(
+                ws,
+                stdin_read=stdin_read,
+                stdout_write=chunks.extend,
+                error_write=streamed.extend,
+            )
+            return result, bytes(chunks), bytes(streamed)
+
+        (exit_code, errors), written, streamed = asyncio.run(scenario())
+        assert (exit_code, errors) == (None, ["no such dir"])
+        assert written == b"partial"
+        assert streamed == b"no such dir\r\n"
+
+    def test_error_frames_are_collected_and_exit_code_returned(self) -> None:
+        async def scenario() -> tuple[int | None, list[str]]:
+            ws = _FakePTYWebSocket(
+                [
+                    b"\x01out",
+                    '{"type":"error","error":"boom"}',
+                    '{"type":"exit","exit_code":3}',
+                ]
+            )
+
+            async def stdin_read() -> bytes:
+                return b""
+
+            chunks = bytearray()
+            return await stream_pty(
+                ws, stdin_read=stdin_read, stdout_write=chunks.extend
+            ), bytes(chunks)
+
+        (exit_code, errors), written = asyncio.run(scenario())
+        assert (exit_code, errors) == (3, ["boom"])
+        assert written == b"out"
+
+    def test_replay_frames_skip_offset_and_still_render(self) -> None:
+        async def scenario() -> bytes:
+            ws = _FakePTYWebSocket([_replay_frame(b"scrollback", offset=42)])
+
+            async def stdin_read() -> bytes:
+                return b""
+
+            chunks = bytearray()
+            await stream_pty(ws, stdin_read=stdin_read, stdout_write=chunks.extend)
+            return bytes(chunks)
+
+        assert asyncio.run(scenario()) == b"scrollback"

@@ -53,6 +53,23 @@ class DiagnosticsAdapterTest {
     }
 
     @Test
+    fun `getContext parses backend identifiers without state`() {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"sandboxId":"sbx-1","backendType":"kubernetes","backendIdentifiers":{"namespace":"tenant-ns"}}""",
+            ),
+        )
+        val result = diagnosticsAdapter.getContext("sbx-1")
+        val request = mockWebServer.takeRequest()
+        assertEquals("/v1/sandboxes/sbx-1/diagnostics/context", request.path)
+        assertEquals("test-api-key", request.getHeader("OPEN-SANDBOX-API-KEY"))
+        assertEquals("application/json", request.getHeader("Accept"))
+        assertEquals("kubernetes", result.backendType)
+        assertEquals(mapOf("namespace" to "tenant-ns"), result.backendIdentifiers)
+        assertEquals(null, result.state)
+    }
+
+    @Test
     fun `getLogs should send scoped request and parse response`() {
         mockWebServer.enqueue(
             MockResponse()

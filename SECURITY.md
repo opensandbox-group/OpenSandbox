@@ -6,12 +6,9 @@ The OpenSandbox team takes security seriously. If you discover a security vulner
 
 ### How to Report
 
-- **GitHub Private Vulnerability Reporting**: Open a
-  [private security advisory](https://github.com/opensandbox-group/OpenSandbox/security/advisories/new)
+- **GitHub Private Vulnerability Reporting**: Open a [private security advisory](https://github.com/opensandbox-group/OpenSandbox/security/advisories/new)
 
-Do not report vulnerabilities in a public issue or to the Code of Conduct
-reporting address. The `conduct@opensandbox.io` address is only for community
-conduct reports.
+Do not report vulnerabilities in a public issue or to the Code of Conduct reporting address. The `conduct@opensandbox.io` address is only for community conduct reports.
 
 ### What to Include
 
@@ -33,10 +30,7 @@ Only the latest release and main branch are actively supported with security upd
 
 ## Release Signatures
 
-OpenSandbox signs public release outputs with GitHub/Sigstore attestations,
-cosign keyless container signatures, and Maven Central package signatures where
-applicable. See [Release Verification](docs/community/release-verification.md) for the
-trusted signer identities and verification commands.
+OpenSandbox signs public release outputs with GitHub/Sigstore attestations, cosign keyless container signatures, and Maven Central package signatures where applicable. See [Release Verification](docs/community/release-verification.md) for the trusted signer identities and verification commands.
 
 ## Security Best Practices
 
@@ -48,8 +42,7 @@ When deploying OpenSandbox:
 
 ## Cryptographic Key Length Policy
 
-OpenSandbox TLS defaults are aligned with OpenSSF `crypto_keylength` guidance
-(NIST minimum strength through year 2030, as stated in 2012):
+OpenSandbox TLS defaults are aligned with OpenSSF `crypto_keylength` guidance (NIST minimum strength through year 2030, as stated in 2012):
 
 - symmetric key: at least 112 bits
 - factoring modulus (RSA): at least 2048 bits

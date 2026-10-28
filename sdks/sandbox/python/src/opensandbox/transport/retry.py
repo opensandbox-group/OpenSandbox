@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from enum import Enum
 from http import HTTPStatus
@@ -27,6 +27,17 @@ from http import HTTPStatus
 _IDEMPOTENT_METHODS: frozenset[str] = frozenset(
     {"GET", "HEAD", "PUT", "DELETE", "OPTIONS"}
 )
+
+# OSEP-0024 wake-timeout marker. The gateway strips this header from every
+# upstream response, so its presence on a 503 proves gateway origin: the
+# request was parked and never forwarded, which is what makes any-method
+# retry safe.
+WAKE_MARKER_HEADER = "OpenSandbox-Wake"
+WAKE_MARKER_VALUE = "expired"
+
+# The gateway emits ``Retry-After: 1`` on wake-timeout responses. Used as
+# the fallback wait when a marked response arrives without the header.
+WAKE_DEFAULT_RETRY_AFTER = timedelta(seconds=1)
 
 
 def is_idempotent_method(method: str) -> bool:
@@ -57,6 +68,8 @@ class RetryCause(str, Enum):
     STATUS_503 = "status_503"
     STATUS_504 = "status_504"
     STATUS_OTHER = "status_other"
+    WAKE_TIMEOUT = "wake_timeout"
+    """Gateway wake-timeout marker on a 503 (OSEP-0024)."""
 
     @classmethod
     def for_status(cls, status_code: int) -> RetryCause:
@@ -117,7 +130,10 @@ class RetryPolicy:
     """
 
     max_retries: int = 3
-    """Retries after the initial attempt. ``0`` disables retry."""
+    """
+    Retries after the initial attempt. ``0`` disables general retry;
+    wake-timeout retries are governed separately by ``wake_retry_enabled``.
+    """
 
     initial_backoff: timedelta = timedelta(milliseconds=500)
     max_backoff: timedelta = timedelta(seconds=30)
@@ -139,10 +155,46 @@ class RetryPolicy:
     on_retry: Callable[[RetryEvent], None] | None = None
     """Non-blocking hook fired synchronously before each backoff sleep."""
 
+    wake_retry_enabled: bool = True
+    """
+    Auto-retry gateway wake-timeout responses (OSEP-0024): a ``503``
+    carrying the ``OpenSandbox-Wake: expired`` marker proves the request
+    was never forwarded, so the original request is resent for any method
+    after waiting per ``Retry-After`` — provided the body is replayable.
+    Bare ``503`` responses are never affected by this knob.
+    """
+
+    wake_overall_deadline: timedelta | None = timedelta(seconds=60)
+    """
+    Wall-clock cap spanning all wake cycles of one logical request:
+    waits, retries, and request time. Wake retries never reset it; a
+    next ``Retry-After`` that does not fit the remaining budget ends
+    the wake retry with a typed ``SandboxWakeTimeoutException``.
+    ``None`` removes the time bound (attempt count still applies).
+    """
+
+    wake_max_attempts: int = 5
+    """
+    Maximum wake-timeout responses (marked ``503``) consumed before the
+    wake retry gives up and raises ``SandboxWakeTimeoutException``.
+    """
+
     @classmethod
     def disabled(cls) -> RetryPolicy:
-        """Never retry. Also suppresses fresh-connection recovery."""
-        return cls(max_retries=0)
+        """Never retry. Also suppresses fresh-connection recovery and wake retry."""
+        return cls(max_retries=0, wake_retry_enabled=False)
+
+    def wake_only(self) -> RetryPolicy:
+        """
+        This policy with only the wake-timeout retry left.
+
+        Used for streaming (SSE) requests. They run commands, so they must
+        not be resent after a status code or a post-send failure, but a
+        marked wake timeout proves the gateway never forwarded the request.
+        """
+        return replace(
+            self, max_retries=0, per_attempt_timeout=None, overall_deadline=None
+        )
 
     def wraps_transport(self) -> bool:
         """
@@ -150,10 +202,12 @@ class RetryPolicy:
 
         Even ``max_retries == 0`` needs the wrapper when the caller uses
         it purely to enforce ``per_attempt_timeout`` or
-        ``overall_deadline`` on a single attempt.
+        ``overall_deadline`` on a single attempt, or to keep the
+        wake-timeout retry contract active.
         """
         return (
             self.max_retries > 0
+            or self.wake_retry_enabled
             or self.per_attempt_timeout is not None
             or self.overall_deadline is not None
             or self.on_retry is not None
@@ -194,6 +248,18 @@ class RetryPolicy:
         ):
             raise ValueError(
                 f"overall_deadline must be > 0 when set, got {self.overall_deadline!r}"
+            )
+        if (
+            self.wake_overall_deadline is not None
+            and self.wake_overall_deadline.total_seconds() <= 0
+        ):
+            raise ValueError(
+                "wake_overall_deadline must be > 0 when set, got "
+                f"{self.wake_overall_deadline!r}"
+            )
+        if self.wake_max_attempts < 1:
+            raise ValueError(
+                f"wake_max_attempts must be >= 1, got {self.wake_max_attempts!r}"
             )
         # Normalize so callers can pass a plain ``set`` or ``tuple``.
         object.__setattr__(

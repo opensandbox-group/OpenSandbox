@@ -20,7 +20,11 @@ from __future__ import annotations
 import httpx
 
 from opensandbox.transport._decision import Outcome
-from opensandbox.transport.retry import RetryCause
+from opensandbox.transport.retry import (
+    WAKE_MARKER_HEADER,
+    WAKE_MARKER_VALUE,
+    RetryCause,
+)
 
 
 def classify_transport_exception(exc: BaseException) -> Outcome:
@@ -61,6 +65,23 @@ def outcome_for_response(response: httpx.Response) -> Outcome:
         is_transport_error=False,
         status_code=response.status_code,
         cause=RetryCause.for_status(response.status_code),
+    )
+
+
+def is_wake_timeout_response(response: httpx.Response) -> bool:
+    """
+    Whether ``response`` is the OSEP-0024 wake-timeout answer.
+
+    Recognition is header-only on a 503: the gateway strips
+    ``OpenSandbox-Wake`` from every upstream response, so a matching
+    marker proves the gateway parked the request and never forwarded
+    it. The JSON ``code`` in the body is documentation for humans, not
+    a recognition signal — a forged body without the header follows the
+    SDK's existing (bare 503) retry rules untouched.
+    """
+    return (
+        response.status_code == 503
+        and response.headers.get(WAKE_MARKER_HEADER) == WAKE_MARKER_VALUE
     )
 
 

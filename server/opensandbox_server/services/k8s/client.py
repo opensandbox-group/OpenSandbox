@@ -354,6 +354,7 @@ class K8sClient:
         plural: str,
         name: str,
         grace_period_seconds: int = 0,
+        propagation_policy: Optional[str] = None,
     ) -> None:
         """Delete a namespaced custom resource."""
         if self._write_limiter:
@@ -365,6 +366,7 @@ class K8sClient:
             plural=plural,
             name=name,
             grace_period_seconds=grace_period_seconds,
+            propagation_policy=propagation_policy,
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:

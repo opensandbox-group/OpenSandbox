@@ -18,6 +18,7 @@ export type SandboxErrorCode =
   | "UNHEALTHY"
   | "INVALID_ARGUMENT"
   | "UNEXPECTED_RESPONSE"
+  | "WAKE_TIMEOUT"
   | "POOL_EMPTY"
   | "POOL_ACQUIRE_FAILED"
   | "POOL_NOT_RUNNING"
@@ -39,6 +40,7 @@ export class SandboxError {
   static readonly UNHEALTHY: SandboxErrorCode = "UNHEALTHY";
   static readonly INVALID_ARGUMENT: SandboxErrorCode = "INVALID_ARGUMENT";
   static readonly UNEXPECTED_RESPONSE: SandboxErrorCode = "UNEXPECTED_RESPONSE";
+  static readonly WAKE_TIMEOUT: SandboxErrorCode = "WAKE_TIMEOUT";
   static readonly POOL_EMPTY: SandboxErrorCode = "POOL_EMPTY";
   static readonly POOL_ACQUIRE_FAILED: SandboxErrorCode = "POOL_ACQUIRE_FAILED";
   static readonly POOL_NOT_RUNNING: SandboxErrorCode = "POOL_NOT_RUNNING";
@@ -131,6 +133,44 @@ export class SandboxReadyTimeoutException extends SandboxException {
       cause: opts.cause,
       error: new SandboxError(SandboxError.READY_TIMEOUT, opts.message),
     });
+  }
+}
+
+/**
+ * Thrown when the OSEP-0024 wake retry budget is exhausted.
+ *
+ * The gateway answered `503` with the `OpenSandbox-Wake: expired` marker on
+ * every attempt: the sandbox restore did not finish within the wake retry
+ * policy's budget. The request was never forwarded, so retrying later is
+ * safe — the server-side resume continues in the background regardless.
+ *
+ * `attempts` carries the number of marked wake-timeout responses received;
+ * `waitedMs` carries the total wall-clock time spent across waits, retries,
+ * and request time.
+ */
+export class SandboxWakeTimeoutException extends SandboxApiException {
+  readonly name: string = "SandboxWakeTimeoutException";
+  readonly attempts: number;
+  readonly waitedMs: number;
+
+  constructor(opts: {
+    message?: string;
+    cause?: unknown;
+    attempts?: number;
+    waitedMs?: number;
+    requestId?: string;
+    rawBody?: unknown;
+  }) {
+    super({
+      message: opts.message,
+      cause: opts.cause,
+      statusCode: 503,
+      error: new SandboxError(SandboxError.WAKE_TIMEOUT, opts.message),
+      requestId: opts.requestId,
+      rawBody: opts.rawBody,
+    });
+    this.attempts = opts.attempts ?? 0;
+    this.waitedMs = opts.waitedMs ?? 0;
   }
 }
 

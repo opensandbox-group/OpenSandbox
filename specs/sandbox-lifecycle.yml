@@ -59,11 +59,10 @@ paths:
       operationId: getSandboxNetworkPolicy
       summary: Read sandbox network policy
       description: |
-        For Fsb, reads persisted egress Action Binding intent in the tenant's
-        Sandbox CR, not live enforcement state. An absent binding defaults to
-        deny-first when an egress handler is configured; this is not proof of
-        enforcement on a pool without that handler. Other backends proxy the
-        sandbox-side egress service. Requires lifecycle API authentication.
+        Fsb reads the egress-held policy record — the response reflects
+        exactly what the egress enforces, not the create-time binding input.
+        Other backends proxy the sandbox-side egress service. Requires
+        lifecycle API authentication.
       responses:
         '200':
           description: Policy intent (Fsb) or sidecar policy (other backends).
@@ -80,6 +79,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -94,9 +95,12 @@ paths:
       summary: Replace the complete sandbox network policy
       description: |
         Replaces defaultAction and all rules, rather than merging them. Fsb
-        commits the egress binding through FastPath, preserving unrelated bindings
-        with UID/generation conflict protection. Success does not imply handler
-        convergence. Other backends proxy the sandbox-side egress service.
+        relays the replacement to the egress-held policy record through the
+        FastPath handler relay — the ack means the egress applied it (and, with
+        policy persistence, that it is durable). The create-time binding input
+        is the bootstrap only; runtime changes never rewrite it, and a paused
+        (sealed) sandbox rejects mutations until resume. Other backends proxy
+        the sandbox-side egress service.
       requestBody:
         required: true
         content:
@@ -141,9 +145,10 @@ paths:
         take priority over existing rules with the same target and replace
         them in place; within one patch payload, the first rule for a target
         wins; existing rules for other targets and the current defaultAction
-        are preserved. Fsb commits the merged binding through FastPath with
-        UID/generation conflict protection. Other backends proxy the
-        sandbox-side egress service.
+        are preserved. Fsb composes the merge server-side (relay GET → merge
+        → relay PUT carrying the read revision) — a concurrent writer wins
+        and the stale merge is a 409. Other backends proxy the sandbox-side
+        egress service.
       requestBody:
         required: true
         content:
@@ -221,6 +226,325 @@ paths:
           $ref: '#/components/responses/InternalServerError'
         '503':
           description: FastPath or policy state is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+    post:
+      tags: [Sandboxes]
+      operationId: createSandboxCredentialVault
+      summary: Create the sandbox Credential Vault
+      description: |
+        Creates the initial Credential Vault revision and activates it for
+        credential injection. Inline credential values are write-only and are
+        never returned by any read. Credential Vault requires a network
+        policy; `defaultAction: deny` is strongly recommended.
+
+        For Fsb the server relays the revision to the egress-held vault over
+        the FastPath handler relay; the relay response is the synchronous
+        egress-validated ack, so success means the sandbox has loaded the
+        revision (create-only: 409 when a vault already exists, atomic across
+        server replicas). Other backends proxy the sandbox-side egress
+        service with sidecar semantics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialVaultCreateRequest'
+      responses:
+        '201':
+          description: Credential Vault created and acknowledged (sanitized state).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      tags: [Sandboxes]
+      operationId: getSandboxCredentialVault
+      summary: Read sanitized sandbox Credential Vault state
+      description: |
+        Returns the sanitized Credential Vault state: credential names,
+        source types, binding metadata and the current revision. Credential
+        values are never returned on any read surface. Readback after a lost
+        mutation ack resolves the current revision (retry anchor for 412).
+        Other backends proxy the sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized Credential Vault state.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      tags: [Sandboxes]
+      operationId: patchSandboxCredentialVault
+      summary: Atomically mutate sandbox credentials and bindings
+      description: |
+        Applies one atomic mutation set: `delete` first, then `replace`, then
+        `add` (per set). Every mentioned name must resolve exactly once —
+        `add` requires the name to be absent; `replace` and `delete` require
+        it to exist. `expectedRevision`, when provided, must match the
+        current revision (412 otherwise).
+
+        For Fsb the merge is composed server-side (relay read → in-memory
+        merge → relay replace) and validated by the egress vault; a rejected
+        mutation never leaves a partially applied revision (last-good kept).
+        Other backends proxy the sandbox-side egress service. On 412, re-read
+        the state and retry with the fresh revision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialVaultMutationRequest'
+      responses:
+        '200':
+          description: Mutation applied and acknowledged (sanitized state).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags: [Sandboxes]
+      operationId: deleteSandboxCredentialVault
+      summary: Delete the sandbox Credential Vault
+      description: |
+        Removes all credentials and bindings; the network policy is kept.
+        Other backends proxy the sandbox-side egress service.
+      responses:
+        '204':
+          description: Credential Vault deleted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/credentials:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+    get:
+      tags: [Sandboxes]
+      operationId: listSandboxCredentialVaultCredentials
+      summary: List sanitized credential metadata
+      description: |
+        Returns sanitized credential metadata (names, source types,
+        per-record revisions); values are never returned. Other backends
+        proxy the sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized credential metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/credentials/{credentialName}:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+      - name: credentialName
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Credential name
+    get:
+      tags: [Sandboxes]
+      operationId: getSandboxCredentialVaultCredential
+      summary: Get sanitized metadata for one credential
+      description: |
+        Returns sanitized metadata for a single credential; values are never
+        returned. Other backends proxy the sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized credential metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialMetadata'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/bindings:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+    get:
+      tags: [Sandboxes]
+      operationId: listSandboxCredentialVaultBindings
+      summary: List sanitized credential binding metadata
+      description: |
+        Returns sanitized credential binding metadata (matchers and auth
+        shapes without credential values). Other backends proxy the
+        sandbox-side egress service.
+      responses:
+        '200':
+          description: Sanitized binding metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBindingListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /sandboxes/{sandboxId}/credential-vault/bindings/{bindingName}:
+    parameters:
+      - $ref: '#/components/parameters/SandboxId'
+      - name: bindingName
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Credential binding name
+    get:
+      tags: [Sandboxes]
+      operationId: getSandboxCredentialVaultBinding
+      summary: Get sanitized metadata for one binding
+      description: |
+        Returns sanitized metadata for a single credential binding; values
+        are never returned. Other backends proxy the sandbox-side egress
+        service.
+      responses:
+        '200':
+          description: Sanitized binding metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBindingMetadata'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: The vault backend is temporarily unavailable.
           content:
             application/json:
               schema:
@@ -440,6 +764,21 @@ paths:
                         schedule: "*/5 * * * *"
                         command: ["/opt/hooks/checkpoint.sh"]
                         timeoutSeconds: 60
+              idle-policy:
+                summary: Auto-pause after five idle minutes and wake on access
+                value:
+                  image:
+                    uri: python:3.11
+                  resourceLimits:
+                    cpu: "500m"
+                    memory: "512Mi"
+                  entrypoint: ["python", "/app/main.py"]
+                  timeout: 86400
+                  lifecycle:
+                    idlePolicy:
+                      idleTimeoutSeconds: 300
+                      onIdle: pause
+                      wakeOnAccess: true
       responses:
         '202':
           description: |
@@ -645,13 +984,14 @@ paths:
     delete:
       tags: [Sandboxes]
       summary: Delete a sandbox
-      description: Delete a sandbox, terminating its execution. The sandbox will transition through Stopping state to Terminated.
+      description: |
+        Request sandbox deletion. Runtime cleanup may continue after the response.
+        For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
+        and return 404 once the resource is removed.
       responses:
         '204':
           description: |
-            Sandbox successfully deleted.
-
-            Sandbox has been scheduled for termination and will transition to Stopping state, then Terminated.
+            Sandbox deletion accepted. Runtime cleanup may still be in progress.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/XRequestId'
@@ -689,10 +1029,14 @@ paths:
 
         This operation does not restart or recreate the sandbox container/pod.
 
-        **Concurrency:** This endpoint uses read-modify-write without optimistic
-        locking (no `resourceVersion` check). Concurrent PATCH requests may
-        interleave and silently drop updates. Use a single writer or coordinate
-        out-of-band when concurrent modifications to the same key are expected.
+        **Concurrency:** On the Docker runtime concurrent PATCH requests apply
+        one after another, last write wins per key. On Kubernetes a PATCH
+        writes back the whole label set it read, with no `resourceVersion`
+        check, so a concurrent PATCH may revert a value another PATCH changed
+        or resurrect a key it deleted. A PATCH on an fsb sandbox sends only its
+        own keys, fenced by the sandbox UID and generation. Use a single writer
+        or coordinate out-of-band when concurrent modifications to the same
+        key are expected.
       requestBody:
         required: true
         content:
@@ -1198,6 +1542,15 @@ components:
       headers:
         X-Request-ID:
           $ref: '#/components/headers/XRequestId'
+    PreconditionFailed:
+      description: The provided expectedRevision does not match the current revision
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestId'
     InternalServerError:
       description: An unexpected server error occurred
       content:
@@ -1671,11 +2024,14 @@ components:
     SandboxLifecycle:
       type: object
       description: |
-        Extensible container for sandbox lifecycle hooks. All fields are optional.
-        Future lifecycle events are added as new optional fields without changing
-        the semantics of existing fields.
+        Extensible container for sandbox lifecycle configuration. All fields
+        are optional. Future lifecycle events are added as new optional
+        fields without changing the semantics of existing fields.
 
-        This release supports only `preStart` and `periodic`.
+        `preStart` and `periodic` are hooks executed inside the sandbox by
+        execd. `idlePolicy` (OSEP-0024) and `renewalPolicy` (OSEP-0009) are
+        control-plane policies: they tell the server how to treat the
+        sandbox's state machine and never reach the guest.
       properties:
         preStart:
           $ref: '#/components/schemas/LifecycleHook'
@@ -1691,6 +2047,122 @@ components:
             Scheduled hooks run by execd while the sandbox is running. Runs of
             the same named hook never overlap; a scheduled run is skipped when
             its previous run is still active.
+        idlePolicy:
+          $ref: '#/components/schemas/IdlePolicy'
+          description: |
+            Auto-pause and wake-on-access behavior (OSEP-0024). Supported only
+            by the fast-sandbox backend; other backends reject the field.
+            Omitting `idlePolicy` preserves non-automated behavior exactly:
+            the sandbox is never auto-paused and never auto-woken.
+        renewalPolicy:
+          $ref: '#/components/schemas/RenewalPolicy'
+          description: |
+            Renew-on-access behavior (OSEP-0009): each ingress-observed or
+            proxied access extends the sandbox expiration. Control-plane
+            state and never reaches the guest. Supported by the docker and
+            Kubernetes (pod) backends; the fast-sandbox backend rejects the
+            field. Supersedes the deprecated
+            `extensions["access.renew.extend.seconds"]` creation key, which
+            remains supported throughout 1.x and is removed in 2.0.
+      additionalProperties: false
+    RenewalPolicy:
+      type: object
+      description: |
+        Renew-on-access behavior declared by the sandbox (OSEP-0009). The
+        policy is desired control-plane state: when the ingress gateway or
+        the server proxy observes traffic for the sandbox, the server extends
+        the sandbox expiration without client involvement. The policy never
+        reaches the guest.
+
+        Setting the policy has no effect unless the server operator enabled
+        the renew-intent integration (`[renew_intent]`). A missing policy
+        means the sandbox never auto-renews.
+      required: [extendSeconds]
+      properties:
+        extendSeconds:
+          type: integer
+          minimum: 300
+          maximum: 86400
+          description: |
+            Extension window X in seconds for each access-driven renewal:
+            the expiration is moved to `max(now + X, current expiresAt)`.
+            Must be between 300 (5 minutes) and 86400 (24 hours) inclusive.
+      additionalProperties: false
+    IdlePolicy:
+      type: object
+      description: |
+        Idle behavior declared by the sandbox (OSEP-0024). The policy is
+        desired state: the server validates it and persists it as the
+        reserved `sandbox.opensandbox.io/idle-policy` Sandbox CR annotation.
+
+        With `idleTimeoutSeconds`, the sandbox is auto-paused after that many
+        seconds without ingress-observed activity. Without it, the policy is
+        wake-only: the sandbox is never auto-paused, but a (manually) paused
+        sandbox wakes on access. A missing, malformed, or invalid policy is
+        treated exactly as absent — never as an implicit opt-in.
+
+        Constraints: `idleTimeoutSeconds` must not exceed the server's
+        configured activity TTL (default 1800), so a present-but-stale
+        activity key always implies idle-by-value. Enabling deployment flags
+        never changes the behavior of sandboxes that do not declare a policy.
+      properties:
+        idleTimeoutSeconds:
+          type: integer
+          minimum: 30
+          maximum: 86400
+          description: |
+            Idle threshold X in seconds: the sandbox is auto-paused after X
+            continuously idle seconds. Absent together with `onIdle` means a
+            wake-only policy.
+        onIdle:
+          type: string
+          enum: [pause]
+          description: |
+            Action taken at the idle threshold. Required with, and only
+            valid with, `idleTimeoutSeconds`. Only `pause` exists today; the
+            enum exists so future actions are additive.
+        wakeOnAccess:
+          type: boolean
+          description: |
+            Whether incoming traffic may wake the sandbox from `Paused`.
+            Defaults to `true` when omitted.
+            `false` keeps today's paused behavior (permanent 503 through the
+            gateway) and only `POST /sandboxes/{sandboxId}/resume` restores
+            the sandbox.
+        activeProbe:
+          $ref: '#/components/schemas/ActivityProbe'
+          description: |
+            Application-declared activity probe. When the sandbox is
+            otherwise idle, the server issues `GET {path}` on `{port}`;
+            `200 {"active": true}` counts as activity and resets the idle
+            clock, while `{"active": false}`, any failure, or a timeout
+            records nothing. Relevant only with auto-pause.
+      additionalProperties: false
+    ActivityProbe:
+      type: object
+      required: [port, path]
+      description: |
+        Endpoint inside the sandbox that answers `{"active": bool,
+        "message"?: string}` with 200 while work is in progress.
+      properties:
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Sandbox port serving the probe endpoint.
+        path:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^/'
+          description: |
+            Absolute HTTP path of the probe endpoint. Must not contain
+            whitespace or control characters.
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Probe request budget in seconds. The server defaults to 2 when omitted.
       additionalProperties: false
     PatchSandboxMetadataRequest:
       type: object
@@ -1757,8 +2229,14 @@ components:
             Mutually exclusive with `image` and `snapshotId`; in template mode
             the workload shape is fixed by the template's golden image, so
             `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
-            `volumes`, `platform`, `credentialProxy`, `secureAccess` and
-            `lifecycle` are rejected (400), and `timeout` is required.
+            `volumes`, `platform`, `secureAccess` and
+            lifecycle hooks are rejected (400), and `timeout` is required.
+            `credentialProxy` is accepted and ignored: the vault is not
+            carried at create time — it is configured after creation through
+            the server-routed Credential Vault API
+            (`/sandboxes/{sandboxId}/credential-vault`).
+            `lifecycle.idlePolicy` is allowed: it is control-plane state,
+            not workload shape.
             The template must belong to the requester's tenant and be
             `Succeeded`; anything else yields 404 (no existence leak).
 
@@ -1828,15 +2306,24 @@ components:
         lifecycle:
           $ref: '#/components/schemas/SandboxLifecycle'
           description: |
-            Optional declarative sandbox lifecycle hooks. This release supports
-            `preStart` and `periodic`. The server transports this configuration to
-            execd; callers must not depend on the internal transport mechanism.
-            The configuration is not included in Sandbox responses.
+            Optional declarative sandbox lifecycle configuration. `preStart`
+            and `periodic` are hooks; the server transports them to execd and
+            callers must not depend on the internal transport mechanism. The
+            configuration is not included in Sandbox responses.
 
-            Not supported together with `extensions.poolRef`, because Pool Pods
-            are pre-created before request-specific lifecycle hooks are known.
-            Runtimes that do not implement lifecycle hook transport reject this
-            field.
+            Lifecycle hooks are not supported together with
+            `extensions.poolRef`, because Pool Pods are pre-created before
+            request-specific hooks are known. Runtimes that do not implement
+            lifecycle hook transport reject hooks. `lifecycle.idlePolicy` is
+            not a hook and may accompany `extensions.poolRef`; it is honored
+            only by the fast-sandbox backend and rejected by others.
+            `lifecycle.renewalPolicy` is likewise not a hook: it may
+            accompany `extensions.poolRef` and is honored by the docker and
+            Kubernetes (pod) backends, while the fast-sandbox backend rejects
+            it. Setting both `lifecycle.renewalPolicy` and the deprecated
+            `extensions["access.renew.extend.seconds"]` is accepted only when
+            their parsed values match; conflicting values are rejected with
+            HTTP 400.
 
         entrypoint:
           type: array
@@ -1874,6 +2361,11 @@ components:
             Optional outbound network policy for the sandbox.
             Shape matches the sidecar `/policy` endpoint. If omitted or empty,
             the sidecar starts in allow-all mode until updated.
+            For Fsb, an omitted policy still registers an egress binding,
+            seeded with a no-op default-allow record (the sandbox behaves
+            like a policy-less one until changed): runtime changes go
+            through the networkpolicy endpoints (handler relay), which
+            require that registration.
             Not supported together with `extensions.poolRef`; pooled pods are
             pre-created, so the server rejects this combination instead of
             silently ignoring the requested policy.
@@ -1884,7 +2376,10 @@ components:
             Optional Credential Vault proxy startup settings. Set `enabled: true`
             to enable transparent MITM support for credential injection. Plain
             `networkPolicy` does not enable transparent MITM unless this option
-            is set.
+            is set. On fsb template-backed sandboxes the field is accepted and
+            ignored at create time: the shared-Fastlet egress has no per-sandbox
+            sidecar, and the vault is configured after creation through the
+            server-routed Credential Vault API.
 
         secureAccess:
           type: boolean
@@ -1922,7 +2417,17 @@ components:
             - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
 
             **Well-known keys**:
-            - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24 hours inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit to disable. Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint via `validate_extensions` in server `src/extensions/validation.py`).
+            - `access.renew.extend.seconds` (**deprecated**): Decimal integer
+              string from **300** to **86400** (5 minutes to 24 hours
+              inclusive). Opts the sandbox into OSEP-0009 renew-on-access and
+              sets per-renewal extension seconds. Omit to disable. Invalid
+              values are rejected at creation with HTTP 400 (validated on the
+              lifecycle create endpoint via `validate_extensions` in server
+              `src/extensions/validation.py`). Superseded by
+              `lifecycle.renewalPolicy.extendSeconds`: prefer the structured
+              field in new code. The extensions key remains supported
+              throughout 1.x and is removed in 2.0; when both are set, their
+              parsed values must match or creation fails with HTTP 400.
     ResourceLimits:
       type: object
       description: |
@@ -2065,6 +2570,10 @@ components:
 
     NetworkRule:
       type: object
+      description: >-
+        Egress rule. At least one of `target` or `ports` must be provided;
+        when both are present the rule applies to `ports` on `target` only.
+        Enforced by the server and the egress sidecar.
       properties:
         action:
           type: string
@@ -2073,9 +2582,372 @@ components:
         target:
           type: string
           description: |
-            FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-            IP/CIDR not yet supported in the egress MVP.
-      required: [action, target]
+            FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP
+            address, or CIDR. May be omitted when `ports` is set (see below);
+            otherwise required.
+        ports:
+          type: array
+          minItems: 1
+          maxItems: 256
+          uniqueItems: true
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+          description: |
+            Restricts this rule to specific TCP destination ports.
+
+            - `target` omitted, `ports` set: the rule applies to these ports
+              across all IPv4/IPv6 destinations.
+            - `target` is an IP or CIDR, `ports` set: the rule applies to that
+              destination only on these ports.
+            - `target` is a domain: `ports` is rejected with a validation
+              error. Domain rules are evaluated at the DNS layer, which has no
+              port dimension; combining them is not supported yet.
+
+            TCP only for now; UDP port scoping is not supported.
+
+            Under `defaultAction: deny`, the DNS proxy still denies hostname
+            lookups for targetless allow rules (it matches domain rules
+            only), so this shape serves direct-IP clients; hostname access
+            requires explicit domain rules or stable IPs.
+      required: [action]
+      additionalProperties: false
+
+    CredentialVaultCreateRequest:
+      type: object
+      description: |
+        Initial Credential Vault revision. Inline credential values are
+        write-only. The vault requires a network policy; `defaultAction:
+        deny` is strongly recommended.
+      properties:
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+      required: [credentials, bindings]
+      additionalProperties: false
+    CredentialVaultMutationRequest:
+      type: object
+      description: |
+        One atomic mutation set. Applied per set as delete → replace → add;
+        every mentioned name must resolve exactly once (add requires the
+        name to be absent, replace and delete require it to exist).
+      properties:
+        expectedRevision:
+          type: integer
+          description: Optional optimistic concurrency guard; mismatch fails with 412.
+        credentials:
+          $ref: '#/components/schemas/CredentialMutationSet'
+        bindings:
+          $ref: '#/components/schemas/CredentialBindingMutationSet'
+      additionalProperties: false
+    CredentialMutationSet:
+      type: object
+      properties:
+        add:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        replace:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        delete:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+    CredentialBindingMutationSet:
+      type: object
+      properties:
+        add:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+        replace:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+        delete:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+    CredentialVaultState:
+      type: object
+      description: Sanitized Credential Vault state — credential values never appear.
+      properties:
+        revision:
+          type: integer
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialMetadata'
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBindingMetadata'
+      required: [revision, credentials, bindings]
+      additionalProperties: false
+    CredentialListResponse:
+      type: object
+      properties:
+        revision:
+          type: integer
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialMetadata'
+      required: [revision, credentials]
+      additionalProperties: false
+    CredentialBindingListResponse:
+      type: object
+      properties:
+        revision:
+          type: integer
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBindingMetadata'
+      required: [revision, bindings]
+      additionalProperties: false
+    CredentialMetadata:
+      type: object
+      properties:
+        name:
+          type: string
+        sourceType:
+          type: string
+        revision:
+          type: integer
+          description: |
+            Revision that last touched this record. Fsb stamps records with
+            the read revision (the relay surface does not carry per-record
+            revisions); other backends track per-record revisions.
+      required: [name, sourceType, revision]
+      additionalProperties: false
+    CredentialBindingMetadata:
+      type: object
+      properties:
+        name:
+          type: string
+        revision:
+          type: integer
+          description: See CredentialMetadata.revision for the Fsb caveat.
+        match:
+          $ref: '#/components/schemas/CredentialMatch'
+        auth:
+          $ref: '#/components/schemas/CredentialAuthMetadata'
+      required: [name, revision]
+      additionalProperties: false
+    CredentialAuthMetadata:
+      type: object
+      description: Sanitized auth shape — type always, name for apiKey only.
+      properties:
+        type:
+          type: string
+        name:
+          type: string
+      required: [type]
+      additionalProperties: false
+    Credential:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        source:
+          $ref: '#/components/schemas/InlineCredentialSource'
+      required: [name, source]
+      additionalProperties: false
+    InlineCredentialSource:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [inline]
+        value:
+          type: string
+          writeOnly: true
+      required: [type, value]
+      additionalProperties: false
+    CredentialBinding:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        match:
+          $ref: '#/components/schemas/CredentialMatch'
+        auth:
+          $ref: '#/components/schemas/CredentialAuth'
+      required: [name, match, auth]
+      additionalProperties: false
+    CredentialMatch:
+      type: object
+      properties:
+        schemes:
+          type: array
+          items:
+            type: string
+            enum: [https, http]
+          default: [https]
+        ports:
+          type: array
+          items:
+            type: integer
+          deprecated: true
+          description: "Deprecated. Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected with a validation error. Standard values (80/443) are accepted but ignored."
+        hosts:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        methods:
+          type: array
+          items:
+            type: string
+          default: [GET, POST, PUT, PATCH, DELETE]
+        paths:
+          type: array
+          items:
+            type: string
+          default: ["/*"]
+      required: [hosts]
+      additionalProperties: false
+    CredentialAuth:
+      oneOf:
+        - $ref: '#/components/schemas/BearerCredentialAuth'
+        - $ref: '#/components/schemas/BasicCredentialAuth'
+        - $ref: '#/components/schemas/ApiKeyCredentialAuth'
+        - $ref: '#/components/schemas/CustomHeadersCredentialAuth'
+        - $ref: '#/components/schemas/PassthroughCredentialAuth'
+      discriminator:
+        propertyName: type
+        mapping:
+          bearer: '#/components/schemas/BearerCredentialAuth'
+          basic: '#/components/schemas/BasicCredentialAuth'
+          apiKey: '#/components/schemas/ApiKeyCredentialAuth'
+          customHeaders: '#/components/schemas/CustomHeadersCredentialAuth'
+          passthrough: '#/components/schemas/PassthroughCredentialAuth'
+    BearerCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [bearer]
+        credential:
+          type: string
+          minLength: 1
+          description: Credential name whose value becomes the bearer token.
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, credential]
+      additionalProperties: false
+    BasicCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [basic]
+        credential:
+          type: string
+          minLength: 1
+          description: Credential containing pre-encoded base64(username:password).
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, credential]
+      additionalProperties: false
+    ApiKeyCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [apiKey]
+        name:
+          type: string
+          pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
+        credential:
+          type: string
+          minLength: 1
+          description: Credential name whose value is the API key.
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, name, credential]
+      additionalProperties: false
+    CustomHeadersCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [customHeaders]
+        headers:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CustomHeaderEntry'
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type, headers]
+      additionalProperties: false
+    PassthroughCredentialAuth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [passthrough]
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      required: [type]
+      additionalProperties: false
+    CustomHeaderEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
+        credential:
+          type: string
+          minLength: 1
+          description: Credential name whose value is injected.
+      required: [name, credential]
+      additionalProperties: false
+    CredentialSubstitution:
+      type: object
+      description: Literal case-sensitive placeholder replacement for selected request surfaces. Replacement is opt-in and scoped per binding.
+      properties:
+        credential:
+          type: string
+          minLength: 1
+          description: Name of the sandbox-local credential used as the replacement value.
+        placeholder:
+          type: string
+          minLength: 1
+          description: Literal placeholder to replace.
+        in:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [path, query, header, body]
+          description: Request surfaces where the placeholder may be replaced.
+      required: [credential, placeholder, in]
       additionalProperties: false
 
     Volume:

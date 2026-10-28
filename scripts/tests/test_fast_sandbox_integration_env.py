@@ -161,6 +161,75 @@ touch "$WORK/continued"
                     (self.work / "logs/kind-create.log").read_text(),
                 )
 
+    def _render_pool(self, oci_stack):
+        """Render the pool manifest for one OCI_STACK mode via the real function."""
+        result = self.run_shell(f'''
+mkdir -p "$GEN_DIR"
+IMG_FASTLET=opensandbox/fsb-fastlet:dev
+IMG_EGRESS=docker.io/opensandbox/egress:latest
+POOL_MIN=2; POOL_MAX=2; MAX_SANDBOXES_PER_POD=8; WARM_IMAGES=0
+TEMPLATE_ID="tpl-test"
+OCI_STACK={oci_stack}
+render_pool
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return (self.work / "gen/firecracker-egress-pool.yaml").read_text()
+
+    @staticmethod
+    def _fastlet_section(rendered):
+        """Text between the fastlet container entry and the egress container."""
+        start = rendered.index("      - name: fastlet")
+        return rendered[start:rendered.index("      - name: egress")]
+
+    def test_render_pool_native_mode_has_no_oci_fragment(self):
+        rendered = self._render_pool(oci_stack=0)
+        fastlet = self._fastlet_section(rendered)
+        self.assertNotIn("FAST_SANDBOX_OCI_ENABLED", fastlet)
+        self.assertNotIn("oci-tools", fastlet)
+        self.assertNotIn("oci-socket", fastlet)
+        self.assertNotIn("host-dev", fastlet)
+        self.assertEqual(fastlet.count("env:"), 1)
+        self.assertEqual(fastlet.count("volumeMounts:"), 1)
+        self.assertFalse([
+            line for line in rendered.splitlines()
+            if not line.lstrip().startswith("#") and "@OCI_FASTLET" in line
+        ])
+
+    def test_render_pool_oci_mode_appends_flag_mounts_and_volumes(self):
+        rendered = self._render_pool(oci_stack=1)
+        fastlet = self._fastlet_section(rendered)
+        # the fragment appends to the EXISTING env and volumeMounts lists:
+        # exactly one env:/volumeMounts: key, items in list order
+        self.assertEqual(fastlet.count("env:"), 1)
+        self.assertEqual(fastlet.count("volumeMounts:"), 1)
+        self.assertIn(
+            "value: /run/fast-sandbox/firecracker/runtime.sock\n"
+            "        - name: FAST_SANDBOX_OCI_ENABLED\n"
+            '          value: "true"\n'
+            "        volumeMounts:",
+            fastlet,
+        )
+        self.assertIn(
+            "mountPath: /run/fast-sandbox/firecracker\n"
+            "        - name: oci-tools\n"
+            "          mountPath: /opt/fast-sandbox/oci\n"
+            "          readOnly: true\n"
+            "        - name: oci-socket\n"
+            "          mountPath: /run/fast-sandbox/overlaybd\n"
+            "        - name: host-dev\n"
+            "          mountPath: /dev\n",
+            fastlet,
+        )
+        self.assertIn("      - name: oci-tools\n        hostPath:", rendered)
+        self.assertIn("      - name: oci-socket\n        hostPath:", rendered)
+        self.assertIn("      - name: host-dev\n        hostPath:\n          path: /dev\n          type: Directory", rendered)
+        # poolMin stays an integer through the token render
+        self.assertIn("poolMin: 2", rendered)
+        self.assertFalse([
+            line for line in rendered.splitlines()
+            if not line.lstrip().startswith("#") and "@OCI_FASTLET" in line
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
@@ -46,16 +47,26 @@ const (
 	revisionIPCControlGenerationEnv = "OPENSANDBOX_EGRESS_REVISION_CONTROL_GENERATION"
 	revisionIPCSubjectGenerationEnv = "OPENSANDBOX_EGRESS_REVISION_SUBJECT_GENERATION"
 	revisionIPCMaxSnapshotBytesEnv  = "OPENSANDBOX_EGRESS_REVISION_MAX_SNAPSHOT_BYTES"
+	// Live admission bundle: presence of all three values in the child selects
+	// the OSEP-0023 live credential-bound receiver instead of the
+	// installation-only receiver. The launcher owns them; sandbox users cannot.
+	revisionIPCTLSCapacityEnv         = "OPENSANDBOX_EGRESS_REVISION_TLS_CAPACITY"
+	revisionIPCRequestCapacityEnv     = "OPENSANDBOX_EGRESS_REVISION_REQUEST_CAPACITY"
+	revisionIPCDrainTimeoutSecondsEnv = "OPENSANDBOX_EGRESS_REVISION_DRAIN_TIMEOUT_SECONDS"
 )
 
 var (
 	errInvalidRevisionIPCConfig = errors.New("mitmproxy: invalid revision IPC configuration")
 	revisionIPCEnvNames         = []string{
+		constants.EnvMitmproxyPassthroughHosts,
 		revisionIPCSocketEnv,
 		revisionIPCTokenEnv,
 		revisionIPCControlGenerationEnv,
 		revisionIPCSubjectGenerationEnv,
 		revisionIPCMaxSnapshotBytesEnv,
+		revisionIPCTLSCapacityEnv,
+		revisionIPCRequestCapacityEnv,
+		revisionIPCDrainTimeoutSecondsEnv,
 	}
 )
 
@@ -109,6 +120,14 @@ type RevisionIPCConfig struct {
 	ControlGeneration string
 	SubjectGeneration string
 	MaxSnapshotBytes  int
+	// LiveAdmission selects the OSEP-0023 live credential-bound receiver: the
+	// addon consults the installed decision snapshot for TLS decrypt and
+	// request admission. False keeps the installation-only receiver.
+	StaticPassthrough   mitmpassthrough.Config
+	LiveAdmission       bool
+	TLSCapacity         int
+	RequestCapacity     int
+	DrainTimeoutSeconds int
 }
 
 // Running: child mitmdump; use GracefulShutdown to SIGTERM+reap before process exit.
@@ -285,6 +304,14 @@ func buildMitmdumpEnv(base []string, home string, revisionIPC *RevisionIPCConfig
 			revisionIPCSubjectGenerationEnv+"="+revisionIPC.SubjectGeneration,
 			revisionIPCMaxSnapshotBytesEnv+"="+strconv.Itoa(revisionIPC.MaxSnapshotBytes),
 		)
+		if revisionIPC.LiveAdmission {
+			env = append(env,
+				constants.EnvMitmproxyPassthroughHosts+"="+revisionIPC.StaticPassthrough.JSON(),
+				revisionIPCTLSCapacityEnv+"="+strconv.Itoa(revisionIPC.TLSCapacity),
+				revisionIPCRequestCapacityEnv+"="+strconv.Itoa(revisionIPC.RequestCapacity),
+				revisionIPCDrainTimeoutSecondsEnv+"="+strconv.Itoa(revisionIPC.DrainTimeoutSeconds),
+			)
+		}
 	}
 	return env
 }
@@ -297,6 +324,20 @@ func validateRevisionIPCConfig(cfg *RevisionIPCConfig) error {
 		!validRevisionIPCToken(cfg.SessionToken) ||
 		!validRevisionIPCGeneration(cfg.ControlGeneration) ||
 		!validRevisionIPCGeneration(cfg.SubjectGeneration) || cfg.MaxSnapshotBytes <= 0 {
+		return errInvalidRevisionIPCConfig
+	}
+	if cfg.LiveAdmission &&
+		(cfg.TLSCapacity <= 0 || cfg.RequestCapacity <= 0 ||
+			cfg.DrainTimeoutSeconds < 1 || cfg.DrainTimeoutSeconds > 300) {
+		return errInvalidRevisionIPCConfig
+	}
+	// The live credential-bound mode never runs with insecure upstream
+	// verification: credential injection requires the verified origin
+	// identity. The installation-only receiver keeps the legacy escape hatch.
+	if cfg.LiveAdmission && !cfg.StaticPassthrough.Empty() && strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
+		return errInvalidRevisionIPCConfig
+	}
+	if cfg.LiveAdmission && constants.IsTruthy(os.Getenv(constants.EnvMitmproxySslInsecure)) {
 		return errInvalidRevisionIPCConfig
 	}
 	return nil
@@ -333,6 +374,13 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 		if !ok {
 			continue
 		}
+		if strings.HasPrefix(msg, "credential proxy: tls-admission-") {
+			if decision, reason, ok := tlsAdmissionEvent(msg); ok {
+				telemetry.RecordTLSAdmission(decision, reason)
+			}
+			// Consume malformed events too; never forward their raw payload.
+			continue
+		}
 		if strings.HasPrefix(msg, "credential proxy: tls-shadow ") {
 			telemetry.RecordTLSShadow(strings.TrimPrefix(msg, "credential proxy: tls-shadow "))
 			continue
@@ -343,6 +391,22 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 	// early; closing the read end makes the exec copy goroutine fail with
 	// ErrClosedPipe so cmd.Wait returns instead of hanging forever.
 	_ = r.Close()
+}
+
+const tlsAdmissionPrefix = "credential proxy: tls-admission-v1"
+
+// tlsAdmissionEvent validates framing only. The recorder validates the closed
+// decision/reason pairs before creating attributes.
+func tlsAdmissionEvent(msg string) (decision, reason string, ok bool) {
+	payload, found := strings.CutPrefix(msg, tlsAdmissionPrefix+" ")
+	if !found || strings.ContainsAny(payload, "\t\r\n\v\f") {
+		return "", "", false
+	}
+	values := strings.Split(payload, " ")
+	if len(values) != 2 || values[0] == "" || values[1] == "" {
+		return "", "", false
+	}
+	return values[0], values[1], true
 }
 
 // credentialProxyMessage returns the message of a credential proxy log line,

@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -56,17 +57,40 @@ func main() {
 	// fast-sandbox, without dns+nft enforcement) fails startup instead of
 	// being silently ignored.
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
+	if _, present := os.LookupEnv(constants.EnvMitmproxyPassthroughHosts); present &&
+		(profile == constants.ProfileFastSandbox || !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime))) {
+		log.Fatalf("invalid %s configuration: requires sidecar live revision runtime", constants.EnvMitmproxyPassthroughHosts)
+	}
+
 	upstreamSpec, err := upstreamProxySpecForProfile(profile)
 	if err != nil {
 		log.Fatalf("invalid upstream proxy configuration: %v", err)
 	}
 
-	// Fast Sandbox profile: multi-sandbox control plane over the slot
-	// store and the proxy route. Sidecar stays the default; the two profiles
-	// are mutually exclusive deployment forms.
+	// Fast Sandbox profile: multi-sandbox control plane driven by the
+	// Sandbox Actions Handler protocol. Sidecar stays the default; the two
+	// profiles are mutually exclusive deployment forms.
 	if profile == constants.ProfileFastSandbox {
 		runFastSandboxProfile(ctx, upstreamSpec)
 		return
+	}
+
+	quarantineOwner, err := newRevisionQuarantine()
+	if err != nil {
+		log.Fatalf("experimental runtime containment: %v", err)
+	}
+	if quarantineOwner != nil {
+		defer quarantineOwner.target.Close()
+	}
+
+	// Reject unsupported experimental storage before policy loading or network
+	// setup. Fast Sandbox dispatched above does not use this sidecar store.
+	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+		if path := strings.TrimSpace(os.Getenv(constants.EnvEgressPolicyFile)); path != "" {
+			if _, err := policy.NewAtomicPolicyFile(path); err != nil {
+				log.Fatalf("invalid experimental policy storage: %v", err)
+			}
+		}
 	}
 
 	// Erase any stale mitmproxy CA left on the shared volume by a previous
@@ -126,7 +150,7 @@ func main() {
 				}
 				addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil {
+				if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
 					log.Warnf("upstream proxy: nft update for %q failed: %v", domain, err)
 				}
 			})
@@ -169,7 +193,7 @@ func main() {
 
 	httpAddr := envOrDefault(constants.EnvEgressHTTPAddr, constants.DefaultEgressServerAddr)
 	mitmGate := mitmproxy.NewHealthGate()
-	policySrv, policyHandler, err := startPolicyServer(proxy, nftMgr, mode, httpAddr, os.Getenv(constants.EnvEgressToken), allowIPs, os.Getenv(constants.EnvEgressPolicyFile), alwaysDeny, alwaysAllow, mitmGate)
+	policySrv, policyHandler, err := startPolicyServer(proxy, nftMgr, mode, httpAddr, os.Getenv(constants.EnvEgressToken), allowIPs, os.Getenv(constants.EnvEgressPolicyFile), alwaysDeny, alwaysAllow, mitmGate, quarantineOwner)
 	if err != nil {
 		log.Fatalf("failed to start policy server: %v", err)
 	}
@@ -179,7 +203,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("mitmproxy transparent: %v", err)
 	}
-	mitmGate.MarkStackReady()
+	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+		mitmGate.MarkStackReady()
+	}
+	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) && mitm != nil {
+		// Attach the live mitmdump lifecycle owner before serving revision-gated
+		// Vault writes; until then such writes fail closed with 503.
+		policyHandler.setRevisionMitm(mitm)
+	}
 	if mitm != nil {
 		mitm.watchMitmproxy(ctx, mitmGate)
 	}
@@ -188,7 +219,7 @@ func main() {
 		log.Errorf("startup hooks (post) error: %v", err)
 	}
 
-	waitForShutdown(ctx, proxy, policySrv, exemptDst, nftMgr, mitm, blockedBroadcaster)
+	waitForShutdown(ctx, proxy, policySrv, exemptDst, nftMgr, mitm, blockedBroadcaster, policyHandler)
 }
 
 func withLogger(ctx context.Context) context.Context {

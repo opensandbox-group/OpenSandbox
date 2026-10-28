@@ -2,22 +2,15 @@
 
 Last updated: 2026-10-08
 
-This roadmap describes the intended project direction for roughly the next 12
-months. It is a planning guide, not a release commitment. Implementation details
-are tracked through GitHub Issues, pull requests, and OpenSandbox Enhancement
-Proposals (OSEPs).
+This roadmap describes the intended project direction for roughly the next 12 months. It is a planning guide, not a release commitment. Implementation details are tracked through GitHub Issues, pull requests, and OpenSandbox Enhancement Proposals (OSEPs).
 
 ## Principles
 
-- Keep public API contracts, SDKs, CLI behavior, implementation, examples, and
-  documentation aligned.
+- Keep public API contracts, SDKs, CLI behavior, implementation, examples, and documentation aligned.
 - Prefer additive, backward-compatible changes for public interfaces.
-- Use the OSEP process for major architecture, API, runtime, or security-model
-  changes.
-- Keep roadmap items focused on project direction instead of using this file as
-  a full backlog.
-- Move completed work into release notes, OSEP status, or stable documentation
-  instead of keeping long historical task lists here.
+- Use the OSEP process for major architecture, API, runtime, or security-model changes.
+- Keep roadmap items focused on project direction instead of using this file as a full backlog.
+- Move completed work into release notes, OSEP status, or stable documentation instead of keeping long historical task lists here.
 
 ## Current Focus: 2026 H1-H2
 
@@ -52,7 +45,7 @@ Proposals (OSEPs).
 | eBPF in-sandbox observation | Implementing | [OSEP-0018](oseps/0018-execd-as-sandbox-init.md) | Optional eBPF observation of exec/connect/privilege events in the sandbox cgroup, emitted to a local rotating JSONL audit file (requires the `execd-ebpf` build + `CAP_BPF`). |
 | Agent in-sandbox audit trail | Planned | TBD / OSEP needed | Define auditable records for agent actions inside sandboxes, such as command/session execution, file operations, network access, identity context, retention, and privacy boundaries. |
 | Kubernetes deployment | Ongoing | [kubernetes/](kubernetes/README.md), [Helm charts](manifests/charts/) | Keep self-hosted deployment, chart, and operational documentation current. |
-| Network isolation guidance | Ongoing | [network isolation guide](docs/architecture/network/network-isolation.md) | Continue documenting safe defaults and practical isolation patterns. |
+| Network isolation guidance | Ongoing | [network isolation guide](docs/guides/network-isolation.md) | Continue documenting safe defaults and practical isolation patterns. |
 | System-wide high availability | Planned | TBD / OSEP needed | Move beyond the current scoped HA (PostgreSQL-backed snapshot coordination) to full control-plane availability: multi-replica Lifecycle Server on Kubernetes, together with HA posture for ingress, node agent, and fast-sandbox components. |
 
 ### Public Contracts and Governance
@@ -65,23 +58,15 @@ Proposals (OSEPs).
 
 ## Not Currently Planned
 
-- Declaring a stable v1 API before lifecycle semantics, runtime behavior, and
-  SDK compatibility are mature enough to support it.
-- Breaking public specs, SDK interfaces, CLI behavior, or documented workflows
-  without an OSEP and migration path.
-- Provider-specific features that cannot be documented, tested, or isolated
-  cleanly from the public API surface.
-- Heavy release-train governance before the project has enough maintainer
-  capacity to keep that process current.
+- Declaring a stable v1 API before lifecycle semantics, runtime behavior, and SDK compatibility are mature enough to support it.
+- Breaking public specs, SDK interfaces, CLI behavior, or documented workflows without an OSEP and migration path.
+- Provider-specific features that cannot be documented, tested, or isolated cleanly from the public API surface.
+- Heavy release-train governance before the project has enough maintainer capacity to keep that process current.
 
 ## How Roadmap Items Are Managed
 
 - Small work is tracked as GitHub Issues and pull requests.
-- Major features, architecture changes, public API changes, runtime behavior
-  changes, and security-model changes start with an OSEP.
-- Active roadmap entries should link to an issue, PR, OSEP, or documentation
-  page once a stable tracking location exists.
-- Completed work should be reflected in release notes, implemented OSEPs, and
-  user documentation rather than remaining as an active roadmap item.
-- Maintainers should review this file at least quarterly, or whenever a major
-  OSEP changes status.
+- Major features, architecture changes, public API changes, runtime behavior changes, and security-model changes start with an OSEP.
+- Active roadmap entries should link to an issue, PR, OSEP, or documentation page once a stable tracking location exists.
+- Completed work should be reflected in release notes, implemented OSEPs, and user documentation rather than remaining as an active roadmap item.
+- Maintainers should review this file at least quarterly, or whenever a major OSEP changes status.

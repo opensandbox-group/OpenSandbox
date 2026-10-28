@@ -36,7 +36,8 @@ internal static class LifecycleMetricsReporter
     // Shared: a per-event HttpClient churns sockets on a fire-and-forget path.
     // Deliberately capped at 5s regardless of RequestTimeoutSeconds: telemetry
     // must never block the create/connect path.
-    private static readonly HttpClient TelemetryClient = new HttpClient
+    private static readonly HttpClient TelemetryClient = new HttpClient(
+        new ProtectedRedirectHandler(new HttpClientHandler { AllowAutoRedirect = false }))
     {
         Timeout = TimeSpan.FromSeconds(5),
     };
@@ -111,9 +112,9 @@ internal static class LifecycleMetricsReporter
                     }
                     request.Headers.TryAddWithoutValidation(header.Key, header.Value);
                 }
-                if (!string.IsNullOrEmpty(connectionConfig.ApiKey))
+                if (!string.IsNullOrEmpty(connectionConfig.ApiKey) &&
+                    !request.Headers.Contains(Constants.ApiKeyHeader))
                 {
-                    request.Headers.Remove(Constants.ApiKeyHeader);
                     request.Headers.TryAddWithoutValidation(Constants.ApiKeyHeader, connectionConfig.ApiKey);
                 }
 

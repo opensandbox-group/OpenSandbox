@@ -30,7 +30,6 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles
 {
     internal const uint MaxIdentityId = uint.MaxValue - 1;
     private readonly HttpClientWrapper _client;
-    private readonly HttpClient _httpClient;
     private readonly string _baseUrl;
     private readonly string _identityBaseUrl;
     private readonly IReadOnlyDictionary<string, string> _headers;
@@ -44,13 +43,11 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles
 
     public FilesystemAdapter(
         HttpClientWrapper client,
-        HttpClient httpClient,
         string baseUrl,
         IReadOnlyDictionary<string, string> headers,
         string? identityBaseUrl = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
-        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _baseUrl = baseUrl?.TrimEnd('/') ?? throw new ArgumentNullException(nameof(baseUrl));
         _identityBaseUrl = identityBaseUrl?.TrimEnd('/') ?? _baseUrl;
         _headers = headers ?? new Dictionary<string, string>();
@@ -63,7 +60,7 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles
         if (gid > MaxIdentityId)
             throw new ArgumentOutOfRangeException(nameof(gid), $"GID must be between 0 and {MaxIdentityId}.");
         var baseUrl = _identityBaseUrl + FormattableString.Invariant($"/v1/filesystem/{uid}/{gid}");
-        return new FilesystemAdapter(_client.WithBaseUrl(baseUrl), _httpClient, baseUrl, _headers, _identityBaseUrl);
+        return new FilesystemAdapter(_client.WithBaseUrl(baseUrl), baseUrl, _headers, _identityBaseUrl);
     }
 
     public async Task<IReadOnlyDictionary<string, SandboxFileInfo>> GetFileInfoAsync(
@@ -158,7 +155,7 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles
             var metadataContent = new StringContent(metadataJson, Encoding.UTF8, "application/json");
             form.Add(metadataContent, "metadata", "metadata");
 
-            var fileContent = CreateFileContent(entry.Data);
+            var fileContent = CreateFileContent(entry.Data, cancellationToken);
             form.Add(fileContent, "file", fileName);
         }
 
@@ -172,11 +169,13 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles
             request.Headers.TryAddWithoutValidation(header.Key, header.Value);
         }
 
-        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var response = await _client.SendTransferAsync(request, cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
-            var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            // The error body is streamed, not buffered: read it with the caller token so a
+            // stalled body cannot block the caller past its cancellation.
+            var content = await HttpClientWrapper.ReadContentStringAsync(response.Content, cancellationToken).ConfigureAwait(false);
             var requestId = response.Headers.TryGetValues(Constants.RequestIdHeader, out var values)
                 ? values.FirstOrDefault()
                 : null;
@@ -255,11 +254,11 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles
             request.Headers.TryAddWithoutValidation("Range", range);
         }
 
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using var response = await _client.SendTransferAsync(request, cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
-            var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var content = await HttpClientWrapper.ReadContentStringAsync(response.Content, cancellationToken).ConfigureAwait(false);
             var requestId = response.Headers.TryGetValues(Constants.RequestIdHeader, out var values)
                 ? values.FirstOrDefault()
                 : null;
@@ -357,14 +356,16 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles
         await _client.PostAsync("/files/permissions", body, cancellationToken).ConfigureAwait(false);
     }
 
-    private static HttpContent CreateFileContent(object? data)
+    private static HttpContent CreateFileContent(object? data, CancellationToken cancellationToken)
     {
         return data switch
         {
             null => new ByteArrayContent(Array.Empty<byte>()),
             string str => new StringContent(str, Encoding.UTF8),
             byte[] bytes => new ByteArrayContent(bytes),
-            Stream stream => new StreamContent(stream),
+            // Unlike StreamContent, this part binds the caller token to the producer read, so
+            // cancelling an upload interrupts a source stream that blocks mid-read on every TFM.
+            Stream stream => new UploadFileContent(stream, cancellationToken),
             _ => throw new InvalidArgumentException($"Unsupported file data type: {data.GetType().FullName}")
         };
     }

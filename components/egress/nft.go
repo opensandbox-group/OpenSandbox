@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -69,7 +70,7 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) {
 		addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := nftMgr.AddResolvedDomain(addCtx, domain, ips); err != nil {
+		if err := nftMgr.AddResolvedDomain(addCtx, domain, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
 			log.Warnf("[dns] record resolved domain %q failed: %v", domain, err)
 		}
 	})
@@ -109,7 +110,15 @@ func parseDoHBlocklist(raw string) (v4, v6 []string) {
 }
 
 func parseNftOptions(upstream *mitmproxy.UpstreamProxySpec) (nftables.Options, error) {
-	opts := nftables.Options{BlockDoT: true}
+	opts := nftables.Options{
+		BlockDoT:              true,
+		QuiesceOnApplyFailure: constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)),
+	}
+	// Transparent MITM: exempt the REDIRECT target dport ahead of port-scoped
+	// rules (issue #2423). Same port derivation as startMitmproxyTransparentIfEnabled.
+	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
+		opts.MitmRedirectPort = constants.EnvIntOrDefault(constants.EnvMitmproxyPort, constants.DefaultMitmproxyPort)
+	}
 	if constants.IsTruthy(os.Getenv(constants.EnvBlockDoH443)) {
 		opts.BlockDoH443 = true
 	}

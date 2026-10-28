@@ -16,6 +16,7 @@ package fastsandboxnft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -220,6 +221,48 @@ func TestRemoveRebuildsTable(t *testing.T) {
 	require.NoError(t, a.Remove(ctx, s2))
 	script = runner.last()
 	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+}
+
+// TestRemoveFailureStaysRetryable: a failed nft transaction must not forget
+// the subject from the in-memory map — otherwise the retry short-circuits to
+// success and the stale same-IP dispatch rule stays first-match in the kernel
+// ahead of any successor (takeover/REMOVE_BINDING retry convergence).
+func TestRemoveFailureStaysRetryable(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	s1 := subject.FromSandboxUID("u-1")
+	s2 := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, s1, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyDenyFirst(ctx, s2, testSlot("u-2", "10.0.0.6")))
+
+	runner.mu.Lock()
+	runner.fail = func(string) error { return errors.New("nft busy") }
+	runner.mu.Unlock()
+	require.Error(t, a.Remove(ctx, s1))
+	// the failed attempt must not have mutated the in-memory state
+	a.mu.Lock()
+	_, stillInstalled := a.subjects[s1]
+	a.mu.Unlock()
+	require.True(t, stillInstalled, "a failed removal must keep the subject retryable")
+
+	// the retry re-emits a real rebuild (header + remaining subject) instead
+	// of short-circuiting
+	runner.mu.Lock()
+	runner.fail = nil
+	runner.mu.Unlock()
+	before := runner.count()
+	require.NoError(t, a.Remove(ctx, s1))
+	assert.Greater(t, runner.count(), before, "the retry must re-run the nft transaction")
+	script := runner.last()
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+	require.Contains(t, script, "subj_s_u_2")
+	assert.NotContains(t, script, "subj_s_u_1")
+
+	// and the subject is gone for good: a further Remove is a genuine no-op
+	before = runner.count()
+	require.NoError(t, a.Remove(ctx, s1))
+	assert.Equal(t, before, runner.count())
 }
 
 func TestDenyFirstResetsOnReRegistration(t *testing.T) {
@@ -800,4 +843,83 @@ func TestAddUpstreamProxyIPsFailureKeepsMirror(t *testing.T) {
 
 	require.NoError(t, a.ApplyReset(ctx))
 	assert.NotContains(t, runner.last(), "10.9.9.9", "failed update must not leak into the rebuild")
+}
+
+func TestPortFloorDropsInDispatchAndInputChains(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{
+		MitmRedirectPort:    18081,
+		PortFloorDenyRanges: []policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}},
+	})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	script := runner.last()
+	floorDispatch := "add rule inet opensandbox-fast-sandbox dispatch tcp dport { 1-79, 81-442, 444-65535 } drop"
+	floorInput := "add rule inet opensandbox-fast-sandbox input ct status dnat tcp dport 18081 ct original proto-dst { 1-79, 81-442, 444-65535 } drop"
+	require.Contains(t, script, floorDispatch, "the floor must gate the forward path profile-wide")
+	require.Contains(t, script, floorInput, "the floor must gate MITM-redirected traffic by its ORIGINAL port only, leaving fsb DNS (REDIRECT to :15353) and pod-inbound flows alone")
+	// Both drops precede the fail-closed tail.
+	require.Less(t, strings.Index(script, floorDispatch), strings.Index(script, "meta mark &"))
+
+	// No floor configured: no floor rules at all.
+	plain := &fakeRunner{}
+	noFloor := NewApplier(plain.Run, Options{})
+	require.NoError(t, noFloor.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	assert.NotContains(t, plain.last(), "tcp dport { 1-79")
+}
+
+func TestApplyPolicy_PortScopedRuleFailsClosed(t *testing.T) {
+	// Older servers and direct Fastlet callers can deliver port-scoped rules
+	// the fast path cannot enforce; the applier must refuse the apply (the
+	// subject stays deny-first) instead of silently dropping the rule.
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[
+		{"action":"deny","target":"10.0.0.0/8","ports":[22]}
+	]}`)
+	require.NoError(t, err)
+	err = a.ApplyPolicy(ctx, s, p)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "port-scoped")
+
+	// The deny-first subject was untouched: the failed apply must not have
+	// installed the rule's static set (10.0.0.0/8 appears in no script).
+	for _, script := range runner.scripts {
+		require.NotContains(t, script, "10.0.0.0/8")
+	}
+}
+
+func TestApplyPolicy_PlatformFloorExemptFromPortScopedGuard(t *testing.T) {
+	// The floor rides the always overlay into every subject policy via the
+	// registry; ApplyPolicy must still succeed (the floor is enforced
+	// profile-wide in the master chains), while a user Ports rule in the
+	// same policy keeps the fail-closed guard.
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{
+		PortFloorDenyRanges: []policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}},
+	})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	user, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[
+		{"action":"allow","target":"pypi.org"}
+	]}`)
+	require.NoError(t, err)
+	effective := policy.MergeAlwaysOverlay(user,
+		[]policy.EgressRule{policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}})},
+		nil)
+	require.NoError(t, a.ApplyPolicy(ctx, s, effective), "the floor alone must not trip the port-scoped guard")
+
+	// Adding a user Ports rule on top trips it again.
+	effective.Egress = append(effective.Egress, policy.EgressRule{Action: policy.ActionAllow, Ports: []int{22}})
+	err = a.ApplyPolicy(ctx, s, effective)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "port-scoped")
 }

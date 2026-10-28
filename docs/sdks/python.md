@@ -94,21 +94,17 @@ finally:
     sandbox.destroy()
 ```
 
-Use `destroy()` for create-use-discard workflows. It calls `kill()` before
-`close()` and still closes local resources if remote termination fails. Context
-managers continue to call only `close()`, so the remote sandbox remains available
-for later `connect()` calls unless you explicitly kill or destroy it.
+Use `destroy()` for create-use-discard workflows. It calls `kill()` before `close()` and still closes local resources if remote termination fails. Context managers continue to call only `close()`, so the remote sandbox remains available for later `connect()` calls unless you explicitly kill or destroy it.
 
 ## Client Pool and observability
 
-Use `SandboxPoolSync` for synchronous applications and `SandboxPoolAsync` for
-asyncio. Both provide in-memory and Redis-backed stores, four acquire policies,
-and staged warmup controls. See [Client Pool](/guides/client-pool) for examples,
-configuration, cleanup, and distributed deployment.
+Use `SandboxPoolSync` for synchronous applications and `SandboxPoolAsync` for asyncio. Both provide in-memory and Redis-backed stores, four acquire policies, and staged warmup controls. See [Client Pool](/guides/client-pool) for examples, configuration, cleanup, and distributed deployment.
 
 Enable `ConnectionConfig(enable_tracing=True)` or
 `ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/sdks/observability#pool-warmup-tracing).
-For remote logs/events, use the [Diagnostics](/api/#diagnostics) manager API.
+For backend context and remote logs/events, use `SandboxManager.get_diagnostic_context`,
+`get_diagnostic_logs`, and `get_diagnostic_events`. These methods also exist on
+`Sandbox`; see [SDK diagnostics](/sdks/#diagnostics).
 Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Lifecycle Hooks
@@ -144,13 +140,61 @@ sandbox = await Sandbox.create(
 
 The Server validates `timeout_seconds`; `pre_start` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
+### Idle policy (auto-pause and wake-on-access)
+
+`SandboxLifecycle.idle_policy` (OSEP-0024, fast-sandbox only) tells the control plane to auto-pause the sandbox after `idle_timeout_seconds` (30–86400) of continuously idle ingress-observed traffic, and to wake it on the next request. It is control-plane state: it never reaches the guest, is allowed in template mode (`Sandbox.create_from_template(idle_policy=...)`), and is rejected by non-fast-sandbox backends. Omitting it preserves non-automated behavior exactly.
+
+```python
+from datetime import timedelta
+
+sandbox = await Sandbox.create(
+    "ubuntu:24.04",
+    connection_config=config,
+    timeout=timedelta(seconds=86400),
+    lifecycle=SandboxLifecycle(
+        idle_policy=IdlePolicy(
+            idle_timeout_seconds=300,
+            on_idle="pause",
+            wake_on_access=True,
+        )
+    ),
+)
+```
+
+`active_probe` lets the application veto a pause while real work runs without producing ingress traffic: declare an endpoint answering `{"active": bool, "message"?: string}` and the server polls it when the sandbox is otherwise idle; a busy answer resets the idle clock.
+
+```python
+IdlePolicy(
+    idle_timeout_seconds=300,
+    on_idle="pause",
+    active_probe=ActivityProbe(port=8080, path="/active", timeout_seconds=2),
+)
+```
+
+### Renewal policy (renew-on-access)
+
+`SandboxLifecycle.renewal_policy.extend_seconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + extend_seconds, current expires_at)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` — see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0.
+
+```python
+from datetime import timedelta
+
+sandbox = await Sandbox.create(
+    "ubuntu:24.04",
+    connection_config=config,
+    timeout=timedelta(seconds=3600),
+    lifecycle=SandboxLifecycle(
+        renewal_policy=RenewalPolicy(extend_seconds=3600),
+    ),
+)
+```
+
+### Wake retry
+
+A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the SDK recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK raises `SandboxWakeTimeoutException` (carrying `attempts` and `waited`) while the server-side restore continues in the background. Bare `503` responses follow the existing retry rules untouched. Streaming (SSE) calls such as `commands.run` and `codes.run` get the wake retry too, for the request that starts the stream; an established stream is never resent.
+
 ## Usage Examples
 
-The snippets below use `config` and a live `sandbox` from the quick start. Run
-async snippets inside an async function, before its cleanup block. Creation
-examples are alternatives; call `destroy()` when each sandbox is no longer needed.
-For the synchronous API, use `SandboxSync` and `SandboxManagerSync`, and omit
-`await` / `async` from SDK calls and context managers.
+The snippets below use `config` and a live `sandbox` from the quick start. Run async snippets inside an async function, before its cleanup block. Creation examples are alternatives; call `destroy()` when each sandbox is no longer needed. For the synchronous API, use `SandboxSync` and `SandboxManagerSync`, and omit `await` / `async` from SDK calls and context managers.
 
 ### 1. Lifecycle Management
 
@@ -189,12 +233,9 @@ print(f"State: {info.status.state}")
 print(f"Expires: {info.expires_at}")  # None when no automatic expiration is configured
 ```
 
-Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume).
-Use `await Sandbox.connect(sandbox_id, connection_config=config)` to attach to an
-already running sandbox without resuming it.
+Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume). Use `await Sandbox.connect(sandbox_id, connection_config=config)` to attach to an already running sandbox without resuming it.
 
-Create a non-expiring sandbox by explicitly passing `timeout=None`. Omitting
-`timeout` uses the default 10-minute TTL:
+Create a non-expiring sandbox by explicitly passing `timeout=None`. Omitting `timeout` uses the default 10-minute TTL:
 
 ```python
 manual = await Sandbox.create(
@@ -206,17 +247,9 @@ manual = await Sandbox.create(
 
 ### 2. Custom Health Check
 
-Resolving an endpoint confirms that a route exists; it does not confirm that the
-application on that port is healthy. For service readiness, make a bounded request
-to the application's health endpoint and include the returned endpoint headers.
+Resolving an endpoint confirms that a route exists; it does not confirm that the application on that port is healthy. For service readiness, make a bounded request to the application's health endpoint and include the returned endpoint headers.
 
-With the built-in health probe, readiness checks during creation, connection, and
-resume fail immediately when the health endpoint returns HTTP 401 or 403.
-The SDK raises `SandboxApiException`
-with the original status, error details, and request ID instead of waiting for
-`SandboxReadyTimeoutException`. Check the endpoint credentials or permissions
-before retrying. Transient health failures retain their existing polling behavior;
-`is_healthy()` still returns `False` for a failed built-in health probe.
+With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
@@ -242,6 +275,10 @@ sandbox = await Sandbox.create(
 ```
 
 ### 3. Command Execution & Streaming
+
+Both synchronous and asynchronous streaming APIs accept an optional leading
+UTF-8 byte order mark (BOM), including when it spans network chunks. Only the
+stream's initial BOM is removed; U+FEFF characters in event data are preserved.
 
 Execute commands and handle output streams in real-time.
 
@@ -272,8 +309,7 @@ result = await sandbox.commands.run(
 )
 ```
 
-To execute a native program without shell parsing, pass an argument list. On Linux,
-this example prints literal `$HOME` and keeps `hello world` as one argument:
+To execute a native program without shell parsing, pass an argument list. On Linux, this example prints literal `$HOME` and keeps `hello world` as one argument:
 
 ```python
 result = await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"])
@@ -281,10 +317,11 @@ result = await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"])
 
 Native argv execution requires an updated execd. See [command execution modes](/architecture/data-plane/execd#command-execution) for executable lookup and platform behavior.
 
+`RunCommandOpts.timeout` and the `timeout` of `commands.run_in_session` take a `timedelta` and are sent in whole milliseconds, rounded up: 500 microseconds is sent as 1 ms and 1.5 ms as 2 ms. An omitted timeout is left out of the request and `timedelta(0)` is sent as 0; ordinary commands then run without a deadline, and bash-session commands use their 24-hour default.
+
 #### Background commands
 
-Start a bounded command, read incremental logs, and check its exit status.
-Command timeout and sandbox TTL are separate settings.
+Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings.
 
 ```python
 import time
@@ -316,8 +353,7 @@ while True:
 
 #### Persistent shell sessions
 
-Use a Bash session to preserve shell variables and the working directory across
-commands. Delete the session when finished.
+Use a Bash session to preserve shell variables and the working directory across commands. Delete the session when finished.
 
 ```python
 session_id = await sandbox.commands.create_session(working_directory="/tmp")
@@ -331,23 +367,15 @@ finally:
 
 #### Persistent environment variables
 
-Set environment variables that the runtime injects into every subsequent command
-and session — without hand-writing shell escaping against the sandbox env file.
+Set environment variables that the runtime injects into every subsequent command and session — without hand-writing shell escaping against the sandbox env file.
 
 ```python
 await sandbox.commands.set_env("MY_TOKEN", "it's a safe value")
 ```
 
-Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values without a single quote are
-stored verbatim; values containing a single quote use the env file's
-double-quoted form, in which shell-style `$NAME` sequences may be expanded
-when the runtime loads the file. The env file is append-only: the
-last write for a key wins. Raises `SandboxException` if the sandbox fails to
-persist the variable. The sync API exposes the same method on
-`sandbox.commands`.
+Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values without a single quote are stored verbatim; values containing a single quote use the env file's double-quoted form, in which shell-style `$NAME` sequences may be expanded when the runtime loads the file. The env file is append-only: the last write for a key wins. Raises `SandboxException` if the sandbox fails to persist the variable. The sync API exposes the same method on `sandbox.commands`.
 
-For commands that need filesystem/process isolation within a sandbox, see
-[Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
+For commands that need filesystem/process isolation within a sandbox, see [Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
 
 ### 4. File Operations
 
@@ -387,9 +415,18 @@ for f in files:
 await sandbox.files.delete_files(["/tmp/hello.txt"])
 ```
 
-For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`;
-use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()`
-also accept `offset` and `limit` for partial reads.
+For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`; use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()` also accept `offset` and `limit` for partial reads.
+
+Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
+
+```python
+from contextlib import aclosing
+
+async with aclosing(await sandbox.files.read_bytes_stream("/tmp/large.bin")) as chunks:
+    async for chunk in chunks:
+        if enough_data(chunk):
+            break
+```
 
 #### File operations with an explicit identity
 
@@ -401,17 +438,9 @@ files = sandbox.files_with_identity(1001, 2000)
 
 Both the asynchronous and synchronous Sandbox clients expose this helper.
 
-The bound client exposes the usual file operations and shares the sandbox
-connection, authentication, and endpoint routing headers. The existing file
-client retains its default identity. Select the UID/GID separately for command
-execution.
+The bound client exposes the usual file operations and shares the sandbox connection, authentication, and endpoint routing headers. The existing file client retains its default identity. Select the UID/GID separately for command execution.
 
-This requires Linux and an Execd version that supports filesystem execution
-identity. Unsupported servers return an error; requests never fall back to the
-default filesystem routes. Keep sandbox credentials and identity selection in
-the trusted backend. Linux filesystem permissions apply; this feature does not
-create a tenant isolation boundary. See [Execd](/architecture/data-plane/execd)
-for permission and workspace provisioning details.
+This requires Linux and an Execd version that supports filesystem execution identity. Unsupported servers return an error; requests never fall back to the default filesystem routes. Keep sandbox credentials and identity selection in the trusted backend. Linux filesystem permissions apply; this feature does not create a tenant isolation boundary. See [Execd](/architecture/data-plane/execd) for permission and workspace provisioning details.
 
 ### 5. Sandbox Management (Admin)
 
@@ -438,8 +467,7 @@ async with await SandboxManager.create(connection_config=config) as manager:
 
 ### Resource metrics
 
-Read current sandbox resource usage with `await sandbox.get_metrics()`. This is
-separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
+Read current sandbox resource usage with `await sandbox.get_metrics()`. This is separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots, templates, and metadata
 
@@ -452,16 +480,9 @@ separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
 | Create from a published template | `Sandbox.create_from_template(template_id, timeout=..., connection_config=config)` |
 | Patch metadata | `sandbox.patch_metadata` or `manager.patch_sandbox_metadata` |
 
-These APIs also exist on the synchronous SDK. Snapshot creation and template
-builds are asynchronous: inspect status before restoring or using a template.
-Templates must reach `Succeeded`; template-backed creation requires a TTL and
-inherits environment, resources, volumes, and lifecycle hooks from the template.
-Metadata patch values add/replace keys; `None` deletes a key.
-See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+These APIs also exist on the synchronous SDK. Snapshot creation and template builds are asynchronous: inspect status before restoring or using a template. Templates must reach `Succeeded`; template-backed creation requires a TTL and inherits environment, resources, volumes, and lifecycle hooks from the template. Metadata patch values add/replace keys; `None` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
 
-Snapshot support depends on the runtime and server configuration. Renew the source
-sandbox first if its remaining TTL may expire during snapshot creation. This example
-waits up to 15 minutes, restores a new sandbox, and retains the snapshot for reuse:
+Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes, restores a new sandbox, and retains the snapshot for reuse:
 
 ```python
 import time
@@ -512,10 +533,12 @@ await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
 
 The `ConnectionConfig` class manages API server connection settings.
 
+Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sandboxes. SDK-owned transports share that configuration's lazily loaded SSL context, avoiding repeated CA certificate loading, while each Sandbox/Manager keeps its own connection pool and closes it independently. TLS verification remains enabled. Create a new configuration to reload the system or environment-configured trust store. For connection pooling across sandboxes, supply a shared `transport` and close it after all users finish.
+
 | Parameter         | Description                                | Default                      | Environment Variable   |
 | ----------------- | ------------------------------------------ | ---------------------------- | ---------------------- |
 | `api_key`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
-| `domain`          | The endpoint domain of the sandbox service | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
+| `domain`          | The endpoint domain of the sandbox service (`host[:port]` or a full URL); a trailing `/` or `/v1` is ignored | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`        | HTTP protocol (http/https)                 | `http`                       | -                      |
 | `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
@@ -523,36 +546,18 @@ The `ConnectionConfig` class manages API server connection settings.
 | `follow_redirects` | Follow HTTP redirects for SDK requests    | `False`                      | -                      |
 | `event_hooks`     | Additional httpx hooks for adapter clients | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry); custom transports must honor request timeouts  | SDK-created per instance     | -                      |
-| `retry_policy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
+| `retry_policy`    | Automatic retry policy; streaming requests only get its wake retry (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
 | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `False` | - |
 
-The Python Code Interpreter inherits the sandbox's connection configuration.
-With `use_server_proxy=True`, context requests and streamed code execution include
-the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct
-mode, the SDK does not automatically attach this key to code execution requests.
-This applies to both the asynchronous and synchronous APIs.
+The Python Code Interpreter inherits the sandbox's connection configuration. With `use_server_proxy=True`, context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
-When `follow_redirects` is enabled, same-origin redirects preserve request
-headers. An origin is the combination of scheme, host, and port, so changing
-any of those values is cross-origin. Before following a cross-origin redirect,
-the SDK removes every header whose name starts with `OPEN-SANDBOX-` or
-`OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped
-automatically.
+When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
 
-File uploads never follow redirects, even when `follow_redirects` is enabled,
-because streamed or file-backed multipart request bodies cannot always be
-safely replayed. This applies to both direct chunked uploads and uploads through
-the server proxy. A redirect response from an upload is surfaced as a
-`SandboxApiException` with the original 3xx status.
+File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. This applies to both direct chunked uploads and uploads through the server proxy. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 
-`ConnectionConfig.event_hooks` accepts async httpx hooks, while
-`ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured
-request hooks run before the SDK safety hook, so they cannot re-add protected
-OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors
-`follow_redirects` and the SDK safety hook, but does not invoke configured user
-hooks.
+`ConnectionConfig.event_hooks` accepts async httpx hooks, while `ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured request hooks run before the SDK safety hook, so they cannot re-add protected OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors `follow_redirects` and the SDK safety hook, but does not invoke configured user hooks.
 
 ```python
 from datetime import timedelta
@@ -591,27 +596,17 @@ config = ConnectionConfig(
 
 ### 2. Automatic retries
 
-The SDK retries transient failures automatically. `ConnectionConfig` /
-`ConnectionConfigSync` install a retry wrapper around the default shared
-transport, controlled by `retry_policy` (`opensandbox.transport.RetryPolicy`).
+The SDK retries transient failures automatically. `ConnectionConfig` / `ConnectionConfigSync` install a retry wrapper around the default shared transport, controlled by `retry_policy` (`opensandbox.transport.RetryPolicy`).
 
 Default behavior:
 
-- **Enabled by default.** Idempotent methods (`GET/HEAD/PUT/DELETE/OPTIONS`)
-  are retried on `429`, `502`, `503`, and on pre-send transport failures
-  (DNS, TCP connect, TLS handshake, fresh-connection reset).
-- **`POST`/`PATCH` are never retried on a status code by default**, since the
-  request may already have been applied server-side. Pre-send transport
-  failures (before any byte is written) are still retried for these methods.
-- Up to `3` retries with decorrelated-jitter exponential backoff, honoring a
-  server `Retry-After` header (capped at 60s).
-- **SSE / streaming requests bypass retry** entirely (bodies are not
-  replayable).
+- **Enabled by default.** Idempotent methods (`GET/HEAD/PUT/DELETE/OPTIONS`) are retried on `429`, `502`, `503`, and on pre-send transport failures (DNS, TCP connect, TLS handshake, fresh-connection reset).
+- **`POST`/`PATCH` are never retried on a status code by default**, since the request may already have been applied server-side. Pre-send transport failures (before any byte is written) are still retried for these methods.
+- Up to `3` retries with decorrelated-jitter exponential backoff, honoring a server `Retry-After` header (capped at 60s).
+- **SSE / streaming requests are not retried** on status codes or transport errors, since they may already have started a command. Only the [wake retry](#wake-retry) applies to the request that starts the stream.
 
 ::: warning Behavior change
-Retries are on by default. This can increase the number of HTTP attempts and
-tail latency compared to earlier SDK versions. If you rely on fast-fail
-semantics, opt out explicitly with `RetryPolicy.disabled()`.
+Retries are on by default. This can increase the number of HTTP attempts and tail latency compared to earlier SDK versions. If you rely on fast-fail semantics, opt out explicitly with `RetryPolicy.disabled()`.
 :::
 
 ```python
@@ -645,8 +640,7 @@ config = ConnectionConfig(
 ```
 
 ::: info
-If you pass a custom `transport`, the SDK does **not** wrap it; installing
-retry behavior is then your responsibility.
+If you pass a custom `transport`, the SDK does **not** wrap it; installing retry behavior is then your responsibility.
 :::
 
 ### 3. Sandbox Creation Configuration
@@ -697,11 +691,7 @@ sandbox = await Sandbox.create(
 
 ### 4. Runtime Egress Policy Updates
 
-Runtime egress policy routing depends on the sandbox origin.
-For image-backed sandboxes, the SDK resolves port `18080` and calls the sidecar
-`/policy` API. For template-backed sandboxes (including restored template snapshots),
-the SDK detects `OPEN-SANDBOX-ORIGIN: template` and routes policy operations through
-the lifecycle `/sandboxes/{sandboxId}/networkpolicy` API.
+Runtime egress policy routing depends on the sandbox origin. For image-backed sandboxes, the SDK resolves port `18080` and calls the sidecar `/policy` API. For template-backed sandboxes (including restored template snapshots), the SDK detects `OPEN-SANDBOX-ORIGIN: template` and routes policy operations through the lifecycle `/sandboxes/{sandboxId}/networkpolicy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `target`.
@@ -724,11 +714,7 @@ await sandbox.patch_egress_rules(
 
 ### 5. Credential Vault
 
-Credential Vault requires a sandbox-side egress service and is unavailable for
-template-backed sandboxes. It injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `credential_proxy` enabled, then write credentials
-and bindings through `sandbox.credential_vault`.
+Credential Vault requires a sandbox-side egress service and is unavailable for template-backed sandboxes. It injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `credential_proxy` enabled, then write credentials and bindings through `sandbox.credential_vault`.
 
 ```python
 from opensandbox.models.sandboxes import (
@@ -765,5 +751,4 @@ await sandbox.credential_vault.create(
 )
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types, binding
-guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding guidance, and Git/curl examples.

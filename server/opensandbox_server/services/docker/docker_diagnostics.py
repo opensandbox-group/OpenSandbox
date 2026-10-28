@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import re
 import time
+from typing import Any
 
 from docker.errors import DockerException
 from fastapi import HTTPException, status
 
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     limit_diagnostic_lines,
     unsupported_scope_error,
@@ -56,8 +58,40 @@ def _parse_since_to_timestamp(since: str) -> int:
     return int(time.time()) - seconds
 
 
+def _container_lifecycle_state(container: Any) -> tuple[str, str, str]:
+    """Classify container inspect data without looking up its image."""
+    state = container.attrs.get("State", {})
+    status_value = (state.get("Status") or container.status or "").lower()
+    if state.get("Running", False) and not state.get("Paused", False):
+        return "Running", "CONTAINER_RUNNING", "Sandbox container is running."
+    if state.get("Paused", False):
+        return "Paused", "CONTAINER_PAUSED", "Sandbox container is paused."
+    if state.get("Restarting", False):
+        return "Running", "CONTAINER_RESTARTING", "Sandbox container is restarting."
+    if status_value in {"created", "starting"}:
+        return "Pending", "CONTAINER_STARTING", "Sandbox container is starting."
+    if status_value in {"exited", "dead"}:
+        exit_code = state.get("ExitCode")
+        if exit_code == 0:
+            return "Terminated", "CONTAINER_EXITED", "Sandbox container exited successfully."
+        return "Failed", "CONTAINER_EXITED_ERROR", f"Sandbox container exited with code {exit_code}."
+    return "Unknown", "CONTAINER_STATE_UNKNOWN", f"Sandbox container is in state '{status_value or 'unknown'}'."
+
+
 class DockerDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Docker backend."""
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        container = self._get_container_by_sandbox_id(sandbox_id)
+        # Container lookup already provides inspect data. Do not construct a full
+        # Sandbox here: that also inspects the image, which may no longer exist.
+        state, _, _ = _container_lifecycle_state(container)
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            state=state,
+            backend_type="docker",
+            backend_identifiers={"containerId": container.id, "containerName": container.name},
+        )
 
     def get_sandbox_log_diagnostics(
         self,

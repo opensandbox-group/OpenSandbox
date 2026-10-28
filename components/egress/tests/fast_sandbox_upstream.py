@@ -156,7 +156,10 @@ def run_ext_http():
             # direct path arrives with src=10.10.0.5 (the sandbox IP), while a
             # request proxied by the shared mitm arrives with the host-side
             # veth src (10.99.0.1).
-            lines = [f"client={self.client_address[0]}"]
+            lines = [f"client={self.client_address[0]}",
+                     # The rewritten request target (path + query): the vault
+                     # smoke asserts query substitutions landed upstream.
+                     f"path={self.path}"]
             lines += [f"{k}: {v}" for k, v in sorted(self.headers.items())]
             body = ("\n".join(lines) + "\n").encode()
             self.send_response(200)

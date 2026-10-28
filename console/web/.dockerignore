@@ -1,0 +1,8 @@
+node_modules
+dist
+.git
+.env
+.env.*
+!.env.example
+*.md
+Dockerfile

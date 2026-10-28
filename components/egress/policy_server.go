@@ -28,14 +28,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/internal/safego"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -55,6 +58,7 @@ type alwaysRulesLoader interface {
 // nftApplier: static allow/deny sets plus dynamic DNS-learned entries; teardown on shutdown.
 type nftApplier interface {
 	ApplyStatic(context.Context, *policy.NetworkPolicy) error
+	Quiesce()
 	AddResolvedDomain(context.Context, string, []nftables.ResolvedIP) error
 	AddUpstreamProxyIPs(context.Context, []nftables.ResolvedIP) error
 	StartConnectionRefresh(context.Context)
@@ -74,7 +78,20 @@ func startPolicyServer(
 	policyFile string,
 	alwaysDeny, alwaysAllow []policy.EgressRule,
 	mitmGate *mitmproxy.HealthGate,
+	quarantineOwners ...*revisionQuarantine,
 ) (*http.Server, *policyServer, error) {
+	liveRevision := constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime))
+	rawPassthrough, passthroughPresent := os.LookupEnv(constants.EnvMitmproxyPassthroughHosts)
+	if passthroughPresent && !liveRevision {
+		return nil, nil, fmt.Errorf("%s requires %s: %w", constants.EnvMitmproxyPassthroughHosts, constants.EnvExperimentalRevisionRuntime, mitmpassthrough.ErrInvalid)
+	}
+	staticPassthrough, err := mitmpassthrough.Parse(rawPassthrough, passthroughPresent)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !staticPassthrough.Empty() && strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
+		return nil, nil, fmt.Errorf("%s is incompatible with %s: %w", constants.EnvMitmproxyPassthroughHosts, constants.EnvUpstreamProxy, mitmpassthrough.ErrInvalid)
+	}
 	maxEgressRules := maxEgressRulesFromEnv()
 	if maxEgressRules > 0 {
 		log.Infof("policy API: max egress rules per policy (POST/PATCH) = %d (set %s=0 to disable)", maxEgressRules, constants.EnvMaxEgressRules)
@@ -82,33 +99,47 @@ func startPolicyServer(
 
 	mux := http.NewServeMux()
 	handler := &policyServer{
-		proxy:            proxy,
-		nft:              nft,
-		token:            token,
-		enforcementMode:  enforcementMode,
-		nameserverIPs:    nameserverIPs,
-		policyFile:       strings.TrimSpace(policyFile),
-		maxEgressRules:   maxEgressRules,
-		alwaysLoader:     policy.NewAlwaysRuleLoader(time.Minute),
-		stopAlwaysReload: make(chan struct{}),
-		mitmGate:         mitmGate,
+		proxy:             proxy,
+		staticPassthrough: staticPassthrough,
+		liveRevision:      liveRevision,
+		nft:               nft,
+		token:             token,
+		enforcementMode:   enforcementMode,
+		nameserverIPs:     nameserverIPs,
+		policyFile:        strings.TrimSpace(policyFile),
+		maxEgressRules:    maxEgressRules,
+		alwaysLoader:      policy.NewAlwaysRuleLoader(time.Minute),
+		stopAlwaysReload:  make(chan struct{}),
+		mitmGate:          mitmGate,
 	}
-	handler.credentialVault = credentialvault.NewStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
+	if len(quarantineOwners) > 0 {
+		handler.quarantine = quarantineOwners[0]
+	}
+	if liveRevision {
+		handler.credentialVault = credentialvault.NewLiveStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" }, staticPassthrough)
+	} else {
+		handler.credentialVault = credentialvault.NewStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
+	}
 	handler.credentialVaultRequireTLS = constants.IsTruthy(os.Getenv(constants.EnvCredentialVaultRequireTLS))
 	handler.setAlwaysRules(alwaysDeny, alwaysAllow)
+	if liveRevision {
+		handler.mu.Lock()
+		current := proxy.CurrentPolicy()
+		if current == nil {
+			current = policy.DefaultDenyPolicy()
+		}
+		// alwaysAllow already includes the telemetry resolved during startup.
+		err := handler.initRevisionRecoveryLocked(effectivePolicyInputs{user: current, alwaysDeny: alwaysDeny, alwaysAllow: alwaysAllow})
+		handler.mu.Unlock()
+		if err != nil {
+			return nil, nil, fmt.Errorf("initialize revision recovery: %w", err)
+		}
+	}
 
 	mux.HandleFunc("/policy", handler.handlePolicy)
 	mux.HandleFunc("/credential-vault", handler.handleCredentialVault)
 	mux.HandleFunc("/credential-vault/", handler.handleCredentialVaultSubresource)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		if mitmGate != nil && mitmGate.MitmPending() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("mitmproxy not ready\n"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	mux.HandleFunc("/healthz", handler.handleHealthz)
 
 	var activeSrv *http.Server
 	var cleanupActiveSocket func(context.Context) error
@@ -171,15 +202,17 @@ func startPolicyServer(
 }
 
 type policyServer struct {
-	proxy           policyUpdater
-	nft             nftApplier
-	server          *http.Server
-	token           string
-	enforcementMode string
-	nameserverIPs   []netip.Addr
-	policyFile      string     // if set, successful /policy changes persist (truncate+write+fsync)
-	maxEgressRules  int        // 0 = unlimited; cap len(Egress) for POST/PATCH
-	mu              sync.Mutex // serializes /policy updates with effective-policy reads and Vault writes
+	staticPassthrough mitmpassthrough.Config
+	liveRevision      bool
+	proxy             policyUpdater
+	nft               nftApplier
+	server            *http.Server
+	token             string
+	enforcementMode   string
+	nameserverIPs     []netip.Addr
+	policyFile        string     // optional persistence; experimental owner uses atomicPolicyFile
+	maxEgressRules    int        // 0 = unlimited; cap len(Egress) for POST/PATCH
+	mu                sync.Mutex // serializes /policy updates with effective-policy reads and Vault writes
 
 	alwaysLoader     alwaysRulesLoader
 	stopAlwaysReload chan struct{}
@@ -187,8 +220,18 @@ type policyServer struct {
 	lastAlwaysFP              uint64
 	lastAlwaysFPSet           bool
 	credentialVault           *credentialvault.Store
+	revisionRecovery          *revisionRecoveryState
+	quarantine                *revisionQuarantine
+	atomicPolicyFile          atomicPolicyFileStore
 	mitmGate                  *mitmproxy.HealthGate
 	credentialVaultRequireTLS bool
+	// mitm is the sidecar's mitmdump lifecycle owner, attached after
+	// startMitmproxyTransparentIfEnabled. Guarded by mu; only the
+	// experimental revision runtime consults it.
+	mitm *mitmTransparent
+
+	// One-way health projection; reason, base and tickets remain owned under mu.
+	revisionRecoveryRequired atomic.Bool
 }
 
 type policyStatusResponse struct {
@@ -197,6 +240,22 @@ type policyStatusResponse struct {
 	EnforcementMode string `json:"enforcementMode,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	Policy          any    `json:"policy,omitempty"`
+}
+
+func (s *policyServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	// Probes must not wait for the policy/effect barrier, even when MITM is optional.
+	if s.revisionRecoveryRequired.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("revision recovery required\n"))
+		return
+	}
+	if s.mitmGate != nil && s.mitmGate.MitmPending() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("mitmproxy not ready\n"))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (s *policyServer) handlePolicy(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +285,7 @@ func (s *policyServer) handleCredentialVault(w http.ResponseWriter, r *http.Requ
 	}
 	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) &&
 		(r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
-		http.Error(w, "credential vault writes are unavailable while the experimental revision runtime is enabled", http.StatusServiceUnavailable)
+		s.handleCredentialVaultWriteRevision(w, r)
 		return
 	}
 	switch r.Method {
@@ -378,6 +437,143 @@ func (s *policyServer) handleCredentialVaultDelete(w http.ResponseWriter, r *htt
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// revisionMutationTimeout is the cooperative nft/IPC budget for live mutations.
+// Mutex waits, synchronous filesystem calls and stop/reap have no hard bound.
+const revisionMutationTimeout = 10 * time.Second
+
+// setRevisionMitm attaches the sidecar's mitmdump lifecycle owner for the
+// experimental revision runtime. Call once after the transparent mitmproxy is
+// started; nil keeps revision-gated writes unavailable.
+func (s *policyServer) setRevisionMitm(m *mitmTransparent) {
+	s.mu.Lock()
+	s.mitm = m
+	s.mu.Unlock()
+}
+
+// revisionMitmLocked returns the attached mitmdump lifecycle owner. The caller
+// must hold s.mu.
+func (s *policyServer) revisionMitmLocked() *mitmTransparent {
+	return s.mitm
+}
+
+// revisionMitmAttached reports whether a mitmdump lifecycle owner exists.
+func (s *policyServer) revisionMitmAttached() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mitm != nil
+}
+
+// handleCredentialVaultWriteRevision serves POST/PATCH/DELETE while the
+// experimental revision runtime is enabled. Every write installs the rendered
+// candidate on the mitmdump receiver and acknowledges only the exact confirmed
+// identity before the public Store is finalized; a failed, canceled, or
+// indeterminate transaction leaves the prior acknowledged revision active.
+func (s *policyServer) handleCredentialVaultWriteRevision(w http.ResponseWriter, r *http.Request) {
+	if !s.revisionMitmAttached() {
+		// Fail closed before the readiness wait: without a mitmdump lifecycle
+		// owner no write can be acknowledged, so it must not be attempted.
+		http.Error(w, "credential vault mutation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.credentialVault.Ready(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		return
+	}
+	if s.credentialVaultRequireTLS && !credentialVaultWriteTransportAllowed(r) {
+		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
+		return
+	}
+	var state credentialvault.State
+	var err error
+	switch r.Method {
+	case http.MethodPost:
+		var req credentialvault.CreateRequest
+		if err := credentialvault.ReadJSON(r, &req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid credential vault request: %v", err), http.StatusBadRequest)
+			return
+		}
+		state, err = s.mutateRevisionVaultRequest(r, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			return store.PrepareCreate(req, pol)
+		})
+	case http.MethodPatch:
+		var req credentialvault.MutationRequest
+		if err := credentialvault.ReadJSON(r, &req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid credential vault mutation request: %v", err), http.StatusBadRequest)
+			return
+		}
+		if req.ExpectedRevision == nil {
+			http.Error(w, "expectedRevision is required while the experimental revision runtime is enabled", http.StatusBadRequest)
+			return
+		}
+		state, err = s.mutateRevisionVaultRequest(r, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			return store.PreparePatch(req, pol)
+		})
+	default:
+		_, err = s.mutateRevisionVaultRequest(r, func(store *credentialvault.Store, _ *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			return store.PrepareDelete()
+		})
+	}
+	if err != nil {
+		writeRevisionMutationError(w, err)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		writeJSON(w, http.StatusCreated, state)
+	case http.MethodDelete:
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeJSON(w, http.StatusOK, state)
+	}
+}
+
+// mutateRevisionVaultRequest runs one mutation transaction with a bounded
+// deadline derived from the request context, so client cancellation and sidecar
+// shutdown interrupt an unresolved reconciliation.
+func (s *policyServer) mutateRevisionVaultRequest(
+	r *http.Request,
+	prepare func(*credentialvault.Store, *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error),
+) (credentialvault.State, error) {
+	var m *mitmTransparent
+	s.mu.Lock()
+	m = s.revisionMitmLocked()
+	s.mu.Unlock()
+	if m == nil {
+		return credentialvault.State{}, revision.ErrTransportUnavailable
+	}
+	ctx, cancel := revisionMutationContext(r.Context(), m)
+	defer cancel()
+	return s.mutateRevisionVault(ctx, m, prepare)
+}
+
+// writeRevisionMutationError maps transaction outcomes to fixed, secret-free
+// responses. Validation, conflict, and not-found failures keep the legacy
+// credential vault semantics; every operational or unknown outcome fails
+// closed with 503 and preserves the prior acknowledged revision.
+func writeRevisionMutationError(w http.ResponseWriter, err error) {
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, errRevisionRecoveryRequired):
+		http.Error(w, "revision recovery required", http.StatusServiceUnavailable)
+	case errors.Is(err, revision.ErrTransportUnavailable),
+		errors.Is(err, revision.ErrClosed),
+		errors.Is(err, revision.ErrIndeterminate),
+		errors.Is(err, revision.ErrBusy),
+		errors.Is(err, revision.ErrPrepareRejected):
+		http.Error(w, "credential vault mutation unavailable", http.StatusServiceUnavailable)
+	case errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, context.Canceled):
+		http.Error(w, "credential vault mutation did not complete", http.StatusServiceUnavailable)
+	case errors.Is(err, revision.ErrInvalid):
+		http.Error(w, "invalid credential vault mutation", http.StatusBadRequest)
+	case errors.Is(err, errRevisionExpectedRevision):
+		http.Error(w, errRevisionExpectedRevision.Error(), http.StatusConflict)
+	default:
+		credentialvault.WriteError(w, err)
+	}
+}
+
 func (s *policyServer) handleCredentialVaultCredentials(w http.ResponseWriter) {
 	state, err := s.credentialVault.Sanitized()
 	if err != nil {
@@ -447,6 +643,10 @@ func (s *policyServer) handlePost(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkRevisionPolicyAvailableLocked(r.Context()); err != nil {
+		writeRevisionPolicyError(w, err)
+		return
+	}
 
 	raw, err := readPolicyRequestBody(r)
 	if err != nil {
@@ -509,6 +709,10 @@ func (s *policyServer) handlePatch(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkRevisionPolicyAvailableLocked(r.Context()); err != nil {
+		writeRevisionPolicyError(w, err)
+		return
+	}
 
 	raw, err := readPolicyRequestBody(r)
 	if err != nil {
@@ -534,7 +738,11 @@ func (s *policyServer) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newPolicy, err := patchMergedPolicy(s.proxy.CurrentPolicy(), patchRules)
+	current := s.proxy.CurrentPolicy()
+	if s.revisionRecovery != nil {
+		current = s.revisionRecovery.current.inputs.user
+	}
+	newPolicy, err := patchMergedPolicy(current, patchRules)
 	if err != nil {
 		logEgressUpdateFailedWarn(fmt.Sprintf("invalid merged policy: %v", err))
 		http.Error(w, fmt.Sprintf("invalid merged policy: %v", err), http.StatusBadRequest)
@@ -567,6 +775,10 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkRevisionPolicyAvailableLocked(r.Context()); err != nil {
+		writeRevisionPolicyError(w, err)
+		return
+	}
 
 	raw, err := readPolicyRequestBody(r)
 	if err != nil {
@@ -593,6 +805,9 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	base := s.proxy.CurrentPolicy()
+	if s.revisionRecovery != nil {
+		base = s.revisionRecovery.current.inputs.user
+	}
 	if base == nil {
 		base = policy.DefaultDenyPolicy()
 	}
@@ -646,38 +861,51 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// commitPolicy applies one logical change: optional disk persist → merge always file rules → nft
-// static (with nameserver allow-IPs) → then update in-memory user policy (POST/PATCH/GET view).
-// If the change fails, the policy file is restored to its previous contents.
+// commitPolicy applies one change under s.mu. The experimental branch holds
+// its process lease through disk → nft → exact receiver ACK → proxy/base.
+// The default-off legacy branch retains its existing disk/nft/proxy behavior.
 func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, pol *policy.NetworkPolicy, op string) bool {
-	prevFile, prevFileExists, readErr := s.readPolicyFile()
-	if readErr != nil {
-		logEgressUpdateFailedError(fmt.Sprintf("read policy file: %v", readErr))
-		log.Errorf("policy API: read policy file failed: %v", readErr)
-		http.Error(w, fmt.Sprintf("failed to persist policy: %v", readErr), http.StatusInternalServerError)
-		return false
-	}
-	if err := s.persistPolicy(pol); err != nil {
-		logEgressUpdateFailedError(fmt.Sprintf("persist policy: %v", err))
-		log.Errorf("policy API: persist policy failed: %v", err)
-		// A failed write may leave a truncated file behind.
-		if restoreErr := s.restorePolicyFile(prevFile, prevFileExists); restoreErr != nil {
-			log.Errorf("policy API: restore policy file after failed persist: %v", restoreErr)
+	if s.revisionRecovery != nil {
+		m := s.revisionMitmLocked()
+		if m == nil {
+			writeRevisionPolicyError(w, revision.ErrTransportUnavailable)
+			return false
 		}
-		http.Error(w, fmt.Sprintf("failed to persist policy: %v", err), http.StatusInternalServerError)
-		return false
+		ctx, cancel := revisionMutationContext(ctx, m)
+		defer cancel()
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		// The immutable committed base, not mutable proxy/loader views, owns
+		// accepted overlays between explicit always-file reloads.
+		inputs := s.revisionRecovery.current.inputs
+		inputs.user = pol
+		base, err := s.applyRevisionPolicyLocked(ctx, m, inputs, true)
+		if err != nil {
+			writeRevisionPolicyError(w, err)
+			return false
+		}
+		s.proxy.UpdatePolicy(policy.MergeAlwaysOverlay(base.inputs.user, nil, nil))
+		s.revisionRecovery.current = base
+		s.invalidateRevisionBootstrapLocked()
+		return true
 	}
 	alwaysDeny, alwaysAllow := s.currentAlwaysRules()
+	restore, persistErr := s.persistPolicyChangeLocked(pol)
+	if persistErr != nil {
+		logEgressUpdateFailedError(fmt.Sprintf("persist policy: %v", persistErr))
+		log.Errorf("policy API: persist policy failed: %v", persistErr)
+		http.Error(w, fmt.Sprintf("failed to persist policy: %v", persistErr), http.StatusInternalServerError)
+		return false
+	}
 	merged := policy.MergeAlwaysOverlay(pol, alwaysDeny, alwaysAllow)
 	if s.nft != nil {
+		s.invalidateRevisionBootstrapLocked()
 		nftCtx, nftCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer nftCancel()
 		if err := s.nft.ApplyStatic(nftCtx, merged.WithExtraAllowIPs(s.nameserverIPs)); err != nil {
 			logEgressUpdateFailedError(fmt.Sprintf("nftables apply (%s): %v", op, err))
 			log.Errorf("policy API: nftables apply failed (%s): %v", op, err)
-			// The policy was not applied, so it must not be loaded on the
-			// next restart either.
-			if restoreErr := s.restorePolicyFile(prevFile, prevFileExists); restoreErr != nil {
+			if restoreErr := restore(); restoreErr != nil {
 				log.Errorf("policy API: restore policy file after failed apply: %v", restoreErr)
 			}
 			http.Error(w, fmt.Sprintf("failed to apply nftables policy: %v", err), http.StatusInternalServerError)
@@ -733,20 +961,50 @@ func fingerprintRules(deny, allow []policy.EgressRule) uint64 {
 }
 
 func (s *policyServer) reloadAlwaysRules() (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.revisionRecovery.recoveryErrorLocked(); err != nil {
+		return false, err
+	}
+	var m *mitmTransparent
+	ctx := context.Background()
+	if s.revisionRecovery != nil {
+		m = s.revisionMitmLocked()
+		if m == nil {
+			return false, revision.ErrTransportUnavailable
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = revisionMutationContext(ctx, m)
+		defer cancel()
+		// Hold the lease through callback AND loader/proxy/base finalization.
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if err := s.revisionPolicySessionReadyLocked(ctx, m); err != nil {
+			return false, err
+		}
+	}
 	if s.alwaysLoader == nil {
 		return false, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	var stagedBase *effectivePolicyBase
 	var stagedAllow []policy.EgressRule
 	deny, _, changed, err := s.alwaysLoader.RefreshIfDueWithApply(time.Now(), func(deny, allow []policy.EgressRule) error {
+		// Loader holds its write lock. Resolve telemetry once and never reenter it.
 		stagedAllow = withTelemetryAllow(allow)
-		if s.nft == nil {
+		if s.nft == nil && s.revisionRecovery == nil {
 			return nil
 		}
 		current := s.proxy.CurrentPolicy()
+		if s.revisionRecovery != nil {
+			current = s.revisionRecovery.current.inputs.user
+		}
 		if current == nil {
 			current = policy.DefaultDenyPolicy()
+		}
+		if s.revisionRecovery != nil {
+			var err error
+			stagedBase, err = s.applyRevisionPolicyLocked(ctx, m, effectivePolicyInputs{user: current, alwaysDeny: deny, alwaysAllow: stagedAllow}, false)
+			return err
 		}
 		merged := policy.MergeAlwaysOverlay(current, deny, stagedAllow)
 		nftCtx, nftCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -763,8 +1021,16 @@ func (s *policyServer) reloadAlwaysRules() (bool, error) {
 	if !changed {
 		return false, nil
 	}
+	if stagedBase != nil {
+		deny = append([]policy.EgressRule(nil), stagedBase.inputs.alwaysDeny...)
+		stagedAllow = append([]policy.EgressRule(nil), stagedBase.inputs.alwaysAllow...)
+	}
 	s.setAlwaysRules(deny, stagedAllow)
 	s.proxy.UpdateAlwaysRules(deny, stagedAllow)
+	if stagedBase != nil {
+		s.revisionRecovery.current = stagedBase
+		s.invalidateRevisionBootstrapLocked()
+	}
 	return true, nil
 }
 
@@ -792,7 +1058,8 @@ func (s *policyServer) effectivePolicy() *policy.NetworkPolicy {
 }
 
 func (s *policyServer) validateCredentialVaultPolicyUpdate(pol *policy.NetworkPolicy) error {
-	if s.credentialVault == nil {
+	// The revision owner validates the frozen candidate once, before any effects.
+	if s.credentialVault == nil || s.revisionRecovery != nil {
 		return nil
 	}
 	alwaysDeny, alwaysAllow := s.currentAlwaysRules()

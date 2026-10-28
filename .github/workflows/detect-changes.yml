@@ -75,7 +75,8 @@ jobs:
                 path.startsWith("server/") ||
                 path.startsWith("components/egress/") ||
                 path.startsWith("components/ingress/") ||
-                path === "tests/python/tests/test_fsb_e2e.py",
+                path === "tests/python/tests/test_fsb_e2e.py" ||
+                path === "tests/python/tests/test_fsb_idle_pause_e2e.py",
               egress: (path) =>
                 workflowChanged(path, "egress-test.yml") ||
                 path.startsWith("components/egress/") ||

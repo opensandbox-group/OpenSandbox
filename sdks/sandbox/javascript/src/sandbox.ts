@@ -27,6 +27,9 @@ import type { SandboxFiles } from "./services/filesystem.js";
 import type { CredentialVault, Egress } from "./services/egress.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 import type { AdapterFactory } from "./factory/adapterFactory.js";
+import type { Diagnostics } from "./services/diagnostics.js";
+import type { DiagnosticContext, DiagnosticContent } from "./models/diagnostics.js";
+import { requireDiagnostics } from "./adapters/diagnosticsAdapter.js";
 
 import type { Sandboxes } from "./services/sandboxes.js";
 import type { ExecdCommands } from "./services/execdCommands.js";
@@ -40,6 +43,7 @@ import type {
   CreateSandboxRequest,
   CredentialProxyConfig,
   Endpoint,
+  IdlePolicy,
   NetworkPolicy,
   NetworkRule,
   PlatformSpec,
@@ -52,11 +56,13 @@ import type {
 } from "./models/sandboxes.js";
 import { SandboxOrigin } from "./models/sandboxes.js";
 import { ReadinessBudget, validatePollingInterval } from "./internal/readiness.js";
+import { validateIdlePolicy } from "./internal/idlePolicy.js";
+import { validateRenewalPolicy } from "./internal/renewalPolicy.js";
 
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
 const TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE =
-  "Credential Vault is not available for template-backed sandboxes: they have no sandbox-side egress sidecar.";
+  "Credential Vault is not available: the adapter factory's network policy stack does not provide credentialVault for template-backed sandboxes.";
 
 const unavailableIsolation: IsolationService = {
   create(): Promise<IsolationSession> {
@@ -307,6 +313,11 @@ export interface SandboxCreateFromTemplateOptions {
    */
   extensions?: Record<string, string>;
   /**
+   * Optional idle behavior (OSEP-0024, fast-sandbox only). Control-plane
+   * state, not workload shape, so template mode accepts it.
+   */
+  idlePolicy?: IdlePolicy;
+  /**
    * Optional signal used to cancel creation and readiness requests.
    */
   signal?: AbortSignal;
@@ -376,7 +387,9 @@ async function resolveEgressStack(
     }
     return {
       egress: stack.egress,
-      credentialVault: unavailableCredentialVault(TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE),
+      credentialVault:
+        stack.credentialVault ??
+        unavailableCredentialVault(TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE),
       origin: SandboxOrigin.TEMPLATE,
     };
   }
@@ -453,6 +466,7 @@ export class Sandbox {
       execdBaseUrl: string;
       egress: Egress;
       ownsTransport: boolean;
+      diagnostics?: Diagnostics;
     }
   >();
 
@@ -475,6 +489,7 @@ export class Sandbox {
     lifecycleBaseUrl: string;
     execdBaseUrl: string;
     sandboxes: Sandboxes;
+    diagnostics?: Diagnostics;
     commands: ExecdCommands;
     files: SandboxFiles;
     health: ExecdHealth;
@@ -498,6 +513,7 @@ export class Sandbox {
       execdBaseUrl: opts.execdBaseUrl,
       egress: opts.egress,
       ownsTransport: opts.ownsTransport,
+      diagnostics: opts.diagnostics,
     });
 
     this.origin = opts.origin ?? SandboxOrigin.UNKNOWN;
@@ -516,6 +532,12 @@ export class Sandbox {
     }
     if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
       validatePollingInterval(opts.healthCheckPollingInterval);
+    }
+    if (opts.lifecycle?.idlePolicy) {
+      validateIdlePolicy(opts.lifecycle.idlePolicy);
+    }
+    if (opts.lifecycle?.renewalPolicy) {
+      validateRenewalPolicy(opts.lifecycle.renewalPolicy);
     }
 
     // Validate volumes before allocating transport resources.
@@ -550,11 +572,12 @@ export class Sandbox {
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
       if (connectionConfig !== baseConnectionConfig) {
         await connectionConfig.closeTransport();
@@ -649,6 +672,7 @@ export class Sandbox {
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -720,14 +744,18 @@ export class Sandbox {
    * Create a new sandbox from a `Succeeded` fsb template.
    *
    * Template mode fixes the workload shape on the server: the entrypoint,
-   * env, resources, volumes, platform and lifecycle of the sandbox come
-   * from the template's golden image and cannot be overridden here. Only
-   * metadata, network policy and extensions may accompany the template id,
+   * env, resources, volumes, platform and lifecycle hooks of the sandbox
+   * come from the template's golden image and cannot be overridden here.
+   * Only metadata, network policy, extensions and the OSEP-0024 idle policy
+   * (control-plane state, not workload shape) may accompany the template id,
    * and the timeout is required.
    *
-   * The returned sandbox routes egress policy operations through the
-   * lifecycle control plane and has no Credential Vault (template-backed
-   * sandboxes have no sandbox-side egress sidecar).
+   * The returned sandbox routes egress policy operations and the Credential
+   * Vault through the lifecycle control plane: the server relays vault
+   * revisions to the egress-held vault over the FastPath handler relay, so
+   * the ack is synchronous and credential values never appear on any read
+   * (OSEP-0022). A 412 patch failure means another writer won the revision —
+   * re-read and retry with the fresh `expectedRevision`.
    */
   static async createFromTemplate(opts: SandboxCreateFromTemplateOptions): Promise<Sandbox> {
     if (!opts.templateId?.trim()) {
@@ -741,6 +769,9 @@ export class Sandbox {
     if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
       validatePollingInterval(opts.healthCheckPollingInterval);
     }
+    if (opts.idlePolicy) {
+      validateIdlePolicy(opts.idlePolicy, "idlePolicy");
+    }
     throwIfAborted(opts.signal);
 
     const baseConnectionConfig =
@@ -752,11 +783,12 @@ export class Sandbox {
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
       if (connectionConfig !== baseConnectionConfig) {
         await connectionConfig.closeTransport();
@@ -775,6 +807,7 @@ export class Sandbox {
           }
         : undefined,
       extensions: opts.extensions ?? {},
+      ...(opts.idlePolicy == null ? {} : { idlePolicy: opts.idlePolicy }),
     };
 
     let sandboxId: SandboxId | undefined;
@@ -823,6 +856,7 @@ export class Sandbox {
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -907,11 +941,12 @@ export class Sandbox {
     const lifecycleBaseUrl = connectionConfig.getBaseUrl();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
       if (ownsTransport) {
         await connectionConfig.closeTransport();
@@ -961,6 +996,7 @@ export class Sandbox {
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -992,6 +1028,18 @@ export class Sandbox {
 
   async getInfo(): Promise<SandboxInfo> {
     return await this.sandboxes.getSandbox(this.id);
+  }
+
+  getDiagnosticContext(): Promise<DiagnosticContext> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getContext(this.id);
+  }
+
+  getDiagnosticLogs(scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getLogs(this.id, scope);
+  }
+
+  getDiagnosticEvents(scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getEvents(this.id, scope);
   }
 
   async isHealthy(): Promise<boolean> {
@@ -1074,6 +1122,10 @@ export class Sandbox {
     return await Sandbox.connect({ ...opts, connectionConfig: baseConnectionConfig, adapterFactory });
   }
 
+  /**
+   * Request irreversible sandbox termination. Resolves when deletion is accepted;
+   * runtime cleanup may continue afterward.
+   */
   async kill(): Promise<void> {
     this.sandboxes.invalidateEndpointCache?.(this.id);
     await this.sandboxes.deleteSandbox(this.id);

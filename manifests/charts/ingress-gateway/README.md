@@ -1,6 +1,6 @@
 # ingress-gateway
 
-![Version: 1.1.1-rc.1](https://img.shields.io/badge/Version-1.1.1--rc.1-informational?style=flat-square) ![AppVersion: 1.1.1-rc.1](https://img.shields.io/badge/AppVersion-1.1.1--rc.1-informational?style=flat-square)
+![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-informational?style=flat-square) ![AppVersion: 1.2.0](https://img.shields.io/badge/AppVersion-1.2.0-informational?style=flat-square)
 
 Helm chart for deploying the OpenSandbox ingress gateway (components/ingress)
 
@@ -26,6 +26,10 @@ Kubernetes: `>=1.21.1-0`
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | fullnameOverride | string | `"opensandbox-ingress-gateway"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name (keeps names stable across releases). |
+| gateway.activity.enabled | bool | `false` | Enable activity recording. |
+| gateway.activity.minInterval | string | `"5s"` | Min interval between activity writes for the same sandbox. |
+| gateway.activity.redisDsn | string | `"redis://127.0.0.1:6379/0"` | Redis DSN; must match the server's [automation.idle_pause] redis.dsn. |
+| gateway.activity.ttlSeconds | int | `1800` | TTL for activity keys; keep equal to the server's activity_ttl_seconds. |
 | gateway.affinity | object | `{}` | Affinity for the gateway pod. |
 | gateway.containerSecurityContext | object | `{}` | Container-level security context for the gateway container. |
 | gateway.dataplaneNamespace | string | `"opensandbox"` | Namespace where the gateway dataplane workloads run. |
@@ -54,6 +58,14 @@ Kubernetes: `>=1.21.1-0`
 | gateway.service.type | string | `"ClusterIP"` | Service type for the gateway. |
 | gateway.tolerations | list | `[]` | Tolerations for the gateway pod. |
 | gateway.topologySpreadConstraints | list | `[]` | Topology spread constraints for the gateway pod. |
+| gateway.wake.enabled | bool | `false` | Enable wake-on-access. |
+| gateway.wake.maxFlightLifetime | string | `"5m"` | Max lifetime of one wake flight; expiry releases the restore permit while the resume converges server-side. |
+| gateway.wake.parkBudget | string | `"5s"` | Park budget per wake flight (must exceed the FastPath wait timeout plus one GetSandbox RPC). |
+| gateway.wake.parkMax | int | `1024` | Parking lot capacity: max concurrently parked requests per replica. |
+| gateway.wake.restoreMax | int | `256` | Concurrent restore permits per replica (must be <= parkMax); a flight holds its permit until the restore reaches a terminal outcome. |
+| gateway.wake.retryFactor | string | `"1.3"` | Exponential growth factor of the wake poll interval. |
+| gateway.wake.retryInterval | string | `"50ms"` | First readiness-poll interval of a wake flight. |
+| gateway.wake.retryJitter | string | `"0.1"` | Relative jitter applied to the wake poll interval. |
 | imagePullSecrets | list | `[]` | Image pull secrets for the gateway deployment. Each entry: {name: <secret-name>}. |
 | nameOverride | string | `""` | Override the name of the chart |
 | namespaceOverride | string | `""` | Override the namespace (default: opensandbox-system) |

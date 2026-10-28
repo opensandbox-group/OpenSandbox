@@ -24,6 +24,7 @@ boxlite, containerd-based runtimes and the upstream central sandbox-proxy are ou
   ```
 
 - Nodes that should serve Firecracker sandboxes need bare-metal KVM (`/dev/kvm`). There is NO manual labeling step: the firecracker-runtime readiness loop verifies each host, installs the Firecracker assets, and applies the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` labels plus the `FirecrackerReady` condition itself (rechecking every 5 minutes).
+- OverlayBD OCI on-demand loading (`runtime.oci.enabled=true`) additionally needs kernel ublk support on every runtime node (`CONFIG_BLK_DEV_UBLK`, `/dev/ublkc*`; `modprobe ublk_drv` when built as a module) and an OCI registry reachable from the cluster: SandboxTemplates publish `oci://` artifacts there and nodes read blocks on demand. The SandboxPool's fastlet containers must set `FAST_SANDBOX_OCI_ENABLED=true` separately — pools are not managed by this chart. See the fast-sandbox [OverlayBD OCI guide](https://github.com/opensandbox-group/fast-sandbox/blob/main/docs/guides/overlaybd-oci-sandboxes.md) for the credential (registry Secret + `fast-sandbox-registry` ConfigMap) and StateRoot-sharing requirements.
 
 - The agent registry Secret with artifact-store pull credentials (compiled `registry.json`):
 

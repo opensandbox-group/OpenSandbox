@@ -205,6 +205,36 @@ def test_kubernetes_pool_acquisition_timeout_defaults_and_validates():
         config_module.KubernetesRuntimeConfig(pool_acquisition_timeout_seconds=0)
 
 
+def test_kubernetes_template_publish_secrets_defaults():
+    """native templates fall back to the S3 secret; the OCI publish secret
+    for overlaybd templates is opt-in and defaults to unset."""
+    kubernetes_cfg = config_module.KubernetesRuntimeConfig()
+    assert kubernetes_cfg.template_s3_publish_secret == "sandbox-oss-credentials"
+    assert kubernetes_cfg.template_oci_publish_secret is None
+
+    configured = config_module.KubernetesRuntimeConfig(
+        template_oci_publish_secret="registry-credentials"
+    )
+    assert configured.template_oci_publish_secret == "registry-credentials"
+
+    with pytest.raises(ValueError):
+        config_module.KubernetesRuntimeConfig(template_oci_publish_secret="")
+
+
+def test_kubernetes_template_oci_publish_secret_from_toml():
+    app_cfg = config_module.AppConfig.model_validate(
+        {
+            "server": {"host": "127.0.0.1", "port": 8000},
+            "runtime": {"type": "kubernetes", "execd_image": "opensandbox/execd:latest"},
+            "kubernetes": {
+                "template_oci_publish_secret": "registry-credentials",
+            },
+        }
+    )
+    assert app_cfg.kubernetes is not None
+    assert app_cfg.kubernetes.template_oci_publish_secret == "registry-credentials"
+
+
 def test_server_config_uvicorn_tuning_defaults():
     """ServerConfig exposes uvicorn concurrency knobs with sensible defaults."""
     server_cfg = ServerConfig()
@@ -309,6 +339,59 @@ def test_renew_intent_defaults():
     assert ar.redis.dsn is None
     assert ar.redis.queue_key == "opensandbox:renew:intent"
     assert ar.redis.consumer_concurrency == 8
+
+
+def test_idle_pause_defaults():
+    cfg = AppConfig(runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:latest"))
+    ip = cfg.automation.idle_pause
+    assert ip.enabled is False
+    assert ip.sweep_interval_seconds == 15
+    assert ip.activity_ttl_seconds == 1800
+    assert ip.redis.dsn is None
+    assert ip.redis.lock_ttl_seconds == 30
+
+
+def test_idle_pause_redis_requires_dsn_when_enabled():
+    from opensandbox_server.config import IdlePauseConfig
+
+    with pytest.raises(ValidationError):
+        IdlePauseConfig(enabled=True)
+    with pytest.raises(ValidationError):
+        IdlePauseConfig(enabled=True, redis={"dsn": "   "})
+    ok = IdlePauseConfig(enabled=True, redis={"dsn": "redis://x", "lock_ttl_seconds": 45})
+    assert ok.redis.lock_ttl_seconds == 45
+
+
+def test_load_config_idle_pause_dotted_redis_keys(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    toml = textwrap.dedent(
+        """
+        [server]
+        host = "127.0.0.1"
+        port = 9000
+
+        [automation.idle_pause]
+        enabled = true
+        sweep_interval_seconds = 10
+        activity_ttl_seconds = 3600
+        redis.dsn = "redis://example:6379/2"
+        redis.lock_ttl_seconds = 45
+
+        [runtime]
+        type = "kubernetes"
+        execd_image = "opensandbox/execd:test"
+        """
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+    ip = loaded.automation.idle_pause
+    assert ip.enabled is True
+    assert ip.sweep_interval_seconds == 10
+    assert ip.activity_ttl_seconds == 3600
+    assert ip.redis.dsn == "redis://example:6379/2"
+    assert ip.redis.lock_ttl_seconds == 45
 
 
 def test_renew_intent_redis_requires_dsn_when_enabled():
@@ -474,6 +557,15 @@ def test_full_config_includes_store_sections(tmp_path) -> None:
     assert "[store]" in content
     assert "[store.postgresql]" in content
     assert "min_pool_size" in content
+
+
+def test_full_config_documents_container_runtime_network_modes(tmp_path) -> None:
+    """`osb config init` renders pydantic field descriptions, so they must list every accepted mode."""
+    config_path = render_full_config(tmp_path / "generated.toml")
+
+    content = config_path.read_text()
+    for mode in ("host", "bridge", "none", "pasta", "slirp4netns"):
+        assert mode in content
 
 
 def test_load_config_renew_intent_legacy_redis_subtable(tmp_path, monkeypatch):

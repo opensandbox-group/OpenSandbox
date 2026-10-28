@@ -9,7 +9,7 @@ This page describes the **Docker runtime** on a single host. Its counterpart on 
 
 The Docker runtime exposes every sandbox port through one host port per sandbox: `execd` bundles a reverse proxy, and the runtime maps only that proxy port to the host.
 
-![Single-host sandbox routing](../../public/images/single_host_network.png)
+![Single-host sandbox routing](../../public/images/single-host-network.svg)
 
 ## Single-host routing model
 - Every sandbox container starts `execd` listening on container port `44772`. `execd` bundles a lightweight reverse proxy that intercepts requests with the `/proxy/{port}` prefix and forwards them to `127.0.0.1:{port}` inside the same container.
@@ -32,6 +32,12 @@ The Docker runtime exposes every sandbox port through one host port per sandbox:
 - The reverse proxy label (`opensandbox.io/embedding-proxy-port`) identifies a host port that fronts `execd`. `get_endpoint(..., port=X)` returns `{public_host}:{host_proxy_port}/proxy/{X}`, so all internal ports can share the same host binding.
 - Port `8080` may also receive a direct host binding (`opensandbox.io/http-port`), providing a conventional HTTP endpoint without the proxy path when required.
 - This bridge setup lets a single machine host many sandboxes without port conflicts, because the same host proxy port can multiplex requests for HTTP, SSE, WebSocket, VNC, etc.
+
+### User-mode network modes (podman: `pasta`, `slirp4netns`)
+- Some container runtimes can attach a container to a user-mode network namespace instead of a bridge. Podman uses this for rootless containers, and `network_mode = "pasta"` is the practical choice on hosts where bridge networking is unavailable (for example a rootless podman machine whose netavark cannot apply its nftables ruleset).
+- These modes involve **no** bridge, so no host-routable container IP exists: the Docker-compatible inspect reports an empty `NetworkSettings.IPAddress` and no `NetworkSettings.Networks` entry. The host reaches the sandbox only through the published ports.
+- `get_endpoint(..., resolve_internal=True)` therefore returns the server-local host-mapped endpoint (`{proxy_host}:{host_proxy_port}/proxy/{X}`) for these modes — the same fallback used for sandboxes that share an egress sidecar network namespace — instead of failing with `NETWORK_MODE_ENDPOINT_UNAVAILABLE`.
+- Everything else is unchanged: `host` / `bridge` / `none` and user-defined networks keep their existing behaviour, and `networkPolicy` (egress sidecar) still requires `bridge`.
 
 ## Containerized lifecycle server
 

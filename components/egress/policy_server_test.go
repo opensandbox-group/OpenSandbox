@@ -20,16 +20,21 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,11 +92,14 @@ func (l *stagedTestAlwaysLoader) RefreshIfDueWithApply(_ time.Time, apply func(d
 type stubNft struct {
 	err         error
 	calls       int
+	quiesces    int
 	applied     *policy.NetworkPolicy
 	onApply     func(*policy.NetworkPolicy)
 	deadline    time.Time
 	hasDeadline bool
 }
+
+func (s *stubNft) Quiesce() { s.quiesces++ }
 
 func (s *stubNft) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) error {
 	s.calls++
@@ -442,6 +450,37 @@ func TestHandlePatch_DomainCaseOverride(t *testing.T) {
 	require.Equal(t, "example.com", proxy.updated.Egress[0].Target, "expected allow example.com to override")
 }
 
+func TestHandlePatch_DistinctPortScopedRulesCoexist(t *testing.T) {
+	// mergeKey used to fold every target-less rule to the same "" key, so a
+	// second port-only rule silently evicted the first instead of coexisting
+	// with it. Two port-only rules with different Ports must both survive a
+	// single PATCH payload.
+	initial := &policy.NetworkPolicy{DefaultAction: policy.ActionDeny}
+	proxy := &stubProxy{updated: initial}
+	nft := &stubNft{}
+	srv := &policyServer{proxy: proxy, nft: nft, enforcementMode: "dns+nft"}
+
+	body := `[{"action":"deny","ports":[25]},{"action":"allow","ports":[443,80]}]`
+	req := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	srv.handlePolicy(w, req)
+
+	resp := w.Result()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "expected 200")
+	require.Len(t, proxy.updated.Egress, 2, "both port-scoped rules should be kept, not deduped against each other")
+
+	// A follow-up PATCH adding a third, differently-scoped port rule must not
+	// evict the two already-applied port rules.
+	body2 := `[{"action":"deny","target":"10.0.0.5","ports":[22]}]`
+	req2 := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(body2))
+	w2 := httptest.NewRecorder()
+	srv.handlePolicy(w2, req2)
+
+	require.Equal(t, http.StatusOK, w2.Result().StatusCode, "expected 200")
+	require.Len(t, proxy.updated.Egress, 3, "the two prior port-scoped rules must survive a later unrelated patch")
+}
+
 func TestMaxEgressRulesFromEnv(t *testing.T) {
 	old := os.Getenv(constants.EnvMaxEgressRules)
 	defer func() { _ = os.Setenv(constants.EnvMaxEgressRules, old) }()
@@ -700,4 +739,318 @@ func TestFingerprintRules_EmptyStable(t *testing.T) {
 	fp1 := fingerprintRules(nil, nil)
 	fp2 := fingerprintRules([]policy.EgressRule{}, []policy.EgressRule{})
 	require.Equal(t, fp1, fp2, "nil and empty slices must produce same fingerprint")
+}
+
+func recoveryPolicyFixture(t *testing.T) *policyServer {
+	t.Helper()
+	t.Setenv(constants.EnvMitmproxyTransparent, "true")
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	inputs := policyCandidateInputs(t)
+	s := recoveryTestOwner(t, inputs, credentialvault.NewStore(nil, nil))
+	s.proxy = &stubProxy{updated: inputs.user}
+	s.mitmGate = mitmproxy.NewHealthGate()
+	s.mitmGate.SetReady(true)
+	s.alwaysLoader = &stagedTestAlwaysLoader{}
+	attachPolicyTestSession(t, s)
+	return s
+}
+
+func attachPolicyTestSession(t *testing.T, s *policyServer) {
+	t.Helper()
+	session := &mutationTestSession{fakeRevisionProcessSession: fakeRevisionProcessSession{config: validFakeRevisionIPCConfig()}}
+	session.update = func(_ context.Context, snapshot credentialvault.ActiveSnapshot, epoch int64) (revision.Identity, error) {
+		return mutationIdentity(t, snapshot, epoch), nil
+	}
+	s.mitm = &mitmTransparent{running: &mitmproxy.Running{}, revisionSession: session, currentGen: 1,
+		revisionOwner: &revisionLaunchOwner{server: s, stop: func(*mitmproxy.Running) {}}}
+}
+
+func TestRevisionRecoveryPolicyEffectClassification(t *testing.T) {
+	for _, kind := range []string{"json", "binding", "read-file", "unpublished-overlay-ignored", "persist", "nft-no-file", "nft-restored-file", "success-no-effects", "success-same-content", "success-reset", "success-nft", "success-file", "legacy-failure"} {
+		t.Run(kind, func(t *testing.T) {
+			if runtime.GOOS != "linux" && (kind == "success-file" || kind == "nft-restored-file") {
+				t.Skip("real experimental atomic policy storage requires Linux")
+			}
+			s := recoveryPolicyFixture(t)
+			nft := &stubNft{}
+			s.nft = nft
+			body := `{"defaultAction":"allow"}`
+			wantDefault := policy.ActionAllow
+			wantStatus := http.StatusOK
+			wantRecovery, wantChanged := false, true
+			var previous []byte
+			switch kind {
+			case "json":
+				body, wantStatus, wantChanged = "invalid", http.StatusBadRequest, false
+			case "binding":
+				s.credentialVault = policyCandidateStore(t, policyCandidateInputs(t))
+				body, wantStatus, wantChanged = `{"defaultAction":"deny"}`, http.StatusBadRequest, false
+			case "read-file":
+				s.policyFile = t.TempDir()
+				wantStatus, wantChanged = http.StatusInternalServerError, false
+			case "unpublished-overlay-ignored":
+				// Only an acknowledged reload can replace the frozen overlay.
+				s.alwaysLoader.SetCurrentRules(nil, []policy.EgressRule{{Action: "invalid", Target: "invalid.example"}})
+			case "persist":
+				s.policyFile = filepath.Join(t.TempDir(), "missing", "policy.json")
+				wantStatus, wantChanged = http.StatusInternalServerError, false
+			case "nft-no-file", "nft-restored-file":
+				nft.err = errors.New("private-nft-error")
+				wantStatus, wantRecovery, wantChanged = http.StatusInternalServerError, true, false
+				if kind == "nft-restored-file" {
+					s.policyFile = filepath.Join(t.TempDir(), "policy.json")
+					previous = []byte(`{"defaultAction":"deny"}`)
+					require.NoError(t, os.WriteFile(s.policyFile, previous, 0o600))
+				}
+			case "success-no-effects":
+				s.nft = nil
+			case "success-same-content":
+				s.nft = nil
+				body = `{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com"}]}`
+				wantDefault = policy.ActionDeny
+			case "success-reset":
+				s.nft = nil
+				body, wantDefault = "", policy.ActionDeny
+			case "success-file":
+				s.nft = nil
+				s.policyFile = filepath.Join(t.TempDir(), "policy.json")
+			case "legacy-failure":
+				s.revisionRecovery = nil
+				nft.err = errors.New("legacy-nft-error")
+				wantStatus, wantChanged = http.StatusInternalServerError, false
+			}
+			var ticket *revisionBootstrapTicket
+			var candidate *effectivePolicyCandidate
+			var original *effectivePolicyBase
+			if s.revisionRecovery != nil {
+				original = s.revisionRecovery.current
+				_, _, ticket, _ = s.captureRevisionBootstrap(context.Background())
+				var err error
+				candidate, err = s.prepareRevisionPolicyCandidate(original.inputs)
+				require.NoError(t, err)
+				nft.onApply = func(*policy.NetworkPolicy) {
+					require.ErrorIs(t, s.validateRevisionBootstrapLocked(ticket), errStaleRevisionBootstrap, "invalidate before the real nft attempt")
+					require.Same(t, original, s.revisionRecovery.current, "publication follows effects")
+				}
+			}
+			w := httptest.NewRecorder()
+			s.handlePost(w, httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(body)))
+			require.Equal(t, wantStatus, w.Code)
+			if kind == "legacy-failure" {
+				require.Nil(t, s.revisionRecovery)
+				require.False(t, s.mitmGate.MitmPending())
+				require.Zero(t, nft.quiesces)
+				return
+			}
+			if wantRecovery {
+				require.Equal(t, 1, nft.quiesces)
+				require.True(t, s.mitmGate.MitmPending())
+				require.Equal(t, revisionRecoveryExternalEffectsUnknown, s.revisionRecovery.reason)
+				require.ErrorIs(t, validateRecoveryTicket(s, ticket), errRevisionRecoveryRequired)
+				_, err := s.prepareRevisionPolicyCandidate(original.inputs)
+				require.ErrorIs(t, err, errRevisionRecoveryRequired)
+				// A best-effort disk restoration and a later healthy nft cannot clear the latch.
+				if previous != nil {
+					actual, err := os.ReadFile(s.policyFile)
+					require.NoError(t, err)
+					require.Equal(t, previous, actual)
+				}
+				nft.err = nil
+				calls := nft.calls
+				s.policyFile = ""
+				w = httptest.NewRecorder()
+				s.handlePost(w, httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(body)))
+				require.Equal(t, http.StatusServiceUnavailable, w.Code)
+				require.Equal(t, calls, nft.calls)
+				require.True(t, s.mitmGate.MitmPending())
+			} else {
+				require.Zero(t, nft.quiesces)
+				require.Equal(t, revisionRecoveryNone, s.revisionRecovery.reason)
+				require.False(t, s.mitmGate.MitmPending())
+				if wantChanged {
+					require.NotSame(t, original, s.revisionRecovery.current)
+					require.ErrorIs(t, validateRecoveryTicket(s, ticket), errStaleRevisionBootstrap)
+					require.ErrorIs(t, validateRecoveryCandidate(s, candidate), errStaleEffectivePolicyCandidate)
+					require.Equal(t, wantDefault, s.revisionRecovery.current.inputs.user.DefaultAction)
+					require.Equal(t, int64(1), s.revisionRecovery.current.epoch)
+					// The proxy exposes a mutable pointer; it must not alias the frozen base.
+					s.proxy.(*stubProxy).updated.DefaultAction = "tampered"
+					require.Equal(t, wantDefault, s.revisionRecovery.current.inputs.user.DefaultAction)
+				} else {
+					require.NoError(t, validateRecoveryTicket(s, ticket))
+					require.Zero(t, nft.calls, "pure errors must precede external effects")
+				}
+			}
+			require.Same(t, original, candidate.base)
+			if !wantChanged {
+				require.Same(t, original, s.revisionRecovery.current)
+			}
+			if kind == "unpublished-overlay-ignored" {
+				_, err := os.Stat(s.policyFile)
+				require.True(t, os.IsNotExist(err), "prebuild failure must occur before saving")
+			}
+		})
+	}
+}
+
+// The production loader invokes apply under its own write lock. This fixture
+// detects reentry without letting a bad callback deadlock the test process.
+type recoveryLockedAlwaysLoader struct {
+	stagedTestAlwaysLoader
+	mu         sync.Mutex
+	t          *testing.T
+	refreshErr error
+}
+
+func (l *recoveryLockedAlwaysLoader) CurrentRules() ([]policy.EgressRule, []policy.EgressRule) {
+	if !l.mu.TryLock() {
+		l.t.Error("always callback reentered CurrentRules while loader lock was held")
+		return nil, nil
+	}
+	defer l.mu.Unlock()
+	return l.stagedTestAlwaysLoader.CurrentRules()
+}
+func (l *recoveryLockedAlwaysLoader) SetCurrentRules(deny, allow []policy.EgressRule) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.stagedTestAlwaysLoader.SetCurrentRules(deny, allow)
+}
+func (l *recoveryLockedAlwaysLoader) RefreshIfDueWithApply(now time.Time, apply func([]policy.EgressRule, []policy.EgressRule) error) ([]policy.EgressRule, []policy.EgressRule, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.refreshErr != nil {
+		return nil, nil, false, l.refreshErr
+	}
+	return l.stagedTestAlwaysLoader.RefreshIfDueWithApply(now, apply)
+}
+
+func TestRevisionRecoveryAlwaysCallback(t *testing.T) {
+	for _, kind := range []string{"unchanged", "parse-error", "unpublished-overlay-ignored", "binding", "nameserver-binding", "nft-failure", "success-nft", "success-no-nft"} {
+		t.Run(kind, func(t *testing.T) {
+			s := recoveryPolicyFixture(t)
+			loader := &recoveryLockedAlwaysLoader{t: t, stagedTestAlwaysLoader: stagedTestAlwaysLoader{
+				candidateAllow: []policy.EgressRule{mustRule(t, policy.ActionAllow, "file-allow.example")}, pending: true,
+			}}
+			s.alwaysLoader = loader
+			nft := &stubNft{}
+			s.nft = nft
+			t.Setenv("OTEL_SDK_DISABLED", "")
+			t.Setenv("OTEL_METRICS_EXPORTER", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://collector-a.example:4318/v1/metrics")
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+			t.Setenv("HOST_IP", "")
+			switch kind {
+			case "unchanged":
+				loader.pending = false
+			case "parse-error":
+				loader.refreshErr = errors.New("parse failed")
+			case "unpublished-overlay-ignored":
+				loader.candidateAllow = []policy.EgressRule{{Action: "invalid", Target: "invalid.example"}}
+			case "binding", "nameserver-binding":
+				s.credentialVault = policyCandidateStore(t, policyCandidateInputs(t))
+				loader.candidateDeny = []policy.EgressRule{mustRule(t, policy.ActionDeny, "api.example.com")}
+				if kind == "nameserver-binding" {
+					s.nameserverIPs = []netip.Addr{netip.MustParseAddr("192.0.2.53")}
+				}
+			case "success-nft":
+				s.nameserverIPs = []netip.Addr{netip.MustParseAddr("192.0.2.53")}
+			case "nft-failure":
+				nft.err = errors.New("private-nft-detail")
+			case "success-no-nft":
+				s.nft = nil
+			}
+			_, _, ticket, err := s.captureRevisionBootstrap(context.Background())
+			require.NoError(t, err)
+			original := s.revisionRecovery.current
+			nft.onApply = func(*policy.NetworkPolicy) {
+				require.ErrorIs(t, s.validateRevisionBootstrapLocked(ticket), errStaleRevisionBootstrap)
+				require.Same(t, original, s.revisionRecovery.current)
+				t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://collector-b.example:4318/v1/metrics")
+			}
+			changed, err := s.reloadAlwaysRules()
+			if kind == "nft-failure" {
+				require.Error(t, err)
+				require.False(t, changed)
+				require.True(t, s.mitmGate.MitmPending())
+				require.Equal(t, revisionRecoveryExternalEffectsUnknown, s.revisionRecovery.reason)
+				require.ErrorIs(t, validateRecoveryTicket(s, ticket), errRevisionRecoveryRequired)
+				nft.err = nil
+				_, err = s.reloadAlwaysRules()
+				require.ErrorIs(t, err, errRevisionRecoveryRequired)
+				require.Equal(t, 1, nft.calls)
+			} else if strings.HasPrefix(kind, "success") {
+				require.NoError(t, err)
+				require.True(t, changed)
+				require.NotSame(t, original, s.revisionRecovery.current)
+				require.ErrorIs(t, validateRecoveryTicket(s, ticket), errStaleRevisionBootstrap)
+				inputs := s.revisionRecovery.current.inputs
+				effectiveAllow := append(append([]policy.EgressRule(nil), inputs.alwaysAllow...), inputs.telemetryAllow...)
+				require.Equal(t, []policy.EgressRule{mustRule(t, policy.ActionAllow, "file-allow.example"), mustRule(t, policy.ActionAllow, "collector-a.example")}, effectiveAllow)
+				require.Equal(t, effectiveAllow, s.proxy.(*stubProxy).allow)
+				_, allow := loader.CurrentRules()
+				require.Equal(t, effectiveAllow, allow)
+				if s.nft != nil {
+					require.Equal(t, effectiveAllow, nft.applied.Egress[:len(effectiveAllow)])
+					nftAllowV4, _, _, _ := nft.applied.StaticIPSets()
+					require.Contains(t, nftAllowV4, "192.0.2.53")
+					basePolicy := policy.MergeAlwaysOverlay(inputs.user, inputs.alwaysDeny, effectiveAllow)
+					baseAllowV4, _, _, _ := basePolicy.StaticIPSets()
+					require.NotContains(t, baseAllowV4, "192.0.2.53", "nameserver allowances belong only to nft derivation")
+				}
+				require.Equal(t, int64(1), s.revisionRecovery.current.epoch)
+				require.False(t, s.mitmGate.MitmPending())
+			} else {
+				if kind == "unchanged" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+				require.False(t, changed)
+				require.Same(t, original, s.revisionRecovery.current)
+				require.NoError(t, validateRecoveryTicket(s, ticket))
+				require.Zero(t, nft.calls)
+				require.False(t, s.mitmGate.MitmPending())
+			}
+		})
+	}
+}
+
+func TestRevisionRecoveryLegacyAlwaysWithoutPolicyRead(t *testing.T) {
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	s := &policyServer{alwaysLoader: &stagedTestAlwaysLoader{pending: true}}
+	// The legacy nil-nft callback has never required a user-policy source.
+	// UpdateAlwaysRules still needs a proxy, but CurrentPolicy is unnecessary.
+	s.proxy = &recoveryNoCurrentPolicyProxy{stubProxy: stubProxy{}}
+	changed, err := s.reloadAlwaysRules()
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Nil(t, s.revisionRecovery)
+}
+
+type recoveryNoCurrentPolicyProxy struct{ stubProxy }
+
+func (*recoveryNoCurrentPolicyProxy) CurrentPolicy() *policy.NetworkPolicy {
+	panic("legacy nil-nft callback must not request CurrentPolicy")
+}
+
+func TestHandleDelete_PortOnlyRulesViaEmptyTarget(t *testing.T) {
+	// Port-only rules have no target; an explicit empty entry in the DELETE
+	// list addresses them (all of them), so they are not permanently stuck.
+	initial := &policy.NetworkPolicy{
+		DefaultAction: policy.ActionDeny,
+		Egress: []policy.EgressRule{
+			{Action: policy.ActionDeny, Ports: []int{25}},
+			{Action: policy.ActionAllow, Target: "example.com"},
+			{Action: policy.ActionAllow, Ports: []int{53}},
+		},
+	}
+	proxy := &stubProxy{updated: initial}
+	srv := &policyServer{proxy: proxy, nft: &stubNft{}, enforcementMode: "dns+nft"}
+
+	req := httptest.NewRequest(http.MethodDelete, "/policy", strings.NewReader(`["example.com", ""]`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+	require.Len(t, proxy.updated.Egress, 0, "port-only rules go with the empty entry, domain rule with its target")
 }

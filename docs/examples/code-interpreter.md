@@ -44,6 +44,8 @@ uv run python examples/code-interpreter/main.py
 
 The script creates a Sandbox + CodeInterpreter, runs a Python code snippet and prints stdout/result, then terminates the remote instance. Cleanup is attempted in a `finally` block even if interpreter setup or code execution raises an exception.
 
+For `Execution` objects returned by the synchronous and asynchronous Python code-interpreter adapters, `execution.text` joins stdout fragments without inserting separators, so `"Loading"` followed by `"...done\n"` produces `"Loading...done"`. Formatted stdout and stderr retain the existing display normalization: CR/CRLF line endings become `\n` and trailing newlines are stripped; raw log messages and command-execution formatting are unchanged. The private formatting flag is not serialized: reconstructing an `Execution` from `model_dump()` or `model_dump_json()` output restores the default line formatting.
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -164,9 +166,7 @@ The lifecycle API allocates an already-running Pod from the Pool, so it does not
 
 The Pool template must provide all parts of that execution path:
 
-- Install and run task-executor, listening on `0.0.0.0:5758`. Set its
-  `-log-dir` explicitly so the troubleshooting path is deterministic; the
-  example writes `/tmp/task-executor.log`.
+- Install and run task-executor, listening on `0.0.0.0:5758`. Set its `-log-dir` explicitly so the troubleshooting path is deterministic; the example writes `/tmp/task-executor.log`.
 - Install execd and `bootstrap.sh` into the shared volume before the Pod starts.
 - Keep `bootstrap.sh` at `/opt/opensandbox/bootstrap.sh`. The server-generated task invokes that exact path. The execd binary can use another path only when the task-executor environment sets `EXECD` accordingly.
 - Start execd through `bootstrap.sh` after allocation so request-specific values such as `EXECD_ACCESS_TOKEN` are available. The example above leaves task-executor as the warm Pod's foreground process for this reason.

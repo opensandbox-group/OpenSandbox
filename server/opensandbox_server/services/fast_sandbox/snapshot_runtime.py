@@ -51,6 +51,12 @@ from opensandbox_server.services.snapshot_runtime import (
 GROUP = "sandbox.fast.io"
 VERSION = "v1alpha2"
 PLURAL = "sandboxsnapshots"
+SANDBOX_PLURAL = "sandboxes"
+
+# fast-sandbox OCI artifacts (templates, snapshots, checkpoints) carry this
+# prefix; restore/create image references that start with it take the OCI
+# publication path upstream.
+OCI_IMAGE_PREFIX = "oci://"
 
 # FastPath validates snapshot metadata keys as DNS-1123 labels and projects
 # them onto CR labels as "metadata.sandbox.fast.io/<key>" (same convention as
@@ -146,11 +152,28 @@ class FastSandboxSnapshotRuntime:
         ns = namespace if namespace is not None else self._namespace
         self._ensure_namespace_watch(ns)
 
+        source_image = self._source_sandbox_image(ns, sandbox_id)
+        if source_image is None:
+            # The encoding decides template_name semantics; guessing wrong is
+            # a guaranteed upstream rejection.
+            return SnapshotRuntimeStatus(
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_create_failed",
+                message=(
+                    f"Cannot snapshot sandbox {sandbox_id}: its Sandbox CR "
+                    "image could not be read to determine the artifact "
+                    "encoding (native vs OCI)."
+                ),
+            )
+
         request = pb2.CreateSandboxSnapshotRequest(
             request_id=snapshot_name,
             sandbox=namespaced_reference(ns, sandbox_id),
-            template_name=snapshot_name,
         )
+        if not source_image.startswith(OCI_IMAGE_PREFIX):
+            # native publishes under a template-name index key; OCI snapshots
+            # omit it and restore from the returned manifest_ref.
+            request.template_name = snapshot_name
         request.metadata[SNAPSHOT_ID_METADATA_KEY] = snapshot_id
         try:
             self._fastpath.create_sandbox_snapshot(request)
@@ -169,11 +192,25 @@ class FastSandboxSnapshotRuntime:
                     reason=SNAPSHOT_CREATE_CONFLICT_REASON,
                     message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
                 )
-            return SnapshotRuntimeStatus(
-                state=SnapshotState.FAILED,
-                reason="snapshot_runtime_create_failed",
-                message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
-            )
+            # The request is durable and idempotent by request_id, so it may
+            # have been persisted before the error (e.g. a lost reply). Unless
+            # FastPath confirms it is absent, report it as submitted whatever
+            # its phase: a failed status would leave it without a record, and
+            # convergence records its terminal state, or its absence, once the
+            # row exists.
+            try:
+                self._fastpath.get_sandbox_snapshot(ns, snapshot_name)
+            except FastPathNotFound:
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.FAILED,
+                    reason="snapshot_runtime_create_failed",
+                    message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
+                )
+            except FastPathError as probe_exc:
+                logger.warning(
+                    f"Could not check fsb snapshot {snapshot_name} after a failed create "
+                    f"({exc}): {probe_exc}"
+                )
         return SnapshotRuntimeStatus(
             state=SnapshotState.CREATING,
             reason="snapshot_runtime_submitted",
@@ -183,6 +220,26 @@ class FastSandboxSnapshotRuntime:
             ),
             backend=_BACKEND_FSB,
         )
+
+    def _source_sandbox_image(self, namespace: str, sandbox_id: str) -> Optional[str]:
+        """The source Sandbox CR's image, or None when unreadable."""
+        try:
+            cr = self._k8s_client.get_custom_object(
+                group=GROUP,
+                version=VERSION,
+                namespace=namespace,
+                plural=SANDBOX_PLURAL,
+                name=sandbox_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - unreadable means unclassifiable
+            logger.warning(
+                f"Failed to read Sandbox CR {namespace}/{sandbox_id} before "
+                f"snapshot: {exc}"
+            )
+            return None
+        spec = cr.get("spec") if isinstance(cr, dict) else None
+        image = spec.get("image") if isinstance(spec, dict) else None
+        return str(image) if image else None
 
     def get_snapshot_status(self, snapshot_id: str) -> SnapshotRuntimeStatus:
         return self.inspect_snapshot(snapshot_id)
@@ -308,23 +365,33 @@ class FastSandboxSnapshotRuntime:
         template_name = (getattr(info, "template_name", "") or "").strip() or None
 
         if phase_name in _TERMINAL_READY_PHASES:
-            # The restore image is the snapshot's template name: the artifact
-            # set is published under index/<sha256(templateName)>.json, the
-            # same content-addressed layout as template golden images. The
-            # manifest_ref points at the raw manifest object and is not
-            # resolvable as a CreateSandbox image.
-            if not template_name:
+            # native restores via the template-name index key, OCI via the
+            # returned immutable manifest_ref; a success with neither is
+            # unpublishable.
+            if template_name:
                 return SnapshotRuntimeStatus(
-                    state=SnapshotState.FAILED,
-                    reason="snapshot_runtime_missing_image",
-                    message="fsb snapshot succeeded without a template name.",
+                    state=SnapshotState.READY,
+                    image=template_name,
+                    reason="snapshot_runtime_ready",
+                    message="fsb snapshot artifacts published successfully.",
+                    backend=_BACKEND_FSB,
+                )
+            manifest_ref = (getattr(info, "manifest_ref", "") or "").strip()
+            if manifest_ref.startswith(OCI_IMAGE_PREFIX):
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.READY,
+                    image=manifest_ref,
+                    reason="snapshot_runtime_ready",
+                    message="fsb snapshot OCI artifacts published successfully.",
                     backend=_BACKEND_FSB,
                 )
             return SnapshotRuntimeStatus(
-                state=SnapshotState.READY,
-                image=template_name,
-                reason="snapshot_runtime_ready",
-                message="fsb snapshot artifacts published successfully.",
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_missing_image",
+                message=(
+                    "fsb snapshot succeeded without a template name or an "
+                    "OCI manifest_ref; no runnable restore image."
+                ),
                 backend=_BACKEND_FSB,
             )
 

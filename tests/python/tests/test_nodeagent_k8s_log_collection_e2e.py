@@ -135,7 +135,7 @@ class TestNodeAgentK8sLogCollectionE2E:
 
             result = sandbox.commands.run("echo exec-ok")
             assert result.error is None
-            assert result.logs.stdout[0].text == "exec-ok"
+            assert result.logs.stdout[0].text == "exec-ok\n"
 
             _eventually(
                 "sandbox stdout marker reaching the node-agent file sink",

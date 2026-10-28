@@ -253,6 +253,82 @@ class TestAsyncEndpointCache:
         assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
     @pytest.mark.asyncio
+    async def test_owner_cancellation_does_not_cancel_waiters(self):
+        c = AsyncEndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+        first_started = asyncio.Event()
+        fetch_count = 0
+
+        async def fetch():
+            nonlocal fetch_count
+            fetch_count += 1
+            if fetch_count == 1:
+                first_started.set()
+                await asyncio.Event().wait()
+            return _ep("result")
+
+        owner = asyncio.create_task(c.get_or_fetch(key, fetch))
+        await asyncio.wait_for(first_started.wait(), timeout=2)
+        waiter = asyncio.create_task(c.get_or_fetch(key, fetch))
+        await asyncio.sleep(0)
+
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert await asyncio.wait_for(waiter, timeout=2) == _ep("result")
+        assert fetch_count == 2
+        assert c.get(key) == _ep("result")
+
+    @pytest.mark.asyncio
+    async def test_owner_cancellation_without_waiters_is_not_logged(self, caplog):
+        c = AsyncEndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+        started = asyncio.Event()
+
+        async def fetch():
+            started.set()
+            await asyncio.Event().wait()
+            return _ep("never")
+
+        with caplog.at_level("ERROR", logger="asyncio"):
+            owner = asyncio.create_task(c.get_or_fetch(key, fetch))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            owner.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        assert key not in c._inflight
+
+    @pytest.mark.asyncio
+    async def test_waiter_cancellation_does_not_cancel_owner(self):
+        c = AsyncEndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fetch():
+            started.set()
+            await release.wait()
+            return _ep("result")
+
+        owner = asyncio.create_task(c.get_or_fetch(key, fetch))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        waiter = asyncio.create_task(c.get_or_fetch(key, fetch))
+        await asyncio.sleep(0)
+
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        release.set()
+        assert await owner == _ep("result")
+
+    @pytest.mark.asyncio
     async def test_invalidate_does_not_remove_replacement_inflight(self):
         c = AsyncEndpointCache(maxsize=10, ttl=60.0)
         key = ("sb-1", 8080, False)

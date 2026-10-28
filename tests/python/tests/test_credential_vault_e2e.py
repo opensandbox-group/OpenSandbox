@@ -62,6 +62,7 @@ SECRET_VALUES = {
     "runtime-token": "vault-runtime-token",
     "runtime-token-replaced": "vault-runtime-token-replaced",
     "npm-scoped-token": "vault-npm-scoped-token",
+    "pypi-proxy-token": "vault-pypi-proxy-token",
 }
 
 
@@ -174,6 +175,55 @@ def test_credential_vault_allows_npm_scoped_package_encoded_slash(
         assert response["case"] == "npm-scoped"
         assert response["authorization"] == (
             f"Bearer {SECRET_VALUES['npm-scoped-token']}"
+        )
+    finally:
+        _close_sandbox(cfg, sandbox)
+
+
+def test_credential_vault_allows_double_encoded_artifact_url(
+    credential_vault_target_ip: str,
+) -> None:
+    """Regression for the ``%252f`` false-positive on artifact-store URLs.
+
+    Some artifact stores (e.g. internal pypi proxies) double-encode their
+    coordinate paths on the wire, producing download URLs like
+    ``/pypi-proxy/requests/%252Fcentral-proxy%252Fpackages%252Fa0/pkg.whl``.
+    The credential proxy used to reject these as ambiguous because nested
+    encodings were refused by decode depth. Now a double-encoded path passes
+    when every percent-decoding depth matches the same binding, so pip
+    downloads from such stores work inside sandboxes with Credential Vault
+    active.
+    """
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
+    try:
+        sandbox.credential_vault.create(
+            credentials=[
+                Credential(
+                    name="pypi-proxy-token",
+                    source={"value": SECRET_VALUES["pypi-proxy-token"]},
+                )
+            ],
+            bindings=[
+                _binding(
+                    "pypi-proxy",
+                    "/pypi-proxy/*",
+                    {"type": "bearer", "credential": "pypi-proxy-token"},
+                ),
+            ],
+        )
+
+        response = _curl_json(
+            sandbox,
+            credential_vault_target_ip,
+            "/pypi-proxy/requests/"
+            "%252Fcentral-proxy%252Fpackages%252Fa0%252Ff4"
+            "%252Fc67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a"
+            "/requests-2.34.2-py3-none-any.whl",
+        )
+        assert response["ok"] is True
+        assert response["case"] == "pypi-proxy"
+        assert response["authorization"] == (
+            f"Bearer {SECRET_VALUES['pypi-proxy-token']}"
         )
     finally:
         _close_sandbox(cfg, sandbox)

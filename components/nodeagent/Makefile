@@ -4,6 +4,8 @@ BUILD_TIME ?= $(shell if [ -n "$$SOURCE_DATE_EPOCH" ]; then date -u -d "@$$SOURC
 GO ?= go
 CLANG_DEFAULT := $(shell command -v clang-18 2>/dev/null || command -v clang 2>/dev/null)
 CLANG ?= $(CLANG_DEFAULT)
+LLVM_OBJCOPY_DEFAULT := $(shell command -v llvm-objcopy-18 2>/dev/null || command -v llvm-objcopy 2>/dev/null)
+LLVM_OBJCOPY ?= $(LLVM_OBJCOPY_DEFAULT)
 GOFMT_DEFAULT := $(shell command -v "$$($(GO) env GOROOT 2>/dev/null)/bin/gofmt" 2>/dev/null || command -v gofmt 2>/dev/null)
 GOFMT ?= $(GOFMT_DEFAULT)
 PROJECT_GOFLAGS := -trimpath -buildvcs=false
@@ -56,10 +58,15 @@ generate-syscalls-bpf:
 		-o "$(or $(BPF_OUTPUT),pkg/source/syscalls/syscalls_bpfel.o)"
 
 .PHONY: verify-syscalls-bpf
+# Ignore DWARF header checksums while retaining BPF code, relocations, and BTF.
 verify-syscalls-bpf:
-	@set -e; output="$$(mktemp)"; trap 'rm -f "$$output"' EXIT; \
-	$(MAKE) --no-print-directory generate-syscalls-bpf BPF_OUTPUT="$$output"; \
-	cmp pkg/source/syscalls/syscalls_bpfel.o "$$output" \
+	@set -e; \
+	command -v "$(LLVM_OBJCOPY)" >/dev/null 2>&1 || { echo "llvm-objcopy not found: $(LLVM_OBJCOPY)" >&2; exit 1; }; \
+	workdir="$$(mktemp -d)"; trap 'rm -rf "$$workdir"' EXIT; \
+	$(MAKE) --no-print-directory generate-syscalls-bpf BPF_OUTPUT="$$workdir/generated.o"; \
+	"$(LLVM_OBJCOPY)" --strip-debug pkg/source/syscalls/syscalls_bpfel.o "$$workdir/checked-in.o"; \
+	"$(LLVM_OBJCOPY)" --strip-debug "$$workdir/generated.o" "$$workdir/generated-stripped.o"; \
+	cmp "$$workdir/checked-in.o" "$$workdir/generated-stripped.o" \
 		|| { echo "pkg/source/syscalls/syscalls_bpfel.o is stale; run 'make generate-syscalls-bpf'" >&2; exit 1; }
 
 .PHONY: check

@@ -17,9 +17,8 @@ Conventions:
 - The GitHub Release mirrors this file verbatim.
 -->
 
-# OpenSandbox X.Y.Z
-
-<!-- One paragraph: the headline of this release and who should upgrade. -->
+<!-- One paragraph: the headline of this release and who should upgrade. No
+     H1 title — the GitHub Release supplies it. -->
 
 ## Highlights
 
@@ -107,6 +106,7 @@ Thanks to these contributors ❤️
 ```bash
 # Platform (Kubernetes) — render the chart at this tag and apply
 git clone https://github.com/opensandbox-group/OpenSandbox
+cd OpenSandbox
 git checkout release-X.Y.Z
 helm dependency build manifests/charts/opensandbox  # package file:// sub-charts (not committed)
 helm template ./manifests/charts/opensandbox | kubectl apply -f -

@@ -168,7 +168,7 @@ class TestServerPoolLifecycleE2ESync:
         result = sandbox.commands.run(f"echo {marker}")
         assert result.error is None
         assert len(result.logs.stdout) == 1
-        assert result.logs.stdout[0].text == marker
+        assert result.logs.stdout[0].text == marker + "\n"
 
     def test_03_destroy_releases_pod_back_to_pool(self, server_pool) -> None:
         sandbox = self._create_pooled_sandbox(server_pool)

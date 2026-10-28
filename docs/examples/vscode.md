@@ -48,8 +48,7 @@ uv run python examples/vscode/main.py
 
 The script starts code-server (with authentication disabled), binds it to the specified port and outputs the accessible address. Uses the prebuilt VS Code image by default.
 
-![VS Code screenshot shell](../public/images/vscode-screenshot-shell.jpg)
-![VS Code screenshot vscode](../public/images/vscode-screenshot-vscode.jpg)
+![VS Code screenshot shell](../public/images/vscode-screenshot-shell.jpg) ![VS Code screenshot vscode](../public/images/vscode-screenshot-vscode.jpg)
 
 ## References
 

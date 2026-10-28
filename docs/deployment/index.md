@@ -5,13 +5,9 @@ description: Deploy OpenSandbox on Kubernetes — CRDs, controller, lifecycle se
 
 # Kubernetes Deployment
 
-This guide covers deploying OpenSandbox on Kubernetes: the cluster foundation
-(CRDs), the controller, the lifecycle server, and the optional components
-(ingress gateway, node agent, fast-sandbox runtime).
+This guide covers deploying OpenSandbox on Kubernetes: the cluster foundation (CRDs), the controller, the lifecycle server, and the optional components (ingress gateway, node agent, fast-sandbox runtime).
 
-Charts are versioned sources in the [OpenSandbox repository](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts).
-They are installed from a checkout of a `release-X.Y.Z` tag — standalone chart
-packages are not published.
+Charts are versioned sources in the [OpenSandbox repository](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts). They are installed from a checkout of a `release-X.Y.Z` tag — standalone chart packages are not published.
 
 ## Prerequisites
 
@@ -130,12 +126,7 @@ Use an external secret manager instead of creating the Secret manually in produc
 The chart installs the server into `opensandbox-system`, while the default `configToml` creates sandbox and pool resources in `opensandbox`. If you change `[kubernetes].namespace` in `configToml`, create that namespace instead of `opensandbox` before submitting workloads.
 
 ::: warning Single-active Server default
-The chart defaults to `server.replicaCount: 1`. Keep one active Lifecycle Server
-unless you deliberately use the PostgreSQL-backed Kubernetes public snapshot
-topology documented below. That exception coordinates public snapshots only; it
-does not provide general multi-replica Server HA. The Server Deployment uses the
-`Recreate` strategy so an upgrade stops the active Server before starting its
-replacement; expect a brief API interruption during upgrades.
+The chart defaults to `server.replicaCount: 1`. Keep one active Lifecycle Server unless you deliberately use the PostgreSQL-backed Kubernetes public snapshot topology documented below. That exception coordinates public snapshots only; it does not provide general multi-replica Server HA. The Server Deployment uses the `Recreate` strategy so an upgrade stops the active Server before starting its replacement; expect a brief API interruption during upgrades.
 :::
 
 ### Use PostgreSQL for server persistence
@@ -151,9 +142,7 @@ kubectl create secret generic opensandbox-postgresql \
 unset OPENSANDBOX_POSTGRESQL_DSN
 ```
 
-In `values-server.yaml`, keep the default `server.replicaCount` at `1`, add the
-Secret-backed environment variable below, and add the shown `[store]` tables to
-the complete `configToml` value:
+In `values-server.yaml`, keep the default `server.replicaCount` at `1`, add the Secret-backed environment variable below, and add the shown `[store]` tables to the complete `configToml` value:
 
 ```yaml
 server:
@@ -177,10 +166,7 @@ configToml: |
 ```
 
 ::: info
-The chart default remains one Server replica. You may explicitly set
-`server.replicaCount: 2` for multi-active public snapshot handling only when
-both replicas use the same PostgreSQL database and the Kubernetes runtime.
-SQLite and Docker snapshot execution do not support this multi-active topology.
+The chart default remains one Server replica. You may explicitly set `server.replicaCount: 2` for multi-active public snapshot handling only when both replicas use the same PostgreSQL database and the Kubernetes runtime. SQLite and Docker snapshot execution do not support this multi-active topology.
 :::
 
 ### Install the server with the API key and verify
@@ -262,17 +248,11 @@ helm install opensandbox-server manifests/charts/server \
   --values values-server.yaml
 ```
 
-Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode`
-of the gateway chart. For signed, expiring sandbox routes, configure the
-shared secure-access key ring on both charts — see [secure-access keys](https://github.com/opensandbox-group/OpenSandbox/blob/main/manifests/HELM-DEPLOYMENT.md#secure-access-keys-osep-0011).
+Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode` of the gateway chart. For signed, expiring sandbox routes, configure the shared secure-access key ring on both charts — see [secure-access keys](https://github.com/opensandbox-group/OpenSandbox/blob/main/manifests/HELM-DEPLOYMENT.md#secure-access-keys-osep-0011).
 
 ### Optional: fast-sandbox runtime
 
-The `fast-sandbox` chart adds the Firecracker (`sandbox.fast.io`) runtime.
-Install it **before the ingress gateway and the lifecycle server** (see [Deployment Order](#deployment-order)):
-the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint
-this chart creates. It also requires `base` first, KVM-capable nodes, and
-companion images built from a pinned upstream commit — see the [fast-sandbox runtime deployment guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/manifests/HELM-DEPLOYMENT.md#fast-sandbox-runtime-firecracker).
+The `fast-sandbox` chart adds the Firecracker (`sandbox.fast.io`) runtime. Install it **before the ingress gateway and the lifecycle server** (see [Deployment Order](#deployment-order)): the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint this chart creates. It also requires `base` first, KVM-capable nodes, and companion images built from a pinned upstream commit — see the [fast-sandbox runtime deployment guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/manifests/HELM-DEPLOYMENT.md#fast-sandbox-runtime-firecracker).
 
 ## Upgrade
 
@@ -296,8 +276,7 @@ helm upgrade opensandbox-server manifests/charts/server \
   --values values-server.yaml
 ```
 
-For the complete values reference and local development installation, see the
-[`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/server).
+For the complete values reference and local development installation, see the [`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/server).
 
 ## Operator Metrics
 
@@ -387,10 +366,7 @@ See [Configuration](/getting-started/configuration) for the full reference.
 helm uninstall opensandbox -n opensandbox-system
 ```
 
-CRDs carry the `helm.sh/resource-policy: keep` annotation and are retained
-across uninstalls; the `opensandbox-dataplane` namespace (created by `base`
-for fast-sandbox) is kept as well. Delete them manually once their data is no
-longer needed:
+CRDs carry the `helm.sh/resource-policy: keep` annotation and are retained across uninstalls; the `opensandbox-dataplane` namespace (created by `base` for fast-sandbox) is kept as well. Delete them manually once their data is no longer needed:
 
 ```bash
 kubectl delete crd batchsandboxes.sandbox.opensandbox.io \
@@ -404,5 +380,5 @@ kubectl delete namespace opensandbox-dataplane
 - [Kubernetes Overview](/architecture/control-plane/operator) — Operator features and CRDs
 - [Pause & Resume](/guides/pause-resume) — Snapshot-based pause/resume on Kubernetes
 - [Secure Container](/guides/secure-container) — gVisor and Kata on Kubernetes
-- [Network Isolation](/architecture/network/network-isolation) — Egress policy design for Kubernetes
+- [Network Isolation on Kubernetes](/guides/network-isolation) — Egress policy design for Kubernetes
 - [Helm charts source](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts) — Chart sources and values reference

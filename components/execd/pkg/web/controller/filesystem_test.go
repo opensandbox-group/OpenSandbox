@@ -17,6 +17,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -416,6 +417,16 @@ func TestFormatContentDisposition(t *testing.T) {
 			filename: "report-报告.pdf",
 			want:     "attachment; filename=\"report-%E6%8A%A5%E5%91%8A.pdf\"; filename*=UTF-8''report-%E6%8A%A5%E5%91%8A.pdf",
 		},
+		{
+			name:     "Double quote in filename",
+			filename: `a"b.txt`,
+			want:     "attachment; filename=\"a%22b.txt\"; filename*=UTF-8''a%22b.txt",
+		},
+		{
+			name:     "Backslash in filename",
+			filename: `a\b.txt`,
+			want:     "attachment; filename=\"a%5Cb.txt\"; filename*=UTF-8''a%5Cb.txt",
+		},
 	}
 
 	for _, tt := range tests {
@@ -424,6 +435,22 @@ func TestFormatContentDisposition(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestDownloadFileContentDispositionParsesForQuotedFilename(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, `a"b.txt`)
+	require.NoError(t, os.WriteFile(target, []byte("demo"), 0o644))
+
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, params, err := mime.ParseMediaType(rec.Header().Get("Content-Disposition"))
+	require.NoError(t, err)
+	require.Equal(t, `a"b.txt`, params["filename"])
 }
 
 func writeTestFileWithLines(t *testing.T, lines []string) string {
@@ -510,6 +537,38 @@ func TestDownloadFileLineRangeConflict(t *testing.T) {
 	var resp model.ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+}
+
+func TestDownloadFileRangeHeader(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "data.bin")
+	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
+
+	ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+	ctx.Request.Header.Set("Range", "bytes=2-5")
+	NewFilesystemController(ctx).DownloadFile()
+
+	require.Equal(t, http.StatusPartialContent, rec.Code)
+	require.Equal(t, "2345", rec.Body.String())
+	require.Equal(t, "bytes 2-5/10", rec.Header().Get("Content-Range"))
+	require.Equal(t, "4", rec.Header().Get("Content-Length"))
+
+	// The 416 for a malformed Range is a JSON error. It must not declare the
+	// file's Content-Length, or clients wait for bytes that never arrive.
+	for _, header := range []string{"bytes=abc", "2-5", "bytes=5-2"} {
+		t.Run(header, func(t *testing.T) {
+			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+			ctx.Request.Header.Set("Range", header)
+			NewFilesystemController(ctx).DownloadFile()
+
+			require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+			require.Empty(t, rec.Header().Get("Content-Length"))
+			require.Empty(t, rec.Header().Get("Content-Disposition"))
+			require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		})
+	}
 }
 
 func TestDownloadFileInvalidOffset(t *testing.T) {

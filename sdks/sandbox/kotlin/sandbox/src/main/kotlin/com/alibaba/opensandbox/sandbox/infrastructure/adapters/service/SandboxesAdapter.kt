@@ -31,6 +31,7 @@ import com.alibaba.opensandbox.sandbox.api.infrastructure.Success
 import com.alibaba.opensandbox.sandbox.api.models.Endpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
@@ -63,10 +64,10 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Templat
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.TemplateModelConverter.toApiCreateTemplateSandboxRequest
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.TemplateModelConverter.toPagedTemplateInfos
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.TemplateModelConverter.toTemplateInfo
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.decodeResponseBody
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import com.alibaba.opensandbox.sandbox.transport.RequestDeadline
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -275,7 +276,11 @@ internal class SandboxesAdapter(
         provider.authenticatedClient.newCall(request).execute().use { response ->
             val responseBody = response.body?.string().orEmpty()
             if (response.isSuccessful) {
-                return Serializer.kotlinxSerializationJson.decodeFromString<ApiSandbox>(responseBody)
+                return Serializer.kotlinxSerializationJson.decodeResponseBody(
+                    ApiSandbox.serializer(),
+                    responseBody,
+                    "patch sandbox metadata",
+                )
             }
             throw response.toSandboxApiException(responseBody) { statusCode, body ->
                 "Failed to patch sandbox metadata. Status code: $statusCode, Body: $body"
@@ -322,12 +327,33 @@ internal class SandboxesAdapter(
         }
     }
 
+    /**
+     * Delegates the previous template signature to the idle-policy overload,
+     * preserving behavior for five-argument call sites.
+     */
     override fun createSandboxFromTemplate(
         templateId: String,
         timeout: Duration,
         metadata: Map<String, String>,
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
+    ): SandboxCreateResponse =
+        createSandboxFromTemplate(
+            templateId = templateId,
+            timeout = timeout,
+            metadata = metadata,
+            networkPolicy = networkPolicy,
+            extensions = extensions,
+            idlePolicy = null,
+        )
+
+    override fun createSandboxFromTemplate(
+        templateId: String,
+        timeout: Duration,
+        metadata: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        idlePolicy: IdlePolicy?,
     ): SandboxCreateResponse {
         logger.info("Creating sandbox from template: {}", templateId)
 
@@ -339,6 +365,7 @@ internal class SandboxesAdapter(
                     metadata = metadata,
                     networkPolicy = networkPolicy,
                     extensions = extensions,
+                    idlePolicy = idlePolicy,
                 )
             val response = api.sandboxesPost(createRequest).toSandboxCreateResponse()
 
@@ -498,7 +525,7 @@ internal class SandboxesAdapter(
 
         return try {
             api.sandboxesSandboxIdDelete(sandboxId)
-            logger.info("Successfully terminated sandbox: {}", sandboxId)
+            logger.info("Sandbox deletion accepted: {}", sandboxId)
         } catch (e: Exception) {
             logger.error("Failed to terminate sandbox: {}", sandboxId, e)
             throw e.toSandboxException()

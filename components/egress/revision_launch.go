@@ -46,31 +46,21 @@ type revisionProcessSession interface {
 	Close() error
 }
 
-type revisionSnapshotSource func(context.Context) (credentialvault.ActiveSnapshot, int64, error)
+type revisionSnapshotSource func(context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error)
 
-// revisionBootstrapSnapshot reads the sidecar's current authoritative Vault
-// state while policy mutations are excluded. Vault writes already wait on the
-// mitm health gate, which remains pending throughout bootstrap. Policy epoch 0
-// is reserved until policy/vault mutations join the revision transaction in a
-// later OSEP-0023 phase.
-func (s *policyServer) revisionBootstrapSnapshot(
-	ctx context.Context,
-) (credentialvault.ActiveSnapshot, int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.credentialVault == nil {
-		return credentialvault.ActiveSnapshot{}, 0, revision.ErrTransportUnavailable
-	}
-	snapshot, err := s.credentialVault.ActiveSnapshotWithContext(ctx)
-	if errors.Is(err, credentialvault.ErrNotFound) {
-		return credentialvault.ActiveSnapshot{}, 0, nil
-	}
-	return snapshot, 0, err
+// revisionLaunchResult belongs to its launch caller until successful publication.
+// The generation is assigned by launchTaggedWithRevision, not the IPC owner.
+type revisionLaunchResult struct {
+	running    *mitmproxy.Running
+	session    revisionProcessSession
+	ticket     *revisionBootstrapTicket
+	generation uint64
 }
 
 // revisionLaunchOwner binds one fresh revision session to one mitmdump child.
 // The caller must retain the returned session until that exact child exits.
 type revisionLaunchOwner struct {
+	server     *policyServer
 	config     revisionruntime.ProcessSessionConfig
 	newSession func(revisionruntime.ProcessSessionConfig) (revisionProcessSession, error)
 	snapshot   revisionSnapshotSource
@@ -81,67 +71,65 @@ func (o *revisionLaunchOwner) launch(
 	ctx context.Context,
 	cfg mitmproxy.Config,
 	launch func(mitmproxy.Config) (*mitmproxy.Running, error),
-) (*mitmproxy.Running, revisionProcessSession, error) {
+) (*revisionLaunchResult, error) {
 	if o == nil || o.newSession == nil || o.snapshot == nil || o.stop == nil || launch == nil ||
 		cfg.RevisionIPC != nil {
-		return nil, nil, revision.ErrInvalid
+		return nil, revision.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	snapshot, policyEpoch, err := o.snapshot(ctx)
+	snapshot, policyEpoch, ticket, err := o.snapshot(ctx)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, nil, ctxErr
+			return nil, ctxErr
 		}
-		return nil, nil, fmt.Errorf("revision bootstrap snapshot: %w", revision.ErrTransportUnavailable)
+		if errors.Is(err, errRevisionRecoveryRequired) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("revision bootstrap snapshot: %w", revision.ErrTransportUnavailable)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	session, err := o.newSession(o.config)
 	if err != nil {
-		return nil, nil, fmt.Errorf("revision session: %w", err)
+		return nil, fmt.Errorf("revision session: %w", err)
 	}
-	closeSession := func() error {
-		if err := session.Close(); err != nil {
-			return fmt.Errorf("revision session cleanup: %w", err)
-		}
-		return nil
-	}
+	closeSession := func() error { return o.closeSession(session) }
 
 	childConfig, err := session.MitmproxyConfig()
 	if err != nil {
 		if cleanupErr := closeSession(); cleanupErr != nil {
-			return nil, nil, cleanupErr
+			return nil, cleanupErr
 		}
-		return nil, nil, fmt.Errorf("revision session handoff: %w", err)
+		return nil, fmt.Errorf("revision session handoff: %w", err)
 	}
 	cfg.RevisionIPC = childConfig
 	running, err := launch(cfg)
 	if err != nil {
 		if cleanupErr := closeSession(); cleanupErr != nil {
-			return nil, nil, cleanupErr
+			return nil, cleanupErr
 		}
-		return nil, nil, err
+		return nil, err
 	}
 	if running == nil {
 		if cleanupErr := closeSession(); cleanupErr != nil {
-			return nil, nil, cleanupErr
+			return nil, cleanupErr
 		}
-		return nil, nil, revision.ErrTransportUnavailable
+		return nil, revision.ErrTransportUnavailable
 	}
-	fail := func(cause error) (*mitmproxy.Running, revisionProcessSession, error) {
+	fail := func(cause error) (*revisionLaunchResult, error) {
 		o.stop(running)
 		if err := closeSession(); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return nil, nil, cause
+		return nil, cause
 	}
 
 	for {
 		if _, err := session.Bootstrap(ctx, snapshot, policyEpoch); err == nil {
-			return running, session, nil
+			return &revisionLaunchResult{running: running, session: session, ticket: ticket}, nil
 		} else if !errors.Is(err, revision.ErrIndeterminate) {
 			return fail(fmt.Errorf("revision bootstrap: %w", err))
 		}
@@ -151,9 +139,26 @@ func (o *revisionLaunchOwner) launch(
 			return fail(fmt.Errorf("revision bootstrap reconcile: %w", err))
 		}
 		if resolved != nil {
-			return running, session, nil
+			return &revisionLaunchResult{running: running, session: session, ticket: ticket}, nil
 		}
 	}
+}
+
+// closeSession is called only after the exact child has been stopped/reaped, or
+// before any child was launched. No lifecycle lock may be held by its caller.
+func (o *revisionLaunchOwner) closeSession(session revisionProcessSession) error {
+	if session == nil {
+		return nil
+	}
+	if err := session.Close(); err != nil {
+		if o != nil && o.server != nil {
+			o.server.mu.Lock()
+			o.server.requireRevisionRecoveryLocked(revisionRecoverySessionCleanupFailed)
+			o.server.mu.Unlock()
+		}
+		return fmt.Errorf("revision session cleanup: %w", revision.ErrTransportUnavailable)
+	}
+	return nil
 }
 
 func newRevisionProcessSession(
@@ -163,7 +168,7 @@ func newRevisionProcessSession(
 }
 
 func newSidecarRevisionLaunchOwner(server *policyServer) (*revisionLaunchOwner, error) {
-	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+	if server == nil && !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) || server != nil && !server.liveRevision {
 		return nil, nil
 	}
 	if server == nil {
@@ -184,15 +189,21 @@ func newSidecarRevisionLaunchOwner(server *policyServer) (*revisionLaunchOwner, 
 		return nil, fmt.Errorf("revision runtime generation: %w", revision.ErrTransportUnavailable)
 	}
 	return &revisionLaunchOwner{
+		server: server,
 		config: revisionruntime.ProcessSessionConfig{
-			ParentDir:         defaultRevisionSessionParent,
-			UID:               int(uid),
-			GID:               int(gid),
-			SubjectGeneration: subjectGeneration,
-			MaxSnapshotBytes:  defaultRevisionMaxSnapshotSize,
+			ParentDir:           defaultRevisionSessionParent,
+			UID:                 int(uid),
+			GID:                 int(gid),
+			SubjectGeneration:   subjectGeneration,
+			MaxSnapshotBytes:    defaultRevisionMaxSnapshotSize,
+			LiveAdmission:       true,
+			StaticPassthrough:   server.staticPassthrough,
+			TLSCapacity:         constants.EnvIntRange(constants.EnvRevisionTLSCapacity, constants.DefaultRevisionTLSCapacity, 1, 1<<20),
+			RequestCapacity:     constants.EnvIntRange(constants.EnvRevisionRequestCapacity, constants.DefaultRevisionRequestCapacity, 1, 1<<20),
+			DrainTimeoutSeconds: constants.EnvIntRange(constants.EnvRevisionDrainTimeoutSeconds, constants.DefaultRevisionDrainTimeoutSeconds, 1, 300),
 		},
 		newSession: newRevisionProcessSession,
-		snapshot:   server.revisionBootstrapSnapshot,
+		snapshot:   server.captureRevisionBootstrap,
 		stop: func(running *mitmproxy.Running) {
 			mitmproxy.GracefulShutdown(running, time.Second)
 		},

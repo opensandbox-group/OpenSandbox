@@ -499,6 +499,72 @@ func TestApplyStatic_NormalizesOverlappingAllow(t *testing.T) {
 	expectContains(t, rendered, "add element inet opensandbox allow_v4 { 100.64.0.0/10 }")
 }
 
+func TestApplyStatic_PortOnlyRuleMatchesAllDestinations(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	p, err := policy.ParsePolicy(`{
+		"defaultAction":"allow",
+		"egress":[{"action":"deny","ports":[25]}]
+	}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+	expectContains(t, rendered, "add rule inet opensandbox egress tcp dport { 25 } drop")
+}
+
+func TestApplyStatic_TargetWithPortsScopesThatTargetOnly(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	p, err := policy.ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"10.0.0.5","ports":[22,80]},
+			{"action":"deny","target":"2001:db8::/32","ports":[8080]}
+		]
+	}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+	expectContains(t, rendered, "add rule inet opensandbox egress ip daddr 10.0.0.5 tcp dport { 22, 80 } accept")
+	expectContains(t, rendered, "add rule inet opensandbox egress ip6 daddr 2001:db8::/32 tcp dport { 8080 } drop")
+	// A rule with Ports must not also open a blanket allow for its target on
+	// every port: it must not appear in the allow_v4 set element line.
+	require.NotContains(t, rendered, "add element inet opensandbox allow_v4 { 10.0.0.5 }")
+}
+
+func TestApplyStatic_PortScopedDenyWinsOverPlainAllow(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	// A blanket allow for 10.0.0.5 plus a port-scoped deny on port 22 for
+	// everyone: the port-scoped deny must be emitted (and therefore take
+	// effect, since nft "drop"/"accept" are terminal) before the plain
+	// allow_v4 set rule that would otherwise let 10.0.0.5:22 through.
+	p, err := policy.ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"10.0.0.5"},
+			{"action":"deny","ports":[22]}
+		]
+	}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+
+	portDenyRule := "add rule inet opensandbox egress tcp dport { 22 } drop"
+	allowSetRule := "add rule inet opensandbox egress ip daddr @allow_v4 accept"
+	portDenyIndex := strings.Index(rendered, portDenyRule)
+	allowSetIndex := strings.Index(rendered, allowSetRule)
+	require.NotEqual(t, -1, portDenyIndex, "expected rendered ruleset to contain %q", portDenyRule)
+	require.NotEqual(t, -1, allowSetIndex, "expected rendered ruleset to contain %q", allowSetRule)
+	require.Less(t, portDenyIndex, allowSetIndex, "port-scoped deny must be evaluated before the plain allow set")
+}
+
 func TestRefreshActiveConnections_RenewsKnownActiveIP(t *testing.T) {
 	var scripts []string
 	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
@@ -730,4 +796,71 @@ func TestManagerSerializesConcurrentTrackerUpdates(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
+}
+
+func TestApplyStatic_PortFloorRangesDenyBeforeAllows(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	// Platform port floor arrives as an always-deny range rule; a user
+	// port-only allow must never open a floor port. The user policy is
+	// parsed (normalizing target kinds), then the floor is prepended the
+	// same way MergeAlwaysOverlay prepends always-deny rules.
+	p, err := policy.ParsePolicy(`{"defaultAction":"allow","egress":[{"action":"allow","ports":[22]}]}`)
+	require.NoError(t, err)
+	p.Egress = append([]policy.EgressRule{
+		policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}}),
+	}, p.Egress...)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+
+	floorRule := "add rule inet opensandbox egress tcp dport { 1-79, 81-442, 444-65535 } drop"
+	userAllow := "add rule inet opensandbox egress tcp dport { 22 } accept"
+	expectContains(t, rendered, floorRule)
+	expectContains(t, rendered, userAllow)
+	require.Less(t, strings.Index(rendered, floorRule), strings.Index(rendered, userAllow),
+		"the platform floor must be evaluated before any user port allow")
+}
+
+// Issue #2423: the MITM REDIRECT rewrites the intercepted dport to the
+// listener port before this chain runs, so the exemption must precede the
+// floor drop, user port rules, and the final default-deny drop.
+func TestApplyStatic_MitmRedirectExemptedBeforePortRules(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunnerAndOptions(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	}, Options{MitmRedirectPort: 18081})
+	// Default-deny policy allowing only 443, plus the port floor: neither
+	// covers the rewritten dport 18081.
+	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","ports":[443]}]}`)
+	require.NoError(t, err)
+	p = policy.MergeAlwaysOverlay(p, []policy.EgressRule{
+		policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}}),
+	}, nil)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+
+	exempt := "add rule inet opensandbox egress ip daddr 127.0.0.1 tcp dport 18081 accept"
+	expectContains(t, rendered, exempt)
+	for _, later := range []string{
+		"add rule inet opensandbox egress tcp dport { 1-79, 81-442, 444-65535 } drop",
+		"add rule inet opensandbox egress tcp dport { 443 } accept",
+		"add rule inet opensandbox egress drop",
+	} {
+		idx := strings.Index(rendered, later)
+		require.NotEqual(t, -1, idx, "expected rendered ruleset to contain %q", later)
+		require.Less(t, strings.Index(rendered, exempt), idx,
+			"the mitm redirect exemption must precede %q", later)
+	}
+}
+
+func TestApplyStatic_NoMitmRedirectExemptionWhenDisabled(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	require.NoError(t, m.ApplyStatic(context.Background(), policy.DefaultDenyPolicy()))
+	require.NotContains(t, rendered, "dport 18081", "no exemption without transparent MITM")
 }

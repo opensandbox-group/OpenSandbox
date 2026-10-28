@@ -18,9 +18,9 @@ package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -111,6 +111,15 @@ class SandboxTest {
                 httpClientProvider = httpClientProvider,
                 diagnosticsService = diagnosticsService,
             )
+    }
+
+    @Test
+    fun `diagnostic context uses diagnostics service`() {
+        val id = sandboxId
+        val expected = mockk<DiagnosticContext>()
+        every { diagnosticsService.getContext(id) } returns expected
+        assertSame(expected, sandbox.getDiagnosticContext())
+        verify { diagnosticsService.getContext(id) }
     }
 
     @Test
@@ -412,7 +421,7 @@ class SandboxTest {
     }
 
     @Test
-    fun `credentialVault should throw for template-backed sandboxes`() {
+    fun `credentialVault should return the injected service for template-backed sandboxes`() {
         val templateSandbox =
             Sandbox(
                 id = sandboxId,
@@ -430,7 +439,7 @@ class SandboxTest {
                 origin = SandboxOrigin.TEMPLATE,
             )
 
-        assertThrows(SandboxException::class.java) { templateSandbox.credentialVault() }
+        assertSame(credentialVaultService, templateSandbox.credentialVault())
     }
 
     @Test

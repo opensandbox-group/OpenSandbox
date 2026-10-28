@@ -126,6 +126,45 @@ test("createSandbox preserves future lifecycle hooks", async () => {
   assert.deepEqual(lifecycle, expectedLifecycle);
 });
 
+test("createSandbox forwards lifecycle.idlePolicy (OSEP-0024)", async () => {
+  const { adapter, requests } = createAdapter();
+  const lifecycle = {
+    idlePolicy: {
+      idleTimeoutSeconds: 300,
+      onIdle: "pause",
+      wakeOnAccess: true,
+      activeProbe: { port: 8080, path: "/active", timeoutSeconds: 2 },
+    },
+  };
+  const expectedLifecycle = structuredClone(lifecycle);
+
+  await adapter.createSandbox({ lifecycle });
+
+  assert.deepEqual(requests[0].lifecycle, expectedLifecycle);
+});
+
+test("createSandboxFromTemplate forwards the idle policy as lifecycle.idlePolicy", async () => {
+  const { adapter, requests } = createAdapter();
+
+  await adapter.createSandboxFromTemplate({
+    templateId: "tpl_1",
+    timeout: 3600,
+    idlePolicy: { idleTimeoutSeconds: 300, onIdle: "pause", wakeOnAccess: true },
+  });
+
+  assert.deepEqual(requests[0].lifecycle, {
+    idlePolicy: { idleTimeoutSeconds: 300, onIdle: "pause", wakeOnAccess: true },
+  });
+});
+
+test("createSandboxFromTemplate omits lifecycle when no idle policy is set", async () => {
+  const { adapter, requests } = createAdapter();
+
+  await adapter.createSandboxFromTemplate({ templateId: "tpl_1", timeout: 3600 });
+
+  assert.equal(Object.hasOwn(requests[0], "lifecycle"), false);
+});
+
 test("deleteSandbox forwards AbortSignal to the transport", async () => {
   const controller = new AbortController();
   let deleteOptions;

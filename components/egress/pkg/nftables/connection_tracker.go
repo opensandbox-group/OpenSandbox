@@ -16,6 +16,7 @@ package nftables
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"sort"
 	"time"
@@ -67,11 +68,20 @@ func (t *connectionTracker) run(ctx context.Context, interval time.Duration, man
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		if manager.isQuiesced() {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if manager.isQuiesced() {
+				return
+			}
 			connections, err := t.listConnections(ctx)
+			if manager.isQuiesced() {
+				return
+			}
 			if err != nil {
 				t.clearPreviousActiveIPs(manager)
 				log.Warnf("nftables: list active TCP connections failed: %v", err)
@@ -80,6 +90,9 @@ func (t *connectionTracker) run(ctx context.Context, interval time.Duration, man
 			refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			err = t.refreshActiveConnections(refreshCtx, connections, manager)
 			cancel()
+			if errors.Is(err, ErrQuiesced) {
+				return
+			}
 			if err != nil {
 				log.Warnf("nftables: refresh active DNS IPs failed: %v", err)
 			}
@@ -90,6 +103,9 @@ func (t *connectionTracker) run(ctx context.Context, interval time.Duration, man
 func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connections []tcpConnection, manager *Manager) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.quiesced.Load() {
+		return ErrQuiesced
+	}
 	plan := t.refreshCandidates(connections)
 	if len(plan.addresses) > 0 {
 		script := buildRefreshResolvedIPsScript(tableName, plan.addresses)
@@ -105,6 +121,9 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 func (t *connectionTracker) clearPreviousActiveIPs(manager *Manager) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.quiesced.Load() {
+		return
+	}
 	t.previousActiveIPs = make(map[netip.Addr]struct{})
 }
 

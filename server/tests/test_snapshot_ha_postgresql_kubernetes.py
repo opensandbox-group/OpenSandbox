@@ -171,6 +171,9 @@ class _SharedK8sClient:
         self._delete_barrier = Barrier(2) if force_create_conflict else None
         self.objects: dict[str, dict] = {}
         self.workloads = {SANDBOX_ID: {}}
+        # fsb snapshot creation classifies the artifact encoding by reading
+        # the source Sandbox CR; native image keeps template_name semantics.
+        self.sandboxes = {FSB_SANDBOX_ID: {"spec": {"image": "alpine:3.19"}}}
         self.pods = {
             f"{SANDBOX_ID}-0": {
                 "spec": {},
@@ -206,6 +209,12 @@ class _SharedK8sClient:
         if plural == "batchsandboxes":
             workload = self.workloads.get(name)
             return deepcopy(workload) if workload is not None else None
+
+        if plural == "sandboxes":
+            cr = self.sandboxes.get(name)
+            if cr is None:
+                raise ApiException(status=404, reason="Not Found")
+            return deepcopy(cr)
 
         barrier = None
         with self._lock:

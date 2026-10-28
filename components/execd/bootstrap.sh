@@ -342,8 +342,41 @@ _jdk_import_ca() {
 		return 0
 	fi
 
-	# Remove stale alias first so a regenerated CA cert is always picked up.
-	if "$kt" -list -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1; then
+	# Different JDK installations can link to the same system trust store.
+	# Bound the walk so a symlink cycle cannot hang bootstrap.
+	link_depth=0
+	while :; do
+		ks_dir="$(cd "$(dirname "$ks")" 2>/dev/null && pwd -P)" || return 0
+		ks="$ks_dir/$(basename "$ks")"
+		[ -L "$ks" ] || break
+		[ "$link_depth" -lt 40 ] || break
+		link_depth=$((link_depth + 1))
+		link_target="$(readlink "$ks" 2>/dev/null)" || break
+		case "$link_target" in
+		/*) ks="$link_target" ;;
+		*) ks="$ks_dir/$link_target" ;;
+		esac
+	done
+	case "
+${_SEEN_JDK_STORES:-}" in
+	*"
+$ks
+"*) return 0 ;;
+	esac
+
+	# Compare certificate content, not just the alias: a rotated CA must replace
+	# the old certificate. PEM normalization avoids an openssl dependency.
+	if current_cert="$("$kt" -exportcert -rfc -alias "$alias_name" -keystore "$ks" -storepass changeit 2>/dev/null)"; then
+		current_cert="$(printf '%s\n' "$current_cert" | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' | tr -d '[:space:]')"
+		incoming_cert="$(sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$cert" | tr -d '[:space:]')"
+		if [ -n "$incoming_cert" ] && [ "$current_cert" = "$incoming_cert" ]; then
+			_SEEN_JDK_STORES="${_SEEN_JDK_STORES:-}$ks
+"
+			return 0
+		fi
+		_sudo "$kt" -delete -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1
+	elif "$kt" -list -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1; then
+		# An alias can exist without an exportable certificate (e.g. SecretKeyEntry).
 		_sudo "$kt" -delete -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1
 	fi
 
@@ -353,6 +386,8 @@ _jdk_import_ca() {
 		-keystore "$ks" \
 		-storepass changeit >/dev/null 2>&1; then
 		echo "imported mitm CA into JDK trust store at $ks"
+		_SEEN_JDK_STORES="${_SEEN_JDK_STORES:-}$ks
+"
 	else
 		echo "warning: failed to import mitm CA into $ks" >&2
 	fi
@@ -376,6 +411,7 @@ trust_mitm_ca_jdk() {
 	cert="$1"
 	[ -f "$cert" ] || return 0
 	_SEEN_JDKS=""
+	_SEEN_JDK_STORES=""
 
 	# 1) $JAVA_HOME if set.
 	if [ -n "${JAVA_HOME:-}" ]; then
@@ -412,6 +448,7 @@ trust_mitm_ca_jdk() {
 	fi
 
 	_SEEN_JDKS=""
+	_SEEN_JDK_STORES=""
 	return 0
 }
 

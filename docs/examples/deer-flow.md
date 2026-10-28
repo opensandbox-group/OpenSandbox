@@ -5,15 +5,9 @@ description: Run DeerFlow agent turns on OpenSandbox through the OpenSandboxProv
 
 # DeerFlow + OpenSandbox Example
 
-[DeerFlow](https://github.com/bytedance/deer-flow) is an open-source deep-research agent
-framework. Since 2.1.0 it ships an OpenSandbox sandbox provider, so the `bash`, file, and
-search tools an agent calls run inside a sandbox on your OpenSandbox server instead of on the
-gateway host.
+[DeerFlow](https://github.com/bytedance/deer-flow) is an open-source deep-research agent framework. Since 2.1.0 it ships an OpenSandbox sandbox provider, so the `bash`, file, and search tools an agent calls run inside a sandbox on your OpenSandbox server instead of on the gateway host.
 
-The provider lives in DeerFlow (`deerflow.community.opensandbox:OpenSandboxProvider`) and
-drives the OpenSandbox Python SDK. Nothing extra is needed on the OpenSandbox side: this
-example starts a server, points DeerFlow's `sandbox` section at it, and runs sandbox work
-through DeerFlow's own provider.
+The provider lives in DeerFlow (`deerflow.community.opensandbox:OpenSandboxProvider`) and drives the OpenSandbox Python SDK. Nothing extra is needed on the OpenSandbox side: this example starts a server, points DeerFlow's `sandbox` section at it, and runs sandbox work through DeerFlow's own provider.
 
 ## Start OpenSandbox server [local]
 
@@ -26,16 +20,12 @@ opensandbox-server
 ```
 
 ::: info Docker runtime requirement
-The server uses `runtime.type = "docker"` by default, so it **must** be able to reach a running
-Docker daemon. Docker Desktop users should confirm with `docker version`; on Colima (macOS)
-export `DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"` before starting the server.
+The server uses `runtime.type = "docker"` by default, so it **must** be able to reach a running Docker daemon. Docker Desktop users should confirm with `docker version`; on Colima (macOS) export `DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"` before starting the server.
 :::
 
 ## Set up DeerFlow with the OpenSandbox provider
 
-DeerFlow is a cloned application rather than a PyPI library — the harness and its
-`deerflow-extension-api` companion are uv workspace members — so the provider extra is
-installed from a checkout. DeerFlow requires Python 3.12 or later.
+DeerFlow is a cloned application rather than a PyPI library — the harness and its `deerflow-extension-api` companion are uv workspace members — so the provider extra is installed from a checkout. DeerFlow requires Python 3.12 or later.
 
 ```shell
 git clone https://github.com/bytedance/deer-flow.git
@@ -51,18 +41,12 @@ cd backend && uv sync --all-packages --extra opensandbox && cd ..
 The provider is imported only when `sandbox.use` selects it.
 
 ::: warning Re-add the extra after a plain sync
-`opensandbox` is an optional extra, and a plain `uv sync --locked` — which is what `make install`
-runs for the backend — prunes it from the environment. If a later `make install` or `uv sync`
-removes it, run `cd backend && uv sync --all-packages --extra opensandbox` again. The
-docker-compose deployment is unaffected: it installs the extra at image build time from
-`UV_EXTRAS=opensandbox` in `.env`.
+`opensandbox` is an optional extra, and a plain `uv sync --locked` — which is what `make install` runs for the backend — prunes it from the environment. If a later `make install` or `uv sync` removes it, run `cd backend && uv sync --all-packages --extra opensandbox` again. The docker-compose deployment is unaffected: it installs the extra at image build time from `UV_EXTRAS=opensandbox` in `.env`.
 :::
 
 ## Run the example
 
-The example drives DeerFlow's provider directly, so it needs no model configuration and no
-gateway process. It writes a minimal `config.yaml` containing only the `sandbox` section and
-points `DEER_FLOW_CONFIG_PATH` at it.
+The example drives DeerFlow's provider directly, so it needs no model configuration and no gateway process. It writes a minimal `config.yaml` containing only the `sandbox` section and points `DEER_FLOW_CONFIG_PATH` at it.
 
 Run it with the DeerFlow backend environment, from your OpenSandbox checkout:
 
@@ -70,13 +54,9 @@ Run it with the DeerFlow backend environment, from your OpenSandbox checkout:
 uv run --project ../deer-flow/backend python examples/deer-flow/main.py
 ```
 
-Any interpreter that can `import deerflow` works — for example a shell where the DeerFlow
-checkout's `backend/.venv` is activated.
+Any interpreter that can `import deerflow` works — for example a shell where the DeerFlow checkout's `backend/.venv` is activated.
 
-The script creates a sandbox through `provider.acquire()`, runs a command, writes a Python
-script with DeerFlow's file API, executes it, then exercises `read_file`, `list_dir`, `glob`,
-`grep`, and the `/mnt/user-data`-restricted `download_file`. The sandbox is released to the
-warm pool and destroyed by `provider.shutdown()` on exit.
+The script creates a sandbox through `provider.acquire()`, runs a command, writes a Python script with DeerFlow's file API, executes it, then exercises `read_file`, `list_dir`, `glob`, `grep`, and the `/mnt/user-data`-restricted `download_file`. The sandbox is released to the warm pool and destroyed by `provider.shutdown()` on exit.
 
 You should see output similar to:
 
@@ -97,14 +77,12 @@ You should see output similar to:
 The sandbox id, remote id, and platform string differ on each run.
 
 ::: tip
-DeerFlow logs `No models are configured ...` while loading this generated config. That notice
-is expected on the provider-only path — the script never invokes a model.
+DeerFlow logs `No models are configured ...` while loading this generated config. That notice is expected on the provider-only path — the script never invokes a model.
 :::
 
 ## Point the DeerFlow agent at OpenSandbox
 
-For agent runs, put the sandbox section in the DeerFlow checkout's `config.yaml` (`make config`
-creates one from `config.example.yaml`):
+For agent runs, put the sandbox section in the DeerFlow checkout's `config.yaml` (`make config` creates one from `config.example.yaml`):
 
 ```yaml
 sandbox:
@@ -134,44 +112,25 @@ sandbox:
 | `idle_timeout` | `600` | Idle seconds before a warm sandbox is destroyed; `0` disables |
 | `environment` | `{}` | Environment variables injected into sandbox commands. A value starting with `$` is resolved from the gateway process environment. |
 
-`api_key` and `domain` may be omitted when `OPEN_SANDBOX_API_KEY` and `OPEN_SANDBOX_DOMAIN` are
-exported, which is how the example passes them. Set `use_server_proxy: true` when the gateway
-can reach the OpenSandbox management service but cannot reach sandbox `execd` endpoints
-directly.
+`api_key` and `domain` may be omitted when `OPEN_SANDBOX_API_KEY` and `OPEN_SANDBOX_DOMAIN` are exported, which is how the example passes them. Set `use_server_proxy: true` when the gateway can reach the OpenSandbox management service but cannot reach sandbox `execd` endpoints directly.
 
-Then run one headless agent turn. The prompt makes the agent call its `bash` tool, which now
-executes inside OpenSandbox:
+Then run one headless agent turn. The prompt makes the agent call its `bash` tool, which now executes inside OpenSandbox:
 
 ```shell
 deerflow --print "Run python3 -c 'print(2 ** 16)' and report the output"
 ```
 
-`deerflow` opens the terminal workbench when run interactively, while `--print` and `--json` run
-one headless turn. The gateway and web UI start with `make dev`, and the docker-compose
-deployment reaches the provider through the `UV_EXTRAS=opensandbox` setting in `.env`.
+`deerflow` opens the terminal workbench when run interactively, while `--print` and `--json` run one headless turn. The gateway and web UI start with `make dev`, and the docker-compose deployment reaches the provider through the `UV_EXTRAS=opensandbox` setting in `.env`.
 
 ## Behavior notes
 
-- The provider creates one sandbox per effective `(user_id, thread_id)` scope and parks it in an
-  in-process warm pool after each turn. Only the same scope can reclaim it, and a reclaim runs a
-  health check first.
-- Create returns only after the SDK readiness check and DeerFlow's
-  `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap failure destroys
-  the newly created remote sandbox.
-- Every operation renews the sandbox's server-side lifetime; commands that carry no explicit
-  timeout use `bash_command_timeout`. Operations on one sandbox are serialized so a short
-  renewal cannot shorten the horizon of an in-flight long command.
-- `execute_command` forwards per-call environment variables and timeouts, and preserves stdout,
-  stderr, and non-zero exit status in the returned text. File reads and writes use OpenSandbox's
-  native filesystem API.
-- `list_dir`, `glob`, and `grep` run portable `find`/`grep` commands inside the sandbox. All
-  paths must be absolute and traversal-free; artifact downloads are restricted to
-  `/mnt/user-data`.
-- A command-path HTTP 404 or 410, an unhealthy session, or a broken transport evicts the dead
-  client so the next acquire cold-starts a replacement.
-- `replicas` is a per-gateway-process soft cap: DeerFlow does not coordinate sandbox ownership
-  between processes yet, so one gateway process per OpenSandbox-backed deployment keeps the cap
-  meaningful.
+- The provider creates one sandbox per effective `(user_id, thread_id)` scope and parks it in an in-process warm pool after each turn. Only the same scope can reclaim it, and a reclaim runs a health check first.
+- Create returns only after the SDK readiness check and DeerFlow's `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap failure destroys the newly created remote sandbox.
+- Every operation renews the sandbox's server-side lifetime; commands that carry no explicit timeout use `bash_command_timeout`. Operations on one sandbox are serialized so a short renewal cannot shorten the horizon of an in-flight long command.
+- `execute_command` forwards per-call environment variables and timeouts, and preserves stdout, stderr, and non-zero exit status in the returned text. File reads and writes use OpenSandbox's native filesystem API.
+- `list_dir`, `glob`, and `grep` run portable `find`/`grep` commands inside the sandbox. All paths must be absolute and traversal-free; artifact downloads are restricted to `/mnt/user-data`.
+- A command-path HTTP 404 or 410, an unhealthy session, or a broken transport evicts the dead client so the next acquire cold-starts a replacement.
+- `replicas` is a per-gateway-process soft cap: DeerFlow does not coordinate sandbox ownership between processes yet, so one gateway process per OpenSandbox-backed deployment keeps the cap meaningful.
 
 ## Environment Variables
 
@@ -183,6 +142,63 @@ deployment reaches the provider through the `UV_EXTRAS=opensandbox` setting in `
 | `SANDBOX_IMAGE` | `python:3.11` | Sandbox image used by this example |
 | `OPEN_SANDBOX_DOMAIN` | _(unset)_ | Server address when the DeerFlow config omits `domain` |
 | `OPEN_SANDBOX_API_KEY` | _(unset)_ | API key when the DeerFlow config omits `api_key` |
+
+## All-in-one Docker image (server + DeerFlow Web UI)
+
+`examples/deer-flow/` ships an all-in-one lab image bundling both sides of the integration: the OpenSandbox server (docker runtime) and the DeerFlow backend with the OpenSandboxProvider extra preinstalled — plus the **pre-built Web UI**, served by the bundled nginx on `:2026`. Sandbox containers run on the **host** Docker daemon: the image mounts `docker.sock` at run time and drives the host daemon through it — the same topology as `server/docker-compose.example.yaml`.
+
+Build and run:
+
+```shell
+cd examples/deer-flow
+docker build -t deerflow-opensandbox .
+docker run -d --name deerflow-opensandbox \
+  -p 2026:2026 \
+  -p 8080:8080 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --add-host host.docker.internal:host-gateway \
+  deerflow-opensandbox
+```
+
+`--add-host host.docker.internal:host-gateway` is required on Linux so the server can reach the host-published sandbox ports; Docker Desktop resolves that name already, and the flag is harmless there.
+
+Two entry points:
+
+- **DeerFlow Web UI**: <http://localhost:2026> — the teaching path. Complete the first-run setup in the page, configure a model under Settings → Models (API key stays in the Web UI), then chat: the agent's `bash` and file tools execute inside an OpenSandbox sandbox.
+- **OpenSandbox server API**: <http://localhost:8080> — for `curl` checks and the `osb` CLI.
+
+Verify from a shell on the host:
+
+```shell
+curl -s http://127.0.0.1:8080/health        # -> {"status":"healthy"}
+docker ps | grep -i sandbox                 # sandbox containers appear as you chat
+```
+
+Headless / model-free paths inside the container (`docker exec -it deerflow-opensandbox bash`):
+
+```shell
+# 1) model-free: drive OpenSandboxProvider directly (no API key needed)
+cd /opt/OpenSandbox
+uv run --project /opt/deer-flow/backend python examples/deer-flow/main.py
+
+# 2) full agent turn via CLI (requires a configured model)
+deerflow --print "Run python3 -c 'print(2 ** 16)' and report the output"
+```
+
+::: tip
+On first boot the entrypoint generates `/opt/deer-flow/config.yaml` from `config.example.yaml` and switches the sandbox section to `OpenSandboxProvider` via `enable-opensandbox` (on PATH, idempotent). If `make setup` or any wizard later overwrites the config, rerun `enable-opensandbox` to switch back.
+:::
+
+::: warning
+The image ships a fixed teaching API key (`deerflow-lab-key`, set as `server.api_key` and `OPEN_SANDBOX_API_KEY`) — required since the server refuses to start with an empty key in non-interactive mode. Fine for a classroom laptop; for any shared deployment mount your own config and override the env var.
+:::
+
+Notes:
+
+- The Web UI stack starts in production mode (background `serve.sh --prod --daemon --skip-install --skip-frontend-build`), reusing the frontend build baked at image build time; the frontend build requires Node.js + pnpm, both installed in the image.
+- `UV_EXTRAS=opensandbox` is set in the image so DeerFlow's own start-time `uv sync --locked` (in `scripts/serve.sh`) keeps the `opensandbox` extra instead of pruning it.
+- Sandbox images default to the lab image itself (`opensandbox/deerflow-example:latest` on the ACR mirror — a python base with a rich preinstalled environment); any image with a POSIX shell works, e.g. Docker Hub `python:3.11`. Images are pulled by the **host** Docker; the provider's `ready_timeout` is set to 600s to cover the first pull of the larger default.
+- `DEERFLOW_REPO` / `DEERFLOW_REF` / `OPENSANDBOX_REPO` build args let network-restricted environments point the clones at mirrors; pip/uv honor `PIP_INDEX_URL` / `UV_INDEX_URL`, and pnpm uses the configured registry.
 
 ## References
 

@@ -23,6 +23,7 @@ from typing import Literal
 from decision_snapshot import validate
 from host_selectors import Selector, parse_canonical
 from revision_receiver import Revision, Snapshot
+from static_passthrough import StaticPassthrough, validate_selectors
 
 Generation = tuple[str, str]
 Action = Literal["deny", "passthrough", "needs_registry"]
@@ -101,20 +102,10 @@ def _valid_sni(sni: object) -> bool:
 
 
 def _valid_static_passthrough(value: object) -> bool:
-    if type(value) is not tuple:
+    try:
+        validate_selectors(value)
+    except ValueError:
         return False
-    for selector in value:
-        if (
-            type(selector) is not Selector
-            or type(selector.base) is not str
-            or type(selector.wildcard) is not bool
-        ):
-            return False
-        try:
-            if parse_canonical(selector.text) != selector:
-                return False
-        except (AttributeError, TypeError, ValueError):
-            return False
     return True
 
 
@@ -122,15 +113,17 @@ def _decision(action: Action, reason: Reason) -> TLSDecision:
     return TLSDecision(action, reason)
 
 
-def classify(
+def _classify(
     *,
     identity: Generation | None,
     sni: str | None,
     ech_hidden: bool,
     static_passthrough: tuple[Selector, ...],
     view: TLSSelectorView | None,
+    destination_port: int | None = None,
+    _static_config: StaticPassthrough | None = None,
 ) -> TLSDecision:
-    """Classify in ClientHello order without decrypting or mutating state."""
+    """Internal selection; only the startup owner supplies a compiled policy."""
     if not _known_identity(identity):
         return _decision("deny", "unknown_identity")
     if type(ech_hidden) is not bool:
@@ -141,10 +134,17 @@ def classify(
         return _decision("passthrough", "no_sni")
     if not _valid_sni(sni):
         return _decision("deny", "invalid_sni")
-    if not _valid_static_passthrough(static_passthrough):
+    startup_tuple = (
+        type(_static_config) is StaticPassthrough
+        and static_passthrough is _static_config.selectors
+    )
+    if not startup_tuple and not _valid_static_passthrough(static_passthrough):
         return _decision("deny", "invalid_input")
     if any(selector.matches(sni) for selector in static_passthrough):
-        return _decision("passthrough", "static_ignore")
+        if type(destination_port) is not int or not 1 <= destination_port <= 65535:
+            return _decision("deny", "invalid_input")
+        if destination_port == 443:
+            return _decision("passthrough", "static_ignore")
     if type(view) is not TLSSelectorView:
         return _decision("deny", "snapshot_missing")
     if identity != (
@@ -155,3 +155,20 @@ def classify(
     if not any(selector.matches(sni) for selector in view.selectors):
         return _decision("passthrough", "no_binding_host")
     return _decision("needs_registry", "binding_host")
+
+
+def classify(
+    *,
+    identity: Generation | None,
+    sni: str | None,
+    ech_hidden: bool,
+    static_passthrough: tuple[Selector, ...],
+    view: TLSSelectorView | None,
+    destination_port: int | None = None,
+) -> TLSDecision:
+    """Validate caller-owned static tuples in the same ClientHello order."""
+    return _classify(
+        identity=identity, sni=sni, ech_hidden=ech_hidden,
+        static_passthrough=static_passthrough, view=view,
+        destination_port=destination_port,
+    )

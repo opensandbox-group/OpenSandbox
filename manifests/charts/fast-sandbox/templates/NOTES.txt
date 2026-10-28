@@ -10,6 +10,11 @@ Components:
     readiness loop: host checks, Firecracker asset install, self-applied
     scheduling labels + FirecrackerReady condition; janitor sidecar;
     peer discovery Service: dart.{{ include "fast-sandbox.namespace" . }}.svc)
+{{- if .Values.runtime.oci.enabled }}
+    + OverlayBD OCI stack: install-oci-tools init, overlaybd-ublkd
+    sidecar (socket /run/fast-sandbox/overlaybd/ublkd.sock), agent
+    FAST_SANDBOX_OCI_ENABLED
+{{- end }}
 {{- end }}
 
 Next steps:
@@ -24,7 +29,14 @@ Next steps:
   3. Build and load the companion images from the pinned source:
        manifests/release/build-fast-sandbox.sh --load-kind <cluster>
   4. Create a SandboxPool with runtime: firecracker and create Sandboxes
-     against it (see docs/ and examples/).
+      against it (see docs/ and examples/).
+{{- if .Values.runtime.oci.enabled }}
+  5. OverlayBD OCI is enabled on the nodes: set FAST_SANDBOX_OCI_ENABLED=true
+     on the SandboxPool's fastlet containers too, provision the registry
+     Secret (kubernetes.io/dockerconfigjson) + fast-sandbox-registry
+     ConfigMap in the pool's namespace, and point SandboxTemplate
+     output.publish at an oci:// registry the nodes trust.
+{{- end }}
 {{- if and .Values.routeKeys.create .Values.routeKeys.developmentOnly }}
 
 WARNING: the Ed25519 controller route keys in fast-sandbox-route-keys are

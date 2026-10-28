@@ -473,7 +473,7 @@ func (p *DefaultSandboxPool) directCreate(ctx context.Context, opts AcquireOptio
 		}
 		sb, err = p.config.SandboxCreator.Create(ctx, createCtx)
 	} else {
-		sb, err = p.createSandboxFromSpec(ctx, p.config.AcquireReadyTimeout, p.config.AcquireHealthCheckPollingInterval, opts.SkipHealthCheck, p.adaptAcquireHealthCheck())
+		sb, err = p.createSandboxFromSpec(ctx, p.config.ConnectionConfig, p.config.AcquireReadyTimeout, p.config.AcquireHealthCheckPollingInterval, opts.SkipHealthCheck, p.adaptAcquireHealthCheck())
 	}
 	if err != nil {
 		return nil, err
@@ -506,6 +506,9 @@ func (p *DefaultSandboxPool) createOneSandbox(ctx context.Context, reason Pooled
 	var sb *Sandbox
 	var err error
 
+	warmupConfig := p.config.ConnectionConfig
+	warmupConfig.DisableMetrics = true
+
 	if p.config.SandboxCreator != nil {
 		createCtx := PooledSandboxCreateContext{
 			PoolName:                   p.config.PoolName,
@@ -516,12 +519,12 @@ func (p *DefaultSandboxPool) createOneSandbox(ctx context.Context, reason Pooled
 			HealthCheckPollingInterval: p.config.WarmupHealthCheckPollingInterval,
 			SkipHealthCheck:            p.config.WarmupSkipHealthCheck,
 			HealthCheck:                p.config.WarmupHealthCheck,
-			ConnectionConfig:           p.config.ConnectionConfig,
+			ConnectionConfig:           warmupConfig,
 			CreationSpec:               p.config.CreationSpec,
 		}
 		sb, err = p.config.SandboxCreator.Create(ctx, createCtx)
 	} else {
-		sb, err = p.createSandboxFromSpec(ctx, p.config.WarmupReadyTimeout, p.config.WarmupHealthCheckPollingInterval, p.config.WarmupSkipHealthCheck, p.adaptWarmupHealthCheck())
+		sb, err = p.createSandboxFromSpec(ctx, warmupConfig, p.config.WarmupReadyTimeout, p.config.WarmupHealthCheckPollingInterval, p.config.WarmupSkipHealthCheck, p.adaptWarmupHealthCheck())
 	}
 	if err != nil {
 		return "", err
@@ -545,7 +548,7 @@ func (p *DefaultSandboxPool) finalizeWarmup(ctx context.Context, sb *Sandbox) (s
 	return sandboxID, nil
 }
 
-func (p *DefaultSandboxPool) createSandboxFromSpec(ctx context.Context, readyTimeout time.Duration, healthCheckInterval time.Duration, skipHealthCheck bool, healthCheck func(ctx context.Context, sb *Sandbox) (bool, error)) (*Sandbox, error) {
+func (p *DefaultSandboxPool) createSandboxFromSpec(ctx context.Context, connConfig ConnectionConfig, readyTimeout time.Duration, healthCheckInterval time.Duration, skipHealthCheck bool, healthCheck func(ctx context.Context, sb *Sandbox) (bool, error)) (*Sandbox, error) {
 	spec := p.config.CreationSpec
 	timeoutSec := int(p.config.IdleTimeout.Seconds())
 	if timeoutSec < 1 {
@@ -572,7 +575,7 @@ func (p *DefaultSandboxPool) createSandboxFromSpec(ctx context.Context, readyTim
 		HealthCheckInterval: healthCheckInterval,
 		HealthCheck:         healthCheck,
 	}
-	return CreateSandbox(ctx, p.config.ConnectionConfig, createOpts)
+	return CreateSandbox(ctx, connConfig, createOpts)
 }
 
 func (p *DefaultSandboxPool) applyWarmupCallbacks(ctx context.Context, sb *Sandbox) error {

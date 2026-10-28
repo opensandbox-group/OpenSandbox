@@ -25,7 +25,6 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
 from opensandbox.exceptions import (
     InvalidArgumentException,
-    SandboxException,
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
@@ -996,6 +995,7 @@ async def test_create_from_template_passes_only_allowed_fields(
             metadata=None,
             network_policy=None,
             extensions=None,
+            idle_policy=None,
         ):
             self.template_calls.append(
                 {
@@ -1004,6 +1004,7 @@ async def test_create_from_template_passes_only_allowed_fields(
                     "metadata": metadata,
                     "network_policy": network_policy,
                     "extensions": extensions,
+                    "idle_policy": idle_policy,
                 }
             )
             return _CreateResponse()
@@ -1069,6 +1070,7 @@ async def test_create_from_template_passes_only_allowed_fields(
     assert call["metadata"] == {"team": "platform"}
     assert call["network_policy"] is None
     assert call["extensions"] is None
+    assert call["idle_policy"] is None
 
 
 @pytest.mark.asyncio
@@ -1080,10 +1082,12 @@ async def test_create_from_template_rejects_blank_template_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_credential_vault_raises_for_template_sandbox() -> None:
+async def test_credential_vault_routes_through_egress_service_for_template_sandbox() -> None:
+    """Template-backed sandboxes expose the vault through the lifecycle
+    control-plane adapter (OSEP-0022): the same object that serves policy
+    serves the server-routed vault."""
     sandbox = await _make_template_sandbox()
-    with pytest.raises(SandboxException, match="Credential Vault"):
-        _ = sandbox.credential_vault
+    assert sandbox.credential_vault is sandbox._egress_service
 
 
 @pytest.mark.asyncio
@@ -1143,8 +1147,8 @@ async def test_connect_from_template_skips_egress_sidecar(
     assert sandbox.origin == SandboxOrigin.TEMPLATE
     assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
     assert factory.network_policy_calls == ["sbx-1"]
-    with pytest.raises(SandboxException, match="Credential Vault"):
-        _ = sandbox.credential_vault
+    # The vault rides the same lifecycle adapter the policy uses (OSEP-0022).
+    assert sandbox.credential_vault is sandbox._egress_service
 
 
 async def _make_template_sandbox() -> Sandbox:

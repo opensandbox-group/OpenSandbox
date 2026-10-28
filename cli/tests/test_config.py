@@ -136,6 +136,42 @@ class TestResolveConfig:
         result = resolve_config(config_path=cfg)
         assert result["use_server_proxy"] is False
 
+    def test_numeric_file_scalars_stay_strings(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[connection]\napi_key = 1234567890\ndomain = 12345\n\n"
+            "[defaults]\ntimeout = 300\n"
+        )
+        result = resolve_config(config_path=cfg)
+        # A numeric-looking string field must not become an int.
+        assert result["api_key"] == "1234567890"
+        assert result["domain"] == "12345"
+        assert result["default_timeout"] == "300"
+
+    def test_stringly_typed_file_scalars_are_coerced(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            '[connection]\nrequest_timeout = "45"\nuse_server_proxy = "true"\n\n'
+            '[output]\ncolor = "false"\n'
+        )
+        result = resolve_config(config_path=cfg)
+        assert result["request_timeout"] == 45
+        assert result["use_server_proxy"] is True
+        assert result["color"] is False
+
+    def test_numeric_file_scalars_are_coerced_for_typed_keys(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[connection]\nrequest_timeout = 45.5\nuse_server_proxy = 1\n\n"
+            "[output]\ncolor = 0\n"
+        )
+        result = resolve_config(config_path=cfg)
+        assert result["request_timeout"] == 45
+        assert result["use_server_proxy"] is True
+        assert result["color"] is False
+
 
 # ---------------------------------------------------------------------------
 # init_config_file

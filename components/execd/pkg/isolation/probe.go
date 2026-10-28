@@ -16,6 +16,7 @@ package isolation
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,25 +24,38 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
+
+// bwrapSmokeTimeout bounds each smoke-test child so a bwrap wedged behind a
+// restrictive LSM/seccomp policy cannot stall execd startup indefinitely.
+const bwrapSmokeTimeout = 10 * time.Second
 
 // ProbeResult holds the result of startup isolation probing.
 type ProbeResult struct {
 	Available        bool
 	Isolator         string
 	Version          string
-	Message          string // diagnostic message when unavailable
+	Message          string // diagnostic message when unavailable or degraded
 	SetprivAvailable bool   // default setpriv uid mode can create the required namespaces
 	// SetprivSwitchAvailable is an internal preflight capability for
 	// requests that choose IDs different from the execd process IDs. The public
 	// setpriv_available flag intentionally describes the default identity path.
 	SetprivSwitchAvailable bool
 	UsernsAvailable        bool // userns uid mode can create the required namespaces
-	CommitSupported        bool // Phase 2
-	DiffSupported          bool // Phase 2
-	PersistAvailable       bool // Phase 2 — requires emptyDir
+	// SetprivNetAvailable / UsernsNetAvailable extend the uid-mode probes with
+	// a private network namespace: share_net=false sessions run bwrap with
+	// --unshare-net, whose loopback setup needs CAP_NET_ADMIN in the execd
+	// container (setpriv) or succeeds inside the mode-owned user namespace
+	// (userns). Sessions must fail fast on these instead of dying inside bwrap
+	// with an opaque gate EOF.
+	SetprivNetAvailable bool
+	UsernsNetAvailable  bool
+	CommitSupported     bool // Phase 2
+	DiffSupported       bool // Phase 2
+	PersistAvailable    bool // Phase 2 — requires emptyDir
 }
 
 // ProbeConfig controls Probe behaviour.
@@ -76,21 +90,56 @@ func Probe(cfg ProbeConfig) ProbeResult {
 	// Probe each uid mode independently. Some environments allow an
 	// unprivileged user namespace but do not grant the capabilities required
 	// by setpriv mode (or vice versa), so one failing mode must not disable the
-	// other.
+	// other. Each mode is probed twice: once for the base namespaces and once
+	// with the private network namespace added (share_net=false), because the
+	// loopback setup has its own capability requirement.
 	setprivErr := probeBwrapSetprivSmoke()
 	setprivIdentitySwitchErr := setprivErr
 	if setprivErr == nil {
 		setprivIdentitySwitchErr = probeBwrapSetprivIdentitySwitchSmoke()
 	}
+	setprivNetErr := fmt.Errorf("setpriv uid mode unavailable entirely: %w", setprivErr)
+	if setprivErr == nil {
+		setprivNetErr = probeBwrapSetprivNetSmoke()
+	}
 	usernsErr := probeBwrapUsernsSmoke()
-	setBwrapModeAvailability(&result, setprivErr, setprivIdentitySwitchErr, usernsErr)
+	usernsNetErr := fmt.Errorf("userns uid mode unavailable entirely: %w", usernsErr)
+	if usernsErr == nil {
+		usernsNetErr = probeBwrapUsernsNetSmoke()
+	}
+	setBwrapModeAvailability(
+		&result,
+		setprivErr,
+		setprivIdentitySwitchErr,
+		setprivNetErr,
+		usernsErr,
+		usernsNetErr,
+	)
 	if setprivErr != nil {
 		log.Warn("isolation probe: setpriv uid mode unavailable: %v", setprivErr)
 	} else if setprivIdentitySwitchErr != nil {
 		log.Warn("isolation probe: setpriv uid mode cannot switch to arbitrary uid/gid: %v", setprivIdentitySwitchErr)
 	}
+	if setprivNetErr != nil && setprivErr == nil {
+		log.Warn("isolation probe: setpriv uid mode cannot create a private network namespace (share_net=false): %v", setprivNetErr)
+	}
 	if usernsErr != nil {
 		log.Warn("isolation probe: userns uid mode unavailable: %v", usernsErr)
+	} else if usernsNetErr != nil {
+		log.Warn("isolation probe: userns uid mode cannot create a private network namespace (share_net=false): %v", usernsNetErr)
+	}
+	// Isolation is up but private networking is broken in every mode: share_net=true
+	// sessions still work, but the standard private-network session posture cannot
+	// run here. Surface the reason so capabilities consumers and create failures
+	// explain themselves instead of dying inside bwrap. The result.Available guard
+	// keeps this degraded message from masking a total failure, which the
+	// !result.Available branch below owns.
+	if result.Available && !result.SetprivNetAvailable && !result.UsernsNetAvailable {
+		result.Message = fmt.Sprintf(
+			"private network namespace (share_net=false) is unavailable in every uid mode: setpriv: %v; userns: %v",
+			setprivNetErr, usernsNetErr,
+		)
+		log.Warn("isolation probe: %s", result.Message)
 	}
 	if !result.Available {
 		result.Message = fmt.Sprintf(
@@ -109,10 +158,15 @@ func Probe(cfg ProbeConfig) ProbeResult {
 	return result
 }
 
-func setBwrapModeAvailability(result *ProbeResult, setprivErr, setprivIdentitySwitchErr, usernsErr error) {
+func setBwrapModeAvailability(
+	result *ProbeResult,
+	setprivErr, setprivIdentitySwitchErr, setprivNetErr, usernsErr, usernsNetErr error,
+) {
 	result.SetprivAvailable = setprivErr == nil
 	result.SetprivSwitchAvailable = setprivErr == nil && setprivIdentitySwitchErr == nil
+	result.SetprivNetAvailable = setprivErr == nil && setprivNetErr == nil
 	result.UsernsAvailable = usernsErr == nil
+	result.UsernsNetAvailable = usernsErr == nil && usernsNetErr == nil
 	result.Available = result.SetprivAvailable || result.UsernsAvailable
 }
 
@@ -150,7 +204,7 @@ func parseBwrapVersion(out string) string {
 // setpriv with its current IDs.
 func probeBwrapSetprivSmoke() error {
 	uid, gid := currentProcessIDs()
-	return probeBwrapSmoke(UidModeSetpriv, uid, gid)
+	return probeBwrapSmoke(UidModeSetpriv, false, uid, gid)
 }
 
 // probeBwrapSetprivIdentitySwitchSmoke verifies that setpriv can switch to IDs
@@ -160,29 +214,67 @@ func probeBwrapSetprivSmoke() error {
 func probeBwrapSetprivIdentitySwitchSmoke() error {
 	uid, gid := currentProcessIDs()
 	uid, gid = setprivSmokeTargetIDs(uid, gid)
-	return probeBwrapSmoke(UidModeSetpriv, uid, gid)
+	return probeBwrapSmoke(UidModeSetpriv, false, uid, gid)
 }
 
 // probeBwrapUsernsSmoke verifies bwrap can create the user namespace and apply
 // the uid/gid mapping used by the userns uid mode.
 func probeBwrapUsernsSmoke() error {
 	uid, gid := currentProcessIDs()
-	return probeBwrapSmoke(UidModeUserns, uid, gid)
+	return probeBwrapSmoke(UidModeUserns, false, uid, gid)
 }
 
-func probeBwrapSmoke(mode UidMode, uid, gid uint32) error {
+// probeBwrapSetprivNetSmoke verifies the setpriv path can also create the
+// private network namespace required by share_net=false. bwrap's loopback
+// setup needs CAP_NET_ADMIN in the execd container for this mode, so the
+// probe keeps it separate from the base smoke: one failing must not hide the
+// other.
+func probeBwrapSetprivNetSmoke() error {
+	uid, gid := currentProcessIDs()
+	return probeBwrapSmoke(UidModeSetpriv, true, uid, gid)
+}
+
+// probeBwrapUsernsNetSmoke verifies the userns path can create the private
+// network namespace. Inside a mode-owned user namespace the loopback setup
+// uses the namespace's own capabilities, so this usually tracks
+// probeBwrapUsernsSmoke; probing keeps the reported capability honest.
+func probeBwrapUsernsNetSmoke() error {
+	uid, gid := currentProcessIDs()
+	return probeBwrapSmoke(UidModeUserns, true, uid, gid)
+}
+
+func probeBwrapSmoke(mode UidMode, privateNet bool, uid, gid uint32) error {
 	p := findBwrap()
 	if p == "" {
 		return fmt.Errorf("bwrap not found")
 	}
 
-	cmd := exec.Command(p, bwrapSmokeArgs(mode, isSetuidBinary(p), uid, gid)...)
+	ctx, cancel := context.WithTimeout(context.Background(), bwrapSmokeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, p, bwrapSmokeArgs(mode, isSetuidBinary(p), privateNet, uid, gid)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("bwrap %s smoke test failed: %w (stderr: %s)", mode, err, strings.TrimSpace(stderr.String()))
+		err = fmt.Errorf("bwrap %s smoke test failed: %w (stderr: %s)", smokeLabel(mode, privateNet), err, strings.TrimSpace(stderr.String()))
+		// bwrap dies on "loopback: Failed RTM_NEWADDR" when it cannot
+		// configure 127.0.0.1 inside the new network namespace; name the
+		// missing capability instead of leaving the raw stderr. Only the
+		// setpriv mode needs CAP_NET_ADMIN in the execd container — in
+		// userns mode the loopback setup runs with the namespace's own
+		// capabilities, so this remediation would be wrong there.
+		if mode == UidModeSetpriv && strings.Contains(stderr.String(), "loopback") {
+			err = fmt.Errorf("%w (loopback setup requires CAP_NET_ADMIN in the execd container)", err)
+		}
+		return err
 	}
 	return nil
+}
+
+func smokeLabel(mode UidMode, privateNet bool) string {
+	if privateNet {
+		return string(mode) + "+private-net"
+	}
+	return string(mode)
 }
 
 // setprivSmokeTargetIDs returns non-zero IDs different from the process IDs.
@@ -201,7 +293,10 @@ func setprivSmokeTargetIDs(currentUID, currentGID uint32) (uint32, uint32) {
 	return targetUID, targetGID
 }
 
-func bwrapSmokeArgs(mode UidMode, setuidBwrap bool, uid, gid uint32) []string {
+// bwrapSmokeArgs mirrors the argv segments that real sessions emit for the
+// given mode. privateNet adds --unshare-net, whose loopback setup is the
+// capability most often missing in restricted containers (CAP_NET_ADMIN).
+func bwrapSmokeArgs(mode UidMode, setuidBwrap, privateNet bool, uid, gid uint32) []string {
 	var args []string
 	if mode == UidModeUserns {
 		args = append(args, "--unshare-user")
@@ -212,6 +307,9 @@ func bwrapSmokeArgs(mode UidMode, setuidBwrap bool, uid, gid uint32) []string {
 	args = append(args,
 		"--unshare-pid", "--unshare-uts", "--unshare-ipc", "--unshare-cgroup",
 	)
+	if privateNet {
+		args = append(args, "--unshare-net")
+	}
 	if mode == UidModeUserns {
 		args = append(args,
 			"--uid", strconv.FormatUint(uint64(uid), 10),

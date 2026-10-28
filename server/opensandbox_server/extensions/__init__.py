@@ -17,6 +17,7 @@ CreateSandbox ``extensions`` shared logic: well-known keys, HTTP validation, wor
 """
 
 from opensandbox_server.extensions.codec import (
+    access_renew_extend_seconds_from_lifecycle,
     apply_access_renew_extend_seconds_to_mapping,
     apply_extensions_to_mapping,
     extract_extensions_from_mapping,
@@ -33,6 +34,7 @@ from opensandbox_server.extensions.validation import (
     ACCESS_RENEW_EXTEND_SECONDS_MAX,
     ACCESS_RENEW_EXTEND_SECONDS_MIN,
     validate_extensions,
+    validate_renew_policy_conflict,
 )
 
 __all__ = [
@@ -41,6 +43,8 @@ __all__ = [
     "ACCESS_RENEW_EXTEND_SECONDS_MIN",
     "ACCESS_RENEW_EXTEND_SECONDS_MAX",
     "validate_extensions",
+    "validate_renew_policy_conflict",
+    "access_renew_extend_seconds_from_lifecycle",
     "apply_access_renew_extend_seconds_to_mapping",
     "apply_extensions_to_mapping",
     "extract_extensions_from_mapping",

@@ -15,8 +15,10 @@
 // Package actionhandler models the fast-sandbox Sandbox Actions Handler
 // protocol (docs/concepts/sandbox-actions.md, sandbox.fast.io/actions/v1)
 // from the egress side: the egress process IS the Handler, and the Fastlet
-// delivers Binding synchronization (SET_BINDING / REMOVE_BINDING) and
-// Lifecycle Hooks over two Pod-loopback HTTP endpoints.
+// delivers Binding synchronization (SET_BINDING / REMOVE_BINDING), Lifecycle
+// Hooks, and the pause/resume snapshot transfer (VAULT_EXPORT / VAULT_IMPORT
+// for the credential vault, POLICY_EXPORT / POLICY_IMPORT for the recorded
+// egress policy) over two Pod-loopback HTTP endpoints.
 //
 // The package owns the wire model, parsing, and validation only. Lifecycle
 // semantics (deny-first registration, data-plane-ready activation) are wired
@@ -35,6 +37,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path/filepath"
+	"strings"
 )
 
 // APIVersion is the only accepted protocol version.
@@ -47,6 +51,16 @@ const (
 	OperationSetBinding    Operation = "SET_BINDING"
 	OperationLifecycleHook Operation = "LIFECYCLE_HOOK"
 	OperationRemoveBinding Operation = "REMOVE_BINDING"
+	// VaultExport/Import carry the subject's vault file across pause/resume
+	// (OSEP-0022): export into the snapshot bundle before teardown, import
+	// re-stamped before data-plane-ready — the only authorized incarnation
+	// transfer.
+	OperationVaultExport Operation = "VAULT_EXPORT"
+	OperationVaultImport Operation = "VAULT_IMPORT"
+	// PolicyExport/Import carry the recorded policy across pause/resume
+	// with the same contract as the vault transfer.
+	OperationPolicyExport Operation = "POLICY_EXPORT"
+	OperationPolicyImport Operation = "POLICY_IMPORT"
 )
 
 // Lifecycle Hook names (v1). Unknown Hook names are rejected: the Handler
@@ -99,6 +113,42 @@ type Hook struct {
 	Sequence uint64 `json:"sequence"`
 }
 
+// SnapshotTransfer names the driver-provided staging file for one subject's
+// state snapshot (vault / recorded policy): the export target, or the bundle
+// source at restore.
+type SnapshotTransfer struct {
+	Path string `json:"path"`
+	// Seal selects the export semantics. Absent/nil = sealed (the
+	// checkpoint flow: the subject is locked out of the copied state until
+	// an import or teardown re-owns it). Seal=false = seal-free carry —
+	// the record is copied verbatim and the source keeps full relay CRUD
+	// (the template flow: the source stays live and the clone adopts the
+	// carried state at its first registration).
+	Seal *bool `json:"seal,omitempty"`
+}
+
+// Sealed reports the export semantics: nil means the checkpoint default
+// (sealed).
+func (t *SnapshotTransfer) Sealed() bool {
+	return t.Seal == nil || *t.Seal
+}
+
+// validatePath enforces the Pod-local absolute-path contract at parse time,
+// checking raw segments before normalization — the same contract the atomic
+// file machinery enforces.
+func (t *SnapshotTransfer) validatePath() error {
+	path := strings.TrimSpace(t.Path)
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("snapshot path %q must be absolute", t.Path)
+	}
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if part == ".." {
+			return fmt.Errorf("snapshot path %q must not traverse parents", t.Path)
+		}
+	}
+	return nil
+}
+
 // Binding carries the Handler-owned input. Input is a JSON RawMessage so the
 // three states are distinguishable: field absent (malformed), JSON null
 // (binding removed from a still-live sandbox), and a JSON string (the opaque
@@ -128,14 +178,15 @@ func (b *Binding) InputString() (string, error) {
 
 // Envelope is the full request body of POST /_fastlet/v1/actions.
 type Envelope struct {
-	APIVersion   string      `json:"apiVersion"`
-	Operation    Operation   `json:"operation"`
-	InvocationID string      `json:"invocationId"`
-	Sandbox      SandboxRef  `json:"sandbox"`
-	Revision     Revision    `json:"revision"`
-	Attachment   *Attachment `json:"attachment,omitempty"`
-	Hook         *Hook       `json:"hook,omitempty"`
-	Binding      *Binding    `json:"binding,omitempty"`
+	APIVersion   string            `json:"apiVersion"`
+	Operation    Operation         `json:"operation"`
+	InvocationID string            `json:"invocationId"`
+	Sandbox      SandboxRef        `json:"sandbox"`
+	Revision     Revision          `json:"revision"`
+	Attachment   *Attachment       `json:"attachment,omitempty"`
+	Hook         *Hook             `json:"hook,omitempty"`
+	Binding      *Binding          `json:"binding,omitempty"`
+	Snapshot     *SnapshotTransfer `json:"snapshot,omitempty"`
 }
 
 // ParseEnvelope decodes and validates a request body. A returned error means
@@ -185,6 +236,14 @@ func (e *Envelope) Validate() error {
 		}
 	case OperationRemoveBinding:
 		// no payload required; terminal cleanup is identified by the sandbox ref
+	case OperationVaultExport, OperationVaultImport,
+		OperationPolicyExport, OperationPolicyImport:
+		if e.Snapshot == nil || strings.TrimSpace(e.Snapshot.Path) == "" {
+			return fmt.Errorf("%s requires a snapshot payload with a path", e.Operation)
+		}
+		if err := e.Snapshot.validatePath(); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown operation %q", e.Operation)
 	}
@@ -223,8 +282,49 @@ func (e *Envelope) Fencing() (runtimeInstanceID, attachmentID string) {
 // identifies one Handler process incarnation: a changed value makes the
 // Fastlet invalidate Binding readiness and replay the latest SetBinding
 // followed by the already-reached Hooks.
+//
+// The MitmCa* fields are additive observability (OSEP-0022 pinned CA):
+// consumers unaware of them ignore the extra JSON keys.
 type StatusResponse struct {
 	APIVersion string `json:"apiVersion"`
 	Ready      bool   `json:"ready"`
 	InstanceID string `json:"instanceId"`
+	// MitmCaFingerprint is the pinned MITM CA's SHA-256 fingerprint
+	// (lowercase hex over the DER); empty when MITM is disabled or no CA is
+	// provisioned.
+	MitmCaFingerprint string `json:"mitmCaFingerprint,omitempty"`
+	// MitmCaDown is the explicit MITM-addon-down signal: the pinned CA is
+	// missing or unloadable, the addon refused to start, and the state is
+	// latched until process restart. Policy actions keep serving.
+	MitmCaDown bool `json:"mitmCaDown,omitempty"`
+	// MitmCaError carries the addon-down reason (empty when up).
+	MitmCaError string `json:"mitmCaError,omitempty"`
+
+	// Vault persistence health (OSEP-0022 stage 2, additive): Recovery is
+	// true while the recovery latch freezes vault writes until restart;
+	// DegradedVaults lists subjects whose persisted vault failed to load
+	// (interception fails closed for them; a successful write clears it).
+	Recovery       bool     `json:"vaultRecovery,omitempty"`
+	DegradedVaults []string `json:"degradedVaults,omitempty"`
+	// VaultTransfer reports that this Handler serves VAULT_EXPORT /
+	// VAULT_IMPORT and persists vault files. Absent on older builds decodes
+	// as false: the Fastlet then skips the transfer (checkpoint proceeds
+	// without a vault) instead of failing it.
+	VaultTransfer bool `json:"vaultTransfer,omitempty"`
+	// PolicyTransfer reports that this Handler serves POLICY_EXPORT /
+	// POLICY_IMPORT and persists per-subject policy files.
+	PolicyTransfer bool `json:"policyTransfer,omitempty"`
+	// PolicyRecovery is true while the policy persistence recovery latch
+	// freezes policy relay writes until restart; DegradedPolicies lists
+	// subjects whose persisted policy failed to load (default-deny fail
+	// closed for them; a relay write heals).
+	PolicyRecovery   bool     `json:"policyRecovery,omitempty"`
+	DegradedPolicies []string `json:"degradedPolicies,omitempty"`
+	// TemplateStateExport reports that this Handler supports the
+	// seal-free template state carry (SnapshotTransfer.Seal=false exports
+	// keep the source live; imports land for the next registration).
+	// Absent on older builds decodes as false: the Fastlet's template
+	// snapshots then export nothing (handlers that always seal are never
+	// asked) — rolling upgrades are safe in both directions.
+	TemplateStateExport bool `json:"templateStateExport,omitempty"`
 }

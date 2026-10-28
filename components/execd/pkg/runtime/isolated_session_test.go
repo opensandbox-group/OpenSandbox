@@ -19,6 +19,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,7 +90,9 @@ func newStubIsolator() *stubIsolator {
 			Isolator:               "stub",
 			SetprivAvailable:       true,
 			SetprivSwitchAvailable: true,
+			SetprivNetAvailable:    true,
 			UsernsAvailable:        true,
+			UsernsNetAvailable:     true,
 			CommitSupported:        false,
 			DiffSupported:          false,
 		},
@@ -676,6 +679,63 @@ func TestRunInIsolatedSession_MultiLine(t *testing.T) {
 	}
 }
 
+// The shell runs the script while it reads it, so a script larger than the
+// stdin pipe whose early commands print more than the stdout pipe holds must
+// still complete.
+func TestRunInIsolatedSession_LargeScriptWithEarlyOutput(t *testing.T) {
+	runner := newTestRunner(t)
+
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var lines int
+	code := "seq 1 100000\n#" + strings.Repeat("x", 150*1024) + "\necho done"
+	err = runner.RunInIsolatedSession(ctx, id, code, nil, func(string) { lines++ })
+	if err != nil {
+		t.Fatalf("RunInIsolatedSession: %v", err)
+	}
+	if lines != 100001 {
+		t.Fatalf("got %d output lines, want 100001", lines)
+	}
+}
+
+// A run whose script stops the shell from reading its stdin, while another
+// process keeps stdout open, must report the failed write instead of waiting
+// for an end marker that never comes.
+func TestRunInIsolatedSession_ReportsFailedScriptWrite(t *testing.T) {
+	runner := newTestRunner(t)
+
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	code := "exec sleep 300 </dev/null\n#" + strings.Repeat("x", 150*1024)
+	err = runner.RunInIsolatedSession(ctx, id, code, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "write stdin") {
+		t.Fatalf("RunInIsolatedSession error = %v, want a write stdin error", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("run waited for its deadline instead of reporting the failed write")
+	}
+}
+
 func TestRunInIsolatedSession_EnvPersistence(t *testing.T) {
 	runner := newTestRunner(t)
 
@@ -807,5 +867,75 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "must be an existing path") {
 		t.Errorf("expected existing-path rejection, got: %v", err)
+	}
+}
+
+func TestScanUntilMarker_LineLongerThanMaxScanLine(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	// The output has no trailing newline, so the marker follows it on the
+	// same line and arrives in the last piece.
+	output := strings.Repeat("a", maxScanLineBytes+100*1024)
+	input := output + marker + " 7\nnext run output\n"
+
+	var stdout []string
+	exitCode, err := scanUntilMarker(context.Background(), io.NopCloser(strings.NewReader(input)), marker, func(text string) {
+		stdout = append(stdout, text)
+	})
+	if err != nil {
+		t.Fatalf("scanUntilMarker: %v", err)
+	}
+	if exitCode != 7 {
+		t.Fatalf("exit code = %d, want 7", exitCode)
+	}
+	if got := strings.Join(stdout, ""); got != output {
+		t.Fatalf("stdout has %d bytes, want the %d output bytes before the marker", len(got), len(output))
+	}
+}
+
+func TestScanUntilMarker_KeepsEmptyLines(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	input := "a\n\nb\n" + marker + " 0\n"
+
+	var stdout []string
+	if _, err := scanUntilMarker(context.Background(), io.NopCloser(strings.NewReader(input)), marker, func(text string) {
+		stdout = append(stdout, text)
+	}); err != nil {
+		t.Fatalf("scanUntilMarker: %v", err)
+	}
+	if got := strings.Join(stdout, "|"); got != "a||b" {
+		t.Fatalf("stdout = %q, want a, empty line, b", got)
+	}
+}
+
+func TestRunOutputScanner_MarkerAtPieceBoundary(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	output := strings.Repeat("a", 64)
+	cases := []struct {
+		name   string
+		pieces []string
+	}{
+		{"boundary inside the marker", []string{output + marker[:5], marker[5:] + " 17"}},
+		{"boundary right after the marker", []string{output + marker, " 17"}},
+		{"boundary inside the exit code", []string{output + marker + " 1", "7"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout []string
+			scanner := &runOutputScanner{marker: marker, onStdout: func(text string) {
+				stdout = append(stdout, text)
+			}}
+			if !scanner.onLine(tc.pieces[0], false) {
+				t.Fatal("scanner stopped before the marker line was complete")
+			}
+			if scanner.onLine(tc.pieces[1], true) {
+				t.Fatal("scanner kept going after the marker line")
+			}
+			if !scanner.markerSeen || scanner.exitCode != 17 {
+				t.Fatalf("markerSeen = %v, exit code = %d, want true, 17", scanner.markerSeen, scanner.exitCode)
+			}
+			if got := strings.Join(stdout, ""); got != output {
+				t.Fatalf("stdout = %q, want %q", got, output)
+			}
+		})
 	}
 }

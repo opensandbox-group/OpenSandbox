@@ -18,8 +18,8 @@ This guide covers the OpenSandbox Server Windows profile (`platform.os=windows`)
 
 ## How it works
 
-- **Runtime**: [`dockur/windows`](https://github.com/dockur/windows) runs the Windows guest in a Linux container (requires KVM/QEMU), using mount points such as `/storage` and `/boot.iso` for the system disk and install media.  
-- **Control plane**: On create, OpenSandbox Server injects the Windows profile configuration (devices, capabilities, `execd`, port mappings) and enforces resource checks, state, and endpoint publication.  
+- **Runtime**: [`dockur/windows`](https://github.com/dockur/windows) runs the Windows guest in a Linux container (requires KVM/QEMU), using mount points such as `/storage` and `/boot.iso` for the system disk and install media.
+- **Control plane**: On create, OpenSandbox Server injects the Windows profile configuration (devices, capabilities, `execd`, port mappings) and enforces resource checks, state, and endpoint publication.
 - **Client**: You call the Lifecycle API or the Python SDK with `platform.os=windows`, then follow create → poll `Running` → get endpoints → use → delete.
 
 ## Prerequisites
@@ -78,11 +78,11 @@ It also builds or merges `USER_PORTS` (often `44772,8080,3389,8006`).
 
 This flow:
 
-1. Create a Windows sandbox  
-2. Wait until `Running`  
-3. Get the `44772` endpoint  
-4. Use the Python SDK against the sandbox  
-5. Delete the sandbox  
+1. Create a Windows sandbox
+2. Wait until `Running`
+3. Get the `44772` endpoint
+4. Use the Python SDK against the sandbox
+5. Delete the sandbox
 
 ### Minimal example
 
@@ -182,10 +182,10 @@ volumes = [
 
 [`dockur/windows`](https://github.com/dockur/windows) is configured with **environment variables**. OpenSandbox passes your `env` into the container as documented upstream. **Install / UX** settings often include:
 
-- `VERSION`: Windows variant code (e.g. `11`, `11l`, `10` — full table in the project README) or, in some cases, a custom ISO `https://` URL  
-- `USERNAME` / `PASSWORD`: first user and password (defaults in the image if omitted — see upstream)  
-- `LANGUAGE`: install language (e.g. `English`, `Chinese`)  
-- `REGION` / `KEYBOARD`: locale and layout (e.g. `en-US`, `zh-CN`)  
+- `VERSION`: Windows variant code (e.g. `11`, `11l`, `10` — full table in the project README) or, in some cases, a custom ISO `https://` URL
+- `USERNAME` / `PASSWORD`: first user and password (defaults in the image if omitted — see upstream)
+- `LANGUAGE`: install language (e.g. `English`, `Chinese`)
+- `REGION` / `KEYBOARD`: locale and layout (e.g. `en-US`, `zh-CN`)
 - Advanced cases may use `DHCP`, `ARGUMENTS` (extra QEMU args), etc. — see the [`dockur/windows` FAQ](https://github.com/dockur/windows)
 
 If you already set CPU, memory, and disk via `resourceLimits`, do **not** repeat the same **resource** keys in `env` as in the dockur docs; see [`resourceLimits` vs. environment variables](#resourcelimits-vs-environment-variables) above. Other non-resource keys can be combined freely.
@@ -207,7 +207,7 @@ For the full list, defaults, and interactions, use the [`dockur/windows` reposit
 
 In [`dockur/windows` documentation](https://github.com/dockur/windows), **“your own”** usually means **which Windows install ISO to use** — not a custom recipe unrelated to upstream. The [custom install FAQ](https://github.com/dockur/windows#how-do-i-install-a-custom-image) states:
 
-- For an ISO **not** in the project’s version table, set `VERSION` to the ISO’s **download URL** (`https://...`); the container fetches and installs it.  
+- For an ISO **not** in the project’s version table, set `VERSION` to the ISO’s **download URL** (`https://...`); the container fetches and installs it.
 - If you **already have a local ISO file**, bind it to **`/boot.iso`** as in [Existing ISO on the host](#existing-iso-on-the-host) above; upstream documents that `VERSION` is then ignored.
 
 In OpenSandbox, set `VERSION` in `env` and, when needed, add a volume for the local ISO at `/boot.iso`, matching the upstream flow; keep `image` as `dockurr/windows` or another compatible upstream image, as in the other examples.

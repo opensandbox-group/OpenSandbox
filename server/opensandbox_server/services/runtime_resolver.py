@@ -258,7 +258,7 @@ def _warn_gvisor_egress_incompatibility(config: "AppConfig") -> None:
     if config.secure_runtime and config.secure_runtime.type == "gvisor" and egress_image:
         logger.warning(
             "gVisor runtime is configured with egress sidecar image. "
-            "The egress sidecar's iptables nat-based DNS redirect is incompatible with gVisor. "
+            "The egress sidecar's nftables-based DNS redirect and policy rules are incompatible with gVisor. "
             "Sandboxes created with network_policy will be rejected at creation time."
         )
 

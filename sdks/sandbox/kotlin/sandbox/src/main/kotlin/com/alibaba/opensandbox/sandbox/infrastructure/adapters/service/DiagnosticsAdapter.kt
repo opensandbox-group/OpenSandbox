@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.diagnostic.DiagnosticsApi
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.DiagnosticModelConverter.toDiagnosticContent
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
@@ -42,6 +43,21 @@ internal class DiagnosticsAdapter(
             )
             .build()
     private val api = DiagnosticsApi(provider.config.getBaseUrl(), diagnosticsClient)
+
+    override fun getContext(sandboxId: String): DiagnosticContext {
+        return try {
+            val response = api.sandboxesSandboxIdDiagnosticsContextGet(sandboxId)
+            DiagnosticContext(
+                sandboxId = response.sandboxId,
+                state = response.state,
+                backendType = response.backendType,
+                backendIdentifiers = response.backendIdentifiers,
+            )
+        } catch (e: Exception) {
+            logger.error("Failed to get diagnostic context for sandbox {}", sandboxId, e)
+            throw e.toSandboxException()
+        }
+    }
 
     override fun getLogs(
         sandboxId: String,

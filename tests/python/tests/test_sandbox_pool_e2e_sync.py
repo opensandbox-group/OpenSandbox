@@ -102,7 +102,7 @@ class TestSandboxPoolSingleNodeE2ESync:
 
         result = sandbox.commands.run("echo py-pool-basic-ok")
         assert result.error is None
-        assert result.logs.stdout[0].text == "py-pool-basic-ok"
+        assert result.logs.stdout[0].text == "py-pool-basic-ok\n"
 
     @pytest.mark.timeout(240)
     def test_resize_release_fail_fast_and_direct_create_fallback(self) -> None:

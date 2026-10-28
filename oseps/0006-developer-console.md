@@ -42,8 +42,7 @@ This proposal is based on [#348](https://github.com/alibaba/OpenSandbox/issues/3
 
 The idea is to add a `console/` web app for day-to-day sandbox management (list, create, renew, delete, get endpoint, filtering) and a server-side auth/authz layer that does not break existing API key automation.
 
-Phase 2:
-OIDC JWT validation, PostgreSQL RBAC bindings, and durable audit logs.
+Phase 2: OIDC JWT validation, PostgreSQL RBAC bindings, and durable audit logs.
 
 ## Motivation
 
@@ -291,11 +290,9 @@ New module `server/opensandbox_server/middleware/authorization.py` with a single
 
 Integrate into `server/opensandbox_server/api/lifecycle.py` per route before invoking mutating service operations.
 
-For list operations:
-Apply server-side scope filter in addition to client-provided filters.
+For list operations: Apply server-side scope filter in addition to client-provided filters.
 
-For get/delete/renew/endpoint:
-Resolve sandbox resource and evaluate scope before action.
+For get/delete/renew/endpoint: Resolve sandbox resource and evaluate scope before action.
 
 #### 4. Mutation Audit Logging (Phase 1)
 

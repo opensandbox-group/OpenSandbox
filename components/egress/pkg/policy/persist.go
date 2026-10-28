@@ -87,7 +87,8 @@ func LoadInitialPolicyDetailed(policyFile, envName string) (*NetworkPolicy, Poli
 	return pol, PolicyFromFile, nil
 }
 
-// SavePolicyFile rewrites the policy file atomically (JSON indent, fsync) when path is set.
+// SavePolicyFile retains legacy in-place persistence (JSON indent, fsync).
+// Experimental revision owners use AtomicPolicyFile instead.
 func SavePolicyFile(path string, p *NetworkPolicy) error {
 	path = strings.TrimSpace(path)
 	if path == "" {

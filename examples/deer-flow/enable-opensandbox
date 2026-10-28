@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Switch DeerFlow's sandbox config to OpenSandboxProvider (idempotent).
+#
+# DeerFlow's config.example.yaml enables LocalSandboxProvider (direct host
+# execution) by default. This script locates that active section, swaps the
+# `use` line to OpenSandboxProvider, and adds the provider options; other
+# section fields (output truncation limits etc.) are kept as-is.
+#
+# Runs automatically on every container start (the Web first-run setup
+# regenerates config.yaml with the default provider), and is safe to run
+# manually at any time. Only non-comment lines are considered: the example
+# config contains a commented OpenSandboxProvider sample that must not count
+# as "already switched".
+set -euo pipefail
+
+DEERFLOW_ROOT="${DEER_FLOW_PROJECT_ROOT:-/opt/deer-flow}"
+CONFIG="${DEERFLOW_ROOT}/config.yaml"
+
+if [ ! -f "$CONFIG" ]; then
+  if [ ! -f "${DEERFLOW_ROOT}/config.example.yaml" ]; then
+    echo "enable-opensandbox: ${DEERFLOW_ROOT}/config.example.yaml not found" >&2
+    exit 1
+  fi
+  echo "enable-opensandbox: config.yaml missing, copying config.example.yaml"
+  cp "${DEERFLOW_ROOT}/config.example.yaml" "$CONFIG"
+fi
+
+python3 - "$CONFIG" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+local_re = re.compile(r"^(\s*)use:\s*deerflow\.sandbox\.local:LocalSandboxProvider\s*$")
+provider_re = re.compile(r"^\s*use:\s*deerflow\.community\.opensandbox:OpenSandboxProvider\s*$")
+
+if any(provider_re.match(line) for line in lines):
+    print("enable-opensandbox: sandbox.use already OpenSandboxProvider, nothing to do")
+    sys.exit(0)
+
+block = (
+    "use: deerflow.community.opensandbox:OpenSandboxProvider\n"
+    "  # ---- OpenSandbox server bundled in this image ----\n"
+    "  # Sandbox image: the lab image itself (python base, rich preinstalled\n"
+    "  # env). Docker Hub python:3.11 also works, but pulls slower in CN.\n"
+    "  image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/deerflow-example:latest\n"
+    "  domain: localhost:8080\n"
+    "  protocol: http\n"
+    "  ready_timeout: 600        # covers the first sandbox image pull\n"
+    "  replicas: 3\n"
+    "  idle_timeout: 600\n"
+)
+for index, line in enumerate(lines):
+    match = local_re.match(line)
+    if match:
+        lines[index] = match.group(1) + block
+        path.write_text("".join(lines), encoding="utf-8")
+        print(f"enable-opensandbox: {path}: sandbox.use -> OpenSandboxProvider (domain localhost:8080)")
+        sys.exit(0)
+
+sys.exit(
+    "enable-opensandbox: default LocalSandboxProvider section not found. "
+    "Upstream DeerFlow likely changed the default config layout; edit "
+    "config.yaml manually: set sandbox.use to "
+    "deerflow.community.opensandbox:OpenSandboxProvider and add the "
+    "provider options (image/domain/protocol/...)."
+)
+PY

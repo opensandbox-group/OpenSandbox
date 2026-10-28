@@ -9,9 +9,7 @@ This section contains the OpenAPI specification documents for the OpenSandbox pr
 
 ## Specification Files
 
-Implementing an alternative backend or integrating a workload's own API? Read
-[Implementation compatibility](/api/implementation-compatibility) for the boundary
-between these contracts, the reference daemons, and current SDK expectations.
+Implementing an alternative backend or integrating a workload's own API? Read [Implementation compatibility](/api/implementation-compatibility) for the boundary between these contracts, the reference daemons, and current SDK expectations.
 
 ### 1. sandbox-lifecycle.yml
 
@@ -47,16 +45,15 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
 - `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint and required headers; supports `use_server_proxy` and signed-endpoint `expires` parameters
 - `GET/PUT/PATCH/DELETE /sandboxes/{sandboxId}/networkpolicy` - Inspect and manage the sandbox egress network policy (Fsb persists intent on the Sandbox CR; other backends proxy the sandbox-side egress service)
+- `POST/GET/PATCH/DELETE /sandboxes/{sandboxId}/credential-vault` (+ sanitized `credentials` / `bindings` reads) - Manage the sandbox Credential Vault (fsb relays to the egress-held vault over FastPath; other backends proxy the sandbox-side egress service; values are write-only and never returned)
 - `POST /templates` - Create a fsb template (asynchronous golden-image build)
 - `GET /templates` - List templates with metadata filters and pagination
 - `GET /templates/{templateId}` - Get template status and artifact references
 - `DELETE /templates/{templateId}` - Delete a template
 
-**Expiration updates:**
-`renew-expiration` sets `expiresAt` to the supplied future timestamp, which may be
-earlier than, equal to, or later than the current expiration. The configured
-`server.max_sandbox_timeout_seconds` applies only to `timeout` on creation; it
-does not cap expiration updates. See [Sandbox expiration](/getting-started/configuration#sandbox-expiration).
+**Expiration updates:** `renew-expiration` sets `expiresAt` to the supplied future timestamp, which may be earlier than, equal to, or later than the current expiration. The configured `server.max_sandbox_timeout_seconds` applies only to `timeout` on creation; it does not cap expiration updates. See [Sandbox expiration](/getting-started/configuration#sandbox-expiration).
+
+**Concurrent Docker lifecycle requests:** Recognized conflicts on the main container return `409 Conflict` when removal is already in progress or the container is no longer in the state required by pause or resume. A missing main container returns `404 Not Found` when reported by the operation or confirmed by the follow-up lookup. For resume, these mappings apply only after any required sidecar rollback succeeds. Pause/resume sidecar failures, failed rollbacks, and unrelated main-container or lookup failures retain their existing `500` responses.
 
 **Optional `Sandbox.allocation` response field:**
 - Returned only when the runtime confirms the sandbox's current concrete Pool allocation.
@@ -73,9 +70,10 @@ does not cap expiration updates. See [Sandbox expiration](/getting-started/confi
 
 **Sandbox Diagnostics API**
 
-Defines best-effort troubleshooting descriptors for sandbox diagnostic logs and events. The descriptors either embed plain-text diagnostic content inline or return a download URL for the content. This spec does not define a structured audit or observability model.
+Defines structured routing context and best-effort troubleshooting descriptors for sandbox diagnostic logs and events. Context identifies the runtime backend and its diagnostic identifiers. Log and event descriptors either embed plain-text content inline or return a download URL. This spec does not define a structured audit or observability model.
 
 **Main Endpoints (base path `/v1`):**
+- `GET /sandboxes/{sandboxId}/diagnostics/context` - Retrieve the runtime backend and backend-defined diagnostic identifiers
 - `GET /sandboxes/{sandboxId}/diagnostics/logs` - Retrieve a diagnostic log content descriptor; `scope` is required
 - `GET /sandboxes/{sandboxId}/diagnostics/events` - Retrieve a diagnostic event content descriptor; `scope` is required
 
@@ -83,10 +81,14 @@ Defines best-effort troubleshooting descriptors for sandbox diagnostic logs and 
 - HTTP Header: `OPEN-SANDBOX-API-KEY: your-api-key`
 - Environment Variable: `OPEN_SANDBOX_API_KEY` (for SDK clients)
 
-`scope` is required. Docker and Kubernetes support `container`/`all` for logs and
-`runtime`/`all` for events. Fast Sandbox supports `runtime`/`all` events; log
-collection is not implemented there. Unsupported scopes return
-`DIAGNOSTICS_SCOPE_UNSUPPORTED`.
+`scope` is required. Docker and Kubernetes support `container`/`all` for logs and `runtime`/`all` for events. Fast Sandbox supports `runtime`/`all` events; log collection is not implemented there. Unsupported scopes return `DIAGNOSTICS_SCOPE_UNSUPPORTED`.
+
+Context does not take a scope and is available independently of execd readiness.
+The built-in server returns `docker` with container identifiers,
+`kubernetes` with namespace/workload identifiers and an allocated Pod name when
+available, or `fast-sandbox` with an empty identifier map. Kubernetes context
+can be queried before a Pod is allocated. Unknown sandboxes return 404;
+backends without context support return 501 `DIAGNOSTICS_NOT_IMPLEMENTED`.
 
 Responses use `delivery: inline` with `content`, or `delivery: url` with
 `contentUrl` and an optional expiry. The SDK does not download URL content;
@@ -94,8 +96,7 @@ inspect `truncated` and `warnings` before treating results as complete.
 Python models and CLI JSON/YAML use snake_case fields such as `content_url`.
 CLI raw output prints the content or URL without following it.
 
-See [SDK diagnostics](/sdks/#diagnostics) for language support and
-[CLI diagnostics](/cli/#collect-diagnostics) for command examples.
+See [SDK diagnostics](/sdks/#diagnostics) for language support and [CLI diagnostics](/cli/#collect-diagnostics) for command examples.
 
 ### 3. execd-api.yaml
 
@@ -103,9 +104,7 @@ See [SDK diagnostics](/sdks/#diagnostics) for language support and
 
 **Code Execution API Inside Sandbox**
 
-Defines interfaces for executing code, commands, and file operations within sandbox environments, providing complete code interpreter and filesystem management capabilities. Forward the headers returned by lifecycle endpoint resolution, including
-`X-EXECD-ACCESS-TOKEN` when required. Do not hard-code an execd address or assume
-the lifecycle API key alone authorizes direct sandbox access.
+Defines interfaces for executing code, commands, and file operations within sandbox environments, providing complete code interpreter and filesystem management capabilities. Forward the headers returned by lifecycle endpoint resolution, including `X-EXECD-ACCESS-TOKEN` when required. Do not hard-code an execd address or assume the lifecycle API key alone authorizes direct sandbox access.
 
 **Core Features:**
 - **Code Execution**: Stateful code execution supporting Python, JavaScript, and other languages with context lifecycle management
@@ -179,11 +178,7 @@ the lifecycle API key alone authorizes direct sandbox access.
 - `POST /session/{sessionId}/directories` - Create directories
 - `DELETE /session/{sessionId}/directories` - Delete directories
 
-`GET /session/{sessionId}/diff` and `POST /session/{sessionId}/commit` appear
-in the contract but are not implemented in the current execd: both return
-`503` with a not-supported error, and capabilities report `diff_supported: false`
-and `commit_supported: false`. Check `/v1/isolated/capabilities` before using
-runtime-dependent isolation features.
+`GET /session/{sessionId}/diff` and `POST /session/{sessionId}/commit` appear in the contract but are not implemented in the current execd: both return `503` with a not-supported error, and capabilities report `diff_supported: false` and `commit_supported: false`. Check `/v1/isolated/capabilities` before using runtime-dependent isolation features.
 
 ### 4. egress-api.yaml
 
@@ -191,9 +186,7 @@ runtime-dependent isolation features.
 
 **Sandbox Egress Runtime API**
 
-Defines the runtime egress policy interface exposed directly by the [egress sidecar](/architecture/network/egress)
-inside a sandbox. Unlike lifecycle operations, this API is reached by first resolving
-the sandbox endpoint for the egress port and then calling the sidecar endpoint directly.
+Defines the runtime egress policy interface exposed directly by the [egress sidecar](/architecture/network/egress) inside a sandbox. Unlike lifecycle operations, this API is reached by first resolving the sandbox endpoint for the egress port and then calling the sidecar endpoint directly.
 
 **Core Features:**
 - **Policy Inspection**: Retrieve the currently enforced egress policy and derived runtime mode
@@ -209,10 +202,7 @@ the sandbox endpoint for the egress port and then calling the sidecar endpoint d
 - `GET /credential-vault/credentials` and `GET /credential-vault/credentials/{credential_name}` - Read sanitized credential metadata
 - `GET /credential-vault/bindings` and `GET /credential-vault/bindings/{binding_name}` - Read binding metadata
 
-Credential values are write-only. Enable Credential Proxy and an egress policy
-before creating a vault. Template-backed sandboxes have no egress sidecar or
-Credential Vault; their policy operations use the lifecycle `networkpolicy`
-endpoints. See [Credential Vault](/guides/credential-vault).
+Credential values are write-only. Enable Credential Proxy and an egress policy before creating a vault. Template-backed (fsb) sandboxes use the server-routed `/sandboxes/{sandboxId}/credential-vault` endpoints above: the server relays revisions to the egress-held vault over the FastPath handler relay, the ack is synchronous, and values never appear on any read (see [Credential Vault](/guides/credential-vault)).
 
 ## Technical Features
 

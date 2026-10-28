@@ -18,14 +18,15 @@ package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.execd.DEFAULT_EGRESS_PORT
 import com.alibaba.opensandbox.sandbox.domain.models.execd.DEFAULT_EXECD_PORT
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
@@ -159,27 +160,15 @@ class Sandbox internal constructor(
     /**
      * Provides access to sandbox-scoped Credential Vault operations.
      *
-     * Credential Vault writes go directly to the sandbox egress sidecar and
+     * Direct sidecar sandboxes write straight to the sandbox egress sidecar and
      * preserve endpoint routing/auth headers resolved for this sandbox.
-     *
-     * @throws SandboxException if this sandbox is template-backed: template-backed
-     * sandboxes have no sandbox-side egress sidecar
+     * Template-backed sandboxes route through the lifecycle control plane
+     * (OSEP-0022): the server relays vault revisions to the egress-held vault
+     * over the FastPath handler relay, so the ack is synchronous and values
+     * never appear on any read. A 412 patch failure means another writer won
+     * the revision — re-read and retry with the fresh `expectedRevision`.
      */
-    fun credentialVault(): CredentialVault {
-        if (origin == SandboxOrigin.TEMPLATE) {
-            throw SandboxException(
-                message =
-                    "Credential Vault is not available for template-backed sandboxes: " +
-                        "they have no sandbox-side egress sidecar.",
-                error =
-                    SandboxError(
-                        SandboxError.UNEXPECTED_RESPONSE,
-                        "Credential Vault is not available for template-backed sandboxes",
-                    ),
-            )
-        }
-        return credentialVaultService
-    }
+    fun credentialVault(): CredentialVault = credentialVaultService
 
     /**
      * Provides access to sandbox diagnostic log and event descriptors.
@@ -542,6 +531,7 @@ class Sandbox internal constructor(
             metadata: Map<String, String>,
             networkPolicy: NetworkPolicy?,
             extensions: Map<String, String>,
+            idlePolicy: IdlePolicy?,
             connectionConfig: ConnectionConfig,
             healthCheck: ((Sandbox) -> Boolean)?,
             healthCheckPollingInterval: Duration,
@@ -567,6 +557,7 @@ class Sandbox internal constructor(
                                 metadata = metadata,
                                 networkPolicy = networkPolicy,
                                 extensions = extensions,
+                                idlePolicy = idlePolicy,
                             )
                         createdSandboxId = response.id
                         InitializationResult.NewSandbox(response.id)
@@ -706,6 +697,11 @@ class Sandbox internal constructor(
         return metricsService.getMetrics(id)
     }
 
+    /** Gets the sandbox's runtime backend and diagnostic identifiers. */
+    fun getDiagnosticContext(): DiagnosticContext {
+        return diagnosticsService.getContext(id)
+    }
+
     /**
      * Gets diagnostic log content for this sandbox.
      *
@@ -804,8 +800,8 @@ class Sandbox internal constructor(
     }
 
     /**
-     * This method sends a termination signal to the remote sandbox instance, causing it to stop immediately.
-     * This is an irreversible operation.
+     * Request irreversible termination of the remote sandbox. Returns when deletion is accepted;
+     * runtime cleanup may continue afterward.
      *
      * Note: This method does NOT close the local `Sandbox` object resources (like connection pools).
      * You should call `close()` or use a try-with-resources block to clean up local resources.
@@ -1793,6 +1789,7 @@ class Sandbox internal constructor(
          * Optional outbound network policy (egress).
          */
         private var networkPolicy: NetworkPolicy? = null
+        private var idlePolicy: IdlePolicy? = null
 
         /**
          * Optional extension parameters for server-side custom behaviors.
@@ -1889,6 +1886,25 @@ class Sandbox internal constructor(
          */
         fun networkPolicy(networkPolicy: NetworkPolicy): TemplateLauncher {
             this.networkPolicy = networkPolicy
+            return this
+        }
+
+        /**
+         * Sets the OSEP-0024 idle policy (fast-sandbox only). Control-plane
+         * state, not workload shape, so template mode accepts it.
+         */
+        fun idlePolicy(idlePolicy: IdlePolicy): TemplateLauncher {
+            this.idlePolicy = idlePolicy
+            return this
+        }
+
+        /**
+         * Configures the OSEP-0024 idle policy using a fluent configuration block.
+         */
+        fun idlePolicy(configure: IdlePolicy.Builder.() -> Unit): TemplateLauncher {
+            val builder = IdlePolicy.builder()
+            builder.configure()
+            this.idlePolicy = builder.build()
             return this
         }
 
@@ -2026,6 +2042,7 @@ class Sandbox internal constructor(
                 metadata = metadata,
                 networkPolicy = networkPolicy,
                 extensions = extensions,
+                idlePolicy = idlePolicy,
                 connectionConfig = connectionConfig ?: ConnectionConfig.builder().build(),
                 healthCheck = healthCheck,
                 healthCheckPollingInterval = healthCheckPollingInterval,

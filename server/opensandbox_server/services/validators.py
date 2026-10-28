@@ -76,11 +76,11 @@ def _is_valid_label_key(key: str) -> bool:
         # when the prefix uses its full 253-character allowance; this is valid.
         if len(prefix) > 253:
             return False
-        if not DNS_SUBDOMAIN_RE.match(prefix):
+        if not DNS_SUBDOMAIN_RE.fullmatch(prefix):
             return False
     else:
         name = key
-    if len(name) > 63 or not LABEL_NAME_RE.match(name):
+    if len(name) > 63 or not LABEL_NAME_RE.fullmatch(name):
         return False
     return True
 
@@ -88,7 +88,7 @@ def _is_valid_label_key(key: str) -> bool:
 def _is_valid_label_value(value: str) -> bool:
     if len(value) > 63:
         return False
-    return bool(LABEL_VALUE_RE.match(value))
+    return bool(LABEL_VALUE_RE.fullmatch(value))
 
 
 def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
@@ -291,7 +291,7 @@ def ensure_valid_volume_name(name: str) -> None:
                 "message": f"Volume name '{name}' exceeds maximum length of 63 characters.",
             },
         )
-    if not VOLUME_NAME_RE.match(name):
+    if not VOLUME_NAME_RE.fullmatch(name):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -459,7 +459,7 @@ def ensure_valid_pvc_name(claim_name: str) -> None:
                 "message": f"PVC claim name '{claim_name}' exceeds maximum length of 253 characters.",
             },
         )
-    if not K8S_RESOURCE_NAME_RE.match(claim_name):
+    if not K8S_RESOURCE_NAME_RE.fullmatch(claim_name):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -522,6 +522,26 @@ def ensure_valid_ossfs_volume(ossfs: "OSSFS") -> None:
                 ),
             },
         )
+
+
+def normalize_network_policy_action(action: Optional[str], field: str) -> str:
+    """Normalize action names using the existing Fast Sandbox deny fallback."""
+    normalized = (action or "deny").strip().lower() or "deny"
+    if normalized not in ("allow", "deny"):
+        raise HTTPException(400, detail=f"{field} must be allow or deny.")
+    return normalized
+
+
+def normalize_network_policy_actions(network_policy: Optional["NetworkPolicy"]) -> None:
+    """Validate create-time actions before runtime dispatch, preserving omitted defaults."""
+    if network_policy is None:
+        return
+    if network_policy.default_action is not None:
+        network_policy.default_action = normalize_network_policy_action(
+            network_policy.default_action, "networkPolicy.defaultAction"
+        )
+    for rule in network_policy.egress:
+        rule.action = normalize_network_policy_action(rule.action, "networkPolicy rule action")
 
 
 def ensure_egress_configured(
@@ -591,10 +611,7 @@ def ensure_egress_runtime_compatible(
     effective_runtime_class: Optional[str] = None,
 ) -> None:
     """
-    Reject network_policy when the secure runtime lacks iptables nat table support.
-
-    gVisor's netstack does not implement the iptables nat table, which the egress
-    sidecar requires for DNS redirect (REDIRECT target on port 53).
+    Reject network_policy when the secure runtime cannot run the egress sidecar.
     """
     if not network_policy:
         return
@@ -612,7 +629,7 @@ def ensure_egress_runtime_compatible(
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
                 "message": (
                     f"networkPolicy is not compatible with runtime '{runtime_type}': "
-                    f"gVisor does not support the iptables nat table required by the egress sidecar. "
+                    f"gVisor does not support the nftables rules required by the egress sidecar. "
                     f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
                 ),
             },

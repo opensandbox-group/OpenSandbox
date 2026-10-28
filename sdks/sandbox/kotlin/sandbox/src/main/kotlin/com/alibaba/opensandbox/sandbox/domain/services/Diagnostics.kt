@@ -17,11 +17,15 @@
 package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 
 /**
  * Sandbox diagnostics service.
  */
 interface Diagnostics {
+    /** Gets backend routing context without connecting to execd. */
+    fun getContext(sandboxId: String): DiagnosticContext
+
     /**
      * Gets diagnostic log content for a sandbox by ID.
      *

@@ -14,6 +14,10 @@ Covers all three OpenAPI specs:
 go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 ```
 
+## Retry Behavior
+
+Idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`) retry `429`, `502`, `503`, and `504` by default. `POST` and `PATCH` retry only dial, proxy-connect, and TLS-handshake failures that are provably pre-send; status-code retries for writes are opt-in because a replay can duplicate a sandbox, session, command, or file mutation. Set `RetryableStatusCodesNonIdempotent` only when the operation is idempotent at the application layer or duplicate execution is acceptable. SSE bootstraps never use the generic retry loop; only the OSEP-0024 wake retry covers the request that starts a stream, because its marker proves the gateway never forwarded it.
+
 ## Quick Start
 
 ### Create and manage a sandbox
@@ -139,8 +143,7 @@ _ = mgr.DeleteSnapshot(ctx, snap.ID)
 
 ### Run code in an isolated session
 
-Isolated sessions run multi-step code in a hardened, resource-bounded
-environment with bind mounts — reachable through `Sandbox.IsolationCreate`:
+Isolated sessions run multi-step code in a hardened, resource-bounded environment with bind mounts — reachable through `Sandbox.IsolationCreate`:
 
 ```go
 shareNet := true
@@ -200,10 +203,7 @@ updated, err := egress.PatchPolicy(ctx, []opensandbox.NetworkRule{
 
 ### Use Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `CredentialProxy` enabled, then write credentials
-and bindings through the sandbox helpers or `EgressClient`.
+Credential Vault injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `CredentialProxy` enabled, then write credentials and bindings through the sandbox helpers or `EgressClient`.
 
 ```go
 sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
@@ -248,13 +248,11 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 })
 ```
 
-See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.
 
 ### Work with files
 
-File helpers live on `Sandbox` (they wrap the `ExecdClient` file operations
-with the sandbox's own access token):
+File helpers live on `Sandbox` (they wrap the `ExecdClient` file operations with the sandbox's own access token):
 
 ```go
 // The examples below need a live handle; the quick start above left `sbx`
@@ -313,8 +311,7 @@ detailed, err := sbx.ReplaceInFilesDetailed(ctx, replaceReq) // per-file Replace
 
 ### Mount volumes into a sandbox
 
-`Volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must
-specify exactly one backend:
+`Volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must specify exactly one backend:
 
 ```go
 sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
@@ -336,9 +333,7 @@ sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreate
 
 ### Build reusable base images with templates
 
-`SandboxManager` builds golden images ("templates") from an OCI image and
-publishes them to an S3-compatible target; sandboxes then boot from a
-`TemplateID` instead of a plain image:
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them to an S3-compatible target; sandboxes then boot from a `TemplateID` instead of a plain image:
 
 ```go
 mgr := opensandbox.NewSandboxManager(config)
@@ -369,9 +364,7 @@ err = mgr.DeleteTemplate(ctx, tpl.TemplateID)
 
 ### Wait for readiness with a custom health check
 
-`WaitUntilReady` polls until the sandbox is ready — by default the execd
-`/ping`; a custom `HealthCheck` replaces that (the JS SDK's custom health
-check equivalent):
+`WaitUntilReady` polls until the sandbox is ready — by default the execd `/ping`; a custom `HealthCheck` replaces that (the JS SDK's custom health check equivalent):
 
 ```go
 err := sbx.WaitUntilReady(ctx, opensandbox.ReadyOptions{
@@ -386,12 +379,7 @@ err := sbx.WaitUntilReady(ctx, opensandbox.ReadyOptions{
 
 ### Release idle pool sandboxes
 
-`ReleaseAllIdle(ctx)` preserves the original fire-and-forget behavior: it drains
-idle IDs and returns after scheduling best-effort kills. Call
-`ReleaseAllIdleParallel(ctx, maxWorkers)` on `*DefaultSandboxPool` to bound kill
-concurrency and wait until every drained ID has received a kill attempt.
-`maxWorkers` must be positive. The parallel method is intentionally not part of
-the `SandboxPool` interface, so existing interface implementors remain compatible.
+`ReleaseAllIdle(ctx)` preserves the original fire-and-forget behavior: it drains idle IDs and returns after scheduling best-effort kills. Call `ReleaseAllIdleParallel(ctx, maxWorkers)` on `*DefaultSandboxPool` to bound kill concurrency and wait until every drained ID has received a kill attempt. `maxWorkers` must be positive. The parallel method is intentionally not part of the `SandboxPool` interface, so existing interface implementors remain compatible.
 
 ## API Reference
 
@@ -425,12 +413,7 @@ Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 
 ### SandboxManager
 
-Created with `NewSandboxManager(config ConnectionConfig)`. Administrative
-operations on sandboxes without connecting to a specific one; every method is a
-thin wrapper over the corresponding `LifecycleClient` call (see table above),
-plus `Close()` (a no-op kept for symmetry — it does not terminate
-sandboxes). Manager operations act across sandboxes by ID (the quick-start
-snapshot example is one of these).
+Created with `NewSandboxManager(config ConnectionConfig)`. Administrative operations on sandboxes without connecting to a specific one; every method is a thin wrapper over the corresponding `LifecycleClient` call (see table above), plus `Close()` (a no-op kept for symmetry — it does not terminate sandboxes). Manager operations act across sandboxes by ID (the quick-start snapshot example is one of these).
 
 **Snapshots:**
 | Method | Description |
@@ -539,8 +522,7 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 
 ### Sandbox helpers
 
-Convenience methods on `*Sandbox` (the object `CreateSandbox` returns) — they
-wrap the underlying clients with the sandbox's own credentials:
+Convenience methods on `*Sandbox` (the object `CreateSandbox` returns) — they wrap the underlying clients with the sandbox's own credentials:
 
 | Method | Description |
 |--------|-------------|
@@ -561,15 +543,11 @@ wrap the underlying clients with the sandbox's own credentials:
 | `Close()` | No-op; does not terminate the sandbox |
 | `CreateSnapshot(ctx, req)` | Create a snapshot of this sandbox |
 
-File operations, command execution, code execution, and isolated sessions are
-also reachable as `Sandbox` helpers — see the file and isolated-session
-examples above, and the `ExecdClient` tables for the full list.
+File operations, command execution, code execution, and isolated sessions are also reachable as `Sandbox` helpers — see the file and isolated-session examples above, and the `ExecdClient` tables for the full list.
 
 ### CodeInterpreter
 
-`CreateCodeInterpreter(ctx, config, opts)` creates a sandbox from the
-code-interpreter image and returns a `*CodeInterpreter` that embeds
-`*Sandbox` (all sandbox helpers above work on it):
+`CreateCodeInterpreter(ctx, config, opts)` creates a sandbox from the code-interpreter image and returns a `*CodeInterpreter` that embeds `*Sandbox` (all sandbox helpers above work on it):
 
 | Method | Description |
 |--------|-------------|
@@ -594,6 +572,8 @@ Return a non-nil error from the handler to stop processing the stream early.
 
 ## Client Options
 
+Cross-origin redirects strip protected OpenSandbox headers, including for file transfers and SSE. See [redirect behavior](../../../docs/sdks/go.md#follow-redirects) for details and custom HTTP client behavior.
+
 All client constructors accept optional `Option` functions:
 
 ```go
@@ -606,9 +586,7 @@ client := opensandbox.NewExecdClient(url, token,
 )
 ```
 
-SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by default
-(RSA >= 2048, EC >= 224, DSA P >= 2048/Q >= 224, hash >= 224). If you must interoperate
-with legacy endpoints, set `AllowWeakServerCertKeyLengths: true` in `TransportConfig`.
+SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by default (RSA >= 2048, EC >= 224, DSA P >= 2048/Q >= 224, hash >= 224). If you must interoperate with legacy endpoints, set `AllowWeakServerCertKeyLengths: true` in `TransportConfig`.
 
 ## Error Handling
 

@@ -46,12 +46,13 @@ rules:
   - apiGroups: ["sandbox.opensandbox.io"]
     resources: ["sandboxsnapshots", "sandboxsnapshots/status", "sandboxsnapshots/finalizers"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  # Fsb: Sandbox CR reads power Get/List; SandboxTemplate
+  # Fsb: Sandbox CR reads power Get/List, and patch persists the OSEP-0024
+  # idle-policy annotation at create; SandboxTemplate
   # CRUD powers the /templates management API; SandboxSnapshot
   # watches power fsb snapshot status convergence.
   - apiGroups: ["sandbox.fast.io"]
     resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["sandbox.fast.io"]
     resources: ["sandboxtemplates"]
     verbs: ["create", "delete", "get", "list", "watch"]

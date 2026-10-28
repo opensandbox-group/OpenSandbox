@@ -34,6 +34,7 @@ from opensandbox.exceptions.sandbox import (
     SandboxReadyTimeoutException,
     SandboxTimeoutException,
     SandboxUnhealthyException,
+    SandboxWakeTimeoutException,
 )
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "SandboxConnectionException",
     "SandboxUnhealthyException",
     "SandboxReadyTimeoutException",
+    "SandboxWakeTimeoutException",
     "InvalidArgumentException",
     "PoolEmptyException",
     "PoolAcquireFailedException",

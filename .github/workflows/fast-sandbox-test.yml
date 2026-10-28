@@ -2,6 +2,13 @@ name: Fast Sandbox Integration Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      fsb_commit:
+        description: Optional fast-sandbox commit SHA to test instead of the pinned commit (full 40-char SHA; a PR head SHA works)
+        required: false
+        type: string
+  repository_dispatch:
+    types: [fast-sandbox-pr]
   pull_request:
     branches: [ main ]
 
@@ -10,9 +17,11 @@ permissions:
   pull-requests: read
   actions: write
 
+# Unique group per dispatch run (GitHub concurrency would otherwise fold
+# queued runs away); PR pushes keep superseding each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -25,7 +34,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: kvm
-    timeout-minutes: 180
+    timeout-minutes: 240
+    env:
+      # Full-stack profile (single round while scenarios stabilize).
+      IDLE_PAUSE: "1"
+      IDLE_PAUSE_ROUNDS: "1"
+      # workflow_dispatch input or repository_dispatch client_payload (empty on PRs).
+      FSB_COMMIT_OVERRIDE: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit }}
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)
@@ -48,12 +63,39 @@ jobs:
         # The self-hosted runner's system python3 may still be Python 3.6.
         run: uv run --no-project --python 3.12 python -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
 
-      - name: Run integration tests
+      # Rewrites the pin in the working tree only, then re-vendors the CRD
+      # bundle so the charts install the tested commit's CRDs.
+      - name: Override fast-sandbox pin
+        if: env.FSB_COMMIT_OVERRIDE != ''
+        run: |
+          [[ "$FSB_COMMIT_OVERRIDE" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::fsb_commit must be a full 40-character SHA (got: $FSB_COMMIT_OVERRIDE)"
+            exit 1
+          }
+          echo "Testing fast-sandbox @ $FSB_COMMIT_OVERRIDE instead of the pinned commit"
+          sed -i "s/^commit:.*/commit: $FSB_COMMIT_OVERRIDE/" manifests/third-party/fast-sandbox.commit
+          manifests/release/build-fast-sandbox.sh --no-build --sync-crds
+
+      - name: Run integration tests (environment init)
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
-      - name: Run SDK e2e
-        timeout-minutes: 30
+      - name: Run native template verify
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Run overlaybd template verify
+        # Builds the overlaybd template first; no-op when OCI_STACK=0.
+        timeout-minutes: 90
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
+      - name: Run base SDK e2e
+        # Runs on the overlaybd template (native only under OCI_STACK=0).
+        timeout-minutes: 60
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      - name: Run idle-pause SDK e2e
+        timeout-minutes: 45
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
 
       # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
       # nodes/pods, controller / firecracker-runtime / fastlet / builder /

@@ -48,6 +48,12 @@ rules:
   # The janitor sidecar's pod informer tracks this node's pods to detect
   # orphans the moment their pod disappears.
   verbs: ["get", "list", "watch"]
+- apiGroups: ["sandbox.fast.io"]
+  resources: ["sandboxes"]
+  # Janitor revalidates the Sandbox assignment before cleaning its
+  # retained per-Pod resources (OCI ublk devices and checkpoint packs,
+  # plus the native snapshot state).
+  verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -178,10 +184,34 @@ spec:
       # The runtime runs on the cluster network (NOT hostNetwork): its dart
       # child needs the cluster DNS to resolve the headless Service peers,
       # and a regular Pod identity for the stable HRW node hostname file.
+      {{- if .Values.runtime.oci.enabled }}
+      # Installs the OCI tools bundle under the shared node hostPath;
+      # agent, overlaybd-ublkd, janitor and Fastlet Pods consume it read-only.
+      initContainers:
+      - name: install-oci-tools
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
+        imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+        command: ["/usr/local/bin/install-oci-tools"]
+        volumeMounts:
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+      {{- end }}
       containers:
       - name: firecracker-agent
         image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
         imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+        {{- if .Values.runtime.oci.enabled }}
+        # The first host-readiness pass pings the node ublkd socket once;
+        # gate on it so the check doesn't race the sidecar's startup.
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |-
+          for i in $(seq 1 300); do
+            [ -S /run/fast-sandbox/overlaybd/ublkd.sock ] && break
+            sleep 0.2
+          done
+          exec /workspace/firecracker-runtime
+        {{- end }}
         # Only Downward API identities live in env; all tunables come from
         # the mounted agent config (nodeReadiness hot-reloads per pass).
         env:
@@ -189,6 +219,11 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
+        {{- if .Values.runtime.oci.enabled }}
+        # Relaxes the XFS/reflink node readiness requirement.
+        - name: FAST_SANDBOX_OCI_ENABLED
+          value: "true"
+        {{- end }}
         - name: FAST_SANDBOX_AGENT_CONFIG
           value: /etc/fast-sandbox/agent-config/agent.yaml
         # Node readiness: spec.nodeName enables the host-check loop (the
@@ -244,17 +279,85 @@ spec:
           readOnly: true
         - name: fc-assets
           mountPath: /opt/fast-sandbox/firecracker
+        {{- if .Values.runtime.oci.enabled }}
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+          readOnly: true
+        - name: oci-socket
+          mountPath: /run/fast-sandbox/overlaybd
+        {{- end }}
+      {{- if .Values.runtime.oci.enabled }}
+      # One shared ublkd per node: fsb-vm connects directly over the socket;
+      # StateRoot and host /dev must match the agent's view.
+      - name: overlaybd-ublkd
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
+        imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+        command: ["/usr/local/bin/overlaybd-node"]
+        env:
+        - name: FAST_SANDBOX_OCI_ENABLED
+          value: "true"
+        - name: FAST_SANDBOX_STATE_ROOT
+          value: {{ .Values.runtime.stateRoot }}
+        - name: OVERLAYBD_CACHE_SIZE_GB
+          value: {{ .Values.runtime.oci.cacheSizeGB | quote }}
+        securityContext:
+          privileged: true
+        {{- with .Values.runtime.resources.ublkd }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -ec
+            - curl -fsS --max-time 2 --unix-socket /run/fast-sandbox/overlaybd/ublkd.sock http://localhost/v1/ping
+          # curl's own --max-time is 2s; the probe timeout must exceed it.
+          periodSeconds: 5
+          timeoutSeconds: 3
+        # The daemon sits on every sandbox's block-data path: a hung process
+        # (socket file alive, pings failing) must be restarted instead of
+        # stalling all node IO until manual intervention. Conservative
+        # thresholds: ~60s of consecutive failures before a restart.
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -ec
+            - curl -fsS --max-time 4 --unix-socket /run/fast-sandbox/overlaybd/ublkd.sock http://localhost/v1/ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        volumeMounts:
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+          readOnly: true
+        - name: oci-socket
+          mountPath: /run/fast-sandbox/overlaybd
+        - name: agent-state
+          mountPath: {{ .Values.runtime.stateRoot }}
+        - name: host-dev
+          mountPath: /dev
+      {{- end }}
       # Node janitor sidecar: sweeps orphaned fastlet network state (netns/
       # tap/veth), boxlite leftovers, and — the reason for hostPID — kills
       # leaked VMM processes fastlets delegate over the node-cleanup UDS
       # socket. The containerd backend is DISABLED here (--containerd-socket=):
       # this pod targets the firecracker runtime; the standalone janitor
       # DaemonSet keeps covering the containerd-based runtimes.
+      {{- $janitorArgs := list
+            (printf "--scan-interval=%s" .Values.janitor.scanInterval)
+            (printf "--orphan-timeout=%s" .Values.janitor.orphanTimeout)
+            "--containerd-socket=" }}
+      {{- if .Values.runtime.oci.enabled }}
+      {{- $janitorArgs = append $janitorArgs (printf "--oci-state-root=%s" .Values.runtime.stateRoot) }}
+      {{- end }}
       - name: janitor
         image: {{ include "fast-sandbox.image" (dict "repository" .Values.janitor.image.repository "tag" .Values.janitor.image.tag "appVersion" .Chart.AppVersion) }}
         imagePullPolicy: {{ .Values.janitor.image.pullPolicy }}
         command: ["/workspace/janitor"]
-        args: ["--scan-interval={{ .Values.janitor.scanInterval }}", "--orphan-timeout={{ .Values.janitor.orphanTimeout }}", "--containerd-socket="]
+        args: {{ $janitorArgs | toJson }}
         ports:
         - name: metrics
           containerPort: 9092
@@ -282,6 +385,18 @@ spec:
         - name: runtime-environments
           mountPath: /etc/fast-sandbox/runtime-environments
           readOnly: true
+        {{- if .Values.runtime.oci.enabled }}
+        # fsb-vm cleanup of devices and checkpoint packs left by deleted Pods.
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+          readOnly: true
+        - name: oci-socket
+          mountPath: /run/fast-sandbox/overlaybd
+        - name: host-dev
+          mountPath: /dev
+        - name: agent-state
+          mountPath: {{ .Values.runtime.stateRoot }}
+        {{- end }}
       volumes:
       - name: agent-socket
         hostPath:
@@ -339,4 +454,20 @@ spec:
           # janitor falls back to its defaults (containerd backend is
           # disabled via --containerd-socket= anyway).
           optional: true
+      {{- if .Values.runtime.oci.enabled }}
+      - name: oci-tools
+        hostPath:
+          path: /opt/fast-sandbox/oci
+          type: DirectoryOrCreate
+      # Root-only ublkd control socket shared with Fastlet Pods.
+      - name: oci-socket
+        hostPath:
+          path: /run/fast-sandbox/overlaybd
+          type: DirectoryOrCreate
+      # Host device tree: ublk devices must be visible to the VMs.
+      - name: host-dev
+        hostPath:
+          path: /dev
+          type: Directory
+      {{- end }}
 {{- end }}

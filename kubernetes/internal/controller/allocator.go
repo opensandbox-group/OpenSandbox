@@ -24,6 +24,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -478,7 +479,7 @@ func (allocator *defaultAllocator) Schedule(ctx context.Context, spec *allocSpec
 	// Orphan entries carry PodSupplement=0 and ToRelease=orphan pods so the normal recycle path
 	// handles them without any special-casing outside this function.
 	// Terminating sandboxes are handled inside getSandboxRequest: they receive no new supplement and
-	// all unreleased pods are queued for release.
+	// task cleanup hands back pods before they can be recycled.
 	allRequest, err := allocator.getAllRequest(ctx, spec.Sandboxes, podAllocation)
 	if err != nil {
 		return nil, err
@@ -530,7 +531,6 @@ func (allocator *defaultAllocator) getAllRequest(ctx context.Context, sandboxes 
 }
 
 func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*algorithm.SandboxRequest, error) {
-	log := logf.FromContext(ctx)
 	allocated, err := allocator.GetSandboxAllocation(ctx, sandbox)
 	if err != nil {
 		return nil, err
@@ -540,54 +540,31 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 		return nil, err
 	}
 
-	releasedSet := make(map[string]struct{}, len(released))
-	for _, r := range released {
-		releasedSet[r] = struct{}{}
-	}
-
-	// Terminating sandboxes should not receive new allocations.
-	// Queue all unreleased allocated pods for release and set supplement to zero.
-	if !sandbox.DeletionTimestamp.IsZero() {
-		toRelease := make([]string, 0)
-		for _, p := range allocated {
-			if _, ok := releasedSet[p]; !ok {
-				toRelease = append(toRelease, p)
-			}
+	deleting := !sandbox.DeletionTimestamp.IsZero()
+	var release []string
+	if deleting && !controllerutil.ContainsFinalizer(sandbox, finalizerTaskCleanup) {
+		// No tasks remain: hand back all outstanding allocations.
+		release = allocated
+	} else {
+		// While task cleanup owns the pods, only recycle explicit handoffs.
+		// The same annotation carries normal task completion and pause releases.
+		release, err = allocator.getSandboxRelease(ctx, sandbox)
+		if err != nil {
+			return nil, err
 		}
-		if len(toRelease) > 0 {
-			log.Info("Queuing terminating sandbox pods for release", "sandbox", sandbox.Name, "pods", toRelease)
-		}
-		return &algorithm.SandboxRequest{
-			SandboxName:   sandbox.Name,
-			CurAllocation: allocated,
-			CurReleased:   released,
-			PodSupplement: 0,
-			ToRelease:     toRelease,
-		}, nil
 	}
-
-	release, err := allocator.getSandboxRelease(ctx, sandbox)
-	if err != nil {
-		return nil, err
-	}
-
-	toRelease := make([]string, 0)
-	for _, r := range release {
-		if _, exists := releasedSet[r]; !exists {
-			toRelease = append(toRelease, r)
+	releasedSet := sets.New(released...)
+	toRelease := make([]string, 0, len(release))
+	for _, pod := range release {
+		if !releasedSet.Has(pod) {
+			toRelease = append(toRelease, pod)
 		}
 	}
 
-	replica := int32(0)
-	if sandbox.Spec.Replicas != nil {
-		replica = *sandbox.Spec.Replicas
+	var supplement int32
+	if !deleting && sandbox.Spec.Replicas != nil {
+		supplement = max(*sandbox.Spec.Replicas-int32(len(allocated)), 0)
 	}
-
-	supplement := int32(0)
-	if replica-int32(len(allocated)) > 0 {
-		supplement = replica - int32(len(allocated))
-	}
-
 	return &algorithm.SandboxRequest{
 		SandboxName:   sandbox.Name,
 		CurAllocation: allocated,

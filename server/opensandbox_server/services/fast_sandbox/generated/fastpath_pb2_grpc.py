@@ -107,6 +107,11 @@ class FastPathServiceStub:
                 request_serializer=fastpath__pb2.ResumeSandboxRequest.SerializeToString,
                 response_deserializer=fastpath__pb2.ResumeSandboxResponse.FromString,
                 _registered_method=True)
+        self.InvokeHandlerAction = channel.unary_unary(
+                '/fastpath.v2.FastPathService/InvokeHandlerAction',
+                request_serializer=fastpath__pb2.InvokeHandlerActionRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.InvokeHandlerActionResponse.FromString,
+                _registered_method=True)
 
 
 class FastPathServiceServicer:
@@ -208,6 +213,18 @@ class FastPathServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def InvokeHandlerAction(self, request, context):
+        """InvokeHandlerAction relays an opaque payload to a Pool-declared Action
+        Handler of the Sandbox's Pool through the hosting Fastlet, and returns
+        the handler's HTTP status and body verbatim as the per-handler result.
+        The control plane validates the tenant-scoped sandbox ownership and the
+        handler declaration, but never interprets the payload or the handler's
+        response: the handler's response is the synchronous ack.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FastPathServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -280,6 +297,11 @@ def add_FastPathServiceServicer_to_server(servicer, server):
                     servicer.ResumeSandbox,
                     request_deserializer=fastpath__pb2.ResumeSandboxRequest.FromString,
                     response_serializer=fastpath__pb2.ResumeSandboxResponse.SerializeToString,
+            ),
+            'InvokeHandlerAction': grpc.unary_unary_rpc_method_handler(
+                    servicer.InvokeHandlerAction,
+                    request_deserializer=fastpath__pb2.InvokeHandlerActionRequest.FromString,
+                    response_serializer=fastpath__pb2.InvokeHandlerActionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -660,6 +682,33 @@ class FastPathService:
             '/fastpath.v2.FastPathService/ResumeSandbox',
             fastpath__pb2.ResumeSandboxRequest.SerializeToString,
             fastpath__pb2.ResumeSandboxResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InvokeHandlerAction(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fastpath.v2.FastPathService/InvokeHandlerAction',
+            fastpath__pb2.InvokeHandlerActionRequest.SerializeToString,
+            fastpath__pb2.InvokeHandlerActionResponse.FromString,
             options,
             channel_credentials,
             insecure,

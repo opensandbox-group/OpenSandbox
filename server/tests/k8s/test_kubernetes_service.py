@@ -34,10 +34,12 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.api.schema import (
     CredentialProxyConfig,
+    IdlePolicy,
     ImageAuth,
     ListSandboxesRequest,
     NetworkPolicy,
     PlatformSpec,
+    SandboxLifecycle,
 )
 from opensandbox_server.config import (
     EGRESS_MODE_DNS,
@@ -561,6 +563,25 @@ class TestKubernetesSandboxServiceCreate:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
         assert "ingress.mode='gateway'" in exc_info.value.detail["message"]
+        k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_rejects_idle_policy_on_pod_backend(
+        self, k8s_service, create_sandbox_request
+    ):
+        # OSEP-0024: auto-pause/wake is fsb-only; pods must refuse the opt-in
+        # instead of silently ignoring it.
+        create_sandbox_request.lifecycle = SandboxLifecycle(
+            idlePolicy=IdlePolicy(idleTimeoutSeconds=300, onIdle="pause")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "idlePolicy" in exc_info.value.detail["message"]
+        assert "fast-sandbox" in exc_info.value.detail["message"]
         k8s_service.workload_provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1097,6 +1118,28 @@ class TestWaitForSandboxReady:
         detail = cast(dict[str, str], exc_info.value.detail)
         assert detail["code"] == SandboxErrorCodes.K8S_POD_FAILED
         assert "InitContainerFailed" in detail["message"]
+        assert k8s_service.workload_provider.get_status.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_stops_when_sandbox_is_already_expired(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Terminated",
+            "reason": "SANDBOX_EXPIRED",
+            "message": "Sandbox expired",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "SANDBOX_EXPIRED" in detail["message"]
         assert k8s_service.workload_provider.get_status.call_count == 1
     
     @pytest.mark.asyncio

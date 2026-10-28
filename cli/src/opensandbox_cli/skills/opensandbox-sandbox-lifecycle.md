@@ -267,7 +267,7 @@ Rules:
 - use `renew` before long-running work instead of waiting for expiry
 - use `pause` only when the workload can tolerate suspension
 - treat the pause result as request acceptance and poll `sandbox get` until the state is `Paused` or `Failed`
-- use `kill` when cleanup is the real goal; do not leave orphaned sandboxes behind
+- `kill` returns `deletion_requested` when accepted; poll `sandbox get` until `404` to confirm resource removal. Pool `Noop` preserves processes even after removal.
 
 ## Runtime Notes
 

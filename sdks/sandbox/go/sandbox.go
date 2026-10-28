@@ -23,6 +23,32 @@ import (
 	"time"
 )
 
+// serverProxyAuthHeader is the header the lifecycle server's auth middleware
+// reads. Data-plane requests routed through the server proxy authenticate with
+// the tenant API key in this header; direct-mode requests must not carry it.
+const serverProxyAuthHeader = "OPEN-SANDBOX-API-KEY"
+
+// hasHeaderFold reports whether headers already carries name under any HTTP
+// casing. Header names are case-insensitive, and endpoint-provided headers may
+// use any casing, so a plain map lookup would add a second, conflicting entry.
+func hasHeaderFold(headers map[string]string, name string) bool {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteHeaderFold removes every casing of name from headers.
+func deleteHeaderFold(headers map[string]string, name string) {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			delete(headers, key)
+		}
+	}
+}
+
 // SandboxCreateOptions configures sandbox creation.
 type SandboxCreateOptions struct {
 	// Image is the container image URI (required).
@@ -210,6 +236,11 @@ type SandboxFromTemplateOptions struct {
 	// Extensions for provider-specific parameters.
 	Extensions map[string]string
 
+	// IdlePolicy is the optional idle behavior (OSEP-0024, fast-sandbox
+	// only). Control-plane state, not workload shape, so template mode
+	// accepts it.
+	IdlePolicy *IdlePolicy
+
 	// SkipHealthCheck skips the WaitUntilReady call after creation.
 	SkipHealthCheck bool
 
@@ -227,16 +258,20 @@ type SandboxFromTemplateOptions struct {
 // template and waits for it to be ready.
 //
 // Template mode fixes the workload shape on the server: the entrypoint, env,
-// resources, volumes, platform and lifecycle of the sandbox come from the
-// template's golden image and cannot be overridden here. Only metadata,
-// network policy and extensions may accompany the template ID, and the
-// timeout is required.
+// resources, volumes, platform and lifecycle hooks of the sandbox come from
+// the template's golden image and cannot be overridden here. Only metadata,
+// network policy, extensions and the OSEP-0024 idle policy (control-plane
+// state, not workload shape) may accompany the template ID, and the timeout
+// is required.
 func CreateSandboxFromTemplate(ctx context.Context, config ConnectionConfig, templateID string, opts SandboxFromTemplateOptions) (*Sandbox, error) {
 	if templateID == "" {
 		return nil, &InvalidArgumentError{Field: "templateID", Message: "template ID is required"}
 	}
 	if opts.TimeoutSeconds <= 0 {
 		return nil, &InvalidArgumentError{Field: "TimeoutSeconds", Message: "timeout is required when creating from a template"}
+	}
+	if err := opts.IdlePolicy.Validate(); err != nil {
+		return nil, err
 	}
 
 	lc := config.lifecycleClient()
@@ -249,6 +284,9 @@ func CreateSandboxFromTemplate(ctx context.Context, config ConnectionConfig, tem
 		Metadata:      opts.Metadata,
 		NetworkPolicy: opts.NetworkPolicy,
 		Extensions:    opts.Extensions,
+	}
+	if opts.IdlePolicy != nil {
+		req.Lifecycle = &SandboxLifecycle{IdlePolicy: opts.IdlePolicy}
 	}
 
 	created, err := lc.CreateSandbox(ctx, req)
@@ -414,7 +452,8 @@ func (s *Sandbox) Resume(ctx context.Context, opts ...ReadyOptions) (*Sandbox, e
 	return ResumeSandbox(ctx, *s.config, s.id, opts...)
 }
 
-// Kill terminates the sandbox. This is irreversible.
+// Kill requests irreversible sandbox termination.
+// Returns when deletion is accepted; runtime cleanup may continue afterward.
 func (s *Sandbox) Kill(ctx context.Context) error {
 	if s.lifecycle.cache != nil {
 		s.lifecycle.cache.Invalidate(s.id)
@@ -624,9 +663,21 @@ func (s *Sandbox) resolveExecd(ctx context.Context) error {
 		headers[k] = v
 	}
 	if s.config.UseServerProxy {
-		if _, ok := headers[execdAuthHeader]; !ok {
+		// The server proxy authenticates data-plane requests with the tenant
+		// API key in OPEN-SANDBOX-API-KEY, the only header its auth middleware
+		// reads. Never reuse the execd token header here: the proxy forwards
+		// unknown headers to the backend, so that would send the tenant key
+		// into the untrusted sandbox (and still leave proxied requests
+		// unauthenticated).
+		//
+		// A caller-supplied key wins, whether it arrives in the endpoint
+		// headers or in ConnectionConfig.Headers. Both maps are merged into the
+		// request headers, so adding the fallback under a second casing would
+		// leave the effective value to map iteration order.
+		if !hasHeaderFold(headers, serverProxyAuthHeader) &&
+			!hasHeaderFold(s.config.Headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
-				headers[execdAuthHeader] = apiKey
+				headers[serverProxyAuthHeader] = apiKey
 			}
 		}
 	}
@@ -658,9 +709,15 @@ func (s *Sandbox) resolveEgress(ctx context.Context) error {
 		headers[k] = v
 	}
 	if s.config.UseServerProxy {
-		if _, ok := headers[egressAuthHeader]; !ok {
+		// Same server-proxy auth contract as resolveExecd: the tenant key goes
+		// in OPEN-SANDBOX-API-KEY, never in the egress auth header, which the
+		// proxy forwards into the sandbox. Caller-supplied keys in the endpoint
+		// headers or ConnectionConfig.Headers are preserved for the same reason
+		// as there.
+		if !hasHeaderFold(headers, serverProxyAuthHeader) &&
+			!hasHeaderFold(s.config.Headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
-				headers[egressAuthHeader] = apiKey
+				headers[serverProxyAuthHeader] = apiKey
 			}
 		}
 	}

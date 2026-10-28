@@ -767,6 +767,96 @@ class TestIsolatedSessionE2E:
             await session.delete()
             await self.sandbox.commands.run(f"rm -rf {src_dir}")
 
+    # ── Bind mount + files API tests (session.files on bind dests) ──────
+
+    async def test_bind_files_api_read_write_roundtrip(self):
+        """session.files reads/writes bind dests and stays consistent with
+        session.run in both directions: the files API serves the same mounts
+        the run namespace exposes."""
+        ts = int(time.time() * 1000)
+        src_dir = f"/data/bind_files_{ts}"
+        dest = "/mnt/bind_files"
+
+        await self.sandbox.commands.run(f"mkdir -p {src_dir} {dest}")
+
+        session = await self.sandbox.isolation.create(
+            CreateIsolatedSessionRequest(
+                workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
+                binds=[BindMount(source=src_dir, dest=dest)],
+            )
+        )
+        try:
+            # files-API write → visible to run and on the host source.
+            api_path = f"{dest}/from_files_api.txt"
+            await session.files.write_files([
+                WriteEntry(path=api_path, data="via-files-api", mode=644)
+            ])
+            via_run = await session.run(f"cat {api_path}")
+            assert "via-files-api" in via_run.text
+            host_check = await self.sandbox.commands.run(
+                f"cat {src_dir}/from_files_api.txt"
+            )
+            assert "via-files-api" in host_check.text
+
+            # run write → visible to the files API at the bind dest.
+            await session.run(f"echo -n via-run > {dest}/from_run.txt")
+            content = await session.files.read_file(
+                f"{dest}/from_run.txt", encoding="utf-8"
+            )
+            assert content == "via-run"
+
+            # host-side seed → readable through both views.
+            await self.sandbox.commands.run(f"echo -n seeded > {src_dir}/seeded.txt")
+            assert (
+                await session.files.read_file(f"{dest}/seeded.txt", encoding="utf-8")
+                == "seeded"
+            )
+            listed = await session.files.list_directory(
+                DirectoryListEntry(path=dest, depth=1)
+            )
+            names = [e.path for e in listed]
+            assert any("seeded.txt" in n for n in names)
+        finally:
+            await session.delete()
+            await self.sandbox.commands.run(f"rm -rf {src_dir}")
+
+    async def test_bind_files_api_readonly_write_rejected(self):
+        """files-API writes to a readonly bind are rejected; reads work,
+        matching --ro-bind inside the namespace."""
+        ts = int(time.time() * 1000)
+        src_dir = f"/data/bind_ro_files_{ts}"
+        dest = "/mnt/bind_ro_files"
+
+        await self.sandbox.commands.run(
+            f"mkdir -p {src_dir} {dest} && echo -n ro-content > {src_dir}/host.txt"
+        )
+
+        session = await self.sandbox.isolation.create(
+            CreateIsolatedSessionRequest(
+                workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
+                binds=[BindMount(source=src_dir, dest=dest, readonly=True)],
+            )
+        )
+        try:
+            content = await session.files.read_file(
+                f"{dest}/host.txt", encoding="utf-8"
+            )
+            assert content == "ro-content"
+
+            with pytest.raises(SandboxApiException):
+                await session.files.write_files([
+                    WriteEntry(path=f"{dest}/denied.txt", data="x", mode=644)
+                ])
+
+            # The namespace view must not have gained the file either.
+            check = await self.sandbox.commands.run(
+                f"test -e {src_dir}/denied.txt && echo EXISTS || echo ABSENT"
+            )
+            assert "ABSENT" in check.text
+        finally:
+            await session.delete()
+            await self.sandbox.commands.run(f"rm -rf {src_dir}")
+
     # ── Background run tests ─────────────────────────────────────────
 
     async def _wait_for_background_run(

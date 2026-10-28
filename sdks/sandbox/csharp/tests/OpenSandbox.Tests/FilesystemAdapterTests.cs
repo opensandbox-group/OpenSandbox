@@ -31,7 +31,7 @@ public class FilesystemAdapterTests
         const string baseUrl = "http://localhost:8080/sandboxes/example/port/44772";
         var headers = new Dictionary<string, string> { ["X-EXECD-ACCESS-TOKEN"] = "secret" };
         var wrapper = new HttpClientWrapper(client, baseUrl, headers);
-        var original = new FilesystemAdapter(wrapper, client, baseUrl, headers);
+        var original = new FilesystemAdapter(wrapper, baseUrl, headers);
         var scoped = original.WithIdentity(1001, 2000);
 
         await scoped.GetFileInfoAsync(new[] { "/file" });
@@ -58,7 +58,7 @@ public class FilesystemAdapterTests
         var handler = new IdentityCaptureHandler();
         using var client = new HttpClient(handler);
         var wrapper = new HttpClientWrapper(client, baseUrl);
-        var original = new FilesystemAdapter(wrapper, client, baseUrl, new Dictionary<string, string>());
+        var original = new FilesystemAdapter(wrapper, baseUrl, new Dictionary<string, string>());
         OpenSandbox.Services.IIdentitySandboxFiles capability = original;
         var first = capability.WithIdentity(1, 2);
         var second = ((OpenSandbox.Services.IIdentitySandboxFiles)first).WithIdentity(3, 4);
@@ -83,7 +83,7 @@ public class FilesystemAdapterTests
         var handler = new IdentityCaptureHandler(status);
         using var client = new HttpClient(handler);
         var wrapper = new HttpClientWrapper(client, "http://localhost:8080");
-        var original = new FilesystemAdapter(wrapper, client, wrapper.BaseUrl, new Dictionary<string, string>());
+        var original = new FilesystemAdapter(wrapper, wrapper.BaseUrl, new Dictionary<string, string>());
         var scoped = original.WithIdentity(1001, 2000);
 
         Func<Task> operation = () => scoped.DeleteFilesAsync(new[] { "/file" });
@@ -129,7 +129,7 @@ public class FilesystemAdapterTests
         var handler = new CaptureJsonHandler(payload);
         using var client = new HttpClient(handler);
         var wrapper = new HttpClientWrapper(client, "http://localhost:8080");
-        var adapter = new FilesystemAdapter(wrapper, client, "http://localhost:8080", new Dictionary<string, string>());
+        var adapter = new FilesystemAdapter(wrapper, "http://localhost:8080", new Dictionary<string, string>());
 
         var entries = await adapter.ListDirectoryAsync("/workspace", depth: 0);
 
@@ -147,7 +147,7 @@ public class FilesystemAdapterTests
         var handler = new CaptureJsonHandler("[]");
         using var client = new HttpClient(handler);
         var wrapper = new HttpClientWrapper(client, "http://localhost:8080");
-        var adapter = new FilesystemAdapter(wrapper, client, "http://localhost:8080", new Dictionary<string, string>());
+        var adapter = new FilesystemAdapter(wrapper, "http://localhost:8080", new Dictionary<string, string>());
 
         var entries = await adapter.ListDirectoryAsync("/workspace");
 

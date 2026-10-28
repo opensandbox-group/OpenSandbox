@@ -22,7 +22,7 @@ A `SandboxTemplate` describes a conversion, not just a copy: an ordinary OCI ima
 
 - **Guest wiring is injected**: an init path (PID 1, carrying the readiness marker and heartbeat) and the execd runtime files always come from the template — every sandbox built from it is execd-ready by construction.
 - **Business entrypoint and envs** are baked in: an empty entrypoint defaults to a keep-alive; envs are injected literally into the guest (no runtime indirection).
-- **Runtime shape is declared**: for microVM runtimes the template names the guest kernel and reference machine; readiness defines when the guest counts as up.
+- **Runtime shape is declared**: the template names the Firecracker guest kernel and reference machine; readiness defines when the guest counts as up.
 - **Output is content-addressed**: the build publishes artifacts to the store and records a manifest reference plus artifact digest in the CR status — builds are immutable and verifiable, never mutated in place.
 
 ## Using templates

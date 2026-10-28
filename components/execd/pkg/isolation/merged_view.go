@@ -66,15 +66,28 @@ func (m *MergedView) resolveLower(rel string) string {
 }
 
 // safePath validates and returns a path relative to the workspace.
-// Absolute paths under LowerDir are stripped to relative; all others
-// are cleaned normally.
+// Relative paths are cleaned; absolute paths must fall under LowerDir and
+// are stripped to relative — anything else is rejected with
+// ErrPathOutsideOverlays instead of being silently resolved against the
+// workspace, where it would touch a different file than the namespace path
+// refers to (bind destinations, the profile's private /tmp, etc.).
+// A LowerDir of "/" is the namespace root and contains every absolute path.
 func (m *MergedView) safePath(path string) (string, error) {
 	cleaned := filepath.Clean(path)
-	// Strip workspace prefix from absolute paths so Join works correctly.
-	if m.LowerDir != "" && strings.HasPrefix(cleaned, m.LowerDir+"/") {
-		cleaned = strings.TrimPrefix(cleaned, m.LowerDir+"/")
-	} else if m.LowerDir != "" && cleaned == m.LowerDir {
-		cleaned = "."
+	if filepath.IsAbs(cleaned) {
+		if m.LowerDir != "/" &&
+			(m.LowerDir == "" ||
+				(cleaned != m.LowerDir && !strings.HasPrefix(cleaned, m.LowerDir+"/"))) {
+			return "", fmt.Errorf("%w: %s", ErrPathOutsideOverlays, path)
+		}
+		if cleaned == m.LowerDir {
+			return ".", nil
+		}
+		if m.LowerDir == "/" {
+			// No cleaned path starts with "//"; strip the single root slash.
+			return strings.TrimPrefix(cleaned, "/"), nil
+		}
+		return strings.TrimPrefix(cleaned, m.LowerDir+"/"), nil
 	}
 	if strings.HasPrefix(cleaned, "..") {
 		return "", fmt.Errorf("path traversal denied: %s", path)
