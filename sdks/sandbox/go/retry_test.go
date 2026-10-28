@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -571,6 +572,12 @@ func TestParseRetryAfter(t *testing.T) {
 		expected time.Duration
 	}{
 		{"seconds", "5", 5 * time.Second},
+		{"largest whole seconds", "9223372036", 9223372036 * time.Second},
+		{"duration overflow", "9223372037", time.Duration(math.MaxInt64)},
+		{"int64 maximum", "9223372036854775807", time.Duration(math.MaxInt64)},
+		{"integer overflow", "9223372036854775808", time.Duration(math.MaxInt64)},
+		{"negative integer overflow", "-9223372036854775809", 0},
+		{"malformed large number", "9223372036854775808x", 0},
 		{"zero", "0", 0},
 		{"empty", "", 0},
 		{"negative", "-1", 0},
@@ -729,5 +736,22 @@ func TestBackoff_UnsetMaxBackoffDoesNotCapToZero(t *testing.T) {
 	got := cfg.backoff(4) // 100ms * 16 = 1.6s
 	if got != 1600*time.Millisecond {
 		assert.Fail(t, fmt.Sprintf("backoff(4) = %v, want 1.6s (uncapped)", got))
+	}
+}
+
+func TestRetry_LargeWakeRetryAfterExhaustsDeadline(t *testing.T) {
+	wait, present := parseRetryAfterValue("9223372036854775807")
+	client := &Client{retry: &RetryConfig{WakeOverallDeadline: time.Millisecond}}
+	attempts := 0
+	err := client.withRetry(context.Background(), func() error {
+		attempts++
+		return &APIError{StatusCode: http.StatusServiceUnavailable, WakeExpired: true,
+			RetryAfter: wait, RetryAfterPresent: present}
+	})
+	if _, ok := err.(*SandboxWakeTimeoutError); !ok {
+		t.Fatalf("expected wake timeout, got %T: %v", err, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("oversized Retry-After should exhaust the deadline before retrying; got %d attempts", attempts)
 	}
 }
