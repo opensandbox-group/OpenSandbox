@@ -43,6 +43,33 @@ from opensandbox_server.services.validators import (
 logger = logging.getLogger(__name__)
 
 
+def _validate_docker_mount_paths(volumes: list) -> None:
+    """Reject Docker mount destinations that Docker cannot create safely."""
+    seen_paths: set[str] = set()
+    for volume in volumes:
+        mount_path = posixpath.normpath(volume.mount_path)
+        if mount_path == "/":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                    "message": f"Volume '{volume.name}': mount path '/' is not allowed by the Docker runtime.",
+                },
+            )
+        if mount_path in seen_paths:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                    "message": (
+                        f"Duplicate volume mount path '{mount_path}'. "
+                        "Each Docker volume must have a unique mount path."
+                    ),
+                },
+            )
+        seen_paths.add(mount_path)
+
+
 class DockerVolumesMixin:
     """Mixin providing volume validation, bind mount building, and cleanup."""
 
@@ -68,6 +95,7 @@ class DockerVolumesMixin:
         if not request.volumes:
             return {}, []
 
+        _validate_docker_mount_paths(request.volumes)
         allowed_prefixes = self.app_config.storage.allowed_host_paths
         ensure_volumes_valid(request.volumes, allowed_host_prefixes=allowed_prefixes)
 
