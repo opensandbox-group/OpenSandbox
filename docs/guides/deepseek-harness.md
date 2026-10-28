@@ -27,6 +27,7 @@ embedded integration, not this native plugin's installation or Web workflow.
   `1.1.1` is included. This guide does not use direct FastPath endpoints.
 - Either a provisioned template ID or an explicit image. The sandbox must have
   Linux, bash, Python 3.8+ and an existing writable absolute working directory.
+- The deployed execd must accept the `argv` form of `POST /command`. SDK `1.1.1` alone does not establish that server capability. A command-only execd rejects prerequisite and helper calls with HTTP 400; use a compatible test backend rather than changing the plugin to replay them through a shell-string fallback.
 - Your normal native DSH model/provider configuration. This plugin does not
   install a model adapter, change the selected model, or configure model keys.
 
@@ -153,6 +154,8 @@ The timeout fields govern API requests, readiness, prerequisites and command
 settlement, respectively. TTL bounds the remote sandbox lifetime; it is not an
 idle-pause timer. Configuration changes require a restart and do not migrate
 existing bindings silently.
+
+The default TTL is 600 seconds, with no automatic renewal. Size it for the whole sandbox session, including preparation, gaps between turns, commands and artifact retrieval, with a margin. A local timeout does not prove expiry, and local status with `remoteExistence: unverified` does not prove the sandbox is healthy or still exists.
 
 ## 4. Start DSH and run a task
 
@@ -346,6 +349,7 @@ upload rejection and unchanged remote binding identity. Those tests establish
 installation and routing contracts, not deployed network isolation or real-model
 quality. Live acceptance must separately use the actual native installed entry,
 your configured model, and the existing OpenSandbox Ingress on ACK fast-sandbox.
+Record the backend explicitly for any additional create-image validation; that evidence does not establish FastSandbox or Firecracker acceptance.
 Record first-use creation, a file-first task, multiround reuse, cross-session
 isolation, artifacts, explicit cleanup and failure/no-host-fallback evidence.
 No live deployment or model result is implied by the offline checks.
