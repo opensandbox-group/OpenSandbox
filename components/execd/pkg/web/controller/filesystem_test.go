@@ -550,7 +550,6 @@ func TestDownloadFileInvalidLimit(t *testing.T) {
 	}
 }
 
-
 func TestFilesystemControllerDownloadRejectsDirectories(t *testing.T) {
 	dir := t.TempDir()
 	for _, rawURL := range []string{
@@ -568,6 +567,20 @@ func TestFilesystemControllerDownloadRejectsDirectories(t *testing.T) {
 			require.Contains(t, resp.Message, "path is a directory:")
 		})
 	}
+}
+
+func TestFilesystemControllerDownloadRejectsDirectoryRange(t *testing.T) {
+	dir := t.TempDir()
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(dir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+	ctrl.ctx.Request.Header.Set("Range", "bytes=0-3")
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Contains(t, resp.Message, "path is a directory:")
 }
 
 func TestFilesystemControllerDownloadMalformedRangeIncludesMessage(t *testing.T) {
