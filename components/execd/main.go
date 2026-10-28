@@ -36,6 +36,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/mcpproxy"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web"
@@ -199,7 +200,14 @@ func run() int {
 	})
 	defer initManager.StopPeriodic()
 
-	engine := web.NewRouter(flag.ServerAccessToken)
+	mcpRegistry, err := buildMCPRegistry()
+	if err != nil {
+		log.Error("%v", err)
+		return 1
+	}
+	defer mcpRegistry.Close()
+
+	engine := web.NewRouter(flag.ServerAccessToken, mcpRegistry)
 	if err := runHTTPServer(
 		engine,
 		startInitEntrypoint,
@@ -225,6 +233,31 @@ func entryLauncher(startInitEntrypoint func([]string) error) func([]string) erro
 		return nil
 	}
 	return startInitEntrypoint
+}
+
+// buildMCPRegistry parses the MCP bridge configuration. With no servers
+// configured it returns an empty registry and the /mcp routes answer 404.
+func buildMCPRegistry() (*mcpproxy.Registry, error) {
+	cfg, err := mcpproxy.ParseConfig(flag.MCPServers, flag.MCPSSEKeepalive)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := mcpproxy.NewRegistry(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.Servers) > 0 {
+		log.Info("mcpproxy: %d server(s) configured: %v", len(cfg.Servers), namesOf(cfg.Servers))
+	}
+	return registry, nil
+}
+
+func namesOf(servers []*mcpproxy.ServerConfig) []string {
+	names := make([]string, 0, len(servers))
+	for _, s := range servers {
+		names = append(names, s.Name)
+	}
+	return names
 }
 
 func runHTTPServer(

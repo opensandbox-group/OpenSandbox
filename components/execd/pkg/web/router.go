@@ -23,6 +23,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/mcpproxy"
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
@@ -40,7 +41,7 @@ var preInitPaths = map[string]struct{}{
 	"/internal/init": {},
 }
 
-func NewRouter(accessToken string) *gin.Engine {
+func NewRouter(accessToken string, mcpRegistry *mcpproxy.Registry) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -57,7 +58,39 @@ func NewRouter(accessToken string) *gin.Engine {
 	registerFilesystemRoutes(r.Group("/v1/filesystem/:uid/:gid", filesystemIdentityMiddleware()))
 
 	registerExecutionRoutes(r)
+	registerMCPRoutes(r, mcpRegistry)
 	return r
+}
+
+// registerMCPRoutes exposes the MCP proxy bridge under /mcp. The index lists
+// configured upstreams; {name} dispatches to the matching bridge for the
+// three Streamable HTTP methods (GET, POST, DELETE). The routes sit behind
+// the same runtime-init gate and access-token check as every other business
+// endpoint.
+func registerMCPRoutes(r *gin.Engine, registry *mcpproxy.Registry) {
+	mcpGroup := r.Group("/mcp")
+	{
+		mcpGroup.GET("", func(c *gin.Context) {
+			servers := registry.List()
+			if servers == nil {
+				servers = []mcpproxy.ServerInfo{}
+			}
+			c.JSON(http.StatusOK, servers)
+		})
+
+		dispatch := func(c *gin.Context) {
+			name := c.Param("name")
+			handler, ok := registry.Handler(name)
+			if !ok {
+				c.JSON(http.StatusNotFound, gin.H{"error": "unknown mcp server: " + name})
+				return
+			}
+			handler.ServeHTTP(c.Writer, c.Request)
+		}
+		mcpGroup.GET("/:name", dispatch)
+		mcpGroup.POST("/:name", dispatch)
+		mcpGroup.DELETE("/:name", dispatch)
+	}
 }
 
 // Both entrypoints use the same handlers. Identity-scoped requests are

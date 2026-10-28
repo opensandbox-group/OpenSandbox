@@ -24,6 +24,7 @@ Execd also fronts a small reverse proxy (`/proxy/{port}`), so one exposed host p
 | Interactive terminals | A real terminal (PTY) over WebSocket, shareable with read-only viewers |
 | Files and directories | Upload, download, list, search, move, chmod, remove, in-place content replace — the sandbox filesystem is fully scriptable |
 | Isolated sessions | Run a shell inside a private namespace for untrusted or exploratory work |
+| MCP proxy bridge | Connect any MCP client to upstream MCP servers through `execd` — HTTP upstreams stream through untouched, stdio upstreams run as managed subprocesses |
 | Metrics | Sandbox CPU and memory as point-in-time snapshots or a live stream |
 
 ## API surface
@@ -41,6 +42,7 @@ Everything execd exposes lives under one API. When the platform configures an ac
 | Terminals | `/pty` | PTY sessions with a WebSocket attach point |
 | Files | `/files`, `/directories` | The whole filesystem surface |
 | Isolated sessions | `/v1/isolated/*` | Private-namespace shells with their own file operations |
+| MCP proxy bridge | `/mcp`, `/mcp/{name}` | List configured upstreams; Streamable HTTP endpoint per upstream |
 | Metrics | `/metrics`, `/metrics/watch` | Snapshot and live stream |
 | Reverse proxy | `/proxy/{port}` | Reach any sandbox port through execd |
 
@@ -121,6 +123,28 @@ An isolated session runs a shell inside a per-execution [bubblewrap](https://git
 - Session creation reports what the current environment supports, so callers can adapt instead of guessing.
 
 See the [Isolation Sessions guide](/guides/isolation-sessions) for the full workflow.
+
+## MCP proxy bridge
+
+Execd can act as an MCP (Model Context Protocol) gateway: clients connect with any official MCP SDK over Streamable HTTP at `/mcp/{name}`, and execd forwards to a configured upstream MCP server. No MCP-specific SDK work is needed on the client side — `streamablehttp_client("https://<sandbox>/mcp/{name}")` in Python or `HttpClientStreamableHttpTransport.builder(base).endpoint("/mcp/{name}")` in Java, both with the usual execd access-token header.
+
+Upstreams are declared in the `EXECD_MCP_SERVERS` environment variable (or `--mcp-servers`), a JSON array with one entry per server:
+
+```json
+[
+  {"name": "search", "transport": "http", "url": "http://127.0.0.1:8000/mcp", "headers": {"Authorization": "Bearer ..."}},
+  {"name": "fs", "transport": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-everything"], "cwd": "/workspace"}
+]
+```
+
+Two transports are supported:
+
+- **`http`** proxies a Streamable HTTP MCP server as an opaque stream — request/response bodies, SSE streams, status codes, and MCP headers (`Mcp-Session-Id`, `MCP-Protocol-Version`) pass through without JSON-RPC inspection, so the bridge stays compatible with any protocol version both sides support. Idle SSE responses receive keepalive comment frames every `EXECD_MCP_SSE_KEEPALIVE` (default 30s, `0` disables) so read-idle clients stay connected.
+- **`stdio`** spawns the configured command as a sandbox-local subprocess — one per MCP session — and bridges it to Streamable HTTP using the official Go MCP SDK. Sessions end (and subprocesses terminate) on client `DELETE`, idle timeout, or child exit. Commands come from image or platform configuration only; clients choose a bridge by name and cannot start arbitrary processes.
+
+The execd access token never leaves execd: it is stripped before forwarding, while client `Authorization` headers pass through to the upstream. Configured `headers` on an upstream override client-supplied values, which keeps upstream credentials inside sandbox configuration. Upstream status codes — including `404` (session terminated) and `405` — are returned unmodified so clients apply their normal session-recovery behavior.
+
+`GET /mcp` lists the configured bridges; unknown names answer `404`. The routes sit behind the same runtime-init gate and access-token check as every other execd endpoint, and are reference-implementation extensions outside the published execd API spec.
 
 ## Layered security
 
