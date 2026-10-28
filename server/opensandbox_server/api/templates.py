@@ -136,7 +136,9 @@ def list_templates(
     """
     from urllib.parse import parse_qsl
 
-    metadata_filter = dict(parse_qsl(metadata)) if metadata else None
+    # keep_blank_values keeps filters such as "env=" (empty metadata value) instead of
+    # dropping them, which silently turned the filter into "no filter".
+    metadata_filter = dict(parse_qsl(metadata, keep_blank_values=True)) if metadata else None
     items, total_items = _get_template_service().list_templates(
         metadata=metadata_filter,
         page=page,

@@ -655,6 +655,25 @@ def test_routes_template_lifecycle(client, crs, service):
     assert client.get(f"/v1/templates/{template_id}").status_code == 404
 
 
+def test_routes_forward_blank_metadata_values_to_the_service(monkeypatch):
+    captured = {}
+
+    class _StubService:
+        def list_templates(self, **kwargs):
+            captured.update(kwargs)
+            return [], 0
+
+    app = FastAPI()
+    app.include_router(templates_api.router, prefix="/v1")
+    monkeypatch.setattr(templates_api, "_get_template_service", lambda: _StubService())
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/v1/templates", params={"metadata": "env="})
+
+    assert response.status_code == 200, response.text
+    assert captured["metadata"] == {"env": ""}
+
+
 def test_routes_reject_extra_fields(client):
     response = client.post(
         "/v1/templates",
