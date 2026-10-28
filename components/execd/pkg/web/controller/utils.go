@@ -28,6 +28,8 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
@@ -273,4 +275,82 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 	}
 
 	return buildFileInfo(absPath, fileInfo)
+}
+
+// uploadOwnerOf reports the uid/gid an atomic upload must preserve when it
+// replaces an existing destination. -1/-1 leaves the staged file as-is.
+func uploadOwnerOf(fi os.FileInfo) (int, int) {
+	if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return int(stat.Uid), int(stat.Gid)
+	}
+	return -1, -1
+}
+
+// uploadLinkCount reports how many directory entries share the destination's
+// inode, so an upload can keep the aliases of a hard-linked file in sync
+// instead of repointing just the requested name. 0 means "unknown".
+func uploadLinkCount(fi os.FileInfo) uint64 {
+	if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return uint64(stat.Nlink)
+	}
+	return 0
+}
+
+// copyUploadAttrs copies the destination's extended attributes - the POSIX
+// access ACL lives in one - onto the staging file, so publishing a new inode
+// does not silently drop access control the old in-place write kept. It
+// reports whether attributes survived the copy: false means the caller must
+// publish in place, which preserves them by construction.
+func copyUploadAttrs(dest, stagedName string) bool {
+	names, err := listUploadXattrs(dest)
+	if err != nil {
+		return false
+	}
+	for _, name := range names {
+		value, err := getUploadXattr(dest, name)
+		if err != nil {
+			return false
+		}
+		if err := unix.Setxattr(stagedName, name, value, 0); err != nil {
+			// security.* and trusted.* need a privilege the upload does not
+			// have; leave the inode in place so the attribute survives.
+			return false
+		}
+	}
+	return true
+}
+
+func listUploadXattrs(path string) ([]string, error) {
+	size, err := unix.Listxattr(path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	buf := make([]byte, size)
+	size, err = unix.Listxattr(path, buf)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, name := range strings.Split(string(buf[:size]), "\x00") {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func getUploadXattr(path, name string) ([]byte, error) {
+	size, err := unix.Getxattr(path, name, nil)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, size)
+	size, err = unix.Getxattr(path, name, buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:size], nil
 }

@@ -238,3 +238,24 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 
 	return buildFileInfo(absPath, fileInfo)
 }
+
+// uploadOwnerOf reports the uid/gid an atomic upload must preserve when it
+// replaces an existing destination. Windows has no chown semantics for
+// renames, so uploads there never carry ownership over.
+func uploadOwnerOf(fi os.FileInfo) (int, int) {
+	return -1, -1
+}
+
+// uploadLinkCount reports how many directory entries share the destination's
+// inode. Windows has no link count to consult here, so uploads there always
+// publish by rename.
+func uploadLinkCount(fi os.FileInfo) uint64 {
+	return 0
+}
+
+// copyUploadAttrs reports whether the destination's extended attributes
+// survived onto the staging file. Windows has no xattr equivalent to carry
+// over here, so it always agrees to publish by rename.
+func copyUploadAttrs(dest, stagedName string) bool {
+	return true
+}
