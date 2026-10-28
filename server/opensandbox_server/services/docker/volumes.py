@@ -53,7 +53,7 @@ def _validate_docker_mount_paths(volumes: list) -> None:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
-                    "message": f"Volume '{volume.name}': mount path '/' is not allowed by the Docker runtime.",
+                    "message": f"Volume '{volume.name}': mount path '/' (the container root) is not allowed by the Docker runtime.",
                 },
             )
         if mount_path in seen_paths:
