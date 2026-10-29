@@ -40,6 +40,7 @@ import (
 	sourcegroup "github.com/alibaba/opensandbox/nodeagent/pkg/source"
 	_ "github.com/alibaba/opensandbox/nodeagent/pkg/source/containerlogs"
 	_ "github.com/alibaba/opensandbox/nodeagent/pkg/source/syscalls"
+	_ "github.com/alibaba/opensandbox/nodeagent/pkg/source/vmconsole"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/store"
 	"k8s.io/client-go/kubernetes"
@@ -139,33 +140,37 @@ func run() (exitCode int) {
 		return
 	}
 	restConfig.UserAgent = "opensandbox-nodeagent/" + version.GitCommit
-	client, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		readiness.Replace("kubernetes-client-unavailable")
-		log.Errorf("Kubernetes client unavailable: %v", err)
-		<-signalCtx.Done()
-		return
-	}
-	identityStore := store.New(client, cfg.NodeName, cfg.ClusterID)
-	if err := identityStore.Start(runCtx); err != nil {
-		readiness.Replace("store-not-synced")
-		log.Errorf("Sandbox Store failed to sync: %v", err)
-		<-signalCtx.Done()
-		return
-	}
-	staleThreshold := max(3*config.InternalReconcileInterval, time.Minute)
-	safego.Go(func() {
-		ticker := time.NewTicker(min(config.InternalReconcileInterval, time.Minute))
-		defer ticker.Stop()
-		for {
-			select {
-			case <-runCtx.Done():
-				return
-			case now := <-ticker.C:
-				readiness.Set("store-stale", identityStore.Stale(now, staleThreshold))
-			}
+	var identityStore *store.Store
+	if len(cfg.Sources) != 1 || cfg.Sources[0] != api.SourceNameVMConsole {
+		client, err := kubernetes.NewForConfig(restConfig)
+		if err != nil {
+			readiness.Replace("kubernetes-client-unavailable")
+			log.Errorf("Kubernetes client unavailable: %v", err)
+			<-signalCtx.Done()
+			return
 		}
-	})
+		identityStore = store.New(client, cfg.NodeName, cfg.ClusterID)
+		if err := identityStore.Start(runCtx); err != nil {
+			readiness.Replace("store-not-synced")
+			log.Errorf("Sandbox Store failed to sync: %v", err)
+			<-signalCtx.Done()
+			return
+		}
+		staleThreshold := max(3*config.InternalReconcileInterval, time.Minute)
+		safego.Go(func() {
+			ticker := time.NewTicker(min(config.InternalReconcileInterval, time.Minute))
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case now := <-ticker.C:
+					readiness.Set("store-stale", identityStore.Stale(now, staleThreshold))
+				}
+			}
+		})
+
+	}
 
 	onRuntimeError := func(err error) {
 		readiness.Set("runtime-error", true)
@@ -173,12 +178,16 @@ func run() (exitCode int) {
 	}
 	sourceChildren := make([]sourcegroup.Child, 0, len(cfg.Sources))
 	for _, sourceName := range cfg.Sources {
-		sourceStore, viewErr := identityStore.ForSource(sourceName)
-		if viewErr != nil {
-			readiness.Replace("source-unavailable")
-			log.Errorf("source Store view failed: %v", viewErr)
-			<-signalCtx.Done()
-			return
+		var sourceStore store.View
+		if sourceName != api.SourceNameVMConsole {
+			var viewErr error
+			sourceStore, viewErr = identityStore.ForSource(sourceName)
+			if viewErr != nil {
+				readiness.Replace("source-unavailable")
+				log.Errorf("source Store view failed: %v", viewErr)
+				<-signalCtx.Done()
+				return
+			}
 		}
 		sourceState, stateErr := checkpoint.SourceState(sourceName)
 		if stateErr != nil {
@@ -187,7 +196,7 @@ func run() (exitCode int) {
 			<-signalCtx.Done()
 			return
 		}
-		implementation, buildErr := registry.BuildSource(sourceName, registry.SourceDependencies{Config: cfg, Store: sourceStore, State: sourceState, Logger: log, OnError: onRuntimeError})
+		implementation, buildErr := registry.BuildSource(sourceName, registry.SourceDependencies{Config: cfg, KubernetesConfig: restConfig, Store: sourceStore, State: sourceState, Logger: log, OnError: onRuntimeError})
 		if buildErr != nil {
 			readiness.Replace("source-unavailable")
 			log.Errorf("source factory failed: %v", buildErr)

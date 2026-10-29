@@ -89,6 +89,8 @@ sink:
 
 # -- Host paths available to the node agent; enabled Sources and Sinks select mounts.
 hostPaths:
+  # -- Firecracker state root used only by the vm-console Source; GC remains owned by the FC driver.
+  vmConsole: /var/lib/fast-sandbox/firecracker
   # -- Pod-log host path used only by the container-logs Source.
   logs: /var/log/pods
   # -- Host cgroup v2 hierarchy used only by the syscalls Source.

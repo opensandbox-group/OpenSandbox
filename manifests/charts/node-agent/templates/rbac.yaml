@@ -9,6 +9,11 @@ metadata:
   labels:
     {{- include "opensandbox-node-agent.labels" . | nindent 4 }}
 rules:
+  {{- if has "vm-console" .Values.config.sources }}
+  - apiGroups: ["sandbox.fast.io"]
+    resources: ["sandboxes"]
+    verbs: ["list", "watch"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "watch"]
