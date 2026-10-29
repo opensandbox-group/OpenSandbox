@@ -34,6 +34,11 @@ def resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
         # The execd API validates this timeout with `gte=0`.
         if timeout < timedelta(0):
             raise InvalidArgumentException("timeout must not be negative")
+        if timeout == timedelta(0):
+            # execd treats 0 as unset (commands run without a timeout and
+            # sessions fall back to a 24h default), so reject it here just
+            # like ExecutionConverter does.
+            raise InvalidArgumentException("timeout must be positive")
         # Round up using integer microseconds to preserve whole milliseconds exactly.
         return (timeout // timedelta(microseconds=1) + 999) // 1000
     raise InvalidArgumentException("timeout must be a datetime.timedelta or None")

@@ -61,7 +61,7 @@ class ExecutionConverter:
 
         timeout_milliseconds = UNSET
         if opts.timeout is not None:
-            if opts.timeout < timedelta(0):
+            if opts.timeout <= timedelta(0):
                 raise InvalidArgumentException("timeout must be positive")
             # Round up using integer microseconds to preserve whole milliseconds exactly.
             timeout_milliseconds = (opts.timeout // timedelta(microseconds=1) + 999) // 1000

@@ -537,7 +537,6 @@ def test_execution_converter_to_api_run_command_request() -> None:
     ("microseconds", "expected"),
     [
         (None, None),
-        (0, 0),
         (1, 1),
         (500, 1),
         (900, 1),
@@ -568,7 +567,6 @@ def test_execution_converter_rounds_timeout_up_to_milliseconds(
     ("microseconds", "expected"),
     [
         (None, None),
-        (0, 0),
         (1, 1),
         (500, 1),
         (900, 1),
@@ -603,10 +601,22 @@ def test_execution_converter_rejects_negative_timeout(microseconds: int) -> None
         )
 
 
+def test_execution_converter_rejects_zero_timeout() -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must be positive"):
+        ExecutionConverter.to_api_run_command_request(
+            "sleep 10", RunCommandOpts(timeout=timedelta(0))
+        )
+
+
 @pytest.mark.parametrize("microseconds", [-1, -999, -1000])
 def test_run_in_session_converter_rejects_negative_timeout(microseconds: int) -> None:
     with pytest.raises(InvalidArgumentException, match="^timeout must not be negative"):
         resolve_run_in_session_timeout(timedelta(microseconds=microseconds))
+
+
+def test_run_in_session_converter_rejects_zero_timeout() -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must be positive"):
+        resolve_run_in_session_timeout(timedelta(0))
 
 
 def test_run_command_opts_validates_gid_requires_uid() -> None:
