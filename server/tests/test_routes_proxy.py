@@ -1451,7 +1451,7 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
         proxy_api,
         "get_config",
         lambda: SimpleNamespace(
-            proxy=SimpleNamespace(resolve_internal=configured_resolve_internal)
+            proxy=SimpleNamespace(resolve_internal=configured_resolve_internal, require_api_key=False)
         ),
     )
     backend = _FakeBackendWebSocket()
@@ -1915,3 +1915,37 @@ def test_proxy_renew_skip_header_unknown_value_still_renews_but_strips(
     assert coordinator.scheduled == ["sbx-renew"]
     forwarded = fake_client.built["headers"]
     assert all(k.lower() != "opensandbox-access-renew" for k in forwarded)
+
+
+def test_proxy_websocket_requires_key_when_require_api_key(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(
+        proxy_api,
+        "get_config",
+        lambda: SimpleNamespace(
+            server=SimpleNamespace(api_key="gateway-key"),
+            proxy=SimpleNamespace(resolve_internal=True, require_api_key=True),
+        ),
+    )
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    monkeypatch.setattr(proxy_api.websockets, "connect", _FakeWebSocketConnector(_FakeBackendWebSocket()))
+
+    for headers in ({}, {SANDBOX_API_KEY_HEADER: "wrong-key"}):
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/v1/sandboxes/sbx-123/proxy/44772/ws", headers=headers) as websocket:
+                websocket.receive_text()
+        assert exc_info.value.code == 1008
+
+    with client.websocket_connect(
+        "/v1/sandboxes/sbx-123/proxy/44772/ws", headers={SANDBOX_API_KEY_HEADER: "gateway-key"}
+    ) as websocket:
+        assert websocket.receive_text() == "backend-ready"

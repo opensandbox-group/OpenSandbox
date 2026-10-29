@@ -34,6 +34,11 @@ max_sandbox_timeout_seconds = 86400
 # cannot route to bridge container IPs, e.g. a launchd/systemd user session
 # on macOS where such traffic is blocked.
 resolve_internal = true
+# When True, the sandbox proxy routes (HTTP and WebSocket) also require the
+# OPEN-SANDBOX-API-KEY header in single-tenant mode. Leave False (default) if
+# browsers open sandbox proxy URLs directly; set True when only a trusted
+# gateway talks to this server. Requires server.api_key.
+# require_api_key = false
 
 [log]
 level = "INFO"

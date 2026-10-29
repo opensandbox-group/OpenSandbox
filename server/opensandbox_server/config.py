@@ -713,6 +713,16 @@ class ProxyConfig(BaseModel):
             "the default preserves the historical behavior."
         ),
     )
+    require_api_key: bool = Field(
+        default=False,
+        description=(
+            "When True, the sandbox reverse-proxy routes (HTTP and WebSocket) also "
+            "require the OPEN-SANDBOX-API-KEY header in single-tenant mode. The "
+            "default False keeps proxy URLs open so a browser can reach sandbox "
+            "ports directly; enable it when only a trusted gateway talks to the "
+            "server. Requires server.api_key."
+        ),
+    )
 
 
 class KubernetesRuntimeConfig(BaseModel):
@@ -1616,6 +1626,12 @@ class AppConfig(BaseModel):
         default=None,
         description="Secure container runtime configuration (gVisor, Kata, Firecracker).",
     )
+    @model_validator(mode="after")
+    def validate_proxy_api_key(self) -> "AppConfig":
+        if self.proxy.require_api_key and self.tenants is None and not (self.server.api_key or "").strip():
+            raise ValueError("proxy.require_api_key needs server.api_key (or [tenants]); otherwise proxy routes stay open.")
+        return self
+
     @model_validator(mode="after")
     def validate_runtime_blocks(self) -> "AppConfig":
         if self.runtime.type == "docker":

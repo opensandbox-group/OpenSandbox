@@ -32,6 +32,10 @@ max_sandbox_timeout_seconds = 86400
 # 设为 False 时，代理改为以服务端本地的 host-mapped 端口为目标。当服务端进程无法
 # 路由到容器 bridge IP 时（例如 macOS 上的 launchd/systemd 用户会话）应设为 False。
 resolve_internal = true
+# 为 True 时，单租户模式下沙箱代理路由（HTTP 与 WebSocket）也要求携带
+# OPEN-SANDBOX-API-KEY 头。若浏览器直接打开沙箱代理地址，保持默认 False；
+# 若只有受信任的网关访问本服务，设为 True。需要同时配置 server.api_key。
+# require_api_key = false
 
 [log]
 level = "INFO"

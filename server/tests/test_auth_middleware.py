@@ -160,3 +160,50 @@ def test_auth_middleware_is_proxy_path_accepts_valid_shapes():
     # Non-numeric port must not skip auth (malformed path → 401, not 422)
     assert AuthMiddleware._is_proxy_path("/sandboxes/s1/proxy/not-a-port/x") is False
     assert AuthMiddleware._is_proxy_path("/sandboxes/s1/proxy/8080x/") is False
+
+
+def _build_require_key_app():
+    app = FastAPI()
+    config = _app_config_with_api_key()
+    config.proxy.require_api_key = True
+    app.add_middleware(AuthMiddleware, config=config)
+
+    @app.get("/v1/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}")
+    def proxy_echo(sandbox_id: str, port: int, full_path: str):
+        return {"proxied": True}
+
+    return app
+
+
+def test_auth_middleware_proxy_requires_key_when_require_api_key():
+    """proxy.require_api_key closes the single-tenant proxy exemption."""
+    client = TestClient(_build_require_key_app())
+
+    response = client.get("/v1/sandboxes/abc/proxy/8080/foo")
+    assert response.status_code == 401
+    assert response.json()["code"] == "MISSING_API_KEY"
+
+    response = client.get(
+        "/v1/sandboxes/abc/proxy/8080/foo", headers={"OPEN-SANDBOX-API-KEY": "wrong"}
+    )
+    assert response.status_code == 401
+    assert response.json()["code"] == "INVALID_API_KEY"
+
+    response = client.get(
+        "/v1/sandboxes/abc/proxy/8080/foo", headers={"OPEN-SANDBOX-API-KEY": "secret-key"}
+    )
+    assert response.status_code == 200
+
+
+def test_require_api_key_without_server_api_key_is_rejected():
+    import pytest
+
+    from opensandbox_server.config import ProxyConfig
+
+    with pytest.raises(ValueError, match="require_api_key"):
+        AppConfig(
+            server=ServerConfig(),
+            proxy=ProxyConfig(require_api_key=True),
+            runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:latest"),
+            ingress=IngressConfig(mode="direct"),
+        )

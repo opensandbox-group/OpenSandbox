@@ -59,7 +59,7 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 |-----|------|---------|-------------|
 | `host` | string | `"0.0.0.0"` | HTTP API bind address. |
 | `port` | integer | `8080` | Listen port (1–65535). |
-| `api_key` | string \| omitted | `null` | If set, requests must send header `OPEN-SANDBOX-API-KEY` (public routes like `/health`, `/docs` excluded). If unset, API key checks are skipped, and startup requires explicit risk acknowledgment: interactive TTY `YES` or `OPENSANDBOX_INSECURE_SERVER=YES`. |
+| `api_key` | string \| omitted | `null` | If set, requests must send header `OPEN-SANDBOX-API-KEY` (public routes like `/health`, `/docs` excluded; in single-tenant mode the sandbox proxy routes are excluded too unless `[proxy] require_api_key` is set). If unset, API key checks are skipped, and startup requires explicit risk acknowledgment: interactive TTY `YES` or `OPENSANDBOX_INSECURE_SERVER=YES`. |
 | `eip` | string \| omitted | `null` | Public IP/hostname used as the host part of returned sandbox endpoint URLs (mainly Docker runtime). |
 | `max_sandbox_timeout_seconds` | integer \| omitted | `null` | Cap on the `timeout` field of **create** requests (≥ 60). Does not apply to renew-expiration or total lifetime. Omit to disable. |
 | `timeout_keep_alive` | integer | `30` | Idle keep-alive timeout (s) passed to uvicorn. |
@@ -77,6 +77,7 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `resolve_internal` | boolean | `true` | `true`: reverse-proxy targets the sandbox internal IP (Docker bridge / provider internal endpoint). `false`: targets the server-local host-mapped port — required when the server cannot route to sandbox bridge IPs (e.g. server container on a Compose network while sandboxes run on the default bridge; macOS launchd/systemd session). |
+| `require_api_key` | boolean | `false` | `true`: the sandbox proxy routes (`/sandboxes/{id}/proxy/{port}/...`, HTTP and WebSocket) also require `OPEN-SANDBOX-API-KEY` in single-tenant mode. `false` keeps them open so a browser can reach sandbox ports directly; any process that can reach the server can then use them without a key. Enable it when only a trusted gateway talks to the server. Requires `server.api_key` (rejected at load otherwise). Multi-tenant mode always authenticates proxy routes. |
 
 ---
 

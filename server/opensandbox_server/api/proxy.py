@@ -258,14 +258,27 @@ def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None
 
 
 async def _authenticate_websocket_tenant(websocket: WebSocket) -> bool:
-    """Authenticate WebSocket connections in multi-tenant mode.
+    """Authenticate WebSocket connections.
 
     BaseHTTPMiddleware only intercepts HTTP requests, so WebSocket
     connections must be authenticated here to establish tenant context.
-    Returns True if the request is authorized (or single-tenant mode).
+    Single-tenant mode checks server.api_key only when proxy.require_api_key
+    is set; otherwise proxy WebSockets stay open as before.
+    Returns True if the request is authorized.
     """
     provider = getattr(websocket.app.state, "tenant_provider", None)
     if provider is None:
+        config = get_config()
+        if not config.proxy.require_api_key:
+            return True
+        expected = (config.server.api_key or "").strip()
+        supplied = websocket.headers.get(SANDBOX_API_KEY_HEADER) or ""
+        if not expected or not hmac.compare_digest(supplied.encode(), expected.encode()):
+            await _fail_client_websocket(
+                websocket, status.WS_1008_POLICY_VIOLATION, "missing or invalid API key"
+            )
+            return False
+        set_current_tenant(None)
         return True
 
     api_key = websocket.headers.get(SANDBOX_API_KEY_HEADER)
