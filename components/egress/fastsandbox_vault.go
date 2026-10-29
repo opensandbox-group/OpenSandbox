@@ -77,6 +77,13 @@ func (s *fastSandboxPolicyServer) handleVaultRelay(w http.ResponseWriter, r *htt
 		return
 	}
 	subj := subject.FromSandboxUID(uid)
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 && r.Method != http.MethodGet {
+		record, err := s.readOwnerRecord(subj)
+		if err != nil || record != nil && record.VaultContract != nil {
+			http.Error(w, "Vault writer requires the conditional state endpoint", http.StatusPreconditionRequired)
+			return
+		}
+	}
 	switch r.Method {
 	case http.MethodGet:
 		full, status, msg, err := s.readRelayVault(r, subj)

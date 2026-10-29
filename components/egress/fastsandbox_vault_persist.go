@@ -568,6 +568,20 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 	if s.vaultFiles == nil {
 		return
 	}
+	// The strict writer never infers initialization/recovery from file absence.
+	// Its separate verify operation must re-establish the in-process ACK.
+	if s.actionsAPIVersion == "sandbox.fast.io/actions/v2" {
+		record, err := s.readOwnerRecord(subj)
+		if err != nil || record != nil && record.VaultContract != nil {
+			s.mu.Lock()
+			entry, live := s.vaults[subj]
+			if !live || entry.fence != fence || !entry.v2Verified {
+				s.vaults[subj] = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence, vaultStateUnknown: true, vaultStateProtected: true, degraded: "Vault initialization verification required"}
+			}
+			s.mu.Unlock()
+			return
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	protectedBefore := false
