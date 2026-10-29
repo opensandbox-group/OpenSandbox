@@ -2972,3 +2972,50 @@ func TestCreateSession_SendsCwd(t *testing.T) {
 		assert.Fail(t, fmt.Sprintf("cwd = %q, want /workspace (regression: request body was dropped)", gotCwd))
 	}
 }
+
+func TestUploadFiles_PreservesMultipartContentType(t *testing.T) {
+	for _, headerName := range []string{"Content-Type", "content-type"} {
+		t.Run(headerName, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseMultipartForm(1 << 20); err != nil {
+					t.Errorf("multipart request must retain its generated boundary: %v", err)
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer r.MultipartForm.RemoveAll()
+				if r.Header.Get("X-Test-Header") != "preserved" {
+					t.Errorf("custom header was lost")
+				}
+				files := r.MultipartForm.File["file"]
+				if len(files) != 2 || len(r.MultipartForm.File["metadata"]) != 2 {
+					t.Errorf("expected two file and metadata parts, got %+v", r.MultipartForm.File)
+				}
+				for i, part := range files {
+					file, err := part.Open()
+					if err != nil {
+						t.Error(err)
+						continue
+					}
+					data, err := io.ReadAll(file)
+					file.Close()
+					if err != nil || string(data) != fmt.Sprintf("file-%d", i) {
+						t.Errorf("part %d: data=%q err=%v", i, data, err)
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+			client := NewExecdClient(srv.URL, "token", WithHeaders(map[string]string{
+				headerName: "application/json", "X-Test-Header": "preserved",
+			}))
+			entries := []UploadFileEntry{}
+			for i := 0; i < 2; i++ {
+				entries = append(entries, UploadFileEntry{File: strings.NewReader(fmt.Sprintf("file-%d", i)),
+					Options: UploadFileOptions{Metadata: FileMetadata{Path: fmt.Sprintf("/tmp/file-%d", i)}}})
+			}
+			if err := client.UploadFiles(context.Background(), entries); err != nil {
+				t.Fatalf("UploadFiles with a default JSON Content-Type: %v", err)
+			}
+		})
+	}
+}
