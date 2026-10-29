@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // ExecdClient provides access to the OpenSandbox Execd API for code execution,
@@ -353,7 +354,11 @@ func (e *ExecdClient) UploadFiles(ctx context.Context, entries []UploadFileEntry
 
 	req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
 	for k, v := range e.client.headers {
-		req.Header.Set(k, v)
+		// The generated multipart type includes the boundary used by the body.
+		// A client-wide default must not replace it.
+		if !strings.EqualFold(k, "Content-Type") {
+			req.Header.Set(k, v)
+		}
 	}
 	if e.client.apiKey != "" {
 		req.Header.Set(e.client.authHeader, e.client.apiKey)
