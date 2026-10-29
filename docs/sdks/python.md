@@ -459,6 +459,10 @@ This requires Linux and an Execd version that supports filesystem execution iden
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 
+`SandboxFilter` and `SnapshotFilter` use 1-based page numbers and page sizes from
+1 to 200. Omit these fields to use the server defaults. Use `page=1` for the first
+page; zero page numbers and page sizes outside this range fail local validation.
+
 ```python
 from opensandbox.manager import SandboxManager
 from opensandbox.models.sandboxes import SandboxFilter

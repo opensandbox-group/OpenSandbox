@@ -1095,15 +1095,15 @@ class SandboxFilter(BaseModel):
     @field_validator("page_size")
     @classmethod
     def page_size_must_be_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("Page size must be positive")
+        if v is not None and not 1 <= v <= 200:
+            raise ValueError("Page size must be between 1 and 200")
         return v
 
     @field_validator("page")
     @classmethod
     def page_must_be_non_negative(cls, v: int | None) -> int | None:
-        if v is not None and v < 0:
-            raise ValueError("Page must be non-negative")
+        if v is not None and v < 1:
+            raise ValueError("Page must be positive")
         return v
 
     model_config = ConfigDict(populate_by_name=True)
@@ -1133,15 +1133,15 @@ class SnapshotFilter(BaseModel):
     @field_validator("page_size")
     @classmethod
     def snapshot_page_size_must_be_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("Page size must be positive")
+        if v is not None and not 1 <= v <= 200:
+            raise ValueError("Page size must be between 1 and 200")
         return v
 
     @field_validator("page")
     @classmethod
     def snapshot_page_must_be_non_negative(cls, v: int | None) -> int | None:
-        if v is not None and v < 0:
-            raise ValueError("Page must be non-negative")
+        if v is not None and v < 1:
+            raise ValueError("Page must be positive")
         return v
 
     model_config = ConfigDict(populate_by_name=True)
