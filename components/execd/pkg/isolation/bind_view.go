@@ -40,10 +40,11 @@ import (
 // The bind source is an operator-allowlisted trusted host directory
 // (validateBinds resolves symlinks and enforces allowed_writable before the
 // session starts). However, because session.run writes land live in a rw bind
-// source, sandbox code can plant a symlink inside the bind pointing outside
-// the allowed source; mutations through any symlinked component under the
-// source are rejected with rejectSymlinked, and reads reject symlinks whose
-// resolved target escapes the bind source.
+// source, sandbox code can plant (or race in) a symlink pointing outside the
+// source. Every operation therefore goes through an os.Root opened on the
+// source: path resolution happens component by component relative to that
+// directory fd, symlinks that stay inside the source are followed, and any
+// that would escape it are refused atomically with the operation (#2332).
 //
 // Compile-time check: BindView satisfies vfs.FS.
 var _ vfs.FS = (*BindView)(nil)
@@ -63,6 +64,8 @@ func NewBindView(source string, readOnly bool, uid, gid uint32) *BindView {
 	return &BindView{Source: source, ReadOnly: readOnly, Uid: uid, Gid: gid}
 }
 
+// resolve maps a namespace path to a path relative to b.Source, suitable
+// for the os.Root returned by openRoot.
 func (b *BindView) resolve(path string) (string, error) {
 	p, err := b.rawResolve(path)
 	if err != nil {
@@ -87,63 +90,77 @@ func (b *BindView) rawResolve(path string) (string, error) {
 	} else if cleaned == b.Source {
 		cleaned = "."
 	}
-	if strings.HasPrefix(cleaned, "..") {
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	if cleaned == "" {
+		cleaned = "."
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", fmt.Errorf("path traversal denied: %s", path)
 	}
-	return filepath.Join(b.Source, cleaned), nil
+	return cleaned, nil
 }
 
-// rejectSymlinked denies paths that traverse any symlinked component under
-// b.Source. session.run writes land live in a rw bind source, so sandbox code
-// can plant a symlink pointing outside the allowed source; mutating through it
-// on the host would bypass the bwrap mount namespace (#2332).
-func (b *BindView) rejectSymlinked(p string) error {
-	rel, err := filepath.Rel(b.Source, p)
+// openRoot resolves path and opens the bind source as an os.Root. The caller
+// must Close the returned root.
+func (b *BindView) openRoot(path string) (*os.Root, string, error) {
+	rel, err := b.resolve(path)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-	if rel == "." || rel == "" {
-		return nil
+	root, err := os.OpenRoot(b.Source)
+	if err != nil {
+		return nil, "", err
 	}
-	check := filepath.Clean(b.Source)
-	for _, seg := range strings.Split(filepath.Clean(rel), string(filepath.Separator)) {
+	return root, b.rebaseLinks(root, rel), nil
+}
+
+// maxLinkHops bounds rebaseLinks' symlink expansion, like the kernel's
+// MAXSYMLINKS.
+const maxLinkHops = 40
+
+// rebaseLinks rewrites absolute symlinks that point back into b.Source into
+// their source-relative form, since os.Root refuses every absolute link while
+// such links legitimately resolve for the files API. It is purely a path
+// rewrite: the caller still performs the operation through root, so a link
+// swapped after this walk is resolved (and contained) by os.Root itself.
+// Anything it cannot rewrite is returned unchanged for os.Root to refuse.
+func (b *BindView) rebaseLinks(root *os.Root, rel string) string {
+	src := filepath.Clean(b.Source)
+	done := "."
+	rest := strings.Split(rel, "/")
+	for hops := 0; len(rest) > 0; {
+		seg := rest[0]
+		rest = rest[1:]
 		if seg == "" || seg == "." {
 			continue
 		}
-		check = filepath.Join(check, seg)
-		info, err := os.Lstat(check)
+		next := filepath.Join(done, seg)
+		if strings.HasPrefix(next, "..") {
+			return rel
+		}
+		info, err := root.Lstat(next)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			done = next
+			continue
+		}
+		if hops++; hops > maxLinkHops {
+			return rel
+		}
+		target, err := root.Readlink(next)
 		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
+			return rel
+		}
+		if filepath.IsAbs(target) {
+			t := filepath.Clean(target)
+			if t != src && !strings.HasPrefix(t, src+"/") {
+				return rel
 			}
-			return err
+			done = "."
+			target = strings.TrimPrefix(strings.TrimPrefix(t, src), "/")
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink target denied: %s", check)
-		}
+		rest = append(strings.Split(target, "/"), rest...)
 	}
-	return nil
-}
-
-// rejectSymlinkEscape allows intra-bind symlinks on reads (matching namespace
-// traversal semantics) while rejecting symlinks under b.Source whose resolved
-// target escapes the bind source (#2332).
-func (b *BindView) rejectSymlinkEscape(p string) error {
-	if b.rejectSymlinked(p) == nil {
-		return nil
-	}
-	srcReal, err := filepath.EvalSymlinks(filepath.Clean(b.Source))
-	if err != nil {
-		srcReal = filepath.Clean(b.Source)
-	}
-	targetReal, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return fmt.Errorf("symlink target denied: %s", p)
-	}
-	if srcReal != "/" && targetReal != srcReal && !strings.HasPrefix(targetReal, srcReal+string(filepath.Separator)) {
-		return fmt.Errorf("symlink target denied: %s", p)
-	}
-	return nil
+	return done
 }
 
 func (b *BindView) denyWrite(op string) error {
@@ -151,153 +168,143 @@ func (b *BindView) denyWrite(op string) error {
 }
 
 func (b *BindView) Stat(path string) (os.FileInfo, error) {
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.rejectSymlinkEscape(p); err != nil {
-		return nil, err
-	}
-	return os.Stat(p)
+	defer root.Close()
+	return root.Stat(rel)
 }
 
 func (b *BindView) ReadFile(path string) ([]byte, error) {
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.rejectSymlinkEscape(p); err != nil {
-		return nil, err
-	}
-	return os.ReadFile(p)
+	defer root.Close()
+	return root.ReadFile(rel)
 }
 
 func (b *BindView) WriteFile(path string, data []byte, perm os.FileMode) error {
 	if b.ReadOnly {
 		return b.denyWrite("write")
 	}
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return err
 	}
-	if err := b.rejectSymlinked(p); err != nil {
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := root.WriteFile(rel, data, perm); err != nil {
 		return err
 	}
-	return writeFileStaged(p, data, perm, true, newFileOwner(b.Uid, b.Gid))
+	return root.Chown(rel, int(b.Uid), int(b.Gid))
 }
 
 func (b *BindView) WriteFileReader(path string, r io.Reader, perm os.FileMode) (int64, error) {
 	if b.ReadOnly {
 		return 0, b.denyWrite("write")
 	}
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return 0, err
 	}
-	if err := b.rejectSymlinked(p); err != nil {
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 		return 0, err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
 		return 0, err
 	}
-	return writeReaderStaged(p, r, perm, true, newFileOwner(b.Uid, b.Gid))
+	defer f.Close()
+	n, err := io.Copy(f, r)
+	if err != nil {
+		return n, err
+	}
+	// Chown the open fd so a concurrent swap of the path cannot redirect it.
+	return n, f.Chown(int(b.Uid), int(b.Gid))
 }
 
 func (b *BindView) Remove(path string) error {
 	if b.ReadOnly {
 		return b.denyWrite("remove")
 	}
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return err
 	}
-	if err := b.rejectSymlinked(p); err != nil {
-		return err
-	}
-	return os.Remove(p)
+	defer root.Close()
+	return root.Remove(rel)
 }
 
 func (b *BindView) RemoveAll(path string) error {
 	if b.ReadOnly {
 		return b.denyWrite("remove")
 	}
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return err
 	}
-	if err := b.rejectSymlinked(p); err != nil {
-		return err
-	}
-	return os.RemoveAll(p)
+	defer root.Close()
+	return root.RemoveAll(rel)
 }
 
 func (b *BindView) MkdirAll(path string, perm os.FileMode) error {
 	if b.ReadOnly {
 		return b.denyWrite("mkdir")
 	}
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return err
 	}
-	if err := b.rejectSymlinked(p); err != nil {
+	defer root.Close()
+	if err := root.MkdirAll(rel, perm); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(p, perm); err != nil {
-		return err
-	}
-	return os.Chown(p, int(b.Uid), int(b.Gid))
+	return root.Chown(rel, int(b.Uid), int(b.Gid))
 }
 
 func (b *BindView) Rename(oldPath, newPath string) error {
 	if b.ReadOnly {
 		return b.denyWrite("rename")
 	}
-	oldP, err := b.resolve(oldPath)
+	root, oldRel, err := b.openRoot(oldPath)
 	if err != nil {
 		return err
 	}
-	newP, err := b.resolve(newPath)
+	defer root.Close()
+	newRel, err := b.resolve(newPath)
 	if err != nil {
 		return err
 	}
-	if err := b.rejectSymlinked(oldP); err != nil {
+	if err := root.MkdirAll(filepath.Dir(newRel), 0o755); err != nil {
 		return err
 	}
-	if err := b.rejectSymlinked(newP); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(newP), 0o755); err != nil {
-		return err
-	}
-	return os.Rename(oldP, newP)
+	return root.Rename(oldRel, newRel)
 }
 
 func (b *BindView) Chmod(path string, mode os.FileMode) error {
 	if b.ReadOnly {
 		return b.denyWrite("chmod")
 	}
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return err
 	}
-	if err := b.rejectSymlinked(p); err != nil {
-		return err
-	}
-	return os.Chmod(p, mode)
+	defer root.Close()
+	return root.Chmod(rel, mode)
 }
 
 func (b *BindView) ReadDir(path string) ([]os.DirEntry, error) {
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.rejectSymlinkEscape(p); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(p)
+	defer root.Close()
+	entries, err := fs.ReadDir(root.FS(), rel)
 	if err != nil {
 		return nil, err
 	}
@@ -305,27 +312,28 @@ func (b *BindView) ReadDir(path string) ([]os.DirEntry, error) {
 }
 
 func (b *BindView) Open(path string) (*os.File, error) {
-	p, err := b.resolve(path)
+	root, rel, err := b.openRoot(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.rejectSymlinkEscape(p); err != nil {
-		return nil, err
-	}
-	return os.Open(p)
+	defer root.Close()
+	return root.Open(rel)
 }
 
 // Search walks the source directory (no whiteout masking) and returns paths
 // relative to the source root, matching MergedView.Search's convention; the
 // router rebases rewritten-route results onto the namespace mount path.
+// The walk runs inside the source's os.Root, so a search root that descends
+// through an escaping symlink is refused instead of walked on the host.
 func (b *BindView) Search(root, pattern string) ([]string, error) {
-	rootP, err := b.resolve(root)
+	r, rel, err := b.openRoot(root)
 	if err != nil {
 		return nil, err
 	}
+	defer r.Close()
 
 	var results []string
-	_ = filepath.WalkDir(rootP, func(p string, d fs.DirEntry, err error) error {
+	_ = fs.WalkDir(r.FS(), rel, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // skip unreadable dirs
 		}
@@ -335,12 +343,8 @@ func (b *BindView) Search(root, pattern string) ([]string, error) {
 		if isStagingName(d.Name()) {
 			return nil
 		}
-		rel, relErr := filepath.Rel(b.Source, p)
-		if relErr != nil {
-			return nil //nolint:nilerr // skip paths outside the source
-		}
-		if matched, _ := filepath.Match(pattern, filepath.Base(rel)); matched {
-			results = append(results, rel)
+		if matched, _ := filepath.Match(pattern, d.Name()); matched {
+			results = append(results, p)
 		}
 		return nil
 	})

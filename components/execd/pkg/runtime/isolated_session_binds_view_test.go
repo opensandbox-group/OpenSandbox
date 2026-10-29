@@ -314,9 +314,6 @@ func TestNewMergedView_BindViewPassthroughSemantics(t *testing.T) {
 	if err := view.Remove("/data/link/victim.txt"); err == nil {
 		t.Fatal("Remove through symlinked parent accepted")
 	}
-	if err := view.RemoveAll("/data/link"); err == nil {
-		t.Fatal("RemoveAll through symlinked parent accepted")
-	}
 	if err := view.Chmod("/data/link/victim.txt", 0o777); err == nil {
 		t.Fatal("Chmod through symlinked parent accepted")
 	}
@@ -334,6 +331,13 @@ func TestNewMergedView_BindViewPassthroughSemantics(t *testing.T) {
 	}
 	if _, err := os.Stat(victim); err != nil {
 		t.Fatalf("victim deleted or moved through symlink escape: %v", err)
+	}
+	// RemoveAll on the planted link drops the link, never its target tree.
+	if err := view.RemoveAll("/data/link"); err != nil {
+		t.Fatalf("RemoveAll of the planted link itself: %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("RemoveAll followed the planted link: %v", err)
 	}
 }
 

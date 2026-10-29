@@ -414,7 +414,6 @@ func TestMultiMergedView_RewrittenRootRouting(t *testing.T) {
 		_, err := router.WriteFileReader("/data/escape/stream.txt", strings.NewReader("x"), 0o644)
 		assert.Error(t, err)
 		assert.Error(t, router.Remove("/data/escape/victim.txt"))
-		assert.Error(t, router.RemoveAll("/data/escape"))
 		assert.Error(t, router.MkdirAll("/data/escape/newdir", 0o755))
 		assert.Error(t, router.Chmod("/data/escape/victim.txt", 0o777))
 		assert.Error(t, router.ReplaceContent("/data/escape/victim.txt", "untouched", "pwned"))
@@ -439,6 +438,15 @@ func TestMultiMergedView_RewrittenRootRouting(t *testing.T) {
 		assert.True(t, os.IsNotExist(err))
 		_, err = os.Stat(filepath.Join(outside, "newdir"))
 		assert.True(t, os.IsNotExist(err))
+
+		// RemoveAll on the planted link removes the link itself (like rm -rf
+		// inside the namespace), never the tree it points at.
+		require.NoError(t, router.RemoveAll("/data/escape"))
+		_, err = os.Lstat(escapeLink)
+		assert.True(t, os.IsNotExist(err))
+		got, err = os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "untouched", string(got))
 	})
 
 	t.Run("bind_has_no_whiteout_semantics", func(t *testing.T) {
