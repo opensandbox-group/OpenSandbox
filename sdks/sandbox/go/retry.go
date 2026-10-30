@@ -318,9 +318,16 @@ func parseRetryAfterValue(val string) (time.Duration, bool) {
 	if val == "" {
 		return 0, false
 	}
-	if secs, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+	if secs, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
 		if secs < 0 {
 			return 0, true
+		}
+		// Saturate before multiplying: wrapping to a negative duration would
+		// turn server back-pressure into an immediate retry. ParseInt also
+		// saturates positive values that exceed int64, independently of the
+		// platform's int width.
+		if secs > math.MaxInt64/int64(time.Second) {
+			return time.Duration(math.MaxInt64), true
 		}
 		return time.Duration(secs) * time.Second, true
 	}
