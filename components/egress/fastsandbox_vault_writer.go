@@ -79,6 +79,55 @@ func (s *fastSandboxPolicyServer) writerFile(subj subject.Subject, record *stric
 	return vf, body, err
 }
 
+// readWriterOwner validates request identity before consulting durable authority.
+// The caller holds the owner stripe. Returning the record avoids a second read
+// whose failure could otherwise bypass live-state invalidation.
+func (s *fastSandboxPolicyServer) readWriterOwner(w http.ResponseWriter, r *http.Request, uid string, contract *strictVaultContract) *strictOwnerRecord {
+	owner, err := ownerFromRequest(r)
+	if err != nil || owner.SandboxUID != uid {
+		http.Error(w, "relay owner must match the path Sandbox UID", 400)
+		return nil
+	}
+	subj := subject.FromSandboxUID(uid)
+	s.mu.Lock()
+	current, found := s.actionOwners[subj]
+	entry := s.vaults[subj]
+	s.mu.Unlock()
+	if !found || !current.Matches(owner) {
+		http.Error(w, "relay owner is not the current registered owner", 412)
+		return nil
+	}
+	// A bad initialization request cannot invalidate a legitimate live Vault,
+	// even when the durable owner record happens to be unavailable.
+	if contract != nil && entry.fileMeta.version == 2 && (contract.InitializationID != entry.fileMeta.initializationID || contract.Lineage != entry.fileMeta.lineage) {
+		http.Error(w, "initialization contract mismatch", 412)
+		return nil
+	}
+	record, err := s.readOwnerRecord(subj)
+	if err != nil || record == nil {
+		s.policyCommitMu.Lock()
+		s.mu.Lock()
+		current, found = s.actionOwners[subj]
+		entry, exists := s.vaults[subj]
+		expected := subject.Fencing{RuntimeInstanceID: owner.RuntimeInstanceID, AttachmentID: owner.AttachmentID}
+		if found && current.Matches(owner) && exists && entry.fence == expected && s.fenceMatchesLocked(subj, expected) && entry.v2Verified {
+			entry.v2Verified = false
+			entry.vaultStateUnknown = true
+			entry.store = credentialvault.NewStore(nil, func() bool { return true })
+			s.vaults[subj] = entry
+		}
+		s.mu.Unlock()
+		s.policyCommitMu.Unlock()
+		http.Error(w, "strict owner authority unavailable", 412)
+		return nil
+	}
+	if record.Phase != "active" || !record.Owner.Matches(owner) {
+		http.Error(w, "strict owner is not active", 412)
+		return nil
+	}
+	return record
+}
+
 // Only the trusted manager may call this endpoint. Fresh is a transient CAS
 // grant from the paired control plane, not a persisted replay permission.
 // A pre-existing contract always refuses fresh, including after partial init.
@@ -110,12 +159,8 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 	gate := s.ownerLock(subj)
 	gate.Lock()
 	defer gate.Unlock()
-	if !s.validateRelayOwner(w, r, uid) {
-		return
-	}
-	record, err := s.readOwnerRecord(subj)
-	if err != nil || record == nil {
-		http.Error(w, "owner unavailable", 503)
+	record := s.readWriterOwner(w, r, uid, &req.Contract)
+	if record == nil {
 		return
 	}
 	s.policyCommitMu.Lock()
@@ -248,15 +293,11 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 	gate := s.ownerLock(subj)
 	gate.RLock()
 	defer gate.RUnlock()
-	if !s.validateRelayOwner(w, r, uid) {
+	record := s.readWriterOwner(w, r, uid, nil)
+	if record == nil {
 		return
 	}
-	record, err := s.readOwnerRecord(subj)
-	if err != nil {
-		http.Error(w, "owner unavailable", 503)
-		return
-	}
-	if record == nil || record.VaultContract == nil {
+	if record.VaultContract == nil {
 		http.Error(w, "Vault writer not selected", 404)
 		return
 	}
