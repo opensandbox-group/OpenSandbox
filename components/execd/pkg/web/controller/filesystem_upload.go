@@ -31,6 +31,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -350,6 +351,24 @@ func isUploadStagingName(name string) bool {
 	}
 	_, err := hex.DecodeString(suffix)
 	return err == nil
+}
+
+// isAnyStagingName reports whether name is either kind of staging file. The
+// ordinary routes take arbitrary host paths, so they can reach an
+// isolated-session workspace or a bind source; filtering only their own prefix
+// would expose that path's in-flight uploads.
+func isAnyStagingName(name string) bool {
+	return isUploadStagingName(name) || isolation.IsStagingName(name)
+}
+
+// rejectStagingPath refuses a path whose cleaned final component is a staging
+// file, so a name-addressed ordinary route cannot read, stat, rename or delete
+// another route's in-flight upload.
+func rejectStagingPath(path string) error {
+	if isAnyStagingName(filepath.Base(filepath.Clean(path))) {
+		return &os.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	return nil
 }
 
 // createUploadTemp creates the staging file with perm. A new destination keeps

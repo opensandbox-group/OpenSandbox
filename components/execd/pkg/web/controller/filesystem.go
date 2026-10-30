@@ -74,6 +74,10 @@ func (c *FilesystemController) GetFilesInfo() {
 
 	resp := make(map[string]model.FileInfo)
 	for _, filePath := range paths {
+		if err := rejectStagingPath(filePath); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		fileInfo, err := GetFileInfo(filePath)
 		if err != nil {
 			c.handleFileError(err)
@@ -92,6 +96,10 @@ func (c *FilesystemController) RemoveFiles() {
 
 	paths := c.ctx.QueryArray("path")
 	for _, filePath := range paths {
+		if err := rejectStagingPath(filePath); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := DeleteFile(filePath); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
@@ -121,6 +129,10 @@ func (c *FilesystemController) ChmodFiles() {
 	}
 
 	for file, item := range request {
+		if err := rejectStagingPath(file); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		err := ChmodFile(file, item)
 		if err != nil {
 			c.RespondError(
@@ -151,6 +163,14 @@ func (c *FilesystemController) RenameFiles() {
 	}
 
 	for _, renameItem := range request {
+		if err := rejectStagingPath(renameItem.Src); err != nil {
+			c.handleFileError(err)
+			return
+		}
+		if err := rejectStagingPath(renameItem.Dest); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := RenameFile(renameItem); err != nil {
 			c.handleFileError(err)
 			return
@@ -307,7 +327,7 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 		}
 
 		for _, entry := range dirEntries {
-			if isUploadStagingName(entry.Name()) {
+			if isAnyStagingName(entry.Name()) {
 				continue
 			}
 			entryPath := filepath.Join(dir, entry.Name())
@@ -380,7 +400,7 @@ func (c *FilesystemController) SearchFiles() {
 		if info.IsDir() {
 			return nil
 		}
-		if isUploadStagingName(info.Name()) {
+		if isAnyStagingName(info.Name()) {
 			return nil
 		}
 
@@ -438,6 +458,10 @@ func (c *FilesystemController) ReplaceContent() {
 		origPath := file
 		file, err := pathutil.ExpandAbsPath(file)
 		if err != nil {
+			c.handleFileError(err)
+			return
+		}
+		if err := rejectStagingPath(file); err != nil {
 			c.handleFileError(err)
 			return
 		}

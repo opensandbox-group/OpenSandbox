@@ -424,6 +424,39 @@ func TestReplaceContentFailsUnknownFile(t *testing.T) {
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+// ReplaceContent reads and truncates the target in place, so it must resolve a
+// trailing "/." the same way the filesystem helpers do before checking the
+// reserved staging names. Otherwise it can expose or corrupt an upload another
+// route is still staging.
+func TestReplaceContentRejectsStagingPath(t *testing.T) {
+	for _, stagingName := range []string{
+		".osb-staging-0123456789abcdef",
+		uploadTempPattern + "0123456789abcdef",
+	} {
+		t.Run(stagingName, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), stagingName)
+			require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o644))
+
+			requestPath := target + string(os.PathSeparator) + "."
+			body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+				requestPath: {
+					Old: "world",
+					New: "universe",
+				},
+			})
+			require.NoError(t, err)
+
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+			ctrl.ReplaceContent()
+
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, "hello world", string(got), "the in-flight staging file must not be rewritten")
+		})
+	}
+}
+
 func TestFormatContentDisposition(t *testing.T) {
 	tests := []struct {
 		name     string
