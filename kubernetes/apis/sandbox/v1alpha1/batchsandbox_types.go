@@ -184,6 +184,10 @@ type BatchSandboxStatus struct {
 	// +optional
 	PauseObservedGeneration int64 `json:"pauseObservedGeneration,omitempty"`
 
+	// FailedPodUIDs records the UIDs of Pods responsible for the current failure state.
+    // +optional
+    FailedPodUIDs []string `json:"failedPodUIDs,omitempty"`
+
 	// Conditions records lifecycle and operational state details.
 	// +optional
 	// +listType=map
