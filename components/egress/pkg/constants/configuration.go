@@ -39,6 +39,23 @@ const (
 	EnvCredentialVaultRequireScopedMatch = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH"
 )
 
+// Credential header resolver client (OSEP-0025): egress → resolver transport
+// configuration. Ownership of this surface lives with the resolver client
+// (pkg/credentialvault/resolver_client.go); interception consumers only
+// consume the client interface.
+//
+// EnvCredentialResolverTimeout: per-resolve deadline in seconds (1..120).
+// EnvCredentialResolverMaxConcurrency: in-flight resolve cap (1..1024).
+// EnvCredentialResolverAuth: origin-scoped bearer tokens
+// "scheme://host:port=token[,...]" (D5). An endpoint whose normalized origin
+// has no entry resolves WITHOUT an Authorization header — there is no global
+// token. Never logged.
+const (
+	EnvCredentialResolverTimeout        = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"
+	EnvCredentialResolverMaxConcurrency = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY"
+	EnvCredentialResolverAuth           = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH"
+)
+
 // Fast Sandbox profile: the egress control plane serves N sandboxes
 // sharing one host/network domain; sidecar remains the default profile.
 const (
@@ -197,6 +214,9 @@ const (
 	DefaultMaxEgressRules        = 4096
 	DefaultDNSUpstreamTimeoutSec = 2
 	OpenSandboxRootDir           = "/opt/opensandbox"
+	// Credential header resolver client defaults (OSEP-0025).
+	DefaultCredentialResolverTimeoutSeconds = 2
+	DefaultCredentialResolverMaxConcurrency = 32
 	// OSEP-0023 live admission defaults (experimental sidecar only).
 	DefaultRevisionTLSCapacity         = 1024
 	DefaultRevisionRequestCapacity     = 4096
