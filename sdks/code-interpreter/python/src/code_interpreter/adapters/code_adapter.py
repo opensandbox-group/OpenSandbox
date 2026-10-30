@@ -25,6 +25,7 @@ import logging
 import time
 
 import httpx
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
@@ -119,6 +120,7 @@ class CodesAdapter(Codes):
             headers=headers,
             timeout=timeout,
             transport=main_transport,
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 
@@ -144,6 +146,7 @@ class CodesAdapter(Codes):
                 pool=None,
             ),
             transport=streaming_transport(sse_transport),
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
 
     async def _get_client(self):
