@@ -107,6 +107,9 @@ class InMemoryPoolStateStore:
             state = self._pools.get(pool_name)
             if state is not None:
                 state.entries.pop(sandbox_id, None)
+                state.queue = deque(
+                    queued_id for queued_id in state.queue if queued_id != sandbox_id
+                )
 
     def try_acquire_primary_lock(
         self, pool_name: str, owner_id: str, ttl: timedelta

@@ -138,6 +138,8 @@ There is no Python, JavaScript, or Kotlin `reconcile_interval` setting and no re
 - **`InMemoryPoolStateStore`** — single process only. Suitable for development, tests, and single-instance workers. Not process-wide for gunicorn/uvicorn workers, Celery, or Kubernetes replicas.
 - **Redis-backed store** (`RedisPoolStateStore`, `AsyncRedisPoolStateStore`, `sandbox-pool-redis` on the JVM, `poolredis` in Go, `@alibaba-group/opensandbox/pool-redis` in JavaScript) — required for multi-process or multi-pod deployments. All nodes in one logical pool must share the same `pool_name` and Redis `key_prefix`, and each process must use a **unique** `owner_id`.
 
+Python's synchronous and asynchronous in-memory stores keep one idle entry per sandbox ID within each pool. Removing and reinserting an ID moves it to the end of that pool's FIFO queue; snapshots list it only once. Removing an absent ID and adding an ID that is already idle are no-ops.
+
 ![Single-node vs distributed pool topology](../public/images/client-pool-topology.svg)
 
 ### Rules that apply to every deployment
