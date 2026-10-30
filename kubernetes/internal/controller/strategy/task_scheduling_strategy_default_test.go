@@ -15,11 +15,11 @@
 package strategy
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
@@ -60,11 +60,22 @@ func TestDefaultTaskSchedulingStrategy_NeedTaskScheduling(t *testing.T) {
 	}
 }
 
+func shardTaskPatch(raw string) sandboxv1alpha1.TaskTemplatePatch {
+	var patch sandboxv1alpha1.TaskTemplatePatch
+	if err := json.Unmarshal([]byte(raw), &patch); err != nil {
+		panic(err)
+	}
+	return patch
+}
+
 func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 	type args struct {
 		batchSbx *sandboxv1alpha1.BatchSandbox
 		idx      int
 	}
+	baseTimeout := int64(30)
+	patchedTimeout := int64(600)
+
 	tests := []struct {
 		name    string
 		args    args
@@ -115,10 +126,8 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 								},
 							},
 						},
-						ShardTaskPatches: []runtime.RawExtension{
-							{
-								Raw: []byte(`{"spec":{"process":{"command":["echo","world"]}}}`),
-							},
+						ShardTaskPatches: []sandboxv1alpha1.TaskTemplatePatch{
+							shardTaskPatch(`{"spec":{"process":{"command":["echo","world"]}}}`),
 						},
 					},
 				},
@@ -133,7 +142,40 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "task spec with invalid patch",
+			name: "shard patch timeout overrides template timeout",
+			args: args{
+				batchSbx: &sandboxv1alpha1.BatchSandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-bs",
+						Namespace: "default",
+					},
+					Spec: sandboxv1alpha1.BatchSandboxSpec{
+						TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{
+							Spec: sandboxv1alpha1.TaskSpec{
+								Process: &sandboxv1alpha1.ProcessTask{
+									Command: []string{"echo", "hello"},
+								},
+								TimeoutSeconds: &baseTimeout,
+							},
+						},
+						ShardTaskPatches: []sandboxv1alpha1.TaskTemplatePatch{
+							shardTaskPatch(`{"spec":{"timeoutSeconds":600}}`),
+						},
+					},
+				},
+				idx: 0,
+			},
+			want: &api.Task{
+				Name: "test-bs-0",
+				Process: &api.Process{
+					Command:        []string{"echo", "hello"},
+					TimeoutSeconds: &patchedTimeout,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "task spec with invalid legacy patch",
 			args: args{
 				batchSbx: &sandboxv1alpha1.BatchSandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -148,9 +190,13 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 								},
 							},
 						},
-						ShardTaskPatches: []runtime.RawExtension{
+						ShardTaskPatches: []sandboxv1alpha1.TaskTemplatePatch{
 							{
-								Raw: []byte(`{"invalid json`),
+								Spec: sandboxv1alpha1.TaskSpecPatch{
+									Process: sandboxv1alpha1.ProcessTaskPatch{
+										Extra: map[string]json.RawMessage{"args": json.RawMessage("3600")},
+									},
+								},
 							},
 						},
 					},
@@ -176,10 +222,8 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 								},
 							},
 						},
-						ShardTaskPatches: []runtime.RawExtension{
-							{
-								Raw: []byte(`{"spec":{"process":{"command":["echo","world"]}}}`),
-							},
+						ShardTaskPatches: []sandboxv1alpha1.TaskTemplatePatch{
+							shardTaskPatch(`{"spec":{"process":{"command":["echo","world"]}}}`),
 						},
 					},
 				},
