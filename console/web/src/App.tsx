@@ -26,6 +26,7 @@ import { PoolsPage } from './pages/PoolsPage';
 import { SandboxCreatePage } from './pages/SandboxCreatePage';
 import { SandboxDetailPage } from './pages/SandboxDetailPage';
 import { SandboxListPage } from './pages/SandboxListPage';
+import { SandboxShellPage } from './pages/SandboxShellPage';
 import { SnapshotsPage } from './pages/SnapshotsPage';
 import { ComponentHealthPage } from './pages/platform/ComponentHealthPage';
 import { K8sEventsPage } from './pages/platform/K8sEventsPage';
@@ -74,6 +75,7 @@ export default function App() {
               <Route index element={<OverviewPage />} />
               <Route path="sandboxes" element={<SandboxListPage />} />
               <Route path="sandboxes/new" element={<SandboxCreatePage />} />
+              <Route path="sandboxes/:id/shell" element={<SandboxShellPage />} />
               <Route path="sandboxes/:id" element={<SandboxDetailPage />} />
               <Route
                 path="admin/sandboxes"

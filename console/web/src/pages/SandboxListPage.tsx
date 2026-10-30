@@ -22,6 +22,7 @@ import { sandboxApi } from '../api/client';
 import type { Sandbox } from '../api/types';
 import { SandboxStateTag } from '../components/SemanticTags';
 import { formatDateTime, formatDuration, SANDBOX_STATES, sandboxDisplayName } from '../utils/format';
+import { ShellLink } from '../components/ShellLink';
 
 export function SandboxListPage() {
   const navigate = useNavigate();
@@ -96,6 +97,7 @@ export function SandboxListPage() {
       render: (_, r) => (
         <Space>
           <Link to={`/sandboxes/${r.id}?tab=logs`}>日志</Link>
+          <ShellLink sandboxId={r.id} state={r.status?.state} />
         </Space>
       ),
     },
