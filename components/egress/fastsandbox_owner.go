@@ -32,10 +32,11 @@ import (
 // Owner records outlive policy/Vault deletion. A retired UID is not reusable
 // in this first strict slice; callers create a new UID instead of rebinding.
 type strictOwnerRecord struct {
-	Version string              `json:"version"`
-	Mode    string              `json:"mode"`
-	Owner   actionhandler.Owner `json:"owner"`
-	Phase   string              `json:"phase"`
+	Version       string               `json:"version"`
+	Mode          string               `json:"mode"`
+	Owner         actionhandler.Owner  `json:"owner"`
+	Phase         string               `json:"phase"`
+	VaultContract *strictVaultContract `json:"vaultContract,omitempty"`
 }
 
 // Disabling the opt-in must not turn an existing strict domain into a v1
@@ -98,6 +99,9 @@ func (s *fastSandboxPolicyServer) readOwnerRecord(subj subject.Subject) (*strict
 		(record.Phase != "active" && record.Phase != "retiring" && record.Phase != "retired") {
 		return nil, fmt.Errorf("unsupported or inconsistent strict owner record")
 	}
+	if record.VaultContract != nil && !record.VaultContract.valid() {
+		return nil, fmt.Errorf("unsupported Vault writer contract")
+	}
 	return &record, nil
 }
 
@@ -106,7 +110,18 @@ func (s *fastSandboxPolicyServer) writeOwnerRecord(subj subject.Subject, owner a
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(strictOwnerRecord{Version: constants.ActionsAPIVersionV2, Mode: "legacy", Owner: owner, Phase: phase})
+	record, err := s.readOwnerRecord(subj)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		record = &strictOwnerRecord{Version: constants.ActionsAPIVersionV2, Mode: "legacy", Owner: owner}
+	}
+	if !record.Owner.Matches(owner) {
+		return fmt.Errorf("owner changed")
+	}
+	record.Phase = phase
+	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}

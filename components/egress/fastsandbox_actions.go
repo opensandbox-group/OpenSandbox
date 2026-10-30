@@ -242,6 +242,12 @@ func (s *fastSandboxPolicyServer) handleActionsV2(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusOK, struct{}{})
 		return
 	}
+	if env.Operation == actionhandler.OperationRemoveBinding && record != nil && record.VaultContract != nil {
+		if err := s.retireWriterVault(subj, record); err != nil {
+			http.Error(w, "Vault retirement requires recovery", http.StatusServiceUnavailable)
+			return
+		}
+	}
 	status, err := s.dispatchAction(r.Context(), env)
 	if err != nil {
 		logEgressUpdateFailedError(fmt.Sprintf("Actions v2 %s for sandbox %s failed: %v", env.Operation, env.Sandbox.UID, err))

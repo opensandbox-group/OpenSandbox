@@ -284,3 +284,20 @@ func decodeSingleJSON(data []byte, out any) error {
 	}
 	return nil
 }
+
+// EncodeVaultFileV2 uses the existing strict reader as the encoding validator.
+// The caller owns authorization and monotonic lineage/sequence enforcement.
+func EncodeVaultFileV2(vf VaultFile, body VaultFileBody) ([]byte, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(vaultFileV2{Version: VaultFileVersion2, Incarnation: vf.Incarnation, AttachmentID: vf.AttachmentID, Revision: vf.Revision, State: vf.State, StateLineage: vf.StateLineage, StateRevision: vf.StateRevision, InitializationID: vf.InitializationID, Vault: raw})
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err = decodeVaultFileV2(out); err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
+}

@@ -302,9 +302,12 @@ def _relay(
     *,
     method: str,
     payload: Optional[bytes] = None,
+    state_endpoint: bool = False,
+    target: Optional[tuple[str, str]] = None,
 ) -> tuple[int, bytes]:
     """Run one relay op and return (status, body) for any 2xx outcome."""
-    namespace, uid = _resolve_subject(service, sandbox_id)
+    namespace, uid = target or _resolve_subject(service, sandbox_id)
+    prefix = "/vault-state/" if state_endpoint else _VAULT_PATH_PREFIX
     try:
         result = service.fastpath_client.invoke_handler_action(
             namespace,
@@ -312,7 +315,7 @@ def _relay(
             expected_uid=uid,
             handler=EGRESS_HANDLER,
             method=method,
-            path=f"{_VAULT_PATH_PREFIX}{uid}",
+            path=f"{prefix}{uid}",
             payload=payload,
         )
     except FastPathHandlerError as exc:
@@ -325,12 +328,72 @@ def _relay(
     return int(result.status), bytes(result.body)
 
 
+_WRITER_VERSION = "sandbox.fast.io/vault-writer/v2"
+
+
+def _read_writer_state(service, sandbox_id: str) -> Optional[dict]:
+    """Read once before constructing a write; never refresh a stale token.
+
+    Only 404 means this endpoint is not selected/supported. All uncertainty
+    fails closed. Even on fallback an initialized v2 receiver rejects the
+    legacy mutation endpoint, so an old server cannot write without a token.
+    """
+    target = _resolve_subject(service, sandbox_id)
+    try:
+        _, body = _relay(service, sandbox_id, method="GET", state_endpoint=True, target=target)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+    try:
+        result = json.loads(body)
+        token = result["token"]
+        if (
+            result["version"] != _WRITER_VERSION
+            or result["owner"]["sandboxUid"] != target[1]
+            or not isinstance(result["initializationId"], str)
+            or not result["initializationId"]
+            or not isinstance(token["lineage"], str)
+            or not token["lineage"]
+            or type(token["sequence"]) is not int
+            or not 0 < token["sequence"] <= 2**64 - 1
+            or result["state"] not in ("empty", "active", "deleted")
+            or (result["state"] == "active" and not isinstance(result.get("vault"), dict))
+        ):
+            raise ValueError("invalid state")
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
+        raise vault_relay_error(503, "Credential Vault internal state was invalid.") from exc
+    result["_target"] = target
+    return result
+
+
+def _writer_mutation(service, sandbox_id: str, method: str, state: dict, vault: dict) -> bytes:
+    # The target UID and token belong to the read that produced this payload.
+    # No retry here: ACK loss requires caller read-back, not a new token.
+    _, ack = _relay(
+        service, sandbox_id, method=method, state_endpoint=True,
+        target=state["_target"],
+        payload=json.dumps({"expectedState": state["token"], "vault": vault}).encode("utf-8"),
+    )
+    return ack
+
+
+def _require_active(state: dict) -> dict:
+    if state["state"] != "active":
+        raise vault_relay_error(404, "Credential Vault not found.")
+    return state["vault"]
+
+
 def relay_create(
     service, sandbox_id: str, request: CredentialVaultCreateRequest
 ) -> dict:
     """POST create-only; 409 when a vault already exists."""
-    payload = request.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
-    _, body = _relay(service, sandbox_id, method="POST", payload=payload)
+    state = _read_writer_state(service, sandbox_id)
+    if state is not None:
+        body = _writer_mutation(service, sandbox_id, "POST", state, request.model_dump(by_alias=True, exclude_none=True))
+    else:
+        payload = request.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
+        _, body = _relay(service, sandbox_id, method="POST", payload=payload)
     return _normalize_ack(body)
 
 
@@ -348,7 +411,9 @@ def _relay_get_full(service, sandbox_id: str) -> dict:
 
 def relay_get(service, sandbox_id: str) -> dict:
     """Public read: the full revision sanitized (values stripped)."""
-    return sanitize_full_revision(_relay_get_full(service, sandbox_id))
+    state = _read_writer_state(service, sandbox_id)
+    full = _require_active(state) if state is not None else _relay_get_full(service, sandbox_id)
+    return sanitize_full_revision(full)
 
 
 def relay_patch(
@@ -361,16 +426,25 @@ def relay_patch(
     commit and the stale PATCH sees 412).
     """
     with service.vault_lock(sandbox_id):
-        full = _relay_get_full(service, sandbox_id)
+        state = _read_writer_state(service, sandbox_id)
+        full = _require_active(state) if state is not None else _relay_get_full(service, sandbox_id)
         merged = merge_mutation(full, request)
-        _, ack = _relay(
-            service, sandbox_id, method="PUT", payload=json.dumps(merged).encode("utf-8")
-        )
+        if state is not None:
+            ack = _writer_mutation(service, sandbox_id, "PUT", state, merged)
+        else:
+            _, ack = _relay(
+                service, sandbox_id, method="PUT", payload=json.dumps(merged).encode("utf-8")
+            )
     return _normalize_ack(ack)
 
 
 def relay_delete(service, sandbox_id: str) -> None:
-    _relay(service, sandbox_id, method="DELETE")
+    state = _read_writer_state(service, sandbox_id)
+    if state is not None:
+        _require_active(state)
+        _writer_mutation(service, sandbox_id, "DELETE", state, {})
+    else:
+        _relay(service, sandbox_id, method="DELETE")
 
 
 def _project(state: dict, records_key: str) -> dict:

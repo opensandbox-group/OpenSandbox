@@ -280,6 +280,8 @@ func cloneGatewayDNSRefs(refs map[subject.Subject]netip.Addr) map[subject.Subjec
 func (s *fastSandboxPolicyServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		mux.HandleFunc(vaultInitializationPrefix, s.handleVaultInitialization)
+		mux.HandleFunc(vaultStatePrefix, s.handleVaultState)
 		mux.HandleFunc(constants.ActionsV2StatusPath, s.handleActionsV2Status)
 		mux.HandleFunc(constants.ActionsV2DispatchPath, s.handleActionsV2)
 		mux.HandleFunc(constants.ActionsV2OwnerPathPrefix, s.handleActionsV2Owner)
@@ -459,6 +461,7 @@ type vaultEntry struct {
 	sealed            bool
 	fileMeta          vaultFileMetadata
 	vaultStateUnknown bool
+	v2Verified        bool
 	// vaultStateProtected records that this live fence previously observed a
 	// non-v1 or unreadable source. A later missing/legacy file cannot erase that
 	// provenance and reopen the v1 writer path.

@@ -79,8 +79,16 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         self.payloads: list[bytes] = []
         self.outcome: Any = (200, b"{}")
         self.outcomes: list[Any] = []
+        self.writer = None
 
     def InvokeHandlerAction(self, request, context):
+        if request.path.startswith("/vault-state/"):
+            if self.writer is None:
+                return pb2.InvokeHandlerActionResponse(result=pb2.HandlerActionResult(status=404, body=b"not selected"))
+            self.calls.append((request.method, request.path, request.sandbox.expected_uid))
+            self.payloads.append(request.payload)
+            status_code, body = self.writer(request)
+            return pb2.InvokeHandlerActionResponse(result=pb2.HandlerActionResult(status=status_code, body=body))
         self.calls.append(
             (request.method, request.path, request.sandbox.expected_uid)
         )
@@ -525,3 +533,90 @@ def test_composite_service_routes_fsb_to_the_relay(vault_fsb, monkeypatch):
     response = client.get(f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault")
     assert response.status_code == 200
     assert "sekrit" not in response.text
+
+
+# The real public route and FastPath gRPC client are exercised; only the
+# remote handler is substituted. Go handler tests cover durable file effects.
+def _writer_state(state="active", sequence=5):
+    return {
+        "version": "sandbox.fast.io/vault-writer/v2",
+        "owner": {"sandboxUid": _SANDBOX_UID},
+        "initializationId": "init-a",
+        "state": state,
+        "token": {"lineage": "L", "sequence": sequence},
+        "vault": {**_FULL_REVISION, "revision": 1} if state == "active" else None,
+    }
+
+
+def test_writer_patch_preserves_first_read_token_across_recreate(vault_fsb):
+    client, fake, _ = vault_fsb
+    original = _writer_state()
+    successor = _writer_state(sequence=7)
+    writes = []
+
+    def writer(request):
+        if request.method == "GET":
+            # This is the snapshot preceding concurrent DELETE/recreate.
+            return 200, json.dumps(original).encode()
+        update = json.loads(request.payload)
+        writes.append(update)
+        assert update["vault"]["expectedRevision"] == 1
+        assert successor["vault"]["revision"] == 1  # Public revision ABA.
+        if update["expectedState"] != successor["token"]:
+            return 412, b"private state precondition mismatch"
+        pytest.fail("stale PATCH adopted the successor token")
+
+    fake.writer = writer
+    response = client.patch(
+        f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
+        json={"bindings": {"delete": ["ext"]}},
+    )
+    assert response.status_code == 412
+    assert len(writes) == 1
+    assert writes[0]["expectedState"] == original["token"]
+    assert [c[0] for c in fake.calls] == ["GET", "PUT"]
+    assert successor["vault"]["bindings"] == _FULL_REVISION["bindings"]
+
+
+@pytest.mark.parametrize("state", ["empty", "deleted"])
+def test_writer_absence_is_public_404_but_create_uses_token(vault_fsb, state):
+    client, fake, _ = vault_fsb
+    internal = _writer_state(state=state)
+    fake.writer = lambda request: (200, json.dumps(internal).encode()) if request.method == "GET" else (201, _vault_ack(1))
+    path = f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault"
+    assert client.get(path).status_code == 404
+    response = client.post(path, json={"credentials": [], "bindings": []})
+    assert response.status_code == 201
+    assert json.loads(fake.payloads[-1])["expectedState"] == internal["token"]
+    assert "token" not in response.text and "lineage" not in response.text
+
+
+def test_writer_read_sanitizes_and_delete_carries_token(vault_fsb):
+    client, fake, _ = vault_fsb
+    internal = _writer_state()
+    fake.writer = lambda request: (200, json.dumps(internal).encode()) if request.method == "GET" else (204, b"")
+    path = f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault"
+    response = client.get(path)
+    assert response.status_code == 200
+    for private in ("sekrit", "lineage", "initializationId", "owner", "token"):
+        assert private not in response.text
+    assert client.delete(path).status_code == 204
+    assert json.loads(fake.payloads[-1])["expectedState"] == internal["token"]
+
+
+@pytest.mark.parametrize("failure", [503, 412])
+def test_writer_uncertainty_does_not_fallback_or_retry(vault_fsb, failure):
+    client, fake, _ = vault_fsb
+    fake.writer = lambda request: (failure, b"unavailable")
+    response = client.post(f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault", json={"credentials": [], "bindings": []})
+    assert response.status_code == failure
+    assert len(fake.calls) == 1
+    assert fake.calls[0][1].startswith("/vault-state/")
+
+
+def test_writer_lost_mutation_ack_is_not_retried(vault_fsb):
+    client, fake, _ = vault_fsb
+    fake.writer = lambda request: (200, json.dumps(_writer_state()).encode()) if request.method == "GET" else (503, b"ack lost")
+    response = client.patch(f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault", json={"bindings": {"delete": ["ext"]}})
+    assert response.status_code == 503
+    assert [c[0] for c in fake.calls] == ["GET", "PUT"]
