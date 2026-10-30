@@ -249,6 +249,8 @@ manual = await Sandbox.create(
 
 Resolving an endpoint confirms that a route exists; it does not confirm that the application on that port is healthy. For service readiness, make a bounded request to the application's health endpoint and include the returned endpoint headers.
 
+Endpoint-cache invalidation is scoped to the affected sandbox. An in-flight lookup for a different sandbox can still populate the cache; a lookup invalidated for its own sandbox cannot repopulate it with an older endpoint. This applies to both the synchronous and asynchronous Python clients.
+
 With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.

@@ -107,6 +107,40 @@ class TestEndpointCacheSync:
         assert result.endpoint == "cached"
         assert fetch_count[0] == 0
 
+    @pytest.mark.parametrize("other_cached", [False, True])
+    def test_unrelated_invalidation_preserves_inflight_cache_fill(self, other_cached):
+        c = EndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+        other_key = ("sb-2", 8080, False)
+        if other_cached:
+            c.put(other_key, _ep("other"))
+        calls = 0
+
+        def fetch():
+            nonlocal calls
+            calls += 1
+            # Invalidation happens after this key's fetch has registered inflight.
+            c.invalidate("sb-2")
+            return _ep("result")
+
+        assert c.get_or_fetch(key, fetch) == _ep("result")
+        assert c.get(key) == _ep("result")
+        assert c.get_or_fetch(key, fetch) == _ep("result")
+        assert calls == 1
+        assert c.get(other_key) is None
+
+    def test_invalidated_fetch_cannot_overwrite_completed_replacement(self):
+        c = EndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+
+        def fetch():
+            c.invalidate("sb-1")
+            assert c.get_or_fetch(key, lambda: _ep("new")) == _ep("new")
+            return _ep("old")
+
+        assert c.get_or_fetch(key, fetch) == _ep("old")
+        assert c.get(key) == _ep("new")
+
     def test_invalidate_does_not_remove_replacement_inflight(self):
         c = EndpointCache(maxsize=10, ttl=60.0)
         key = ("sb-1", 8080, False)
@@ -160,12 +194,15 @@ class TestEndpointCacheSync:
             with c._lock:
                 assert c._inflight.get(key) is second_inflight
 
+            assert c.get(key) is None
+
             release_second.set()
             second_thread.join(timeout=2)
             assert not second_thread.is_alive()
             assert [result.endpoint for result in first_result] == ["first"]
             assert [result.endpoint for result in second_result] == ["second"]
             assert fetch_count == 2
+            assert c.get(key) == _ep("second")
         finally:
             release_first.set()
             release_second.set()
@@ -329,6 +366,46 @@ class TestAsyncEndpointCache:
         assert await owner == _ep("result")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("other_cached", [False, True])
+    async def test_unrelated_invalidation_preserves_inflight_cache_fill(
+        self, other_cached
+    ):
+        c = AsyncEndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+        other_key = ("sb-2", 8080, False)
+        if other_cached:
+            c.put(other_key, _ep("other"))
+        calls = 0
+
+        async def fetch():
+            nonlocal calls
+            calls += 1
+            c.invalidate("sb-2")
+            return _ep("result")
+
+        assert await c.get_or_fetch(key, fetch) == _ep("result")
+        assert c.get(key) == _ep("result")
+        assert await c.get_or_fetch(key, fetch) == _ep("result")
+        assert calls == 1
+        assert c.get(other_key) is None
+
+    @pytest.mark.asyncio
+    async def test_invalidated_fetch_cannot_overwrite_completed_replacement(self):
+        c = AsyncEndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+
+        async def replacement():
+            return _ep("new")
+
+        async def fetch():
+            c.invalidate("sb-1")
+            assert await c.get_or_fetch(key, replacement) == _ep("new")
+            return _ep("old")
+
+        assert await c.get_or_fetch(key, fetch) == _ep("old")
+        assert c.get(key) == _ep("new")
+
+    @pytest.mark.asyncio
     async def test_invalidate_does_not_remove_replacement_inflight(self):
         c = AsyncEndpointCache(maxsize=10, ttl=60.0)
         key = ("sb-1", 8080, False)
@@ -365,6 +442,9 @@ class TestAsyncEndpointCache:
         assert await first_task == _ep("first")
         assert c._inflight.get(key) is second_inflight
 
+        assert c.get(key) is None
+
         release_second.set()
         assert await second_task == _ep("second")
         assert fetch_count == 2
+        assert c.get(key) == _ep("second")
