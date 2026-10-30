@@ -41,13 +41,14 @@ type SourceRegistry struct {
 	factories map[string]CredentialSourceFactory
 }
 
-// NewSourceRegistry creates a registry with the built-in inline provider
-// pre-registered.
+// NewSourceRegistry creates a registry with the built-in inline and exchange
+// providers pre-registered.
 func NewSourceRegistry() *SourceRegistry {
 	r := &SourceRegistry{
 		factories: make(map[string]CredentialSourceFactory),
 	}
 	r.Register("inline", inlineSourceFactory)
+	r.Register("exchange", exchangeSourceFactory)
 	return r
 }
 

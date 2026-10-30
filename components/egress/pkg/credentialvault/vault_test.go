@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
 )
@@ -288,7 +289,7 @@ func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), payload.Revision)
 	require.Empty(t, payload.Bindings[0].Headers)
-	require.Equal(t, []InjectionSubstitution{
+	require.Equal(t, &[]InjectionSubstitution{
 		{
 			Placeholder: "__client_secret__",
 			Value:       `real "clé"&value😀`,
@@ -605,4 +606,274 @@ ignore_hosts: ['^example\.com$', ".*\.internal$"]
 `))
 
 	require.Nil(t, parseMitmproxyIgnoreHosts("ignore_hosts: []"))
+}
+
+func testExchangeCredential(name string) Credential {
+	return Credential{
+		Name:   name,
+		Source: mustMarshal(map[string]string{"type": "exchange", "endpoint": "unix:///run/spi/" + name + ".sock"}),
+	}
+}
+
+func testExchangeVaultRequest() CreateRequest {
+	return CreateRequest{
+		Credentials: []Credential{testExchangeCredential("spi-signer")},
+		Bindings: []Binding{
+			{
+				Name: "internal-api",
+				Match: Match{
+					Hosts:   []string{"api.internal.example.com"},
+					Methods: []string{"GET"},
+					Paths:   []string{"/*"},
+				},
+				Auth: Auth{Credential: "spi-signer"},
+			},
+		},
+	}
+}
+
+func testExchangePolicy(t *testing.T) *policy.NetworkPolicy {
+	return testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"api.internal.example.com"}]}`)
+}
+
+func testResolverReadyStore() *Store {
+	store := NewStore(nil, func() bool { return true })
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	return store
+}
+
+func TestCredentialVaultTypelessExchangeAuthSanitizesAndRendersMarker(t *testing.T) {
+	store := testResolverReadyStore()
+	state, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+	require.NoError(t, err)
+	require.Equal(t, []Metadata{{Name: "spi-signer", SourceType: "exchange", Revision: 1}}, state.Credentials)
+	require.Equal(t, AuthMetadata{Credential: "spi-signer"}, state.Bindings[0].Auth)
+	require.NotContains(t, string(mustMarshal(state)), "unix:///run/spi/spi-signer.sock")
+
+	snapshot, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.Bindings, 1)
+	require.Empty(t, snapshot.Bindings[0].Headers)
+	require.Empty(t, *snapshot.Bindings[0].Substitutions)
+	require.Equal(t, &ExchangeRef{Credential: "spi-signer"}, snapshot.Bindings[0].Exchange)
+	require.Empty(t, snapshot.Redactions)
+	require.JSONEq(t, `{
+		"revision": 1,
+		"bindings": [{
+			"name": "internal-api",
+			"match": {"schemes": ["https"], "hosts": ["api.internal.example.com"], "methods": ["GET"], "paths": ["/*"]},
+			"headers": [],
+			"substitutions": [],
+			"exchange": {"credential": "spi-signer"}
+		}]
+	}`, string(mustMarshal(snapshot)))
+}
+
+func TestCredentialVaultTypelessAuthRejectsExtraFields(t *testing.T) {
+	base := testExchangeVaultRequest()
+	tests := []struct {
+		name string
+		auth Auth
+	}{
+		{"missing credential", Auth{}},
+		{"blank credential", Auth{Credential: "   "}},
+		{"with name", Auth{Credential: "spi-signer", Name: "x-signature"}},
+		{"with headers", Auth{Credential: "spi-signer", Headers: []CustomHeaderEntry{{Name: "x-a", Credential: "spi-signer"}}}},
+		{"with substitutions", Auth{Credential: "spi-signer", Substitutions: []Substitution{{Credential: "spi-signer", Placeholder: "__t__", In: []string{"header"}}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testResolverReadyStore()
+			request := base
+			request.Bindings[0].Auth = tc.auth
+			_, err := store.Create(request, testExchangePolicy(t))
+			require.Error(t, err)
+			response := httptest.NewRecorder()
+			WriteError(response, err)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.NotContains(t, response.Body.String(), "unsupported auth type")
+		})
+	}
+}
+
+func TestCredentialVaultCrossLockRejectsMixedSourceReferences(t *testing.T) {
+	tests := []struct {
+		name   string
+		auth   Auth
+		unwant string
+	}{
+		{
+			name:   "bearer references exchange",
+			auth:   Auth{Type: "bearer", Credential: "spi-signer"},
+			unwant: "only the typeless auth form may use exchange credentials",
+		},
+		{
+			name:   "apiKey references exchange",
+			auth:   Auth{Type: "apiKey", Name: "x-token", Credential: "spi-signer"},
+			unwant: "only the typeless auth form may use exchange credentials",
+		},
+		{
+			name:   "customHeaders references exchange",
+			auth:   Auth{Type: "customHeaders", Headers: []CustomHeaderEntry{{Name: "x-token", Credential: "spi-signer"}}},
+			unwant: "only the typeless auth form may use exchange credentials",
+		},
+		{
+			name:   "typeless references inline",
+			auth:   Auth{Credential: "gitlab-token"},
+			unwant: "requires an exchange credential",
+		},
+		{
+			name:   "substitution references exchange",
+			auth:   Auth{Type: "passthrough", Substitutions: []Substitution{{Credential: "spi-signer", Placeholder: "__t__", In: []string{"header"}}}},
+			unwant: "substitution cannot reference the exchange credential",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testResolverReadyStore()
+			request := CreateRequest{
+				Credentials: []Credential{
+					{Name: "gitlab-token", Source: mustMarshal(map[string]string{"type": "inline", "value": "secret-token"})},
+					testExchangeCredential("spi-signer"),
+				},
+				Bindings: []Binding{{
+					Name:  "mixed",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth:  tc.auth,
+				}},
+			}
+			_, err := store.Create(request, testExchangePolicy(t))
+			require.ErrorContains(t, err, tc.unwant)
+			_, err = store.PrepareCreate(request, testExchangePolicy(t))
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestCredentialVaultMixedInlineAndExchangeBindingsAreValid(t *testing.T) {
+	store := testResolverReadyStore()
+	request := testExchangeVaultRequest()
+	request.Credentials = append(request.Credentials,
+		Credential{Name: "gitlab-token", Source: mustMarshal(map[string]string{"type": "inline", "value": "secret-token"})},
+	)
+	request.Bindings = append(request.Bindings, Binding{
+		Name:  "gitlab-api",
+		Match: Match{Hosts: []string{"code.example.com"}, Methods: []string{"GET"}, Paths: []string{"/api/*"}},
+		Auth:  Auth{Type: "apiKey", Name: "private-token", Credential: "gitlab-token"},
+	})
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[
+		{"action":"allow","target":"api.internal.example.com"},
+		{"action":"allow","target":"code.example.com"}
+	]}`)
+	state, err := store.Create(request, pol)
+	require.NoError(t, err)
+	require.Len(t, state.Credentials, 2)
+	require.Len(t, state.Bindings, 2)
+
+	snapshot, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	byName := map[string]ActiveBinding{}
+	for _, binding := range snapshot.Bindings {
+		byName[binding.Name] = binding
+	}
+	require.Nil(t, byName["gitlab-api"].Exchange)
+	require.Equal(t, &ExchangeRef{Credential: "spi-signer"}, byName["internal-api"].Exchange)
+	require.Equal(t, "secret-token", byName["gitlab-api"].Headers[0].Value)
+	require.Contains(t, snapshot.Redactions, "secret-token")
+}
+
+func TestCredentialVaultExchangeRequiresResolverConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		config ResolverConfig
+	}{
+		{"unset", ResolverConfig{}},
+		{"timeout only", ResolverConfig{TimeoutConfigured: true}},
+		{"auth only", ResolverConfig{AuthTableParsed: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(nil, func() bool { return true })
+			store.SetResolverConfig(tc.config)
+			_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+			require.ErrorContains(t, err, "credential resolver operator configuration")
+			_, err = store.PrepareReplace(ReplaceRequest{CreateRequest: testExchangeVaultRequest()}, testExchangePolicy(t))
+			require.Error(t, err)
+		})
+	}
+
+	store := NewStore(nil, func() bool { return true })
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+	require.NoError(t, err)
+}
+
+func TestCredentialVaultExchangeGateCoversUnreferencedCredentials(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	request := CreateRequest{Credentials: []Credential{testExchangeCredential("unused-exchange")}}
+	_, err := store.Create(request, testExchangePolicy(t))
+	require.ErrorContains(t, err, "credential resolver operator configuration")
+
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	_, err = store.Create(request, testExchangePolicy(t))
+	require.NoError(t, err)
+}
+
+func TestCredentialVaultLiveRevisionRuntimeRejectsExchange(t *testing.T) {
+	store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
+	_, err = store.PrepareCreate(testExchangeVaultRequest(), testExchangePolicy(t))
+	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
+
+	// The live runtime still admits inline-only vaults unchanged.
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	_, err = store.Create(testCredentialVaultRequest(), pol)
+	require.NoError(t, err)
+}
+
+func TestCredentialVaultExchangeReloadRequiresNoResolverListener(t *testing.T) {
+	// Reload runs factory validation and the capability gate only — it must
+	// never dial the resolver, so it succeeds without anything listening on
+	// the endpoint socket.
+	store := testResolverReadyStore()
+	require.NoError(t, store.Reload(4, testExchangeVaultRequest(), testExchangePolicy(t)))
+	snapshot, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, int64(4), snapshot.Revision)
+	require.Equal(t, &ExchangeRef{Credential: "spi-signer"}, snapshot.Bindings[0].Exchange)
+
+	closed := NewStore(nil, func() bool { return true })
+	err = closed.Reload(4, testExchangeVaultRequest(), testExchangePolicy(t))
+	require.ErrorContains(t, err, "credential resolver operator configuration")
+}
+
+func TestCredentialVaultExchangeVaultFileV1RoundTrip(t *testing.T) {
+	body := VaultFileBody{
+		Credentials: []Credential{testExchangeCredential("spi-signer")},
+		Bindings:    testExchangeVaultRequest().Bindings,
+	}
+	encoded, err := EncodeVaultFile("incarnation-1", "attachment-1", 2, body)
+	require.NoError(t, err)
+	_, decoded, err := DecodeVaultFile(encoded)
+	require.NoError(t, err)
+	require.JSONEq(t, string(mustMarshal(body.Credentials[0].Source)), string(decoded.Credentials[0].Source))
+	require.Equal(t, Auth{Credential: "spi-signer"}, decoded.Bindings[0].Auth)
+
+	store := testResolverReadyStore()
+	require.NoError(t, store.Reload(2, CreateRequest(decoded), testExchangePolicy(t)))
+	snapshot, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, &ExchangeRef{Credential: "spi-signer"}, snapshot.Bindings[0].Exchange)
+}
+
+func TestRenderInjectionHeadersRejectsTypelessDefense(t *testing.T) {
+	credentials := map[string]record{
+		"spi-signer": {Name: "spi-signer", SourceType: "exchange", Source: &exchangeSource{endpoint: "unix:///run/spi.sock"}},
+	}
+	headers, redactions, err := renderInjectionHeaders(context.Background(), Auth{Credential: "spi-signer"}, credentials)
+	require.ErrorContains(t, err, "cannot be rendered as static injection headers")
+	require.Nil(t, headers)
+	require.Nil(t, redactions)
 }

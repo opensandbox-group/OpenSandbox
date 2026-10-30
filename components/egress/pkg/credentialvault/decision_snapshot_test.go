@@ -43,8 +43,7 @@ func renderedBinding(name string, schemes, hosts []string, secret string) Active
 			Methods: []string{"GET"},
 			Paths:   []string{"/api/*"},
 		},
-		Headers:       headers,
-		Substitutions: []InjectionSubstitution{},
+		Headers: headers,
 	}
 }
 
@@ -193,6 +192,65 @@ func TestMarshalDecisionSnapshotRequiresCanonicalRedactionOrder(t *testing.T) {
 	snapshot := ActiveSnapshot{Revision: 1, Redactions: []string{"short", "much-longer", "short"}}
 	_, err := MarshalDecisionSnapshot(snapshot, 1)
 	require.True(t, errors.Is(err, ErrInvalidDecisionSnapshot))
+}
+
+func TestMarshalDecisionSnapshotAcceptsExchangeMarkers(t *testing.T) {
+	exchangeBinding := renderedBinding("exchange-binding", []string{"https"}, []string{"api.internal.example.com"}, "")
+	exchangeBinding.Exchange = &ExchangeRef{Credential: "spi-signer"}
+	snapshot := ActiveSnapshot{Revision: 3, Bindings: []ActiveBinding{exchangeBinding}}
+	payload, err := MarshalDecisionSnapshot(snapshot, 5)
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+		"version": 1,
+		"vaultRevision": 3,
+		"effectivePolicyEpoch": 5,
+		"interceptionMode": "credential-bound",
+		"state": "active",
+		"tlsBindingHostSelectors": ["api.internal.example.com"],
+		"fullRenderedBindings": [{
+			"name": "exchange-binding",
+			"match": {"schemes": ["https"], "hosts": ["api.internal.example.com"], "methods": ["GET"], "paths": ["/api/*"]},
+			"headers": [],
+			"substitutions": [],
+			"exchange": {"credential": "spi-signer"}
+		}],
+		"redactions": []
+	}`, string(payload))
+
+	// The canonical encoding is stable: re-marshaling the decoded payload
+	// reproduces the same bytes.
+	var redecoded decisionSnapshot
+	require.NoError(t, json.Unmarshal(payload, &redecoded))
+	again, err := MarshalDecisionSnapshot(ActiveSnapshot{
+		Revision:   redecoded.VaultRevision,
+		Bindings:   redecoded.FullRenderedBindings,
+		Redactions: redecoded.Redactions,
+	}, 5)
+	require.NoError(t, err)
+	require.Equal(t, payload, again)
+}
+
+func TestMarshalDecisionSnapshotRejectsNonCanonicalExchangeMarkers(t *testing.T) {
+	valid := renderedBinding("exchange-binding", []string{"https"}, []string{"api.internal.example.com"}, "")
+	valid.Exchange = &ExchangeRef{Credential: "spi-signer"}
+	tests := []struct {
+		name   string
+		mutate func(*ActiveBinding)
+	}{
+		{"blank credential", func(b *ActiveBinding) { b.Exchange.Credential = "" }},
+		{"padded credential", func(b *ActiveBinding) { b.Exchange.Credential = " spi-signer " }},
+		{"rendered header", func(b *ActiveBinding) { b.Headers = []InjectionHeader{{Name: "Authorization", Value: "never-log-me"}} }},
+		{"nil exchange credential", func(b *ActiveBinding) { b.Exchange = &ExchangeRef{} }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := valid
+			tc.mutate(&candidate)
+			_, err := MarshalDecisionSnapshot(ActiveSnapshot{Revision: 1, Bindings: []ActiveBinding{candidate}}, 1)
+			require.ErrorIs(t, err, ErrInvalidDecisionSnapshot)
+			require.NotContains(t, err.Error(), "never-log-me")
+		})
+	}
 }
 
 func TestMarshalDecisionSnapshotOmitsAcceptedEmptyWildcardLanguage(t *testing.T) {

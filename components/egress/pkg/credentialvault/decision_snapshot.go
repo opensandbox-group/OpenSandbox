@@ -133,13 +133,36 @@ func validRenderedBinding(binding *ActiveBinding, redactions map[string]struct{}
 			selectors[host] = struct{}{}
 		}
 	}
-	if len(seenHosts) == 0 || !validRenderedCredentials(binding, redactions) {
+	if len(seenHosts) == 0 {
 		return false
 	}
 	binding.Headers = append([]InjectionHeader{}, binding.Headers...)
-	binding.Substitutions = append([]InjectionSubstitution{}, binding.Substitutions...)
-	for i := range binding.Substitutions {
-		binding.Substitutions[i].In = append([]string{}, binding.Substitutions[i].In...)
+	if binding.Exchange != nil {
+		// OSEP-0025 marker binding: a credential-only reference with no
+		// rendered material, so no redaction coverage is required. The
+		// canonical encoding carries explicit empty headers/substitutions
+		// arrays; readers without exchange support reject the unknown key
+		// (version-skew fail closed).
+		credential := binding.Exchange.Credential
+		if credential == "" || credential != strings.TrimSpace(credential) {
+			return false
+		}
+		if len(binding.Headers) != 0 {
+			return false
+		}
+		empty := []InjectionSubstitution{}
+		binding.Substitutions = &empty
+		return true
+	}
+	if !validRenderedCredentials(binding, redactions) {
+		return false
+	}
+	if binding.Substitutions != nil {
+		subs := append([]InjectionSubstitution{}, *binding.Substitutions...)
+		for i := range subs {
+			subs[i].In = append([]string{}, subs[i].In...)
+		}
+		binding.Substitutions = &subs
 	}
 	return true
 }
@@ -179,19 +202,21 @@ func validRenderedCredentials(binding *ActiveBinding, redactions map[string]stru
 			}
 		}
 	}
-	for _, substitution := range binding.Substitutions {
-		if substitution.Placeholder == "" || !validCanonicalStringsOnly(substitution.In, func(value string) bool {
-			return value == "path" || value == "query" || value == "header" || value == "body"
-		}) {
-			return false
-		}
-		required := append(substitutionRedactionVariants(substitution.Value), substitution.Placeholder)
-		for _, value := range required {
-			if value == "" {
-				continue
-			}
-			if _, ok := redactions[value]; !ok {
+	if binding.Substitutions != nil {
+		for _, substitution := range *binding.Substitutions {
+			if substitution.Placeholder == "" || !validCanonicalStringsOnly(substitution.In, func(value string) bool {
+				return value == "path" || value == "query" || value == "header" || value == "body"
+			}) {
 				return false
+			}
+			required := append(substitutionRedactionVariants(substitution.Value), substitution.Placeholder)
+			for _, value := range required {
+				if value == "" {
+					continue
+				}
+				if _, ok := redactions[value]; !ok {
+					return false
+				}
 			}
 		}
 	}
