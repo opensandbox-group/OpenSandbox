@@ -137,7 +137,14 @@ func (ci *CodeInterpreter) IsHealthy(ctx context.Context) bool {
 		return false
 	}
 	exec, err := ci.Sandbox.RunCommand(ctx, CodeInterpreterRuntimeCheckCommand, nil)
-	return err == nil && exec != nil && exec.Error == nil
+	return err == nil && runtimeProbeSucceeded(exec)
+}
+
+// runtimeProbeSucceeded requires a confirmed successful foreground execution.
+// A stream ending after init or output alone does not prove Jupyter is ready.
+// RunCommand infers exit code 0 from completion events on older servers too.
+func runtimeProbeSucceeded(exec *Execution) bool {
+	return exec != nil && exec.Error == nil && exec.ExitCode != nil && *exec.ExitCode == 0
 }
 
 // waitRuntimeReady polls the runtime check until it passes or the timeout
@@ -153,7 +160,7 @@ func (ci *CodeInterpreter) waitRuntimeReady(ctx context.Context, timeout, interv
 
 		exec, err := ci.Sandbox.RunCommand(ctx, CodeInterpreterRuntimeCheckCommand, nil)
 		switch {
-		case err == nil && (exec == nil || exec.Error == nil):
+		case err == nil && runtimeProbeSucceeded(exec):
 			return nil
 		case err != nil:
 			lastErr = err
