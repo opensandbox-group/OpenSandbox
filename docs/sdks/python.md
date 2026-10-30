@@ -96,6 +96,8 @@ finally:
 
 Use `destroy()` for create-use-discard workflows. It calls `kill()` before `close()` and still closes local resources if remote termination fails. Context managers continue to call only `close()`, so the remote sandbox remains available for later `connect()` calls unless you explicitly kill or destroy it.
 
+If async `Sandbox.create()` or `Sandbox.create_from_template()` fails after allocating a sandbox, the SDK attempts remote termination and still runs owned-transport cleanup when cancellation interrupts the termination request. Cancellation still propagates; remote termination is best-effort and caller-supplied transports remain caller-owned.
+
 ## Client Pool and observability
 
 Use `SandboxPoolSync` for synchronous applications and `SandboxPoolAsync` for asyncio. Both provide in-memory and Redis-backed stores, four acquire policies, and staged warmup controls. See [Client Pool](/guides/client-pool) for examples, configuration, cleanup, and distributed deployment.
