@@ -148,6 +148,10 @@ Defines interfaces for executing code, commands, and file operations within sand
 - `POST /files/upload` - Upload files (multipart)
 - `GET /files/download` - Download files (supports range requests)
 
+`GET /files/download`, its `/v1/filesystem/{uid}/{gid}/files/download` variant, and `/v1/isolated/session/{sessionId}/files/download` reject an opened directory with `400 INVALID_REQUEST_BODY` and `path is a directory: <path>` before serving whole-file, byte-range, or line-based content. This also covers a symlink to a directory wherever the route's existing path resolution follows it. Use the corresponding `directories/list` route to list entries.
+
+A `Range` header rejected by the download handler returns `416` with JSON code `UNKNOWN` and message `invalid Range header: <header>`. A well-formed range starting past the end of a file retains the existing plain-text `416` response.
+
 **Directory Operations:**
 - `GET /directories/list` - List directory contents with optional depth control
 - `POST /directories` - Create directories with permissions (mkdir -p semantics)

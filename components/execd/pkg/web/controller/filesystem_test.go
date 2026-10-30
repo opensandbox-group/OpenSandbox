@@ -646,3 +646,158 @@ func TestDownloadFileInvalidLimit(t *testing.T) {
 		})
 	}
 }
+
+// requireDirectoryRejected checks the 400 that a download of a directory gets,
+// whichever download mode the request selects.
+func requireDirectoryRejected(t *testing.T, rec *httptest.ResponseRecorder, dir string) {
+	t.Helper()
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Empty(t, rec.Header().Get("Content-Disposition"))
+	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+	require.Contains(t, resp.Message, dir)
+}
+
+func TestDownloadFileRejectsDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "docs")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "inside.txt"), []byte("inside\n"), 0o644))
+
+	tests := []struct {
+		name  string
+		query string
+		rng   string
+	}{
+		{name: "plain"},
+		{name: "range header", rng: "bytes=0-3"},
+		{name: "offset and limit", query: "&offset=1&limit=2"},
+		{name: "offset only", query: "&offset=1"},
+		{name: "limit only", query: "&limit=2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/download?path=%s%s", url.QueryEscape(dir), tt.query)
+			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+			if tt.rng != "" {
+				ctx.Request.Header.Set("Range", tt.rng)
+			}
+			NewFilesystemController(ctx).DownloadFile()
+
+			requireDirectoryRejected(t, rec, dir)
+		})
+	}
+}
+
+func TestDownloadFileRejectsSymlinkToDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "docs")
+	link := filepath.Join(tmpDir, "docs-link")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	for _, tt := range []struct{ name, query string }{
+		{name: "plain"},
+		{name: "offset and limit", query: "&offset=1&limit=2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/download?path=%s%s", url.QueryEscape(link), tt.query)
+			ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+			ctrl.DownloadFile()
+
+			requireDirectoryRejected(t, rec, link)
+		})
+	}
+}
+
+func TestDownloadFileMalformedRangeErrorBody(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "data.bin")
+	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
+
+	for _, header := range []string{"bytes=abc", "2-5", "bytes=5-2", "bytes=a-b"} {
+		t.Run(header, func(t *testing.T) {
+			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+			ctx.Request.Header.Set("Range", header)
+			NewFilesystemController(ctx).DownloadFile()
+
+			require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+			// The error schema in specs/execd-api.yaml requires both fields.
+			var body map[string]string
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Equal(t, string(model.ErrorCodeUnknown), body["code"])
+			require.NotEmpty(t, body["message"])
+			require.Contains(t, body["message"], header)
+		})
+	}
+}
+
+// The controls keep the paths around the directory check as they were: a
+// whole-file read, byte ranges, a range ServeContent answers itself, a symlink
+// to a file and a missing file.
+func TestDownloadFileRegularFileControls(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "data.bin")
+	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
+	empty := filepath.Join(tmpDir, "empty.bin")
+	require.NoError(t, os.WriteFile(empty, nil, 0o644))
+	link := filepath.Join(tmpDir, "data-link.bin")
+	symlinked := os.Symlink(target, link) == nil
+
+	tests := []struct {
+		name       string
+		path       string
+		rng        string
+		wantStatus int
+		wantBody   string
+		wantRange  string
+	}{
+		{name: "whole file", path: target, wantStatus: http.StatusOK, wantBody: "0123456789"},
+		{name: "empty file", path: empty, wantStatus: http.StatusOK},
+		{name: "first byte", path: target, rng: "bytes=0-0", wantStatus: http.StatusPartialContent, wantBody: "0", wantRange: "bytes 0-0/10"},
+		{name: "suffix", path: target, rng: "bytes=-3", wantStatus: http.StatusPartialContent, wantBody: "789", wantRange: "bytes 7-9/10"},
+		{name: "open ended", path: target, rng: "bytes=8-", wantStatus: http.StatusPartialContent, wantBody: "89", wantRange: "bytes 8-9/10"},
+		{name: "start past end", path: target, rng: "bytes=99-", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantRange: "bytes */10"},
+		{name: "symlink to file", path: link, wantStatus: http.StatusOK, wantBody: "0123456789"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.path == link && !symlinked {
+				t.Skip("symlink unavailable")
+			}
+			rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(tt.path))
+			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+			if tt.rng != "" {
+				ctx.Request.Header.Set("Range", tt.rng)
+			}
+			NewFilesystemController(ctx).DownloadFile()
+
+			require.Equal(t, tt.wantStatus, rec.Code)
+			require.Equal(t, tt.wantRange, rec.Header().Get("Content-Range"))
+			if tt.wantStatus != http.StatusRequestedRangeNotSatisfiable {
+				require.Equal(t, tt.wantBody, rec.Body.String())
+			}
+		})
+	}
+
+	missing := filepath.Join(tmpDir, "missing.bin")
+	for _, tt := range []struct{ name, query string }{
+		{name: "missing file", query: ""},
+		{name: "missing file with line parameters", query: "&offset=1&limit=2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/download?path=%s%s", url.QueryEscape(missing), tt.query)
+			ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+			ctrl.DownloadFile()
+
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
+			require.NotEmpty(t, resp.Message)
+		})
+	}
+}
