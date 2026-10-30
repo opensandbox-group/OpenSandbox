@@ -118,6 +118,14 @@ To share a sandbox between conversations, provision a separate user and workspac
 
 The existing `/files` and `/directories` routes retain their default identity. The identity-prefixed routes require Linux and a supporting Execd version. Older servers return an unsupported route instead of silently ignoring identity options; clients must not fall back to the unprefixed routes.
 
+### Upload metadata
+
+The regular upload handler serves `POST /files/upload` and, on Linux, `/v1/filesystem/{uid}/{gid}/files/upload`. It validates each pair's mode and resolves requested POSIX owner/group names before creating target directories or opening the destination. Modes must carry octal permission digits between 0 and 7777. An invalid mode or unknown account name returns `400 INVALID_FILE_METADATA`; other account-lookup failures return `500 RUNTIME_ERROR`. A pair rejected at this stage leaves its destination and parent directories untouched.
+
+After writing, the handler applies ownership before the explicit mode, so chown cannot clear newly requested setuid/setgid bits. It translates the 4000, 2000, and 1000 digits to Go's setuid, setgid, and sticky flags and applies an explicit `mode: 0`. An omitted or null mode skips chmod: new files use the existing 0777 creation mode subject to umask and filesystem rules, and existing ordinary permission bits are retained. Writes or chown can still clear existing special bits.
+
+Validation is per pair: earlier pairs are not rolled back, multipart parsing may already have created temporary files, and later filesystem or permission failures can leave target changes behind. Windows continues to ignore owner/group and use Windows chmod semantics. The isolated-session upload handler uses its separate write path and is unchanged.
+
 ## Isolated sessions
 
 An isolated session runs a shell inside a per-execution [bubblewrap](https://github.com/containers/bubblewrap) namespace — a private view of mounts and identity, created fresh for each session:

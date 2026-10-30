@@ -25,7 +25,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,6 +104,12 @@ func (c *FilesystemController) processUploadPair(metadataHeader, fileHeader *mul
 		return uerr
 	}
 
+	// Validate this pair's mode and account names before creating target
+	// directories or opening the destination.
+	if uerr := validateUploadPermission(meta); uerr != nil {
+		return uerr
+	}
+
 	resolvedPath, uerr := resolveUploadTarget(meta.Path, meta.Permission)
 	if uerr != nil {
 		return uerr
@@ -111,7 +119,63 @@ func (c *FilesystemController) processUploadPair(metadataHeader, fileHeader *mul
 		return uerr
 	}
 
-	return applyUploadPermission(resolvedPath, meta.Permission)
+	return applyUploadPermission(resolvedPath, meta)
+}
+
+// validateUploadPermission checks the mode, owner and group of an upload without
+// changing anything on disk. A mode that is not octal digits, or an owner or
+// group the system does not know, is a client error.
+func validateUploadPermission(meta *model.FileMetadata) *uploadError {
+	if meta.ModeSet {
+		if _, err := uploadFileMode(meta.Mode); err != nil {
+			return newUploadError(
+				http.StatusBadRequest,
+				model.ErrorCodeInvalidFileMetadata,
+				fmt.Sprintf("invalid metadata mode. %v", err),
+			)
+		}
+	}
+
+	if _, _, err := lookupOwnership(meta.Owner, meta.Group); err != nil {
+		var unknownUser user.UnknownUserError
+		var unknownGroup user.UnknownGroupError
+		if errors.As(err, &unknownUser) || errors.As(err, &unknownGroup) {
+			return newUploadError(
+				http.StatusBadRequest,
+				model.ErrorCodeInvalidFileMetadata,
+				fmt.Sprintf("invalid metadata owner or group. %v", err),
+			)
+		}
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error resolving owner or group. %v", err),
+		)
+	}
+	return nil
+}
+
+// uploadFileMode converts a mode written as octal digits in a decimal integer
+// (644, 4755), as the API spec does, to an os.FileMode. The setuid, setgid and
+// sticky digits become Go's own flags: os.FileMode keeps those bits elsewhere,
+// so converting the number directly would drop them.
+func uploadFileMode(digits int) (os.FileMode, error) {
+	parsed, err := strconv.ParseUint(strconv.Itoa(digits), 8, 32)
+	if err != nil || parsed > 0o7777 {
+		return 0, fmt.Errorf("%d is not octal digits between 0 and 7777, such as 644 or 4755", digits)
+	}
+
+	mode := os.FileMode(parsed & 0o777)
+	if parsed&0o4000 != 0 {
+		mode |= os.ModeSetuid
+	}
+	if parsed&0o2000 != 0 {
+		mode |= os.ModeSetgid
+	}
+	if parsed&0o1000 != 0 {
+		mode |= os.ModeSticky
+	}
+	return mode, nil
 }
 
 func parseUploadMetadata(header *multipart.FileHeader) (*model.FileMetadata, *uploadError) {
@@ -141,6 +205,13 @@ func parseUploadMetadata(header *multipart.FileHeader) (*model.FileMetadata, *up
 			fmt.Sprintf("invalid metadata format. %v", err),
 		)
 	}
+	// Mode is a plain int, so decoding into it cannot tell an explicit 0 from
+	// no mode at all.
+	var sent struct {
+		Mode *int `json:"mode"`
+	}
+	_ = json.Unmarshal(metaBytes, &sent) // cannot fail: the same bytes just decoded into meta
+	meta.ModeSet = sent.Mode != nil
 	if meta.Path == "" {
 		return nil, newUploadError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, "metadata path is empty")
 	}
@@ -417,14 +488,14 @@ func resolveUploadTargetPath(path string) (string, *uploadError) {
 
 // applyUploadPermission applies the metadata permission with one retry to
 // absorb metadata-propagation delay on weakly-coherent filesystems
-// (virtio-fs, 9pfs). ChmodFile always invokes chown under the hood, so a
-// freshly-created dirent that has not yet propagated will surface as ENOENT
-// here even though the file is fully written and synced.
-func applyUploadPermission(resolvedPath string, permission model.Permission) *uploadError {
-	chmodErr := ChmodFile(resolvedPath, permission)
+// (virtio-fs, 9pfs). A freshly-created dirent that has not yet propagated will
+// surface as ENOENT from chown or chmod even though the file is fully written
+// and synced.
+func applyUploadPermission(resolvedPath string, meta *model.FileMetadata) *uploadError {
+	chmodErr := chmodUploadedFile(resolvedPath, meta)
 	if chmodErr != nil {
 		time.Sleep(20 * time.Millisecond)
-		chmodErr = ChmodFile(resolvedPath, permission)
+		chmodErr = chmodUploadedFile(resolvedPath, meta)
 	}
 	if chmodErr != nil {
 		return newUploadError(
@@ -434,4 +505,22 @@ func applyUploadPermission(resolvedPath string, permission model.Permission) *up
 		)
 	}
 	return nil
+}
+
+// chmodUploadedFile changes the owner and group first and the mode last: chown
+// clears setuid and setgid on a regular file, so a requested special bit would
+// be lost if the mode were set before it. An omitted mode skips chmod; chown
+// can still clear existing special bits.
+func chmodUploadedFile(path string, meta *model.FileMetadata) error {
+	if err := SetFileOwnership(path, meta.Owner, meta.Group); err != nil {
+		return err
+	}
+	if !meta.ModeSet {
+		return nil
+	}
+	mode, err := uploadFileMode(meta.Mode)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(path, mode)
 }

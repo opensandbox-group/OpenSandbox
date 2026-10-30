@@ -28,6 +28,11 @@ type FileInfo struct {
 type FileMetadata struct {
 	Path       string `json:"path,omitempty"`
 	Permission `json:",inline"`
+
+	// ModeSet records that the decoded metadata carried a mode, so an explicit
+	// 0 can be told apart from no mode. It is set by the upload handler and is
+	// never encoded.
+	ModeSet bool `json:"-"`
 }
 
 type Permission struct {
