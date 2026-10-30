@@ -570,6 +570,8 @@ When `follow_redirects` is enabled, same-origin redirects preserve request heade
 
 File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. This applies to both direct chunked uploads and uploads through the server proxy. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 
+The Python code-interpreter SDK uses these same redirect and event-hook settings for both context requests and streaming code execution, in its async and sync APIs.
+
 `ConnectionConfig.event_hooks` accepts async httpx hooks, while `ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured request hooks run before the SDK safety hook, so they cannot re-add protected OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors `follow_redirects` and the SDK safety hook, but does not invoke configured user hooks.
 
 ```python
