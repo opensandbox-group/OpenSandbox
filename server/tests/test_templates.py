@@ -445,6 +445,17 @@ def test_create_rejects_invalid_env_names(service):
         assert "env names" in str(excinfo.value.detail).lower()
 
 
+@pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\t", " "])
+def test_create_rejects_env_names_with_trailing_whitespace(service, crs, whitespace):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(env={"LOG_LEVEL" + whitespace: "x"}))
+    assert excinfo.value.status_code == 400
+    assert "env names" in str(excinfo.value.detail).lower()
+    assert crs.created == []
+
+
 def test_create_rolls_back_row_on_crd_conflict(service, crs, repo):
     crs.crs[("ns-1", "tpl-dup")] = {"metadata": {"name": "tpl-dup", "namespace": "ns-1"}}
 

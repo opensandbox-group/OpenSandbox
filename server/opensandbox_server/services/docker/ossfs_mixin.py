@@ -45,7 +45,7 @@ class OSSFSMixin:
                     "message": "OSSFS bucket name cannot be empty.",
                 },
             )
-        if not re.match(r'^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$', bucket):
+        if not re.fullmatch(r'^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$', bucket):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={

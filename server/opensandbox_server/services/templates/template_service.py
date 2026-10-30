@@ -280,7 +280,7 @@ class FastSandboxTemplateService:
                 )
         if request.env:
             invalid_env_names = [
-                name for name in request.env if not _VALID_ENV_NAME.match(name)
+                name for name in request.env if not _VALID_ENV_NAME.fullmatch(name)
             ]
             if invalid_env_names:
                 raise HTTPException(
