@@ -67,6 +67,11 @@ opensandbox-node-agent:
 fast-sandbox:
   # -- Whether the fast-sandbox control plane + node runtime is enabled.
   enabled: false
+  # Snapshot artifact transfer mode of the node runtime (legacy, the
+  # default, or chunked); see runtime.transfer in the fast-sandbox chart.
+  # runtime:
+  #   transfer:
+  #     format: chunked
 
 # -- Global values passed to all sub-charts (e.g. shared imagePullSecrets).
 global: {}

@@ -228,6 +228,22 @@ runtime:
   socketDir: /run/fast-sandbox/firecracker
   # -- DART P2P peer listen port (also the headless dart Service port)
   dartPeerPort: 9000
+  # Snapshot artifact transfer between the node and the artifact store.
+  transfer:
+    # -- Transfer mode: legacy (whole-file artifact sets, the original
+    # behaviour) or chunked (zero-elided, content-addressed 4 MiB chunks
+    # with parallel transfers and a verified node cache; ~10x less data per
+    # pause/snapshot). Pulls read both layouts in either mode, so switching
+    # back to legacy keeps existing snapshots restorable; upgrade every node
+    # to an agent image that supports it before choosing chunked. Ignored
+    # when runtime.config is set (put a transfer section in it instead).
+    format: legacy
+    # -- Chunk object compression in chunked mode: none or zstd
+    compression: none
+    # -- Parallel chunk transfers per publish/pull in chunked mode
+    concurrency: 8
+    # -- Chunk size of new chunked sets in MiB (a multiple of 64 KiB)
+    chunkSizeMiB: 4
   # -- Agent config (agent.yaml). Empty = the chart default (upstream
   # config/dev/agent-config.yaml with the dart discover URL pointing at
   # this chart's namespace). socket/stateRoot/registryConfig/p2p are
