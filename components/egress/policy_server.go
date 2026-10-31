@@ -58,6 +58,11 @@ type alwaysRulesLoader interface {
 // nftApplier: static allow/deny sets plus dynamic DNS-learned entries; teardown on shutdown.
 type nftApplier interface {
 	ApplyStatic(context.Context, *policy.NetworkPolicy) error
+	// ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
+	// teardown set, and applies under one lock so AddResolvedDomain cannot race.
+	// The returned count is the best-effort number of matching TCP conntrack
+	// flows observed before the apply.
+	ApplyStaticComputingEstablishedDrops(context.Context, *policy.NetworkPolicy, *policy.NetworkPolicy) (int, error)
 	Quiesce()
 	AddResolvedDomain(context.Context, string, []nftables.ResolvedIP) error
 	AddUpstreamProxyIPs(context.Context, []nftables.ResolvedIP) error
@@ -235,11 +240,12 @@ type policyServer struct {
 }
 
 type policyStatusResponse struct {
-	Status          string `json:"status,omitempty"`
-	Mode            string `json:"mode,omitempty"`
-	EnforcementMode string `json:"enforcementMode,omitempty"`
-	Reason          string `json:"reason,omitempty"`
-	Policy          any    `json:"policy,omitempty"`
+	Status             string `json:"status,omitempty"`
+	Mode               string `json:"mode,omitempty"`
+	EnforcementMode    string `json:"enforcementMode,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+	Policy             any    `json:"policy,omitempty"`
+	DroppedEstablished *int   `json:"droppedEstablished,omitempty"`
 }
 
 func (s *policyServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -256,6 +262,32 @@ func (s *policyServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// dropEstablishedRequested reports whether the caller asked to tear down
+// established flows to destinations the new policy no longer allows.
+func dropEstablishedRequested(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	v := strings.TrimSpace(r.URL.Query().Get("dropEstablished"))
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// dropEstablishedUnsupportedReason returns a non-empty message when the
+// current process cannot honor dropEstablished (chained upstream proxy + MITM
+// tunnels hide the policy destination from nft OUTPUT matching).
+func (s *policyServer) dropEstablishedUnsupportedReason() string {
+	if strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" &&
+		constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
+		return "dropEstablished is not supported when OPENSANDBOX_EGRESS_UPSTREAM_PROXY is set with transparent MITM"
+	}
+	return ""
 }
 
 func (s *policyServer) handlePolicy(w http.ResponseWriter, r *http.Request) {
@@ -663,15 +695,17 @@ func (s *policyServer) handlePost(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("credential vault policy validation: %v", err), http.StatusBadRequest)
 			return
 		}
-		if !s.commitPolicy(r.Context(), w, def, "reset") {
+		ok, dropped := s.commitPolicy(r.Context(), w, def, "reset", dropEstablishedRequested(r))
+		if !ok {
 			return
 		}
 		logEgressUpdated(def.DefaultAction, nil)
 		log.Infof("policy API: proxy and nftables updated to deny_all")
 		writeJSON(w, http.StatusOK, policyStatusResponse{
-			Status: "ok",
-			Mode:   "deny_all",
-			Reason: "policy reset to default deny-all",
+			Status:             "ok",
+			Mode:               "deny_all",
+			Reason:             "policy reset to default deny-all",
+			DroppedEstablished: dropped,
 		})
 		return
 	}
@@ -693,15 +727,17 @@ func (s *policyServer) handlePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("credential vault policy validation: %v", err), http.StatusBadRequest)
 		return
 	}
-	if !s.commitPolicy(r.Context(), w, pol, "post") {
+	ok, dropped := s.commitPolicy(r.Context(), w, pol, "post", dropEstablishedRequested(r))
+	if !ok {
 		return
 	}
 	logEgressUpdated(pol.DefaultAction, pol.Egress)
 	log.Infof("policy API: proxy and nftables updated successfully")
 	writeJSON(w, http.StatusOK, policyStatusResponse{
-		Status:          "ok",
-		Mode:            mode,
-		EnforcementMode: s.enforcementMode,
+		Status:             "ok",
+		Mode:               mode,
+		EnforcementMode:    s.enforcementMode,
+		DroppedEstablished: dropped,
 	})
 }
 
@@ -759,15 +795,17 @@ func (s *policyServer) handlePatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("credential vault policy validation: %v", err), http.StatusBadRequest)
 		return
 	}
-	if !s.commitPolicy(r.Context(), w, newPolicy, "patch") {
+	ok, dropped := s.commitPolicy(r.Context(), w, newPolicy, "patch", dropEstablishedRequested(r))
+	if !ok {
 		return
 	}
 	logEgressUpdated(newPolicy.DefaultAction, patchRules)
 	log.Infof("policy API: patch applied successfully")
 	writeJSON(w, http.StatusOK, policyStatusResponse{
-		Status:          "ok",
-		Mode:            mode,
-		EnforcementMode: s.enforcementMode,
+		Status:             "ok",
+		Mode:               mode,
+		EnforcementMode:    s.enforcementMode,
+		DroppedEstablished: dropped,
 	})
 }
 
@@ -849,27 +887,46 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("credential vault policy validation: %v", err), http.StatusBadRequest)
 		return
 	}
-	if !s.commitPolicy(r.Context(), w, newPolicy, "delete") {
+	ok, dropped := s.commitPolicy(r.Context(), w, newPolicy, "delete", dropEstablishedRequested(r))
+	if !ok {
 		return
 	}
 	logEgressUpdated(newPolicy.DefaultAction, removedRules)
 	log.Infof("policy API: delete applied successfully")
 	writeJSON(w, http.StatusOK, policyStatusResponse{
-		Status:          "ok",
-		Mode:            mode,
-		EnforcementMode: s.enforcementMode,
+		Status:             "ok",
+		Mode:               mode,
+		EnforcementMode:    s.enforcementMode,
+		DroppedEstablished: dropped,
 	})
 }
 
 // commitPolicy applies one change under s.mu. The experimental branch holds
 // its process lease through disk → nft → exact receiver ACK → proxy/base.
 // The default-off legacy branch retains its existing disk/nft/proxy behavior.
-func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, pol *policy.NetworkPolicy, op string) bool {
+func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, pol *policy.NetworkPolicy, op string, dropEstablished bool) (ok bool, dropped *int) {
+	if dropEstablished {
+		if s.revisionRecovery != nil {
+			http.Error(w, "dropEstablished is not supported with the experimental revision runtime", http.StatusNotImplemented)
+			return false, nil
+		}
+		if reason := s.dropEstablishedUnsupportedReason(); reason != "" {
+			http.Error(w, reason, http.StatusNotImplemented)
+			return false, nil
+		}
+		if s.nft == nil {
+			// dns-only enforcement has no nft chain to install teardown rules
+			// in; answering 200 with droppedEstablished=0 would be
+			// indistinguishable from "matched zero flows".
+			http.Error(w, "dropEstablished requires dns+nft enforcement", http.StatusNotImplemented)
+			return false, nil
+		}
+	}
 	if s.revisionRecovery != nil {
 		m := s.revisionMitmLocked()
 		if m == nil {
 			writeRevisionPolicyError(w, revision.ErrTransportUnavailable)
-			return false
+			return false, nil
 		}
 		ctx, cancel := revisionMutationContext(ctx, m)
 		defer cancel()
@@ -882,12 +939,12 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 		base, err := s.applyRevisionPolicyLocked(ctx, m, inputs, true)
 		if err != nil {
 			writeRevisionPolicyError(w, err)
-			return false
+			return false, nil
 		}
 		s.proxy.UpdatePolicy(policy.MergeAlwaysOverlay(base.inputs.user, nil, nil))
 		s.revisionRecovery.current = base
 		s.invalidateRevisionBootstrapLocked()
-		return true
+		return true, dropped
 	}
 	alwaysDeny, alwaysAllow := s.currentAlwaysRules()
 	restore, persistErr := s.persistPolicyChangeLocked(pol)
@@ -895,25 +952,36 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 		logEgressUpdateFailedError(fmt.Sprintf("persist policy: %v", persistErr))
 		log.Errorf("policy API: persist policy failed: %v", persistErr)
 		http.Error(w, fmt.Sprintf("failed to persist policy: %v", persistErr), http.StatusInternalServerError)
-		return false
+		return false, nil
 	}
 	merged := policy.MergeAlwaysOverlay(pol, alwaysDeny, alwaysAllow)
 	if s.nft != nil {
 		s.invalidateRevisionBootstrapLocked()
 		nftCtx, nftCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer nftCancel()
-		if err := s.nft.ApplyStatic(nftCtx, merged.WithExtraAllowIPs(s.nameserverIPs)); err != nil {
+		effective := merged.WithExtraAllowIPs(s.nameserverIPs)
+		var err error
+		if dropEstablished {
+			oldUser := s.proxy.CurrentPolicy()
+			oldEffective := policy.MergeAlwaysOverlay(oldUser, alwaysDeny, alwaysAllow).WithExtraAllowIPs(s.nameserverIPs)
+			var matched int
+			matched, err = s.nft.ApplyStaticComputingEstablishedDrops(nftCtx, oldEffective, effective)
+			dropped = &matched
+		} else {
+			err = s.nft.ApplyStatic(nftCtx, effective)
+		}
+		if err != nil {
 			logEgressUpdateFailedError(fmt.Sprintf("nftables apply (%s): %v", op, err))
 			log.Errorf("policy API: nftables apply failed (%s): %v", op, err)
 			if restoreErr := restore(); restoreErr != nil {
 				log.Errorf("policy API: restore policy file after failed apply: %v", restoreErr)
 			}
 			http.Error(w, fmt.Sprintf("failed to apply nftables policy: %v", err), http.StatusInternalServerError)
-			return false
+			return false, nil
 		}
 	}
 	s.proxy.UpdatePolicy(pol)
-	return true
+	return true, dropped
 }
 
 func (s *policyServer) startAlwaysRuleReloadJob() {

@@ -77,6 +77,25 @@ paths:
         - If multiple incoming rules resolve to the same match scope (same
           `target` and the same set of `ports`), the first one wins; rules
           that differ in `target` or in `ports` coexist.
+      parameters:
+        - name: dropEstablished
+          in: query
+          required: false
+          description: |
+            When true, destinations removed by this policy change lose their
+            established/related conntrack bypass on the dns+nft sidecar: matching
+            keep-alive flows are dropped. Opt-in because tearing down long-lived
+            connections can surprise callers that only meant to block new dials.
+            The teardown rules stay installed across later policy applies until
+            the destination is allowed again.
+
+            Unsupported configurations return `501 Not Implemented` without
+            changing the policy: `dns`-only enforcement (no nftables chain), the
+            experimental revision runtime, and an upstream proxy
+            (`OPENSANDBOX_EGRESS_UPSTREAM_PROXY`) combined with transparent MITM.
+          schema:
+            type: boolean
+            default: false
       requestBody:
         required: true
         content:
@@ -119,6 +138,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '501':
+          $ref: '#/components/responses/DropEstablishedNotImplemented'
         '503':
           description: |
             The internal experimental revision runtime is unavailable, the
@@ -144,6 +165,25 @@ paths:
           `ports` and no `target`): listing it removes every port-only rule.
           Port-only rules cannot be addressed individually by target since
           they have none.
+      parameters:
+        - name: dropEstablished
+          in: query
+          required: false
+          description: |
+            When true, destinations removed by this policy change lose their
+            established/related conntrack bypass on the dns+nft sidecar: matching
+            keep-alive flows are dropped. Opt-in because tearing down long-lived
+            connections can surprise callers that only meant to block new dials.
+            The teardown rules stay installed across later policy applies until
+            the destination is allowed again.
+
+            Unsupported configurations return `501 Not Implemented` without
+            changing the policy: `dns`-only enforcement (no nftables chain), the
+            experimental revision runtime, and an upstream proxy
+            (`OPENSANDBOX_EGRESS_UPSTREAM_PROXY`) combined with transparent MITM.
+          schema:
+            type: boolean
+            default: false
       requestBody:
         required: true
         content:
@@ -183,6 +223,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '501':
+          $ref: '#/components/responses/DropEstablishedNotImplemented'
         '503':
           description: |
             The internal experimental revision runtime is unavailable, the
@@ -373,6 +415,15 @@ components:
         text/plain:
           schema:
             type: string
+    DropEstablishedNotImplemented:
+      description: |
+        `dropEstablished=true` was requested but this sidecar cannot honor it
+        (`dns`-only enforcement, the experimental revision runtime, or an
+        upstream proxy with transparent MITM). The policy was not changed.
+      content:
+        text/plain:
+          schema:
+            type: string
     PreconditionFailed:
       description: Credential Proxy prerequisites are not ready.
       content:
@@ -406,6 +457,14 @@ components:
           description: Optional human-readable reason when the sidecar returns extra context.
         policy:
           $ref: '#/components/schemas/NetworkPolicy'
+        droppedEstablished:
+          type: integer
+          minimum: 0
+          description: |
+            Present when the request set `dropEstablished=true`. Best-effort count of
+            TCP conntrack flows whose original destination matched destinations the
+            new policy no longer allows. The sidecar also installs nft drop rules
+            ahead of `ct state established,related accept` for those destinations.
       additionalProperties: false
     NetworkPolicy:
       type: object

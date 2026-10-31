@@ -35,7 +35,7 @@ func TestBuildRulesetWithUpstreamProxyScopesAccept(t *testing.T) {
 			UID:  10042,
 			IPs:  []netip.Addr{netip.MustParseAddr("10.20.30.40")},
 		},
-	})
+	}, EstablishedDrops{})
 	require.NoError(t, err)
 
 	expectContains(t, rendered, "add set inet opensandbox upstream_proxy_v4 { type ipv4_addr; flags timeout; }")
@@ -48,7 +48,7 @@ func TestBuildRulesetWithUpstreamProxyScopesAccept(t *testing.T) {
 }
 
 func TestBuildRulesetWithoutUpstreamProxyOmitsScopedSets(t *testing.T) {
-	rendered, err := buildRuleset(policy.DefaultDenyPolicy(), Options{BlockDoT: true})
+	rendered, err := buildRuleset(policy.DefaultDenyPolicy(), Options{BlockDoT: true}, EstablishedDrops{})
 	require.NoError(t, err)
 	require.NotContains(t, rendered, "upstream_proxy")
 }
