@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { SandboxApiException } from "../dist/index.js";
 import { IsolatedSessionsAdapter } from "../dist/internal.js";
 
 function createAdapter(mockFetch) {
@@ -95,7 +96,10 @@ describe("runBackground", () => {
       if (method === "POST" && urlStr.endsWith("/v1/isolated/session/sess-1/run")) {
         return new Response(
           JSON.stringify({ code: "SESSION_NOT_FOUND", message: "isolated session not found" }),
-          { status: 404, headers: { "content-type": "application/json" } },
+          {
+            status: 404,
+            headers: { "content-type": "application/json", "x-request-id": "req-run" },
+          },
         );
       }
       return new Response("wrong endpoint", { status: 500 });
@@ -105,9 +109,25 @@ describe("runBackground", () => {
     await assert.rejects(
       () => adapter._runBackground("sess-1", "echo hi"),
       (err) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /404/);
-        assert.match(err.message, /\/v1\/isolated\/session\/sess-1\/run/);
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 404);
+        assert.strictEqual(err.requestId, "req-run");
+        assert.strictEqual(err.error.code, "SESSION_NOT_FOUND");
+        assert.strictEqual(err.message, "isolated session not found");
+        return true;
+      },
+    );
+  });
+
+  it("rejects a 2xx response other than 202", async () => {
+    const adapter = createAdapter(async () => new Response("", { status: 200 }));
+
+    await assert.rejects(
+      () => adapter._runBackground("sess-1", "echo hi"),
+      (err) => {
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 200);
+        assert.strictEqual(err.message, "POST /v1/isolated/session/sess-1/run failed (status=200)");
         return true;
       },
     );
@@ -192,7 +212,10 @@ describe("getRunStatus", () => {
       ) {
         return new Response(
           JSON.stringify({ code: "RUN_NOT_FOUND", message: "run not found" }),
-          { status: 404, headers: { "content-type": "application/json" } },
+          {
+            status: 404,
+            headers: { "content-type": "application/json", "x-request-id": "req-status" },
+          },
         );
       }
       return new Response("wrong endpoint", { status: 500 });
@@ -202,9 +225,11 @@ describe("getRunStatus", () => {
     await assert.rejects(
       () => adapter._getRunStatus("sess-1", "run-missing"),
       (err) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /404/);
-        assert.match(err.message, /\/v1\/isolated\/session\/sess-1\/runs\/run-missing/);
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 404);
+        assert.strictEqual(err.requestId, "req-status");
+        assert.strictEqual(err.error.code, "RUN_NOT_FOUND");
+        assert.strictEqual(err.message, "run not found");
         return true;
       },
     );
@@ -325,7 +350,7 @@ describe("getRunLogs", () => {
       ) {
         return new Response("run gone", {
           status: 404,
-          headers: { "content-type": "text/plain" },
+          headers: { "content-type": "text/plain", "x-request-id": "req-logs" },
         });
       }
       return new Response("wrong endpoint", { status: 500 });
@@ -335,9 +360,12 @@ describe("getRunLogs", () => {
     await assert.rejects(
       () => adapter._getRunLogs("sess-1", "run-missing"),
       (err) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /404/);
-        assert.match(err.message, /\/v1\/isolated\/session\/sess-1\/runs\/run-missing\/logs/);
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 404);
+        assert.strictEqual(err.requestId, "req-logs");
+        assert.strictEqual(err.error.code, "UNEXPECTED_RESPONSE");
+        assert.strictEqual(err.message, "run gone");
+        assert.strictEqual(err.rawBody, "run gone");
         return true;
       },
     );

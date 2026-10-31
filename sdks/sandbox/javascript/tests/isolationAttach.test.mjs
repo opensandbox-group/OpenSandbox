@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { SandboxApiException } from "../dist/index.js";
 import { IsolatedSessionsAdapter } from "../dist/internal.js";
 
 function createAdapter(mockFetch) {
@@ -171,7 +172,10 @@ describe("attach", () => {
             code: "SESSION_NOT_FOUND",
             message: "isolated session not found",
           }),
-          { status: 404, headers: { "content-type": "application/json" } },
+          {
+            status: 404,
+            headers: { "content-type": "application/json", "x-request-id": "req-attach" },
+          },
         );
       }
       return new Response("wrong endpoint", { status: 500 });
@@ -181,9 +185,26 @@ describe("attach", () => {
     await assert.rejects(
       () => adapter.attach("missing-sess"),
       (err) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /404/);
-        assert.match(err.message, /\/v1\/isolated\/session\/missing-sess/);
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 404);
+        assert.strictEqual(err.requestId, "req-attach");
+        assert.strictEqual(err.error.code, "SESSION_NOT_FOUND");
+        assert.strictEqual(err.message, "isolated session not found");
+        return true;
+      },
+    );
+  });
+
+  it("reports an error response without a body with its status", async () => {
+    const adapter = createAdapter(async () => new Response("", { status: 503 }));
+
+    await assert.rejects(
+      () => adapter.attach("sess-1"),
+      (err) => {
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 503);
+        assert.strictEqual(err.error.code, "UNEXPECTED_RESPONSE");
+        assert.strictEqual(err.message, "GET /v1/isolated/session/sess-1 failed (status=503)");
         return true;
       },
     );
