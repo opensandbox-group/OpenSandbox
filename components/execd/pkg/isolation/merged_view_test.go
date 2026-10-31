@@ -16,6 +16,7 @@ package isolation
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -364,4 +365,128 @@ func TestMergedView_TraversalDenialUnchanged(t *testing.T) {
 	// outside the workspace and is rejected as out-of-scope.
 	_, err = mv.Stat(filepath.Join(mv.LowerDir, "..", "etc", "passwd"))
 	assert.True(t, errors.Is(err, ErrPathOutsideOverlays))
+}
+
+// assertNotInView checks that every read path of mv treats rel as absent.
+func assertNotInView(t *testing.T, mv *MergedView, rel string) {
+	t.Helper()
+	_, err := mv.Stat(rel)
+	assert.ErrorIs(t, err, fs.ErrNotExist, "Stat(%s)", rel)
+	_, err = mv.ReadFile(rel)
+	assert.ErrorIs(t, err, fs.ErrNotExist, "ReadFile(%s)", rel)
+	f, err := mv.Open(rel)
+	if err == nil {
+		f.Close()
+	}
+	assert.ErrorIs(t, err, fs.ErrNotExist, "Open(%s)", rel)
+
+	entries, err := mv.ReadDir(filepath.Dir(rel))
+	if err == nil {
+		for _, e := range entries {
+			assert.NotEqual(t, filepath.Base(rel), e.Name(), "ReadDir(%s)", filepath.Dir(rel))
+		}
+	}
+	results, err := mv.Search(".", "*")
+	require.NoError(t, err)
+	assert.NotContains(t, results, rel, "Search")
+}
+
+func TestMergedView_DeletedDirectoryHidesLowerContents(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "sub", "y.txt"), []byte("y"), 0o644))
+
+	require.NoError(t, mv.RemoveAll("d"))
+
+	assertNotInView(t, mv, "d")
+	assertNotInView(t, mv, filepath.Join("d", "x.txt"))
+	assertNotInView(t, mv, filepath.Join("d", "sub", "y.txt"))
+	_, err := mv.ReadDir("d")
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+	_, err = mv.ReadDir(filepath.Join("d", "sub"))
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+	results, err := mv.Search("d", "*")
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMergedView_RecreatedDirectoryHidesOldLowerContents(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "old.txt"), []byte("old"), 0o644))
+
+	require.NoError(t, mv.RemoveAll("d"))
+	require.NoError(t, mv.WriteFile(filepath.Join("d", "new.txt"), []byte("new"), 0o644))
+
+	assertNotInView(t, mv, filepath.Join("d", "old.txt"))
+	entries, err := mv.ReadDir("d")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "new.txt", entries[0].Name())
+	results, err := mv.Search(".", "*.txt")
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join("d", "new.txt")}, results)
+}
+
+func TestMergedView_UpperFileHidesLowerDirectory(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.UpperDir, "d"), []byte("file"), 0o644))
+
+	assertNotInView(t, mv, filepath.Join("d", "x.txt"))
+	data, err := mv.ReadFile("d")
+	require.NoError(t, err)
+	assert.Equal(t, "file", string(data))
+}
+
+// In rw mode the runtime passes the workspace as both lower and upper, so
+// every file "hides" itself in lower; reads must not change.
+func TestMergedView_RWModeSameUpperAndLower(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	mv := NewMergedView(dir, dir, WorkspaceRW, uint32(os.Getuid()), uint32(os.Getgid()))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "d", "x.txt"), []byte("x"), 0o644))
+
+	data, err := mv.ReadFile(filepath.Join("d", "x.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+	entries, err := mv.ReadDir("d")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "x.txt", entries[0].Name())
+	results, err := mv.Search(".", "*.txt")
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join("d", "x.txt")}, results)
+
+	_, err = mv.ReadDir(filepath.Join("d", "x.txt"))
+	assert.False(t, errors.Is(err, fs.ErrNotExist), "an existing file is not missing: %v", err)
+}
+
+// An upper file that exists but cannot be read keeps its error: it is
+// neither missing nor a reason to serve the lower copy.
+func TestMergedView_UnreadableUpperFileKeepsItsError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads mode 000 files")
+	}
+	for _, sameDir := range []bool{false, true} {
+		mv := newTestMergedView(t, WorkspaceRW)
+		if sameDir {
+			// rw mode as the runtime builds it.
+			mv = NewMergedView(mv.UpperDir, mv.UpperDir, WorkspaceRW, mv.Uid, mv.Gid)
+		} else {
+			require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "f.txt"), []byte("stale"), 0o644))
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(mv.UpperDir, "f.txt"), []byte("new"), 0o000))
+
+		_, err := mv.ReadFile("f.txt")
+		assert.ErrorIs(t, err, fs.ErrPermission, "ReadFile, same dir %v", sameDir)
+		f, err := mv.Open("f.txt")
+		if err == nil {
+			f.Close()
+		}
+		assert.ErrorIs(t, err, fs.ErrPermission, "Open, same dir %v", sameDir)
+	}
 }
