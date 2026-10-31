@@ -29,9 +29,10 @@ def _volume(name: str, mount_path: str, host_path: str = "/tmp/data") -> Volume:
     )
 
 
-def test_rejects_root_mount_path():
+@pytest.mark.parametrize("mount_path", ["/", "//", "///"], ids=["root", "double-slash-root", "triple-slash-root"])
+def test_rejects_root_mount_path(mount_path: str):
     with pytest.raises(HTTPException) as exc_info:
-        _validate_docker_mount_paths([_volume("data", "/")])
+        _validate_docker_mount_paths([_volume("data", mount_path)])
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_MOUNT_PATH
@@ -40,8 +41,18 @@ def test_rejects_root_mount_path():
 
 @pytest.mark.parametrize(
     ("first", "second"),
-    [("/d1", "/d1"), ("/d1", "/d1/")],
-    ids=["exact-duplicate", "trailing-slash-duplicate"],
+    [
+        ("/d1", "/d1"),
+        ("/d1", "/d1/"),
+        ("/d1", "//d1"),
+        ("//d1", "///d1/"),
+    ],
+    ids=[
+        "exact-duplicate",
+        "trailing-slash-duplicate",
+        "double-leading-slash-duplicate",
+        "multiple-leading-slashes-duplicate",
+    ],
 )
 def test_rejects_duplicate_normalized_mount_paths(first: str, second: str):
     volumes = [_volume("first", first), _volume("second", second)]
