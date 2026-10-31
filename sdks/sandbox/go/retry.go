@@ -276,12 +276,22 @@ func (r *RetryConfig) backoff(attempt int) time.Duration {
 		multiplier = 1
 	}
 	delay := float64(r.InitialBackoff) * math.Pow(multiplier, float64(attempt))
-	if r.MaxBackoff > 0 && delay > float64(r.MaxBackoff) {
-		delay = float64(r.MaxBackoff)
+	// An unset MaxBackoff still saturates at the largest Duration, which also
+	// keeps an infinite delay from turning into NaN under jitter.
+	maxDelay := float64(math.MaxInt64)
+	if r.MaxBackoff > 0 {
+		maxDelay = float64(r.MaxBackoff)
+	}
+	if delay > maxDelay {
+		delay = maxDelay
 	}
 	if r.Jitter > 0 {
 		jitter := delay * r.Jitter
 		delay = delay - jitter + rand.Float64()*2*jitter
+	}
+	// Converting a float at or above 2^63 to Duration wraps to a negative value.
+	if delay >= float64(math.MaxInt64) {
+		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(delay)
 }

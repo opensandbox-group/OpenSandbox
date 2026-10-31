@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -729,5 +730,19 @@ func TestBackoff_UnsetMaxBackoffDoesNotCapToZero(t *testing.T) {
 	got := cfg.backoff(4) // 100ms * 16 = 1.6s
 	if got != 1600*time.Millisecond {
 		assert.Fail(t, fmt.Sprintf("backoff(4) = %v, want 1.6s (uncapped)", got))
+	}
+}
+
+func TestBackoff_SaturatesInsteadOfOverflowing(t *testing.T) {
+	// Without a MaxBackoff, a long retry run must not wrap to a negative delay.
+	exact := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0}
+	jittered := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0, Jitter: 0.25}
+	for _, attempt := range []int{35, 40, 64, 2000} {
+		if got := exact.backoff(attempt); got != time.Duration(math.MaxInt64) {
+			t.Errorf("backoff(%d) = %v, want the maximum duration", attempt, got)
+		}
+		if got := jittered.backoff(attempt); got < time.Duration(math.MaxInt64)/2 {
+			t.Errorf("jittered backoff(%d) = %v, want a saturated delay", attempt, got)
+		}
 	}
 }
