@@ -91,7 +91,7 @@ gateway:
     # flight holds its permit until the restore reaches a terminal outcome.
     restoreMax: 256
     # -- Max lifetime of one wake flight; expiry releases the restore
-    # permit while the resume converges server-side.
+    # permit while the resume converges server-side. Must exceed parkBudget.
     maxFlightLifetime: "5m"
     # -- First readiness-poll interval of a wake flight.
     retryInterval: "50ms"
