@@ -115,3 +115,37 @@ class TestTableOutput:
         fmt.print_text("hello world")
         captured = capsys.readouterr()
         assert captured.out.strip() == "hello world"
+
+
+class TestTextIsNotMarkup:
+    """User and server text must print as-is, even when it looks like markup."""
+
+    TEXT = "/tmp/notes[draft]/a[/]b"
+
+    def test_messages(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.success(self.TEXT)
+        fmt.error(self.TEXT)
+        captured = capsys.readouterr()
+        assert self.TEXT in captured.out
+        assert self.TEXT in captured.err
+
+    def test_error_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.error_panel(self.TEXT)
+        assert self.TEXT in capsys.readouterr().err
+
+    def test_success_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.success_panel({"path": self.TEXT})
+        assert self.TEXT in capsys.readouterr().out
+
+    def test_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.panel(self.TEXT, title="Logs")
+        assert self.TEXT in capsys.readouterr().out
+
+    def test_table_cells(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=False)
+        fmt.print_rows([{"path": self.TEXT}], columns=["path"])
+        assert self.TEXT in capsys.readouterr().out

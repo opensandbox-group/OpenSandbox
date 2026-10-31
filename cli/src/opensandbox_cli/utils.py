@@ -205,7 +205,7 @@ def handle_errors(fn):  # type: ignore[no-untyped-def]
                     output.error_panel(str(exc), title="Sandbox Error")
                 else:
                     output.error_panel(
-                        f"{str(exc)}\n\n[dim]Type: {type(exc).__qualname__}[/]",
+                        f"{exc}\n\nType: {type(exc).__qualname__}",
                         title=type(exc).__name__,
                     )
             else:
