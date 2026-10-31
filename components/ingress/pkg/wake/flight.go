@@ -57,9 +57,13 @@ func (f *flight) requestID(attempt int) string {
 }
 
 // wait blocks until the flight finishes, the caller's context is done, or
-// the shared budget elapses. The flight keeps running in every case.
-func (f *flight) wait(ctx context.Context) error {
-	remaining := time.Until(f.deadline)
+// the shared budget or the caller's own deadline elapses. The flight keeps
+// running in every case.
+func (f *flight) wait(ctx context.Context, deadline time.Time) error {
+	if f.deadline.Before(deadline) {
+		deadline = f.deadline
+	}
+	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		return ErrBudgetExhausted
 	}

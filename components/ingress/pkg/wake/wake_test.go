@@ -561,7 +561,7 @@ func TestAcquireFlightJoinsWhileQueuedOnPermit(t *testing.T) {
 	var joinErr error
 	go func() {
 		defer close(acquired)
-		joined, _, joinErr = waker.acquireFlight(context.Background(), wakeTarget, "ckpt-1")
+		joined, _, joinErr = waker.acquireFlight(context.Background(), wakeTarget, "ckpt-1", time.Now().Add(time.Second))
 	}()
 	time.Sleep(20 * time.Millisecond) // the starter is now queued on the permit
 
@@ -603,7 +603,7 @@ func TestFlightLifetimeCapsPollingAndFreesPermit(t *testing.T) {
 	}
 	waker, _ := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 8, MaxFlightLifetime: 50 * time.Millisecond, RetryInterval: 10 * time.Millisecond}, lifecycle)
 
-	_, _, err := waker.acquireFlight(context.Background(), wakeTarget, "ckpt-1")
+	_, _, err := waker.acquireFlight(context.Background(), wakeTarget, "ckpt-1", time.Now().Add(time.Second))
 	require.NoError(t, err)
 	require.Equal(t, 1, len(waker.permits))
 
@@ -678,6 +678,53 @@ func TestRestorePermitQueueShedsWithoutResume(t *testing.T) {
 	require.NoError(t, <-queuedErr)
 	resumeCalls, _ := scripted.snapshot()
 	require.Equal(t, 2, resumeCalls)
+}
+
+func TestQueuedStarterWaitIsBoundedByItsOwnBudget(t *testing.T) {
+	// B queues for the only permit until A's flight ends, then starts a flight
+	// that never becomes ready. B's total wait stays within one budget instead
+	// of a full queue wait plus a fresh flight budget.
+	const budget = 400 * time.Millisecond
+	firstResumeHeld := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	bProbed := make(chan struct{})
+	var probeCount atomic.Int64
+	var hookOnce sync.Once
+	lifecycle := &scriptedLifecycle{
+		// call0: A probe; call1: B probe; call2: A poll (ready); call3+: B polls.
+		probes:     []probeCall{pausedProbe("ckpt-1"), pausedProbe("ckpt-1"), readyProbe(), pausedProbe("ckpt-1")},
+		resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAccepted},
+		resumeErrs: []error{nil},
+	}
+	lifecycle.resumeHook = func() {
+		hookOnce.Do(func() {
+			close(firstResumeHeld)
+			<-releaseFirst
+		})
+	}
+	lifecycle.probeHook = func() {
+		if probeCount.Add(1) == 2 {
+			close(bProbed)
+		}
+	}
+	waker, _ := newTestWaker(t, Config{ParkBudget: budget, ParkMax: 8, RestoreMax: 1, RetryInterval: 10 * time.Millisecond}, lifecycle)
+	targetB := wakeTarget
+	targetB.SandboxID = "sb-2"
+
+	ownerErr := make(chan error, 1)
+	go func() { ownerErr <- waker.Wake(context.Background(), wakeTarget) }()
+	<-firstResumeHeld
+
+	start := time.Now()
+	queuedErr := make(chan error, 1)
+	go func() { queuedErr <- waker.Wake(context.Background(), targetB) }()
+	<-bProbed
+	time.Sleep(3 * budget / 4)
+	close(releaseFirst)
+	require.NoError(t, <-ownerErr)
+
+	require.ErrorIs(t, <-queuedErr, ErrBudgetExhausted)
+	require.Less(t, time.Since(start), budget+budget/2)
 }
 
 func TestRestorePermitShedsWhenBudgetElapsesQueued(t *testing.T) {

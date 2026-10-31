@@ -220,7 +220,9 @@ func (w *Waker) Wake(ctx context.Context, target sandbox.EndpointTarget) error {
 	}
 	defer w.lot.release()
 
-	flight, joined, err := w.acquireFlight(ctx, target, probe.CheckpointID)
+	// The request's own budget bounds the permit queue and the wait together.
+	deadline := w.now().Add(w.cfg.ParkBudget)
+	flight, joined, err := w.acquireFlight(ctx, target, probe.CheckpointID, deadline)
 	if err != nil {
 		return err
 	}
@@ -237,7 +239,7 @@ func (w *Waker) Wake(ctx context.Context, target sandbox.EndpointTarget) error {
 
 	start := w.now()
 	telemetry.RecordParkDelta(1)
-	waitErr := flight.wait(ctx)
+	waitErr := flight.wait(ctx, deadline)
 	telemetry.RecordParkDelta(-1)
 	telemetry.RecordParkWait(parkOutcome(waitErr), w.now().Sub(start))
 	return waitErr
@@ -245,14 +247,14 @@ func (w *Waker) Wake(ctx context.Context, target sandbox.EndpointTarget) error {
 
 // acquireFlight returns the active flight, creating it under a restore
 // permit when none is running; a queued starter is bounded by its own
-// budget, and joiners take no permit.
-func (w *Waker) acquireFlight(ctx context.Context, target sandbox.EndpointTarget, checkpointID string) (*flight, bool, error) {
+// deadline, and joiners take no permit.
+func (w *Waker) acquireFlight(ctx context.Context, target sandbox.EndpointTarget, checkpointID string, deadline time.Time) (*flight, bool, error) {
 	key := flightKey{namespace: target.Namespace, sandboxID: target.SandboxID}
 	if existing := w.flights.lookup(key); existing != nil {
 		return existing, true, nil
 	}
 
-	timer := time.NewTimer(w.cfg.ParkBudget)
+	timer := time.NewTimer(deadline.Sub(w.now()))
 	defer timer.Stop()
 	// Re-check the registry while queued: with permits saturated (the very
 	// case they exist for), a joinable flight may appear at any moment and
