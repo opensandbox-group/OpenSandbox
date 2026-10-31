@@ -599,6 +599,10 @@ func (allocator *defaultAllocator) GetSandboxReleased(ctx context.Context, sandb
 }
 
 func (allocator *defaultAllocator) GetPoolAllocation(ctx context.Context, pool *sandboxv1alpha1.Pool) (map[string]string, error) {
+	// Eviction and the capacity metrics read the store before the first Schedule.
+	if err := allocator.checkRecovery(ctx); err != nil {
+		return nil, err
+	}
 	alloc, err := allocator.store.GetAllocation(ctx, pool)
 	if err != nil {
 		return nil, err

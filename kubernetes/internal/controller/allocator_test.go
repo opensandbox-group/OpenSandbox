@@ -300,6 +300,8 @@ func TestGetPoolAllocation_Empty(t *testing.T) {
 	allocator, store, _ := newTestAllocator(ctrl)
 	pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool1"}}
 
+	// The store is recovered before it is first read.
+	store.EXPECT().Recover(gomock.Any(), gomock.Any()).Return(nil).Times(1)
 	store.EXPECT().GetAllocation(gomock.Any(), pool).Return(nil, nil).Times(1)
 
 	alloc, err := allocator.GetPoolAllocation(context.Background(), pool)
