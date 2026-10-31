@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import asyncio
+import time
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import cast
 from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
+from kubernetes.client import ApiException
 from pydantic import SecretStr
 
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
@@ -1419,6 +1421,202 @@ class TestWaitForSandboxReady:
         assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_QUOTA_EXCEEDED
         assert "exceeded quota" in exc_info.value.detail["message"]
         k8s_service.workload_provider.delete_workload.assert_called_once()
+
+def _pending_status():
+    return {
+        "state": "Pending",
+        "reason": "",
+        "message": "Still pending",
+        "last_transition_at": datetime.now(timezone.utc),
+    }
+
+
+def _waiting_pod(name="sbx-pod-0", namespace="test-namespace"):
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name, namespace=namespace),
+        status=SimpleNamespace(
+            conditions=[
+                SimpleNamespace(
+                    type="PodScheduled",
+                    status="False",
+                    reason="Unschedulable",
+                    message="0/3 nodes are available: 3 Insufficient cpu.",
+                )
+            ],
+            init_container_statuses=[
+                SimpleNamespace(
+                    name="execd-installer",
+                    state=SimpleNamespace(
+                        waiting=None,
+                        terminated=SimpleNamespace(exit_code=0, reason="Completed", message=None),
+                    ),
+                )
+            ],
+            container_statuses=[
+                SimpleNamespace(
+                    name="sandbox",
+                    state=SimpleNamespace(
+                        waiting=SimpleNamespace(
+                            reason="ImagePullBackOff",
+                            message='Back-off pulling image "registry.invalid/app:v1"',
+                        ),
+                        terminated=None,
+                    ),
+                )
+            ],
+        ),
+    )
+
+
+def _warning_event(reason, message, ts):
+    return SimpleNamespace(
+        reason=reason,
+        message=message,
+        last_timestamp=ts,
+        event_time=None,
+        first_timestamp=None,
+    )
+
+
+class TestCreateTimeoutStartupDetails:
+    """Pod failure reasons are captured before the timed-out workload is deleted (#2417)."""
+
+    async def _wait_timeout(self, k8s_service, mock_workload) -> HTTPException:
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = _pending_status()
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-123", timeout_seconds=0.2, poll_interval_seconds=0.05
+            )
+        return exc_info.value
+
+    @pytest.mark.asyncio
+    async def test_timeout_reports_pod_failure_reasons(self, k8s_service, mock_workload):
+        k8s_service.k8s_client.list_pods.return_value = [_waiting_pod()]
+        core_v1 = k8s_service.k8s_client.get_core_v1_api.return_value
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(
+            items=[
+                _warning_event("Failed", "Failed to pull image: not found", "2026-10-27T01:00:00Z"),
+                _warning_event("FailedScheduling", "0/3 nodes are available", "2026-10-27T01:00:05Z"),
+                _warning_event("Failed", "Failed to pull image: not found", "2026-10-27T00:59:00Z"),
+            ]
+        )
+
+        exc = await self._wait_timeout(k8s_service, mock_workload)
+
+        assert exc.status_code == 504
+        detail = cast(dict[str, str], exc.detail)
+        assert detail["code"] == SandboxErrorCodes.K8S_POD_READY_TIMEOUT
+        message = detail["message"]
+        assert message.startswith("Timeout waiting for sandbox test-sandbox-123 to be Running with IP.")
+        assert "Pod startup details: pod sbx-pod-0:" in message
+        assert "not scheduled: Unschedulable (0/3 nodes are available: 3 Insufficient cpu.)" in message
+        assert 'container sandbox waiting: ImagePullBackOff (Back-off pulling image "registry.invalid/app:v1")' in message
+        # A completed init container is not a failure reason.
+        assert "execd-installer" not in message
+        # Newest event first; duplicates folded.
+        assert message.index("event FailedScheduling") < message.index("event Failed (")
+        assert message.count("Failed to pull image") == 1
+        k8s_service.k8s_client.list_pods.assert_called_once_with(
+            namespace="test-namespace",
+            label_selector="opensandbox.io/id=test-sandbox-123",
+        )
+        _, kwargs = core_v1.list_namespaced_event.call_args
+        assert kwargs["field_selector"] == "involvedObject.name=sbx-pod-0,type=Warning"
+
+    @pytest.mark.asyncio
+    async def test_timeout_reports_missing_pod_with_workload_events(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.k8s_client.list_pods.return_value = []
+        core_v1 = k8s_service.k8s_client.get_core_v1_api.return_value
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(
+            items=[
+                _warning_event(
+                    "FailedCreate",
+                    'pods "sbx-pod-0" is forbidden: exceeded quota',
+                    "2026-10-27T01:00:00Z",
+                )
+            ]
+        )
+
+        exc = await self._wait_timeout(k8s_service, mock_workload)
+
+        assert exc.status_code == 504
+        message = cast(dict[str, str], exc.detail)["message"]
+        assert "Pod startup details: no pod found for sandbox" in message
+        assert (
+            'workload test-sandbox-123: event FailedCreate (pods "sbx-pod-0" is forbidden: exceeded quota)'
+            in message
+        )
+        k8s_service.k8s_client.read_pod.assert_not_called()
+        _, kwargs = core_v1.list_namespaced_event.call_args
+        assert kwargs["field_selector"] == "involvedObject.name=test-sandbox-123,type=Warning"
+
+    @pytest.mark.asyncio
+    async def test_timeout_message_unchanged_when_detail_lookup_fails(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.k8s_client.list_pods.side_effect = ApiException(status=403, reason="Forbidden")
+
+        exc = await self._wait_timeout(k8s_service, mock_workload)
+
+        assert exc.status_code == 504
+        detail = cast(dict[str, str], exc.detail)
+        assert detail["code"] == SandboxErrorCodes.K8S_POD_READY_TIMEOUT
+        assert "Pod startup details" not in detail["message"]
+        assert detail["message"].startswith("Timeout waiting for sandbox test-sandbox-123")
+
+    @pytest.mark.asyncio
+    async def test_slow_detail_lookup_is_bounded(self, k8s_service, mock_workload):
+        def _slow_list_pods(**kwargs):
+            time.sleep(1.0)
+            return [_waiting_pod()]
+
+        k8s_service.k8s_client.list_pods.side_effect = _slow_list_pods
+
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service._STARTUP_DETAILS_TIMEOUT_SECONDS",
+            0.05,
+        ):
+            started = time.monotonic()
+            exc = await self._wait_timeout(k8s_service, mock_workload)
+            elapsed = time.monotonic() - started
+
+        assert exc.status_code == 504
+        assert "Pod startup details" not in cast(dict[str, str], exc.detail)["message"]
+        assert elapsed < 0.9
+
+    @pytest.mark.asyncio
+    async def test_create_collects_details_before_deleting_workload(
+        self, k8s_service, create_sandbox_request, mock_workload
+    ):
+        calls: list[str] = []
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = _pending_status()
+        k8s_service.app_config.kubernetes.sandbox_create_timeout_seconds = 1
+        k8s_service.app_config.kubernetes.sandbox_create_poll_interval_seconds = 0.1
+
+        def _list_pods(**kwargs):
+            calls.append("list_pods")
+            return [_waiting_pod()]
+
+        k8s_service.k8s_client.list_pods.side_effect = _list_pods
+        k8s_service.workload_provider.delete_workload.side_effect = (
+            lambda *args, **kwargs: calls.append("delete_workload")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value.status_code == 504
+        assert "ImagePullBackOff" in cast(dict[str, str], exc_info.value.detail)["message"]
+        assert calls == ["list_pods", "delete_workload"]
+
 
 class TestKubernetesSandboxServiceRenew:
     def test_renew_expiration_rejects_manual_cleanup_sandbox(self, k8s_service):

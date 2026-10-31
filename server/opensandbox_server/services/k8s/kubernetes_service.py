@@ -64,7 +64,10 @@ from opensandbox_server.services.k8s.error_helpers import (
     _is_not_found_error,
     _quota_rejection_message,
 )
-from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
+from opensandbox_server.services.k8s.k8s_diagnostics import (
+    K8sDiagnosticsMixin,
+    K8sStartupDiagnosticsMixin,
+)
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
 from opensandbox_server.services.k8s.status_helpers import (
@@ -125,6 +128,10 @@ logger = logging.getLogger(__name__)
 _CLUSTER_LOOKUP_FORBIDDEN_BACKOFF_SECONDS = 600.0
 
 
+#: Upper bound on the extra time a create timeout spends reading Pod details.
+_STARTUP_DETAILS_TIMEOUT_SECONDS = 5.0
+
+
 def _is_namespace_not_found(exc: Exception) -> bool:
     """True when a K8s ApiException indicates the target namespace does not exist."""
     try:
@@ -137,7 +144,9 @@ def _is_namespace_not_found(exc: Exception) -> bool:
         return False
 
 
-class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionService):
+class KubernetesSandboxService(
+    K8sDiagnosticsMixin, K8sStartupDiagnosticsMixin, SandboxService, ExtensionService
+):
     def __init__(self, config: Optional[AppConfig] = None):
         self.app_config = config or get_config()
         runtime_config = self.app_config.runtime
@@ -371,6 +380,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         active = True
 
         pending_workload: Dict[str, Any] | None = None
+        last_workload: Any = None
         reading_workload = True
         workload_identity: tuple[str, str] | None = None
 
@@ -458,6 +468,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
                         await wait_for_change()
                         continue
+                    last_workload = workload
 
                     status_info = _normalize_create_status(
                         self.workload_provider.get_status(workload)
@@ -565,14 +576,23 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 raise self._pool_capacity_exhausted_error(
                     pool_acquisition_timeout_seconds
                 )
+            message = (
+                f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
+                f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
+            )
+            # The caller deletes the workload after this error, which removes
+            # the Pod and with it the only place users could see why it never
+            # started. Capture that reason now so it reaches the caller.
+            startup_details = await self._startup_failure_details(
+                sandbox_id, last_workload
+            )
+            if startup_details:
+                message += f". Pod startup details: {startup_details}"
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail={
                     "code": SandboxErrorCodes.K8S_POD_READY_TIMEOUT,
-                    "message": (
-                        f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
-                        f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
-                    ),
+                    "message": message,
                 },
             )
 
@@ -580,6 +600,31 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             active = False
             if unsubscribe is not None:
                 unsubscribe()
+
+    async def _startup_failure_details(
+        self, sandbox_id: str, workload: Any
+    ) -> Optional[str]:
+        """Best-effort Pod failure reason for a create timeout.
+
+        Never raises, and is bounded by ``_STARTUP_DETAILS_TIMEOUT_SECONDS``:
+        a failed or slow lookup must not change the timeout error or hold up
+        the rollback that follows it.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.collect_startup_failure_details,
+                    sandbox_id,
+                    self._resolve_namespace(),
+                    workload,
+                ),
+                timeout=_STARTUP_DETAILS_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Could not collect startup details for sandbox {sandbox_id}: {exc}"
+            )
+            return None
 
     @staticmethod
     def _pool_capacity_exhausted_error(
