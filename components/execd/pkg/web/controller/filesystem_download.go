@@ -20,10 +20,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -199,6 +199,29 @@ func formatContentDisposition(filename string) string {
 		return "attachment; filename=\"" + filename + "\""
 	}
 
-	encodedFilename := url.PathEscape(filename)
+	encodedFilename := encodeExtValue(filename)
 	return "attachment; filename=\"" + encodedFilename + "\"; filename*=UTF-8''" + encodedFilename
+}
+
+// encodeExtValue percent-encodes every byte outside the RFC 8187 attr-char set.
+// url.PathEscape is not enough: it keeps characters such as '=', ':' and '@',
+// which an ext-value may not contain unencoded.
+func encodeExtValue(value string) string {
+	var b strings.Builder
+	for i := range len(value) {
+		if c := value[i]; isAttrChar(c) {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+func isAttrChar(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$&+-.^_`|~", c) >= 0
 }

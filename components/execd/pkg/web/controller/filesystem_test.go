@@ -475,6 +475,17 @@ func TestFormatContentDisposition(t *testing.T) {
 	}
 }
 
+func TestFormatContentDispositionRoundTrips(t *testing.T) {
+	// filename* must stick to RFC 8187 attr-chars so standard parsers accept it.
+	for _, filename := range []string{"ü=1.txt", "报告:v1@2.txt", "测试 文件.txt", `a"b.txt`, "a'b(1).txt"} {
+		t.Run(filename, func(t *testing.T) {
+			_, params, err := mime.ParseMediaType(formatContentDisposition(filename))
+			require.NoError(t, err)
+			require.Equal(t, filename, params["filename"])
+		})
+	}
+}
+
 func TestDownloadFileContentDispositionParsesForQuotedFilename(t *testing.T) {
 	tmpDir := t.TempDir()
 	target := filepath.Join(tmpDir, `a"b.txt`)
