@@ -553,7 +553,7 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 | `api_key`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
 | `domain`          | The endpoint domain of the sandbox service (`host[:port]` or a full URL); a trailing `/` or `/v1` is ignored | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`        | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `request_timeout` | Timeout for API requests; command streams (SSE) wait at most `max(request_timeout, 30s)` for the response and between stream bytes | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
 | `follow_redirects` | Follow HTTP redirects for SDK requests    | `False`                      | -                      |

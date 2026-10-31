@@ -69,7 +69,7 @@ from opensandbox.models.execd import (
 )
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.command import Commands
-from opensandbox.transport import streaming_transport
+from opensandbox.transport import sse_timeout, streaming_transport
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,8 @@ class CommandsAdapter(Commands):
         )
         self._client.set_async_httpx_client(self._httpx_client)
 
-        # SSE client (read timeout disabled); endpoint headers already in headers
+        # SSE client: read timeout bounds the wait for response headers and the gap
+        # between stream bytes (see sse_timeout); endpoint headers already in headers
         sse_headers = {
             **headers,
             "Accept": "text/event-stream",
@@ -138,12 +139,7 @@ class CommandsAdapter(Commands):
         # status opt-in would cause duplicate execution on a resent SSE POST.
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
-            timeout=httpx.Timeout(
-                connect=timeout_seconds,
-                read=None,
-                write=timeout_seconds,
-                pool=None,
-            ),
+            timeout=sse_timeout(timeout_seconds),
             transport=streaming_transport(self.connection_config.transport),
             **build_async_redirect_client_options(self.connection_config, base_url),
         )
@@ -158,7 +154,7 @@ class CommandsAdapter(Commands):
         return f"{protocol}://{self.execd_endpoint.endpoint}{path}"
 
     async def _get_sse_client(self) -> httpx.AsyncClient:
-        """Return SSE client (read timeout disabled) for execd streaming."""
+        """Return SSE client (bounded read timeout, see sse_timeout) for execd streaming."""
         return self._sse_client
 
     async def _execute_streaming_request(
