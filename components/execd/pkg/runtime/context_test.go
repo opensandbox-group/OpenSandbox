@@ -15,12 +15,14 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,7 +211,7 @@ func TestCreateAndDeleteContext_DiscoversStandaloneJupyterRuntimeToken(t *testin
 	c := NewController(server.URL, "")
 	c.jupyterRuntimeRoot = runtimeRoot
 
-	sessionID, err := c.CreateContext(&CreateContextRequest{
+	sessionID, err := c.CreateContext(context.Background(), &CreateContextRequest{
 		Language: Python,
 		Cwd:      t.TempDir(),
 	})
@@ -299,7 +301,7 @@ func TestCreateContextAndRunJupyter_FastFailWhenTokenMissing(t *testing.T) {
 	c.jupyterRuntimeRoot = t.TempDir()
 
 	start := time.Now()
-	_, err := c.CreateContext(&CreateContextRequest{
+	_, err := c.CreateContext(context.Background(), &CreateContextRequest{
 		Language: Python,
 		Cwd:      t.TempDir(),
 	})
@@ -361,10 +363,106 @@ func TestCreateContext_SkipsNewerUnauthenticatedDecoyRuntimeFile(t *testing.T) {
 	c := NewController(server.URL, "")
 	c.jupyterRuntimeRoot = runtimeRoot
 
-	sessionID, err := c.CreateContext(&CreateContextRequest{
+	sessionID, err := c.CreateContext(context.Background(), &CreateContextRequest{
 		Language: Python,
 		Cwd:      t.TempDir(),
 	})
 	require.NoError(t, err)
 	require.Equal(t, "sess-after-decoy", sessionID)
+}
+
+func TestKernelWaitingBackoffKeepsWaitingForJupyterStartup(t *testing.T) {
+	backoff := kernelWaitingBackoff
+	backoff.Jitter = 0
+	var total time.Duration
+	for backoff.Steps > 0 {
+		delay := backoff.Step()
+		require.LessOrEqual(t, delay, 5*time.Second, "a single wait should stay short")
+		total += delay
+	}
+	require.GreaterOrEqual(t, total, 4*time.Minute, "a slow Jupyter start should still be waited for")
+}
+
+func TestCreateContextStopsRetryingWhenContextIsDone(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := NewController(server.URL, "token")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.CreateContext(ctx, &CreateContextRequest{Language: Python, Cwd: t.TempDir()})
+	// retry.OnError reports the last Jupyter error once ctx stops the retries.
+	require.ErrorContains(t, err, "503")
+	require.Less(t, time.Since(start), 3*time.Second)
+	require.Equal(t, int32(1), attempts.Load())
+}
+
+func TestCreateContextStopsWhenJupyterNeverResponds(t *testing.T) {
+	original := jupyterRequestTimeout
+	jupyterRequestTimeout = 100 * time.Millisecond
+	defer func() { jupyterRequestTimeout = original }()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	c := NewController(server.URL, "token")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.CreateContext(ctx, &CreateContextRequest{Language: Python, Cwd: t.TempDir()})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("CreateContext kept waiting on a Jupyter request that never answered")
+	}
+}
+
+func TestCreateContextDeletesSessionWhenKernelCheckFails(t *testing.T) {
+	var created, deleted atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/kernelspecs"):
+			_, _ = w.Write([]byte(`{"default":"python","kernelspecs":{"python":{"name":"python","spec":{"language":"python","display_name":"Python"}}}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/sessions"):
+			created.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"sess-1","kernel":{"id":"kernel-1","name":"python"}}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/kernels"):
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/api/sessions/sess-1"):
+			deleted.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := NewController(server.URL, "token")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := c.CreateContext(ctx, &CreateContextRequest{Language: Python, Cwd: t.TempDir()})
+	require.Error(t, err)
+	require.Equal(t, int32(1), created.Load())
+	require.Equal(t, created.Load(), deleted.Load(), "every session created by a failed attempt is deleted")
 }

@@ -26,12 +26,13 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter"
 )
 
+// kernelWaitingBackoff retries about once a second for five minutes while
+// Jupyter starts. The delay is fixed because wait.Backoff stops retrying as
+// soon as a growing delay reaches its Cap.
 var kernelWaitingBackoff = wait.Backoff{
-	Steps:    60,
-	Duration: 500 * time.Millisecond,
-	Factor:   1.5,
+	Steps:    300,
+	Duration: time.Second,
 	Jitter:   0.1,
-	Cap:      5 * time.Second,
 }
 
 // Controller manages code execution across runtimes.
