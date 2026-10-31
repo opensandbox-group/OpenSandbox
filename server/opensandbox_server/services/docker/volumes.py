@@ -47,7 +47,10 @@ def _validate_docker_mount_paths(volumes: list) -> None:
     """Reject Docker mount destinations that Docker cannot create safely."""
     seen_paths: set[str] = set()
     for volume in volumes:
-        mount_path = posixpath.normpath(volume.mount_path)
+        # POSIX normpath preserves exactly two leading slashes. Docker treats
+        # mount destinations as container paths, so collapse all leading
+        # slashes to one before checking roots and duplicate destinations.
+        mount_path = "/" + posixpath.normpath(volume.mount_path).lstrip("/")
         if mount_path == "/":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -185,9 +188,9 @@ class DockerVolumesMixin:
         ``pvc.claimName`` is used as the Docker volume name.  The volume must
         already exist (created via ``docker volume create``).
 
-        When ``subPath`` is specified, the volume must use the ``local`` driver
-        so that the host-side ``Mountpoint`` is a real filesystem path.  The
-        resolved path (``Mountpoint + subPath``) is validated for path-traversal
+        When ``subPath`` is specified, the volume must use the ``local``
+        driver so that the host-side ``Mountpoint`` is a real filesystem path.
+        The resolved path (``Mountpoint + subPath``) is validated for path-traversal
         safety but *not* for existence, because the Mountpoint directory is
         typically owned by root and may not be stat-able by the server process.
 
@@ -305,6 +308,7 @@ class DockerVolumesMixin:
                 )
 
             # 2. Symlink-aware check (best-effort).
+            #
             #    Docker volume Mountpoint dirs are typically root-owned and not
             #    readable by the server process.  Using strict=True so that
             #    realpath raises OSError when it cannot traverse a directory
@@ -337,7 +341,7 @@ class DockerVolumesMixin:
                             "code": SandboxErrorCodes.INVALID_SUB_PATH,
                             "message": (
                                 f"Volume '{volume.name}': resolved subPath escapes "
-                                f"the volume mountpoint after symlink resolution."
+                                "the volume mountpoint after symlink resolution."
                             ),
                         },
                     )
@@ -349,9 +353,9 @@ class DockerVolumesMixin:
 
             # NOTE: We intentionally do NOT check os.path.exists(resolved_path)
             # here.  Docker volume Mountpoint directories (e.g.,
-            # /var/lib/docker/volumes/…/_data) are typically owned by root and
-            # not readable by the server process.  os.path.exists() returns
-            # False when the process lacks permission to stat the path, causing
+            # /var/lib/docker/volumes/…/_data) are typically owned by root and not
+            # readable by the server process.  os.path.exists() returns False
+            # when the process lacks permission to stat the path, causing
             # false-negative rejections.  If the subPath does not actually
             # exist, Docker will report the error at container creation time.
 
@@ -372,8 +376,6 @@ class DockerVolumesMixin:
           Format (no subPath): ``volume-name:/container/path:ro|rw``
           Docker recognises non-absolute-path sources as named volume references.
           Format (with subPath): ``/var/lib/docker/volumes/…/subdir:/container/path:ro|rw``
-          When subPath is specified, the volume's host Mountpoint (obtained from
-          ``pvc_inspect_cache``) is used to produce a standard bind mount.
         - ``ossfs``: host bind mount to runtime-mounted OSSFS path.
           Format: ``/mnt/ossfs/<bucket>/<subPath?>:/container/path:ro|rw``
 
