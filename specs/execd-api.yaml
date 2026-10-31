@@ -3142,7 +3142,9 @@ components:
       properties:
         code:
           type: string
-          description: Shell code to execute inside the session
+          description: |
+            Shell code to execute inside the session. Its standard input is
+            /dev/null; pass input through a file or a here-document.
           example: echo hello
         envs:
           type: object

@@ -598,6 +598,96 @@ func TestRunInIsolatedSession_ExitCode(t *testing.T) {
 	}
 }
 
+// TestRunInIsolatedSession_StdinDetached verifies that user code cannot read
+// the rest of the run script (including its end marker) from the shell's
+// stdin, with and without envs.
+func TestRunInIsolatedSession_StdinDetached(t *testing.T) {
+	for _, envs := range []map[string]string{nil, {"RUN_ENVELOPE": "1"}} {
+		runner, id := newInterruptTestSession(t)
+		run := func(code string) ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var lines []string
+			err := runner.RunInIsolatedSession(ctx, id, code, envs, func(line string) {
+				lines = append(lines, line)
+			})
+			return lines, err
+		}
+
+		lines, err := run(`read x; echo "got:$x"; false`)
+		if err == nil || !strings.Contains(err.Error(), "code 1") {
+			t.Errorf("envs=%v: read run error = %v, want exit code 1", envs, err)
+		}
+		if len(lines) != 1 || lines[0] != "got:" {
+			t.Errorf("envs=%v: read run output = %v, want [got:]", envs, lines)
+		}
+
+		if _, err := run("cat"); err != nil {
+			t.Errorf("envs=%v: cat run: %v", envs, err)
+		}
+		lines, err = run("echo next")
+		if err != nil || len(lines) != 1 || lines[0] != "next" {
+			t.Errorf("envs=%v: follow-up run = %v, %v; want [next]", envs, lines, err)
+		}
+	}
+}
+
+// TestRunInIsolatedSession_ParsesCodeIncrementally verifies that each
+// command of a run is parsed after the previous ones ran, as at top level, so
+// a shell option set early in the code applies to the lines after it.
+func TestRunInIsolatedSession_ParsesCodeIncrementally(t *testing.T) {
+	if getShell() != bashShell {
+		t.Skip("extglob needs bash")
+	}
+	runner, id := newInterruptTestSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var lines []string
+	code := "shopt -s extglob\ncase aa in +(a)) echo matched;; esac"
+	err := runner.RunInIsolatedSession(ctx, id, code, nil, func(line string) {
+		lines = append(lines, line)
+	})
+	if err != nil || len(lines) != 1 || lines[0] != "matched" {
+		t.Fatalf("run = %v, %v; want [matched]", lines, err)
+	}
+}
+
+// TestRunInIsolatedSession_IgnoresEvalOverrides verifies that a function or
+// alias named eval left behind by one run cannot swallow the code of the
+// next: the runner must still reach the builtin.
+func TestRunInIsolatedSession_IgnoresEvalOverrides(t *testing.T) {
+	if getShell() != bashShell {
+		t.Skip("overriding eval with a function needs bash")
+	}
+	for _, override := range []string{
+		"eval() { :; }",
+		"shopt -s expand_aliases; alias eval=true",
+	} {
+		runner, id := newInterruptTestSession(t)
+		run := func(code string) ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var lines []string
+			err := runner.RunInIsolatedSession(ctx, id, code, nil, func(line string) {
+				lines = append(lines, line)
+			})
+			return lines, err
+		}
+
+		if _, err := run(override); err != nil {
+			t.Fatalf("%s: %v", override, err)
+		}
+		lines, err := run("echo next; false")
+		if err == nil || !strings.Contains(err.Error(), "code 1") {
+			t.Errorf("after %q: error = %v, want exit code 1", override, err)
+		}
+		if len(lines) != 1 || lines[0] != "next" {
+			t.Errorf("after %q: output = %v, want [next]", override, lines)
+		}
+	}
+}
+
 func TestCapabilities(t *testing.T) {
 	runner := newTestRunner(t)
 	caps := runner.Capabilities()
@@ -723,11 +813,24 @@ func TestRunInIsolatedSession_ReportsFailedScriptWrite(t *testing.T) {
 	}
 	defer runner.DeleteIsolatedSession(id)
 
+	// Simulate a shell that no longer reads its stdin (e.g. it was killed):
+	// the script goes to a pipe whose read end is already closed.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pr.Close()
+	s := runner.lookup(id)
+	s.mu.Lock()
+	shellStdin := s.stdin
+	s.stdin = pw
+	s.mu.Unlock()
+	defer shellStdin.Close()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	code := "exec sleep 300 </dev/null\n#" + strings.Repeat("x", 150*1024)
-	err = runner.RunInIsolatedSession(ctx, id, code, nil, nil)
+	err = runner.RunInIsolatedSession(ctx, id, "echo unreachable", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "write stdin") {
 		t.Fatalf("RunInIsolatedSession error = %v, want a write stdin error", err)
 	}

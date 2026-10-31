@@ -1719,7 +1719,8 @@ export interface components {
         };
         IsolatedRunRequest: {
             /**
-             * @description Shell code to execute inside the session
+             * @description Shell code to execute inside the session. Its standard input is
+             *     /dev/null; pass input through a file or a here-document.
              * @example echo hello
              */
             code: string;

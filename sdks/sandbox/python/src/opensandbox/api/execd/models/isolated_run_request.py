@@ -35,7 +35,9 @@ T = TypeVar("T", bound="IsolatedRunRequest")
 class IsolatedRunRequest:
     """
     Attributes:
-        code (str): Shell code to execute inside the session Example: echo hello.
+        code (str): Shell code to execute inside the session. Its standard input is
+            /dev/null; pass input through a file or a here-document.
+             Example: echo hello.
         envs (IsolatedRunRequestEnvs | Unset): Environment variables exported into the shell before the code runs
         timeout_seconds (int | Unset): Foreground-only timeout. The run is interrupted after this many
             seconds. Ignored for background runs: a background run is not
