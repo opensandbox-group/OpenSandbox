@@ -29,7 +29,11 @@ def _volume(name: str, mount_path: str, host_path: str = "/tmp/data") -> Volume:
     )
 
 
-@pytest.mark.parametrize("mount_path", ["/", "//", "///"], ids=["root", "double-slash-root", "triple-slash-root"])
+@pytest.mark.parametrize(
+    "mount_path",
+    ["/", "//", "///"],
+    ids=["root", "double-slash-root", "triple-slash-root"],
+)
 def test_rejects_root_mount_path(mount_path: str):
     with pytest.raises(HTTPException) as exc_info:
         _validate_docker_mount_paths([_volume("data", mount_path)])
