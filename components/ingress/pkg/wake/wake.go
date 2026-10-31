@@ -157,6 +157,12 @@ func NewWaker(cfg Config, lifecycle Lifecycle, activity ActivityWriter, policy P
 	if cfg.MaxFlightLifetime <= 0 {
 		cfg.MaxFlightLifetime = DefaultFlightLifetime
 	}
+	// Waiters must give up before their flight does: a flight that outlives
+	// its own lifetime finishes with a context error, which the proxy cannot
+	// tell apart from a client disconnect.
+	if cfg.ParkBudget >= cfg.MaxFlightLifetime {
+		return nil, fmt.Errorf("wake: park budget (%v) must be shorter than the max flight lifetime (%v)", cfg.ParkBudget, cfg.MaxFlightLifetime)
+	}
 	if cfg.RetryInterval <= 0 {
 		cfg.RetryInterval = DefaultRetryInterval
 	}

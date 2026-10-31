@@ -601,7 +601,7 @@ func TestFlightLifetimeCapsPollingAndFreesPermit(t *testing.T) {
 		resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAccepted},
 		resumeErrs: []error{nil},
 	}
-	waker, _ := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 8, MaxFlightLifetime: 50 * time.Millisecond, RetryInterval: 10 * time.Millisecond}, lifecycle)
+	waker, _ := newTestWaker(t, Config{ParkBudget: 10 * time.Millisecond, ParkMax: 8, MaxFlightLifetime: 50 * time.Millisecond, RetryInterval: 10 * time.Millisecond}, lifecycle)
 
 	_, _, err := waker.acquireFlight(context.Background(), wakeTarget, "ckpt-1")
 	require.NoError(t, err)
@@ -633,6 +633,15 @@ func TestNewWakerValidatesLifecycle(t *testing.T) {
 func TestNewWakerRejectsRestoreMaxAboveParkMax(t *testing.T) {
 	_, err := NewWaker(Config{ParkBudget: time.Second, ParkMax: 4, RestoreMax: 8, RetryInterval: time.Millisecond}, &scriptedLifecycle{}, nil, nil)
 	require.ErrorContains(t, err, "restore permits")
+}
+
+func TestNewWakerRejectsParkBudgetNotBelowFlightLifetime(t *testing.T) {
+	// A waiter outliving its flight would get the flight's own context error,
+	// which the proxy reads as a client disconnect instead of a 503.
+	for _, budget := range []time.Duration{time.Minute, 2 * time.Minute} {
+		_, err := NewWaker(Config{ParkBudget: budget, MaxFlightLifetime: time.Minute}, &scriptedLifecycle{}, nil, nil)
+		require.ErrorContains(t, err, "max flight lifetime")
+	}
 }
 
 func TestRestorePermitQueueShedsWithoutResume(t *testing.T) {
