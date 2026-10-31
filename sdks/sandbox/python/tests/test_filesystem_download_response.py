@@ -21,8 +21,10 @@ import httpx
 import pytest
 
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
+from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.exceptions import SandboxConnectionException
 from opensandbox.models import ByteRange
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services import DownloadFilesystem
@@ -344,3 +346,64 @@ def test_sync_line_reads_report_unknown_total_size(options) -> None:
                 response.body.close()
     finally:
         adapter._httpx_client.close()
+
+
+_SESSION_ID = "12345678-1234-5678-1234-567812345678"
+
+
+class _ResetMidBody(httpx.SyncByteStream):
+    def __iter__(self):
+        yield b"a"
+        raise httpx.ReadError("connection reset")
+
+
+class _AsyncResetMidBody(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"a"
+        raise httpx.ReadError("connection reset")
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_sync_stream_maps_errors_while_reading_the_body(isolated: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, stream=_ResetMidBody())
+
+    config = ConnectionConfigSync(protocol="http", transport=httpx.MockTransport(handler))
+    if isolated:
+        adapter = IsolatedFilesystemAdapterSync(config, _endpoint(), _SESSION_ID)
+    else:
+        adapter = FilesystemAdapterSync(config, _endpoint())
+
+    # The request succeeds; the reset only surfaces while iterating.
+    for body in (
+        adapter.read_bytes_stream_detailed("/data.bin").body,
+        adapter.read_bytes_stream("/data.bin"),
+    ):
+        with pytest.raises(SandboxConnectionException) as exc:
+            for _chunk in body:
+                pass
+        assert isinstance(exc.value.__cause__, httpx.ReadError)
+    adapter._httpx_client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_async_stream_maps_errors_while_reading_the_body(isolated: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, stream=_AsyncResetMidBody())
+
+    config = ConnectionConfig(protocol="http", transport=httpx.MockTransport(handler))
+    if isolated:
+        adapter = IsolatedFilesystemAdapter(config, _endpoint(), _SESSION_ID)
+    else:
+        adapter = FilesystemAdapter(config, _endpoint())
+
+    for body in (
+        (await adapter.read_bytes_stream_detailed("/data.bin")).body,
+        await adapter.read_bytes_stream("/data.bin"),
+    ):
+        with pytest.raises(SandboxConnectionException) as exc:
+            async for _chunk in body:
+                pass
+        assert isinstance(exc.value.__cause__, httpx.ReadError)
+    await adapter._httpx_client.aclose()

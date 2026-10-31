@@ -417,7 +417,7 @@ await sandbox.files.delete_files(["/tmp/hello.txt"])
 
 For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`; use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()` also accept `offset` and `limit` for partial reads.
 
-Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
+Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. A connection failure while reading a download body raises the same SDK exception as a failed request (for example `SandboxConnectionException`), with the underlying `httpx` error as its `__cause__`; this applies to the sync streams too. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
 
 ```python
 from contextlib import aclosing
