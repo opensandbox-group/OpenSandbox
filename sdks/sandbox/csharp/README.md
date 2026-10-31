@@ -322,7 +322,8 @@ await using var manager = SandboxManager.Create(new SandboxManagerOptions
 var template = await manager.CreateTemplateAsync(new CreateTemplateRequest
 {
     Image = "python:3.11",
-    Publish = "s3://bucket/publish"
+    Publish = "s3://bucket/publish",
+    Format = "native"
 });
 
 while (template.Status.Phase != TemplatePhases.Succeeded)
