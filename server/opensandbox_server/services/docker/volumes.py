@@ -29,21 +29,34 @@ from typing import TYPE_CHECKING, Optional
 from docker.errors import DockerException, NotFound as DockerNotFound
 from fastapi import HTTPException, status
 
+from opensandbox_server.extensions.keys import (
+    BOOTSTRAP_EXECD_ISOLATION_KEY,
+    ISOLATION_UPPER_MOUNT_PATH,
+)
 from opensandbox_server.services.constants import (
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_PLATFORM_OS_LABEL,
     SandboxErrorCodes,
 )
-from opensandbox_server.services.docker.windows_profile import WINDOWS_OEM_VOLUME_PREFIX
+from opensandbox_server.services.docker.windows_profile import (
+    WINDOWS_OEM_MOUNT_PATH,
+    WINDOWS_OEM_VOLUME_PREFIX,
+)
 from opensandbox_server.services.validators import (
     ensure_valid_host_path,
     ensure_volumes_valid,
 )
+from opensandbox_server.services.windows_common import is_windows_platform
 
 if TYPE_CHECKING:
     from opensandbox_server.api.schema import CreateSandboxRequest
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_mount_path(path: str) -> str:
+    # Docker cleans container paths, including repeated leading slashes.
+    return posixpath.normpath("/" + path.lstrip("/"))
 
 
 class DockerVolumesMixin:
@@ -57,10 +70,20 @@ class DockerVolumesMixin:
         allowed_prefixes = self.app_config.storage.allowed_host_paths
         ensure_volumes_valid(request.volumes, allowed_host_prefixes=allowed_prefixes)
 
-        seen_mount_paths: set[str] = set()
+        seen_mount_paths = self._server_mount_paths(request)
         for volume in request.volumes:
-            # Docker cleans container paths, including repeated leading slashes.
-            mount_path = posixpath.normpath("/" + volume.mount_path.lstrip("/"))
+            if ":" in volume.mount_path:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                        "message": (
+                            f"Volume '{volume.name}': mount path '{volume.mount_path}' "
+                            "contains ':', which is not supported by the Docker runtime."
+                        ),
+                    },
+                )
+            mount_path = _clean_mount_path(volume.mount_path)
             # Docker's root check also reads a backslash as "/"; its duplicate check does not.
             root_path = posixpath.normpath("/" + volume.mount_path.replace("\\", "/").lstrip("/"))
             if root_path == "/":
@@ -81,11 +104,34 @@ class DockerVolumesMixin:
                         "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
                         "message": (
                             f"Duplicate mount path '{mount_path}'. Each volume must have "
-                            "a unique mount destination in the Docker runtime."
+                            "a unique mount destination in the Docker runtime, including "
+                            "paths the server mounts itself."
                         ),
                     },
                 )
             seen_mount_paths.add(mount_path)
+
+    def _server_mount_paths(self, request: CreateSandboxRequest) -> set[str]:
+        """Container paths the server mounts itself for this request."""
+        paths: set[str] = set()
+        for bind in self.app_config.docker.sandbox_binds or []:
+            # host_path:container_path[:mode]
+            parts = bind.split(":")
+            if len(parts) > 1:
+                paths.add(_clean_mount_path(parts[1]))
+        if (request.extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
+            paths.add(ISOLATION_UPPER_MOUNT_PATH)
+        if is_windows_platform(request.platform):
+            paths.add(WINDOWS_OEM_MOUNT_PATH)
+        return paths
+
+    @staticmethod
+    def _has_volume_at(request: CreateSandboxRequest, path: str) -> bool:
+        """Whether a request volume mounts at ``path`` once Docker cleans it."""
+        return any(
+            _clean_mount_path(volume.mount_path) == path
+            for volume in request.volumes or []
+        )
 
     def _validate_volumes(
         self, request

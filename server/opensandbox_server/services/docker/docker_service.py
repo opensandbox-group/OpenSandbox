@@ -905,17 +905,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 else:
                     exposed_ports = None
 
-            if runtime_volume_name:
-                runtime_mount_suffix = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}:"
-                runtime_mount_end = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}"
-                has_runtime_mount = any(
-                    runtime_mount_suffix in bind or bind.endswith(runtime_mount_end)
-                    for bind in volume_binds
+            # A request volume at the runtime path replaces the runtime mount.
+            if runtime_volume_name and not self._has_volume_at(
+                request, OPENSANDBOX_RUNTIME_MOUNT_PATH
+            ):
+                volume_binds.append(
+                    f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
                 )
-                if not has_runtime_mount:
-                    volume_binds.append(
-                        f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
-                    )
             # Config-level binds (docker.sandbox_binds) apply to every sandbox
             # and come first.
             all_binds = list(self.app_config.docker.sandbox_binds or []) + (volume_binds or [])
