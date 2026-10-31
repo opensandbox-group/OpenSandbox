@@ -144,6 +144,8 @@ func (ci *CodeInterpreter) IsHealthy(ctx context.Context) bool {
 // expires.
 func (ci *CodeInterpreter) waitRuntimeReady(ctx context.Context, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	probeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	var lastErr error
 
 	for time.Now().Before(deadline) {
@@ -151,12 +153,19 @@ func (ci *CodeInterpreter) waitRuntimeReady(ctx context.Context, timeout, interv
 			return ctx.Err()
 		}
 
-		exec, err := ci.Sandbox.RunCommand(ctx, CodeInterpreterRuntimeCheckCommand, nil)
+		exec, err := ci.Sandbox.RunCommand(probeCtx, CodeInterpreterRuntimeCheckCommand, nil)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if probeCtx.Err() != nil {
+			lastErr = fmt.Errorf("code interpreter runtime (jupyter) readiness probe: %w", probeCtx.Err())
+			break
+		}
 		switch {
 		case err == nil && (exec == nil || exec.Error == nil):
 			return nil
 		case err != nil:
-			lastErr = err
+			lastErr = fmt.Errorf("code interpreter runtime (jupyter) readiness probe: %w", err)
 		default:
 			lastErr = fmt.Errorf("code interpreter runtime (jupyter) is not serving")
 		}
