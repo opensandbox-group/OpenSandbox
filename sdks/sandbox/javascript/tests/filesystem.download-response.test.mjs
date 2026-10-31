@@ -158,6 +158,32 @@ test("detailed streams cancel unconsumed and partially consumed bodies", async (
   assert.equal(cancelled[1], true);
 });
 
+test("detailed stream can be closed from inside its own loop", async () => {
+  let cancelled = false;
+  const adapter = createAdapter(async () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          for (const part of ["a", "b", "c"]) controller.enqueue(new TextEncoder().encode(part));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 200 },
+    ),
+  );
+
+  const response = await adapter.readBytesStreamDetailed("/data.bin");
+  const seen = [];
+  for await (const chunk of response.body) {
+    seen.push(new TextDecoder().decode(chunk));
+    await response.body.close();
+  }
+  assert.deepEqual(seen, ["a"]);
+  assert.equal(cancelled, true);
+});
+
 for (const options of [{ offset: 2 }, { limit: 2 }]) {
   test(`line reads report unknown total size: ${JSON.stringify(options)}`, async () => {
     const adapter = createAdapter(async () =>
