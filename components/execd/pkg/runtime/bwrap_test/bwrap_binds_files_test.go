@@ -219,6 +219,28 @@ func TestBindsFiles_PassthroughSemantics(t *testing.T) {
 		_, err := mv.Stat(p)
 		require.NoError(t, err, "rebased search result %s must stat", p)
 	}
+
+	// An agent inside the namespace can plant a symlink pointing outside the
+	// bind source; the files API must reject mutations and escaping reads
+	// through it (#2332).
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("untouched"), 0o600))
+	runInSession(t, r, id, "ln -s "+outside+" "+destDir+"/escape", nil)
+
+	require.Error(t, mv.WriteFile(filepath.Join(destDir, "escape", "pwn.txt"), []byte("x"), 0o644))
+	require.Error(t, mv.Remove(filepath.Join(destDir, "escape", "victim.txt")))
+	require.Error(t, mv.RemoveAll(filepath.Join(destDir, "escape")))
+	require.Error(t, mv.MkdirAll(filepath.Join(destDir, "escape", "newdir"), 0o755))
+	require.Error(t, mv.Chmod(filepath.Join(destDir, "escape", "victim.txt"), 0o777))
+	require.Error(t, mv.Rename(filepath.Join(destDir, "escape", "victim.txt"), filepath.Join(destDir, "stolen.txt")))
+	require.Error(t, mv.Rename(filepath.Join(destDir, "plain.txt"), filepath.Join(destDir, "escape", "moved.txt")))
+	_, err = mv.ReadFile(filepath.Join(destDir, "escape", "victim.txt"))
+	require.Error(t, err)
+
+	gotVictim, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, "untouched", string(gotVictim))
 }
 
 // TestBindsFiles_OverlappingMountsRejected: create-time validation keeps the

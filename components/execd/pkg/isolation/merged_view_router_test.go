@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -383,8 +384,9 @@ func TestMultiMergedView_RewrittenRootRouting(t *testing.T) {
 	})
 
 	t.Run("bind_follows_symlinks_like_the_namespace", func(t *testing.T) {
-		// A symlink inside the bind source resolves on the host, exactly as
-		// the kernel resolves it for processes inside the namespace.
+		// An intra-bind symlink inside the bind source resolves on the host
+		// for reads, matching how the kernel resolves it for processes
+		// inside the namespace.
 		target := filepath.Join(rwSrc, "real.txt")
 		require.NoError(t, os.WriteFile(target, []byte("via-link"), 0o644))
 		link := filepath.Join(rwSrc, "alias.txt")
@@ -393,6 +395,58 @@ func TestMultiMergedView_RewrittenRootRouting(t *testing.T) {
 		data, err := router.ReadFile("/data/alias.txt")
 		require.NoError(t, err)
 		assert.Equal(t, "via-link", string(data))
+	})
+
+	t.Run("bind_rejects_symlink_escape_through_planted_links", func(t *testing.T) {
+		// An agent inside a rw bind can plant a symlink pointing outside the
+		// bind source; neither mutations nor reads through the files API may
+		// escape the bind source onto the host (#2332).
+		outside := filepath.Join(base, "outside-host")
+		require.NoError(t, os.MkdirAll(outside, 0o755))
+		victim := filepath.Join(outside, "victim.txt")
+		require.NoError(t, os.WriteFile(victim, []byte("untouched"), 0o600))
+
+		escapeLink := filepath.Join(rwSrc, "escape")
+		require.NoError(t, os.Symlink(outside, escapeLink))
+
+		// Mutations through the symlinked parent are rejected.
+		assert.Error(t, router.WriteFile("/data/escape/pwn.txt", []byte("x"), 0o644))
+		_, err := router.WriteFileReader("/data/escape/stream.txt", strings.NewReader("x"), 0o644)
+		assert.Error(t, err)
+		assert.Error(t, router.Remove("/data/escape/victim.txt"))
+		assert.Error(t, router.MkdirAll("/data/escape/newdir", 0o755))
+		assert.Error(t, router.Chmod("/data/escape/victim.txt", 0o777))
+		assert.Error(t, router.ReplaceContent("/data/escape/victim.txt", "untouched", "pwned"))
+		assert.Error(t, router.Rename("/data/escape/victim.txt", "/data/stolen.txt"))
+		assert.Error(t, router.Rename("/data/seed.txt", "/data/escape/moved.txt"))
+
+		// Reads through a symlink escaping the bind source are also rejected.
+		_, err = router.ReadFile("/data/escape/victim.txt")
+		assert.Error(t, err)
+		_, err = router.Stat("/data/escape/victim.txt")
+		assert.Error(t, err)
+		_, err = router.ReadDir("/data/escape")
+		assert.Error(t, err)
+		_, err = router.Open("/data/escape/victim.txt")
+		assert.Error(t, err)
+
+		// Host victim file and directory remain untouched.
+		got, err := os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "untouched", string(got))
+		_, err = os.Stat(filepath.Join(outside, "pwn.txt"))
+		assert.True(t, os.IsNotExist(err))
+		_, err = os.Stat(filepath.Join(outside, "newdir"))
+		assert.True(t, os.IsNotExist(err))
+
+		// RemoveAll on the planted link removes the link itself (like rm -rf
+		// inside the namespace), never the tree it points at.
+		require.NoError(t, router.RemoveAll("/data/escape"))
+		_, err = os.Lstat(escapeLink)
+		assert.True(t, os.IsNotExist(err))
+		got, err = os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "untouched", string(got))
 	})
 
 	t.Run("bind_has_no_whiteout_semantics", func(t *testing.T) {
