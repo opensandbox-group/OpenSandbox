@@ -1,0 +1,13 @@
+spec:
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        io.katacontainers.config.hypervisor.machine_type: ecs.g9i.xlarge
+        io.katacontainers.config.hypervisor.image: "${PODVM_IMAGE_ID}"
+        io.katacontainers.config.hypervisor.cc_init_data: "${PEERPODS_INITDATA}"
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        example.opensandbox.io/peerpods: "true"

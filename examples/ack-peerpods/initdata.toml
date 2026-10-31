@@ -1,0 +1,56 @@
+# Development profile: trust the Kubernetes control plane and allow its Kata
+# agent operations. No KBS resources or application secrets are requested.
+version = "0.1.0"
+algorithm = "sha384"
+
+[data]
+"aa.toml" = ""
+"cdh.toml" = '''
+[kbc]
+name = "cc_kbc"
+
+[image]
+work_dir = "/var/lib/confidential-containers/image"
+'''
+
+# Operation names follow CAA's podvm/files/etc/kata-opa/allow-all.rego.
+"policy.rego" = '''
+package agent_policy
+
+default AddARPNeighborsRequest := true
+default AddSwapRequest := true
+default CloseStdinRequest := true
+default CopyFileRequest := true
+default CreateContainerRequest := true
+default CreateSandboxRequest := true
+default DestroySandboxRequest := true
+default ExecProcessRequest := true
+default GetMetricsRequest := true
+default GetOOMEventRequest := true
+default GuestDetailsRequest := true
+default ListInterfacesRequest := true
+default ListRoutesRequest := true
+default MemHotplugByProbeRequest := true
+default OnlineCPUMemRequest := true
+default PauseContainerRequest := true
+default PullImageRequest := true
+default ReadStreamRequest := true
+default RemoveContainerRequest := true
+default RemoveStaleVirtiofsShareMountsRequest := true
+default ReseedRandomDevRequest := true
+default ResumeContainerRequest := true
+default SetGuestDateTimeRequest := true
+default SetPolicyRequest := true
+default SignalProcessRequest := true
+default StartContainerRequest := true
+default StartTracingRequest := true
+default StatsContainerRequest := true
+default StopTracingRequest := true
+default TtyWinResizeRequest := true
+default UpdateContainerRequest := true
+default UpdateEphemeralMountsRequest := true
+default UpdateInterfaceRequest := true
+default UpdateRoutesRequest := true
+default WaitProcessRequest := true
+default WriteStreamRequest := true
+'''

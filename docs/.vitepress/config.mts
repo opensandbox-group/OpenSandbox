@@ -318,6 +318,7 @@ export default defineConfig({
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
+            { text: "ACK PeerPods", link: "/examples/ack-peerpods" },
             { text: "Harbor Evaluation", link: "/examples/harbor-evaluation" },
           ],
         },

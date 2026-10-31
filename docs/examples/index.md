@@ -52,6 +52,7 @@ Fundamental sandbox operations and SDK workflows.
 | [AIO Sandbox](/examples/aio-sandbox) | All-in-One sandbox setup |
 | [Agent Sandbox](/examples/agent-sandbox) | Kubernetes agent-sandbox integration |
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |
+| [ACK + PeerPods](/examples/ack-peerpods) | Run commands and file operations in an Intel TDX PodVM on ACK |
 | [Windows](/examples/windows) | Windows sandbox via KVM/QEMU |
 | [Harbor Evaluation](/examples/harbor-evaluation) | Run a Harbor agent evaluation, one sandbox per trial |
 
