@@ -11,10 +11,11 @@ This is a runtime integration example. It uses public test data and trusts the O
 
 ## Prerequisites
 
-- An ACK cluster with CAA's Alibaba Cloud provider and the `kata-remote` RuntimeClass installed. Start with the [CoCo Alibaba Cloud guide](https://confidentialcontainers.org/docs/cloud-providers/providers/alibaba-cloud-simple/).
-- A compatible TDX PodVM image, TDX-capable instance type and zone, working worker-to-PodVM networking, and guest access to the container registry. Verify a normal PeerPod before installing OpenSandbox.
-- A guest compatible with the included development initdata profile. An image requiring another application's bootstrap is not suitable.
-- `kubectl`, Helm 3, `envsubst`, and Python 3.10+.
+- Prepare an ACK cluster by following Alibaba Cloud's [Deploy confidential containers with CAA](https://help.aliyun.com/en/ack/ack-managed-and-ack-dedicated/user-guide/implement-caa-confidential-container-solution-using-confidential-vms/) guide ([Chinese](https://help.aliyun.com/zh/ack/ack-managed-and-ack-dedicated/user-guide/implement-caa-confidential-container-solution-using-confidential-vms/)). Complete its sample application before continuing here. The guide covers ACK Pro, Flannel, outbound access, RRSA, Ubuntu workers, CAA, Kata and the public PodVM image.
+- Confirm that the sample PeerPod runs in a TDX-capable instance type and zone, then delete it and verify that its ECS instance is released.
+- `kubectl`, Helm 3, and Python 3.10+.
+
+Use the guide's **Flannel** network configuration. An existing Terway cluster is a different infrastructure configuration and is not the validated path for this example. No OpenShell components, custom guest build, Trustee deployment or per-sandbox initdata are required.
 
 The example uses the BatchSandbox provider and the server proxy, so the SDK needs only a local port-forward to the lifecycle server. No separate ingress gateway, egress sidecar, model API key or persistent volume is needed.
 
@@ -24,37 +25,32 @@ The example uses the BatchSandbox provider and the server proxy, so the SDK need
 | --- | --- |
 | OpenSandbox server, controller, execd and Python SDK | 1.2.0 |
 | ACK | Kubernetes 1.36.2, Ubuntu 24.04 worker, containerd 2.3.4 |
-| PeerPods | CAA 0.23.0 with Alibaba Cloud integration fixes |
-| Kata / guest components | Kata 4.2.0; AA/CDH 0.22.0 |
-| PodVM | Generic Ubuntu 26.04 UKI image; `ecs.g9i.xlarge` in `cn-beijing-i`, TDX enabled |
-| CNI | Terway ipvlan; matching CAA host and guest support for on-link routes |
+| PeerPods | Official CAA `v0.22.0` Helm chart and Alibaba Cloud mirror |
+| Kata | Official guide's `kata-deploy:4.0.0` image |
+| PodVM | Public `PeerPods-ubuntu26.04-v0.22.0` image `m-2ze2vxvrxsbue3sf8b02`; `ecs.g8i.xlarge` in `cn-beijing-i`, TDX enabled |
+| CNI | Flannel |
+| Sandbox container | Alibaba Cloud Linux 3 public image shown below |
 
-The PodVM image is an infrastructure prerequisite, not the container image passed to `Sandbox.create()`. The validation used a generic guest built through CAA's mkosi flow with the existing PeerPods deployment's compatible guest binaries, without application-specific bootstrap. For Terway, verify that both the host adaptor and guest forwarder preserve on-link route flags. A mismatched guest can boot in TDX but fail before the sandbox's init container starts.
+The PodVM image is configured once in CAA when following the infrastructure guide. It is the virtual machine surrounding the sandbox, distinct from the container image passed to `Sandbox.create()`. OpenSandbox uses the cluster's existing image and instance-type defaults without overriding them.
 
 ## Configure the sandbox template
 
-Run from the OpenSandbox repository root. Select an already configured PeerPods worker and the PodVM image supplied by your cluster administrator:
+Run from the OpenSandbox repository root. Select an already configured PeerPods worker:
 
 ```bash
 export PEERPODS_NODE=<peerpods-worker-name>
-export PODVM_IMAGE_ID=<tdx-podvm-image-id>
-export PEERPODS_INITDATA="$(gzip -n -c examples/ack-peerpods/initdata.toml | base64 | tr -d '\n')"
 
 kubectl get runtimeclass kata-remote
 kubectl label node "$PEERPODS_NODE" example.opensandbox.io/peerpods=true --overwrite
 kubectl create namespace opensandbox-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace opensandbox-peerpods --dry-run=client -o yaml | kubectl apply -f -
 
-envsubst '${PODVM_IMAGE_ID} ${PEERPODS_INITDATA}' \
-  < examples/ack-peerpods/batchsandbox-template.yaml > /tmp/ack-peerpods-template.yaml
 kubectl create configmap ack-peerpods-template -n opensandbox-system \
-  --from-file=batchsandbox-template.yaml=/tmp/ack-peerpods-template.yaml \
+  --from-file=batchsandbox-template.yaml=examples/ack-peerpods/batchsandbox-template.yaml \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-The template selects `ecs.g9i.xlarge`; use a TDX-capable type supported by your CAA deployment and zone. The initdata annotation uses Kata's `base64(gzip(TOML))` encoding. The included policy permits Kubernetes-driven Kata operations, consistent with this example's trusted-control-plane scope. It is configuration visible to Kubernetes, not a place for plaintext secrets.
-
-For a registry using a private CA, add its public PEM certificate to `extra_root_certificates` in the initdata's CDH `[image]` section before encoding. Do not disable registry TLS verification. CAA must forward the `image`, `machine_type`, and `cc_init_data` annotations through the Kata remote runtime.
+The template only selects the PeerPods worker and sets the Pod lifecycle options. The server configuration selects the `kata-remote` RuntimeClass.
 
 ## Install OpenSandbox
 
@@ -95,10 +91,11 @@ python3 -m venv .venv-peerpods
 . .venv-peerpods/bin/activate
 python -m pip install opensandbox==1.2.0
 export SANDBOX_DOMAIN=127.0.0.1:18080
+export SANDBOX_IMAGE=alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:latest
 python examples/ack-peerpods/main.py
 ```
 
-Keep `SANDBOX_API_KEY` from the installation step in this terminal. Set `SANDBOX_IMAGE` if your guest needs a registry mirror; the image must include `sh`, `bash`, `uname`, and `tail`.
+Keep `SANDBOX_API_KEY` from the installation step in this terminal. The command uses the same public Alibaba Cloud Linux image as the infrastructure guide, accessible from the validated mainland China environment. You can choose another `SANDBOX_IMAGE` reachable from your guest; it must include `sh`, `bash`, `uname`, and `tail`. Without this variable, the script uses `ubuntu:22.04` from Docker Hub.
 
 The script prints the sandbox ID, guest kernel, command result and file round-trip result, then requests deletion. Use `--keep` to inspect a successful sandbox; it still expires after 30 minutes.
 
@@ -145,7 +142,6 @@ kubectl delete configmap ack-peerpods-template -n opensandbox-system
 kubectl delete secret opensandbox-api-key -n opensandbox-system
 kubectl delete namespace opensandbox-peerpods
 kubectl label node "$PEERPODS_NODE" example.opensandbox.io/peerpods-
-rm /tmp/ack-peerpods-template.yaml
 ```
 
 The ACK cluster, CAA, RuntimeClass and PodVM image belong to the pre-existing infrastructure and are retained.
