@@ -201,6 +201,21 @@ class WorkloadProvider(ABC):
         """
         pass
     
+    def get_unschedulable_status(self, workload: Any) -> Optional[Dict[str, Any]]:
+        """
+        Get a Failed status if the workload's pods can never be scheduled.
+
+        Unlike get_status this may call the API server, so only the create
+        wait loop uses it, at a limited rate.
+
+        Args:
+            workload: Workload object
+
+        Returns:
+            Status dict like get_status, or None
+        """
+        return None
+
     @abstractmethod
     def get_endpoint_info(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """

@@ -26,6 +26,7 @@ from uuid import UUID
 
 from kubernetes.client import ApiException
 
+from opensandbox_server.services.constants import BATCHSANDBOX_NAME_LABEL
 from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
@@ -40,7 +41,6 @@ _GROUP = "sandbox.opensandbox.io"
 _VERSION = "v1alpha1"
 _PLURAL = "sandboxsnapshots"
 _BATCHSANDBOX_PLURAL = "batchsandboxes"
-_BATCHSANDBOX_NAME_LABEL = "batch-sandbox.sandbox.opensandbox.io/name"
 
 PUBLIC_SNAPSHOT_NAME_PREFIX = "osb-snap-"
 PUBLIC_SNAPSHOT_TAG_PREFIX = "snap-"
@@ -452,7 +452,7 @@ class KubernetesSnapshotRuntime:
 
         pods = self._k8s_client.list_pods(
             namespace=namespace,
-            label_selector=f"{_BATCHSANDBOX_NAME_LABEL}={sandbox_id}",
+            label_selector=f"{BATCHSANDBOX_NAME_LABEL}={sandbox_id}",
         )
         for pod in pods:
             if self._pod_is_running(pod):
