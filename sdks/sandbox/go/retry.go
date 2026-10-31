@@ -286,14 +286,19 @@ func (r *RetryConfig) backoff(attempt int) time.Duration {
 	return time.Duration(delay)
 }
 
-// retryDelay returns the backoff duration, respecting Retry-After if present.
+// retryDelay returns the backoff duration, respecting Retry-After (capped at
+// retryAfterCap) if present.
 func retryDelay(cfg *RetryConfig, attempt int, err error) time.Duration {
 	computed := cfg.backoff(attempt)
 
 	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
-		if apiErr.RetryAfter > computed {
-			return apiErr.RetryAfter
+	if errors.As(err, &apiErr) {
+		wait := apiErr.RetryAfter
+		if wait > retryAfterCap {
+			wait = retryAfterCap
+		}
+		if wait > computed {
+			return wait
 		}
 	}
 	return computed
