@@ -235,37 +235,41 @@ class FilesystemAdapterSync(FilesystemSync):
         limit: int | None = None,
     ) -> ReadBytesResponse[ReadBytesStream]:
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
-        request_data = self._build_download_request(
-            path, range_header, offset=offset, limit=limit
-        )
-        url = request_data["url"]
-        params = request_data["params"]
-        headers = request_data["headers"]
-
-        request = self._httpx_client.build_request(
-            "GET",
-            url,
-            headers=headers,
-            params=params,
-        )
-        response = self._httpx_client.send(request, stream=True)
-
-        if response.status_code >= 300:
-            try:
-                response.read()
-            finally:
-                response.close()
-            raise SandboxApiException(
-                f"Failed to stream file {path}: {response.status_code}",
-                status_code=response.status_code,
-                request_id=extract_request_id(response.headers),
+        try:
+            request_data = self._build_download_request(
+                path, range_header, offset=offset, limit=limit
             )
+            url = request_data["url"]
+            params = request_data["params"]
+            headers = request_data["headers"]
 
-        return create_read_bytes_response(
-            response,
-            iter_response_bytes(response, chunk_size),
-            line_based=offset is not None or limit is not None,
-        )
+            request = self._httpx_client.build_request(
+                "GET",
+                url,
+                headers=headers,
+                params=params,
+            )
+            response = self._httpx_client.send(request, stream=True)
+
+            if response.status_code >= 300:
+                try:
+                    response.read()
+                finally:
+                    response.close()
+                raise SandboxApiException(
+                    f"Failed to stream file {path}: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
+
+            return create_read_bytes_response(
+                response,
+                iter_response_bytes(response, chunk_size),
+                line_based=offset is not None or limit is not None,
+            )
+        except Exception as e:
+            logger.error(f"Failed to stream file {path}", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def write_files(self, entries: list[WriteEntry]) -> None:
         """Write multiple files in a single operation using multipart upload.

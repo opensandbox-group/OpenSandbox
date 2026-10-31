@@ -23,6 +23,7 @@ import pytest
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.exceptions import SandboxConnectionException
 from opensandbox.models import ByteRange
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services import DownloadFilesystem
@@ -344,3 +345,23 @@ def test_sync_line_reads_report_unknown_total_size(options) -> None:
                 response.body.close()
     finally:
         adapter._httpx_client.close()
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_sync_stream_maps_transport_errors_like_async(isolated: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    config = ConnectionConfigSync(protocol="http", transport=httpx.MockTransport(handler))
+    if isolated:
+        adapter = IsolatedFilesystemAdapterSync(
+            config, _endpoint(), "12345678-1234-5678-1234-567812345678"
+        )
+    else:
+        adapter = FilesystemAdapterSync(config, _endpoint())
+
+    with pytest.raises(SandboxConnectionException):
+        adapter.read_bytes_stream_detailed("/data.bin")
+    with pytest.raises(SandboxConnectionException):
+        adapter.read_bytes_stream("/data.bin")
+    adapter._httpx_client.close()
