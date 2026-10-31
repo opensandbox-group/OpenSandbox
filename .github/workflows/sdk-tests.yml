@@ -355,6 +355,32 @@ jobs:
           path: |
             sdks/sandbox/go/reports/**
 
+  rust-sdk-quality:
+    name: Rust SDK Quality And Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        working-directory: sdks/sandbox/rust
+        run: cargo fmt --check
+
+      - name: Run clippy
+        working-directory: sdks/sandbox/rust
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        working-directory: sdks/sandbox/rust
+        run: cargo test --all-targets
+
   required:
     name: SDK CI
     if: ${{ always() && github.event_name == 'pull_request' }}
@@ -366,6 +392,7 @@ jobs:
       - kotlin-sdk-quality
       - csharp-sdk-quality
       - go-sdk-quality
+      - rust-sdk-quality
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -378,13 +405,14 @@ jobs:
           KOTLIN_RESULT: ${{ needs.kotlin-sdk-quality.result }}
           CSHARP_RESULT: ${{ needs.csharp-sdk-quality.result }}
           GO_RESULT: ${{ needs.go-sdk-quality.result }}
+          RUST_RESULT: ${{ needs.rust-sdk-quality.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" && "$RUST_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" && "$RUST_RESULT" == "skipped" ]]
           fi
