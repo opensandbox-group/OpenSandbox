@@ -646,3 +646,52 @@ func TestDownloadFileInvalidLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestFilesystemControllerDownloadRejectsDirectories(t *testing.T) {
+	dir := t.TempDir()
+	for _, rawURL := range []string{
+		fmt.Sprintf("/files/download?path=%s", url.QueryEscape(dir)),
+		fmt.Sprintf("/files/download?path=%s&offset=1", url.QueryEscape(dir)),
+		fmt.Sprintf("/files/download?path=%s&limit=1", url.QueryEscape(dir)),
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+			ctrl.DownloadFile()
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+			require.Contains(t, resp.Message, "path is a directory:")
+		})
+	}
+}
+
+func TestFilesystemControllerDownloadRejectsDirectoryRange(t *testing.T) {
+	dir := t.TempDir()
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(dir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+	ctrl.ctx.Request.Header.Set("Range", "bytes=0-3")
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Contains(t, resp.Message, "path is a directory:")
+}
+
+func TestFilesystemControllerDownloadMalformedRangeIncludesMessage(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "data.bin")
+	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+	ctrl.ctx.Request.Header.Set("Range", "bytes=abc")
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeUnknown, resp.Code)
+	require.Contains(t, resp.Message, "invalid Range header: bytes=abc")
+}

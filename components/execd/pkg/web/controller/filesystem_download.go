@@ -75,12 +75,6 @@ func (c *FilesystemController) DownloadFile() {
 	}
 	defer file.Close()
 
-	if hasLineParams {
-		c.serveLineRange(file, rawOffset, rawLimit)
-		rec.MarkSuccess()
-		return
-	}
-
 	fileInfo, err := file.Stat()
 	if err != nil {
 		c.RespondError(
@@ -88,6 +82,16 @@ func (c *FilesystemController) DownloadFile() {
 			model.ErrorCodeRuntimeError,
 			fmt.Sprintf("error getting file stat info: %s. %v", resolvedFilePath, err),
 		)
+		return
+	}
+	if fileInfo.IsDir() {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, fmt.Sprintf("path is a directory: %s", filePath))
+		return
+	}
+
+	if hasLineParams {
+		c.serveLineRange(file, rawOffset, rawLimit)
+		rec.MarkSuccess()
 		return
 	}
 
@@ -99,6 +103,7 @@ func (c *FilesystemController) DownloadFile() {
 			c.RespondError(
 				http.StatusRequestedRangeNotSatisfiable,
 				model.ErrorCodeUnknown,
+				fmt.Sprintf("invalid Range header: %s", rangeHeader),
 			)
 			return
 		}

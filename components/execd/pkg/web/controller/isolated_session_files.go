@@ -160,14 +160,18 @@ func (c *IsolatedSessionController) DownloadFile() {
 	}
 	defer f.Close()
 
-	if hasLineParams {
-		c.serveIsolatedLineRange(f, rawOffset, rawLimit)
-		return
-	}
-
 	fileInfo, err := f.Stat()
 	if err != nil {
 		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
+		return
+	}
+	if fileInfo.IsDir() {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, fmt.Sprintf("path is a directory: %s", filePath))
+		return
+	}
+
+	if hasLineParams {
+		c.serveIsolatedLineRange(f, rawOffset, rawLimit)
 		return
 	}
 
@@ -175,7 +179,7 @@ func (c *IsolatedSessionController) DownloadFile() {
 	if rangeHeader != "" {
 		ranges, err = ParseRange(rangeHeader, fileInfo.Size())
 		if err != nil {
-			c.RespondError(http.StatusRequestedRangeNotSatisfiable, model.ErrorCodeUnknown)
+			c.RespondError(http.StatusRequestedRangeNotSatisfiable, model.ErrorCodeUnknown, fmt.Sprintf("invalid Range header: %s", rangeHeader))
 			return
 		}
 	}
