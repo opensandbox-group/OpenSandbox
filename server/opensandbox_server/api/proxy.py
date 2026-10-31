@@ -225,6 +225,20 @@ def _set_forwarded_headers(
         headers["X-Forwarded-For"] = request.client.host
 
 
+def _request_has_body(request: Request) -> bool:
+    """Whether the client request carries a body to forward.
+
+    Any method may carry one; its framing headers (RFC 9112, section 6) say
+    whether it does. Content-Length is forwarded as is, so a declared body
+    must be streamed with it.
+    """
+    return (
+        request.method in ("POST", "PUT", "PATCH", "DELETE")
+        or "content-length" in request.headers
+        or "transfer-encoding" in request.headers
+    )
+
+
 def _rewrite_proxy_location(
     location: str,
     request: Request,
@@ -406,12 +420,11 @@ async def _proxy_http_request(
         # observed by this trusted proxy, so clients cannot spoof transport state.
         _set_forwarded_headers(headers, request)
 
-        stream_body = request.method in ("POST", "PUT", "PATCH", "DELETE")
         req = client.build_request(
             method=request.method,
             url=target_url,
             headers=headers,
-            content=request.stream() if stream_body else None,
+            content=request.stream() if _request_has_body(request) else None,
         )
 
         resp = await client.send(req, stream=True)
