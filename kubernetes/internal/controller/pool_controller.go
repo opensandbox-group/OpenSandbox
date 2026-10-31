@@ -1207,6 +1207,10 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	if desiredSchedulableCnt < schedulableCnt {
 		scaleIn = schedulableCnt - desiredSchedulableCnt
 	}
+	// Idle pods above a lowered PoolMax are excess too: scale-up only stops
+	// creating them. Pods already planned for deletion count toward it.
+	planned := int32(len(plannedDeletions(podsByName(pods), toDeletePods)))
+	scaleIn = max(scaleIn, schedulableCnt-planned-pool.Spec.CapacitySpec.PoolMax)
 	if scaleIn > 0 || len(toDeletePods) > 0 {
 		podsToDelete := r.pickPodsToDelete(pods, args.idlePods, args.toDeletePods, scaleIn)
 		maxDeleteCnt := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
@@ -1270,14 +1274,19 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 	return nil
 }
 
-func (r *PoolReconciler) pickPodsToDelete(pods []*corev1.Pod, idlePodNames []string, toDeletePodNames []string, scaleIn int32) []*corev1.Pod {
-	podMap := make(map[string]*corev1.Pod)
+func podsByName(pods []*corev1.Pod) map[string]*corev1.Pod {
+	podMap := make(map[string]*corev1.Pod, len(pods))
 	for _, pod := range pods {
 		podMap[pod.Name] = pod
 	}
+	return podMap
+}
 
+// plannedDeletions returns the pods named in toDeletePodNames that still exist
+// and are not already terminating, once each and in order.
+func plannedDeletions(podMap map[string]*corev1.Pod, toDeletePodNames []string) []*corev1.Pod {
 	selected := make(map[string]struct{})
-	var podsToDelete []*corev1.Pod
+	var planned []*corev1.Pod
 	for _, name := range toDeletePodNames {
 		pod, ok := podMap[name]
 		if !ok || !pod.DeletionTimestamp.IsZero() {
@@ -1286,8 +1295,18 @@ func (r *PoolReconciler) pickPodsToDelete(pods []*corev1.Pod, idlePodNames []str
 		if _, exists := selected[name]; exists {
 			continue
 		}
-		podsToDelete = append(podsToDelete, pod)
+		planned = append(planned, pod)
 		selected[name] = struct{}{}
+	}
+	return planned
+}
+
+func (r *PoolReconciler) pickPodsToDelete(pods []*corev1.Pod, idlePodNames []string, toDeletePodNames []string, scaleIn int32) []*corev1.Pod {
+	podMap := podsByName(pods)
+	podsToDelete := plannedDeletions(podMap, toDeletePodNames)
+	selected := make(map[string]struct{}, len(podsToDelete))
+	for _, pod := range podsToDelete {
+		selected[pod.Name] = struct{}{}
 	}
 
 	var idlePods []*corev1.Pod
