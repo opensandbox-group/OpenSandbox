@@ -50,6 +50,8 @@ from opensandbox.models.templates import (
     TemplateInfo,
     TemplateStatus,
 )
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
 from opensandbox_cli.commands.terminal import _make_stdin_reader, stream_pty
 from opensandbox_cli.config import load_config_file
@@ -2601,6 +2603,7 @@ def _invoke_terminal(
     *,
     incoming: list,
     stdin_chunks: list[bytes] | None = None,
+    connect_error: Exception | None = None,
 ):
     """Run `osb terminal` with the execd PTY boundary fully mocked.
 
@@ -2630,6 +2633,8 @@ def _invoke_terminal(
 
     def fake_connect(url: str, additional_headers: dict | None = None):
         connect_calls.append((url, additional_headers))
+        if connect_error is not None:
+            raise connect_error
         return ws
 
     with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
@@ -2731,6 +2736,26 @@ class TestTerminal:
         assert result.exit_code == 1
         assert "Shell startup failed" in result.stderr
         assert "no such dir" in result.stderr
+        assert delete.call_args.args[2] == "sess-1"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError("connection refused"),
+            websockets.InvalidStatus(Response(403, "Forbidden", Headers())),
+        ],
+    )
+    def test_failed_connect_deletes_session(
+        self, runner: CliRunner, error: Exception
+    ) -> None:
+        result, _, _, delete, _, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=[],
+            connect_error=error,
+        )
+
+        assert result.exit_code == 1
         assert delete.call_args.args[2] == "sess-1"
 
     def test_server_error_frames_are_reported_on_stderr(
