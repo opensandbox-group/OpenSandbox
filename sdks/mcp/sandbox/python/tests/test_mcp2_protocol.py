@@ -25,6 +25,7 @@ from mcp import types
 from mcp.client.session import ClientSession
 from mcp.shared.memory import create_client_server_memory_streams
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, LATEST_HANDSHAKE_VERSION
+from opensandbox.exceptions import SandboxApiException
 
 from opensandbox_mcp.server import create_server
 
@@ -124,6 +125,26 @@ async def test_mcp2_expected_tool_errors_keep_actionable_message() -> None:
     assert "auth_username and auth_password must be provided together" in _text_content(
         result
     )
+
+
+async def test_mcp2_sandbox_errors_keep_actionable_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _MissingSandboxManager(_FakeManager):
+        async def kill_sandbox(self, sandbox_id: str) -> None:
+            raise SandboxApiException(f"Sandbox {sandbox_id} not found", status_code=404)
+
+    monkeypatch.setattr("opensandbox_mcp.server.SandboxManager", _MissingSandboxManager)
+
+    async with _client_session() as mcp_session:
+        await mcp_session.initialize()
+        result = await mcp_session.call_tool(
+            "sandbox_kill", {"sandbox_id": "sbx-missing"}
+        )
+
+    assert isinstance(result, types.CallToolResult)
+    assert result.is_error is True
+    assert "Sandbox sbx-missing not found" in _text_content(result)
 
 
 async def test_mcp2_unknown_tool_is_an_error_result() -> None:
