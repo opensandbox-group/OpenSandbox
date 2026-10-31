@@ -30,3 +30,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0022](0022-multi-sandbox-egress-control-plane.md)        |      Multi-Sandbox Egress Control Plane                                  | implementing  |  2026-08-21  |
 | [OSEP-0023](0023-credential-bound-tls-interception.md)          |      Credential-Bound TLS Interception                                    | implementing  |  2026-09-09  |
 | [OSEP-0024](0024-auto-pause-and-wake-on-access-for-fast-sandbox.md) |      Auto-Pause and Wake-on-Access for Fast Sandbox                  | implementing  |  2026-10-12  |
+| [OSEP-0026](0026-managed-external-egress-authorization.md) | Managed Egress Control-Plane Integration | draft | 2026-10-24 |
