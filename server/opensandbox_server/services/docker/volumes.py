@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from docker.errors import DockerException, NotFound as DockerNotFound
 from fastapi import HTTPException, status
@@ -39,6 +39,9 @@ from opensandbox_server.services.validators import (
     ensure_valid_host_path,
     ensure_volumes_valid,
 )
+
+if TYPE_CHECKING:
+    from opensandbox_server.api.schema import CreateSandboxRequest
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +79,52 @@ def _validate_docker_mount_paths(volumes: list) -> None:
 class DockerVolumesMixin:
     """Mixin providing volume validation, bind mount building, and cleanup."""
 
+    def _validate_volume_definitions(self, request: CreateSandboxRequest) -> None:
+        """Validate request volumes before filesystem changes or Docker API calls."""
+        if not request.volumes:
+            return
+
+        _validate_docker_mount_paths(request.volumes)
+        allowed_prefixes = self.app_config.storage.allowed_host_paths
+        ensure_volumes_valid(request.volumes, allowed_host_prefixes=allowed_prefixes)
+
+        seen_mount_paths: set[str] = set()
+        for volume in request.volumes:
+            # Docker cleans container paths, including repeated leading slashes.
+            mount_path = posixpath.normpath("/" + volume.mount_path.lstrip("/"))
+            # Docker's root check also reads a backslash as "/"; its duplicate check does not.
+            root_path = posixpath.normpath("/" + volume.mount_path.replace("\\", "/").lstrip("/"))
+            if root_path == "/":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                        "message": (
+                            f"Volume '{volume.name}': mount path '{volume.mount_path}' "
+                            "resolves to '/', which is not supported by the Docker runtime."
+                        ),
+                    },
+                )
+            if mount_path in seen_mount_paths:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                        "message": (
+                            f"Duplicate mount path '{mount_path}'. Each volume must have "
+                            "a unique mount destination in the Docker runtime."
+                        ),
+                    },
+                )
+            seen_mount_paths.add(mount_path)
+
     def _validate_volumes(
         self, request
     ) -> tuple[dict[str, dict], list[str]]:
         """
-        Validate volume definitions for Docker runtime.
+        Validate volume backends for Docker runtime.
+
+        Request definitions must already have passed ``_validate_volume_definitions``.
 
         Returns:
             A tuple of:
@@ -98,10 +142,7 @@ class DockerVolumesMixin:
         if not request.volumes:
             return {}, []
 
-        _validate_docker_mount_paths(request.volumes)
         allowed_prefixes = self.app_config.storage.allowed_host_paths
-        ensure_volumes_valid(request.volumes, allowed_host_prefixes=allowed_prefixes)
-
         pvc_inspect_cache: dict[str, dict] = {}
         auto_created_volumes: list[str] = []
         try:
@@ -188,9 +229,9 @@ class DockerVolumesMixin:
         ``pvc.claimName`` is used as the Docker volume name.  The volume must
         already exist (created via ``docker volume create``).
 
-        When ``subPath`` is specified, the volume must use the ``local``
-        driver so that the host-side ``Mountpoint`` is a real filesystem path.
-        The resolved path (``Mountpoint + subPath``) is validated for path-traversal
+        When ``subPath`` is specified, the volume must use the ``local`` driver
+        so that the host-side ``Mountpoint`` is a real filesystem path.  The
+        resolved path (``Mountpoint + subPath``) is validated for path-traversal
         safety but *not* for existence, because the Mountpoint directory is
         typically owned by root and may not be stat-able by the server process.
 
@@ -308,7 +349,6 @@ class DockerVolumesMixin:
                 )
 
             # 2. Symlink-aware check (best-effort).
-            #
             #    Docker volume Mountpoint dirs are typically root-owned and not
             #    readable by the server process.  Using strict=True so that
             #    realpath raises OSError when it cannot traverse a directory
@@ -341,7 +381,7 @@ class DockerVolumesMixin:
                             "code": SandboxErrorCodes.INVALID_SUB_PATH,
                             "message": (
                                 f"Volume '{volume.name}': resolved subPath escapes "
-                                "the volume mountpoint after symlink resolution."
+                                f"the volume mountpoint after symlink resolution."
                             ),
                         },
                     )
@@ -353,9 +393,9 @@ class DockerVolumesMixin:
 
             # NOTE: We intentionally do NOT check os.path.exists(resolved_path)
             # here.  Docker volume Mountpoint directories (e.g.,
-            # /var/lib/docker/volumes/…/_data) are typically owned by root and not
-            # readable by the server process.  os.path.exists() returns False
-            # when the process lacks permission to stat the path, causing
+            # /var/lib/docker/volumes/…/_data) are typically owned by root and
+            # not readable by the server process.  os.path.exists() returns
+            # False when the process lacks permission to stat the path, causing
             # false-negative rejections.  If the subPath does not actually
             # exist, Docker will report the error at container creation time.
 
@@ -376,6 +416,8 @@ class DockerVolumesMixin:
           Format (no subPath): ``volume-name:/container/path:ro|rw``
           Docker recognises non-absolute-path sources as named volume references.
           Format (with subPath): ``/var/lib/docker/volumes/…/subdir:/container/path:ro|rw``
+          When subPath is specified, the volume's host Mountpoint (obtained from
+          ``pvc_inspect_cache``) is used to produce a standard bind mount.
         - ``ossfs``: host bind mount to runtime-mounted OSSFS path.
           Format: ``/mnt/ossfs/<bucket>/<subPath?>:/container/path:ro|rw``
 
