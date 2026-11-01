@@ -844,7 +844,7 @@ describe("IsolatedSession E2E", () => {
       workspace: { path: "/tmp", mode: "rw" },
     });
     try {
-      await expect(session.getRunStatus("no-such-run")).rejects.toThrow(/404/);
+      await expect(session.getRunStatus("no-such-run")).rejects.toMatchObject({ statusCode: 404 });
     } finally {
       await session.delete();
     }
