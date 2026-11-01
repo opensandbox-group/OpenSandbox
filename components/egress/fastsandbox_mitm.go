@@ -126,7 +126,10 @@ func startFastSandboxActiveSocket(ctx context.Context, srv *fastSandboxPolicySer
 		log.Fatalf("lookup credential proxy user %q: %v (ensure this user exists in the image)", mitmproxy.RunAsUser, err)
 	}
 	socketPath := fastSandboxActiveSocketPath()
-	activeSrv, cleanup, err := credentialvault.StartActiveSocketServerRequestAware(srv.handleCredentialVaultActive, socketPath, int(mitmGID))
+	activeSrv, cleanup, err := credentialvault.StartActiveSocketServerRequestAware(
+		srv.handleCredentialVaultActive,
+		credentialvault.NewResolveHandler(srv.resolveVaultAccess),
+		socketPath, int(mitmGID))
 	if err != nil {
 		log.Fatalf("credential vault active socket: %v", err)
 	}

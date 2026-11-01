@@ -77,6 +77,11 @@ type fastSandboxPolicyServer struct {
 	// subjAtt records the latest validated registration attempt, including
 	// failed enforcement, for same-fence comparison and old-IP cleanup.
 	subjAtt map[subject.Subject]actionhandler.NetworkAttachment
+	// subjSandbox mirrors the SandboxRef.Name (the wire sandboxId, D11) of
+	// the latest SET_BINDING attempt per subject. The resolve path puts this
+	// value on the resolver wire; it is refreshed with the fence and purged
+	// with every other subject mirror.
+	subjSandbox map[subject.Subject]string
 	// subjFence mirrors the registered fence per subject: the relay paths
 	// finish registry pre-reads before taking s.mu; no registry lock spans mu.
 	// The mirror is published after successful registration, and
@@ -155,6 +160,7 @@ func newFastSandboxPolicyServer(ctx context.Context, reg *subject.MemoryRegistry
 		pendingPolicies:   make(map[subject.Subject]*policy.NetworkPolicy),
 		policies:          make(map[subject.Subject]*policyEntry),
 		subjAtt:           make(map[subject.Subject]actionhandler.NetworkAttachment),
+		subjSandbox:       make(map[subject.Subject]string),
 		subjFence:         make(map[subject.Subject]subject.Fencing),
 		gatewayDNSRefs:    make(map[subject.Subject]netip.Addr),
 		dnsRedirectApply:  iptables.ReplaceGatewayDNSRedirects,
@@ -389,32 +395,103 @@ func (s *fastSandboxPolicyServer) handleCredentialVaultActive(w http.ResponseWri
 		http.Error(w, fmt.Sprintf("invalid clientIp %q", raw), http.StatusBadRequest)
 		return
 	}
+	result := s.withVaultAccess(ip, func(store *credentialvault.Store, _ string) vaultAccessResult {
+		return vaultAccessResult{respond: captureActiveVaultSnapshot(r, store)}
+	})
+	if result.err != nil {
+		result.err.write(w)
+		return
+	}
+	result.respond(w)
+}
+
+// vaultAccessError is a fixed-vocabulary HTTP failure of the shared
+// clientIp -> subject -> vault derivation.
+type vaultAccessError struct {
+	status int
+	reason string
+}
+
+func (e *vaultAccessError) write(w http.ResponseWriter) {
+	http.Error(w, e.reason, e.status)
+}
+
+// vaultAccessResult carries the outcome of the locked derivation: the
+// subject's store and wire sandboxId, or a failure. respond, when set, was
+// produced under the same s.mu hold (the active-snapshot capture).
+type vaultAccessResult struct {
+	store     *credentialvault.Store
+	sandboxID string
+	respond   func(http.ResponseWriter)
+	err       *vaultAccessError
+}
+
+// withVaultAccess applies the active-vault identity discipline for one client
+// IP — registry pre-read outside the lock, then validation and store
+// derivation under s.mu (lock order registry → s.mu unchanged) — and runs
+// derive under the same hold. It is shared by the _active snapshot path and
+// the _resolve path; the resolve path additionally requires the recorded
+// sandboxId.
+func (s *fastSandboxPolicyServer) withVaultAccess(
+	ip netip.Addr,
+	derive func(store *credentialvault.Store, sandboxID string) vaultAccessResult,
+) vaultAccessResult {
 	subj, resolved := s.reg.Resolve(subject.SubjectKey{SourceIP: ip})
 	fence, registered := s.reg.Fence(subj)
-	respond := func() func(http.ResponseWriter) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if !resolved {
-			return func(w http.ResponseWriter) { http.Error(w, "no subject for clientIp", http.StatusNotFound) }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !resolved {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusNotFound, "no subject for clientIp"}}
+	}
+	if s.subjectRebindingLocked(subj) {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "subject rebind in progress"}}
+	}
+	if !registered || !s.fenceMatchesLocked(subj, fence) || s.subjAtt[subj].IP != ip {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusNotFound, "no subject for clientIp"}}
+	}
+	store := s.vaultForLocked(subj, fence)
+	if s.vaultSealedLocked(subj) {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusConflict, "subject vault is sealed"}}
+	}
+	if entry := s.vaults[subj]; entry.vaultStateUnknown {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "vault state is unknown"}}
+	}
+	return derive(store, s.subjSandbox[subj])
+}
+
+// resolveVaultAccess derives the fast-sandbox resolve access for one request:
+// clientIp -> subject -> fence/IP-validated store plus the wire subject — the
+// sandboxId recorded by the subject's SET_BINDING, never a protocol value.
+// The same derivation runs at recheck; any failure there is a scoped
+// invalidation of the in-flight resolution.
+func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	raw := strings.TrimSpace(r.URL.Query().Get("clientIp"))
+	if raw == "" {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
+			Status: http.StatusBadRequest,
+			Reason: "clientIp query parameter required",
 		}
-		if s.subjectRebindingLocked(subj) {
-			return func(w http.ResponseWriter) {
-				http.Error(w, "subject rebind in progress", http.StatusServiceUnavailable)
-			}
+	}
+	ip, err := netip.ParseAddr(raw)
+	if err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
+			Status: http.StatusBadRequest,
+			Reason: "invalid clientIp",
 		}
-		if !registered || !s.fenceMatchesLocked(subj, fence) || s.subjAtt[subj].IP != ip {
-			return func(w http.ResponseWriter) { http.Error(w, "no subject for clientIp", http.StatusNotFound) }
+	}
+	result := s.withVaultAccess(ip, func(store *credentialvault.Store, sandboxID string) vaultAccessResult {
+		if sandboxID == "" {
+			return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "sandbox identity unavailable"}}
 		}
-		store := s.vaultForLocked(subj, fence)
-		if s.vaultSealedLocked(subj) {
-			return func(w http.ResponseWriter) { http.Error(w, "subject vault is sealed", http.StatusConflict) }
+		return vaultAccessResult{store: store, sandboxID: sandboxID}
+	})
+	if result.err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
+			Status: result.err.status,
+			Reason: result.err.reason,
 		}
-		if entry := s.vaults[subj]; entry.vaultStateUnknown {
-			return func(w http.ResponseWriter) { http.Error(w, "vault state is unknown", http.StatusServiceUnavailable) }
-		}
-		return captureActiveVaultSnapshot(r, store)
-	}()
-	respond(w)
+	}
+	return credentialvault.ResolveAccess{SandboxID: result.sandboxID, Store: result.store}, nil
 }
 
 // applyPolicy applies a policy to a subject. Ordering: nft FIRST, registry
@@ -520,7 +597,7 @@ func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence sub
 		}
 		delete(s.vaults, subj)
 	}
-	v := credentialvault.NewStore(nil, func() bool { return true })
+	v := credentialvault.NewSubjectStore()
 	e := vaultEntry{store: v, fence: fence, lazyVaultProbe: true}
 	s.inspectLazyVaultStateLocked(subj, &e)
 	if s.vaultFiles != nil && s.vaultFiles.isSealed(subj) {
@@ -692,16 +769,20 @@ func (s *fastSandboxPolicyServer) dropSubjectStateLocked(subj subject.Subject) e
 	delete(s.subjFence, subj)
 	delete(s.pendingPolicies, subj)
 	delete(s.subjAtt, subj)
+	delete(s.subjSandbox, subj)
 	return nil
 }
 
 // recordBindingState records a validated network attempt before enforcement.
 // A failed initial deny-first may already have kernel effects; retries must
 // still compare its network rather than treat missing success metadata as
-// evidence that no rules exist. Called outside the registry lock.
-func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment) {
+// evidence that no rules exist. sandboxName is the envelope's SandboxRef.Name
+// (the wire sandboxId); it refreshes with the attempt. Called outside the
+// registry lock.
+func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment, sandboxName string) {
 	s.mu.Lock()
 	s.subjAtt[subj] = att
+	s.subjSandbox[subj] = strings.TrimSpace(sandboxName)
 	s.mu.Unlock()
 }
 

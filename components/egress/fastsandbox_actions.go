@@ -601,7 +601,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	installStarted := time.Now()
 	// Record even failed first installs: partial kernel effects otherwise have
 	// no network identity for a later same-fence retry or changed-fence rebind.
-	s.recordBindingState(subj, att)
+	s.recordBindingState(subj, att, env.Sandbox.Name)
 	var victims []subject.Subject
 	state, err := s.reg.RegisterAndEnforce(subj, subject.SubjectKey{SourceIP: att.IP}, fence, func() error {
 		return s.OnRegistered(subj, att)
