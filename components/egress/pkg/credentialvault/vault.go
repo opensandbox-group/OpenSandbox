@@ -89,6 +89,7 @@ type Store struct {
 	strictMatch       bool
 	liveAdmission     bool
 	staticPassthrough mitmpassthrough.Config
+	resolverConfig    ResolverConfig
 }
 
 type record struct {
@@ -175,7 +176,7 @@ type Match struct {
 }
 
 type Auth struct {
-	Type          string              `json:"type"`
+	Type          string              `json:"type,omitempty"`
 	Credential    string              `json:"credential,omitempty"`
 	Name          string              `json:"name,omitempty"`
 	Headers       []CustomHeaderEntry `json:"headers,omitempty"`
@@ -223,8 +224,9 @@ type BindingMetadata struct {
 }
 
 type AuthMetadata struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Credential string `json:"credential,omitempty"`
 }
 
 type ActiveSnapshot struct {
@@ -233,11 +235,19 @@ type ActiveSnapshot struct {
 	Redactions []string        `json:"redactions,omitempty"`
 }
 
+// ExchangeRef marks an exchange-resolved binding in snapshots: no material
+// is rendered locally, only the credential the per-request resolve path
+// consults (always exchange-sourced, per the cross-lock).
+type ExchangeRef struct {
+	Credential string `json:"credential"`
+}
+
 type ActiveBinding struct {
-	Name          string                  `json:"name"`
-	Match         Match                   `json:"match"`
-	Headers       []InjectionHeader       `json:"headers"`
-	Substitutions []InjectionSubstitution `json:"substitutions,omitempty"`
+	Name          string                   `json:"name"`
+	Match         Match                    `json:"match"`
+	Headers       []InjectionHeader        `json:"headers"`
+	Substitutions *[]InjectionSubstitution `json:"substitutions,omitempty"`
+	Exchange      *ExchangeRef             `json:"exchange,omitempty"`
 }
 
 type InjectionHeader struct {
@@ -257,6 +267,26 @@ func NewLiveStore(gate *mitmproxy.HealthGate, requireToken func() bool, config m
 	store.liveAdmission = true
 	store.staticPassthrough = config
 	return store
+}
+
+// ResolverConfig reports whether the resolver operator configuration is
+// ready (D13): resolve timeout configured and the endpoint auth table parsed.
+// The zero value is not ready — exchange vaults fail closed until injected.
+type ResolverConfig struct {
+	TimeoutConfigured bool
+	AuthTableParsed   bool
+}
+
+func (c ResolverConfig) Ready() bool {
+	return c.TimeoutConfigured && c.AuthTableParsed
+}
+
+// SetResolverConfig installs the exchange capability gate's readiness. Call
+// before serving vault mutations.
+func (v *Store) SetResolverConfig(config ResolverConfig) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.resolverConfig = config
 }
 
 func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
@@ -495,8 +525,14 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 	if len(bindings) > 0 && pol.DefaultAction != policy.ActionDeny {
 		log.Warnf("credential vault: default-allow egress policy is deprecated and may allow credential destination bypass; use defaultAction=deny")
 	}
+	if err := v.validateExchangeAdmission(credentials); err != nil {
+		return err
+	}
 	for _, b := range bindings {
 		if err := validateBindingCredentialRefs(b, credentials); err != nil {
+			return err
+		}
+		if err := validateAuthSourceCrossLock(b, credentials); err != nil {
 			return err
 		}
 		if err := v.validateBindingPolicy(b, pol); err != nil {
@@ -505,6 +541,29 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 	}
 	if err := validateBindingAmbiguity(bindings); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateExchangeAdmission fails closed on exchange-sourced credentials:
+// the live revision runtime never supports them; other stores require the
+// resolver operator configuration (D13). Inline-only vaults are unaffected.
+func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
+	hasExchange := false
+	for _, credential := range credentials {
+		if credential.SourceType == "exchange" {
+			hasExchange = true
+			break
+		}
+	}
+	if !hasExchange {
+		return nil
+	}
+	if v.liveAdmission {
+		return fmt.Errorf("exchange credentials are not supported in the live revision runtime")
+	}
+	if !v.resolverConfig.Ready() {
+		return fmt.Errorf("exchange credentials are not supported until the credential resolver operator configuration is ready")
 	}
 	return nil
 }
@@ -692,6 +751,23 @@ func normalizeAuth(a *Auth) error {
 		if len(a.Headers) != 0 {
 			return fmt.Errorf("passthrough auth does not accept headers")
 		}
+	case "":
+		// Typeless: the exchange-only reference form; cross-lock enforces
+		// the exchange source. Headers resolve per request, never locally.
+		a.Credential = strings.TrimSpace(a.Credential)
+		if a.Credential == "" {
+			return fmt.Errorf("typeless auth requires credential")
+		}
+		if strings.TrimSpace(a.Name) != "" {
+			return fmt.Errorf("typeless auth does not accept name")
+		}
+		if len(a.Headers) != 0 {
+			return fmt.Errorf("typeless auth does not accept headers")
+		}
+		if len(a.Substitutions) != 0 {
+			return fmt.Errorf("typeless auth does not accept substitutions")
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported auth type %q", a.Type)
 	}
@@ -717,15 +793,62 @@ func validateBindingCredentialRefs(b Binding, credentials map[string]record) err
 	return nil
 }
 
+// validateAuthSourceCrossLock pins the exchange reference discipline: static
+// auth types and substitutions render locally and reject exchange-sourced
+// credentials; the typeless form accepts only exchange-sourced ones.
+// passthrough references no auth credential.
+func validateAuthSourceCrossLock(b Binding, credentials map[string]record) error {
+	for _, name := range authCredentialRefs(b.Auth) {
+		rec, ok := credentials[name]
+		if !ok {
+			continue // unknown references are reported by validateBindingCredentialRefs
+		}
+		switch b.Auth.Type {
+		case "":
+			if rec.SourceType != "exchange" {
+				return fmt.Errorf("binding %q typeless auth requires an exchange credential, but %q is %s-sourced", b.Name, name, rec.SourceType)
+			}
+		case "passthrough":
+		default:
+			if rec.SourceType == "exchange" {
+				return fmt.Errorf("binding %q %s auth cannot reference the exchange credential %q; only the typeless auth form may use exchange credentials", b.Name, b.Auth.Type, name)
+			}
+		}
+	}
+	for _, name := range substitutionCredentialRefs(b.Auth) {
+		rec, ok := credentials[name]
+		if !ok {
+			continue
+		}
+		if rec.SourceType == "exchange" {
+			return fmt.Errorf("binding %q substitution cannot reference the exchange credential %q; substitutions render locally and only inline credentials support that", b.Name, name)
+		}
+	}
+	return nil
+}
+
 func credentialRefsForAuth(auth Auth) []string {
+	return append(authCredentialRefs(auth), substitutionCredentialRefs(auth)...)
+}
+
+func authCredentialRefs(auth Auth) []string {
 	var out []string
-	if auth.Type == "customHeaders" {
+	switch auth.Type {
+	case "customHeaders":
 		for _, h := range auth.Headers {
 			out = append(out, h.Credential)
 		}
-	} else if auth.Type != "passthrough" && auth.Credential != "" {
-		out = append(out, auth.Credential)
+	case "passthrough":
+	default:
+		if auth.Credential != "" {
+			out = append(out, auth.Credential)
+		}
 	}
+	return out
+}
+
+func substitutionCredentialRefs(auth Auth) []string {
+	var out []string
 	for _, substitution := range auth.Substitutions {
 		out = append(out, substitution.Credential)
 	}
@@ -777,6 +900,10 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 			redactions = append(redactions, value)
 		}
 	case "passthrough":
+	case "":
+		// Typeless bindings render as snapshot markers only; this branch is
+		// defensive — renderActiveSnapshot never routes them here.
+		return nil, nil, fmt.Errorf("typeless exchange auth cannot be rendered as static injection headers")
 	default:
 		return nil, nil, fmt.Errorf("unsupported auth type %q", auth.Type)
 	}
@@ -893,6 +1020,8 @@ func sanitizeAuth(auth Auth) AuthMetadata {
 	switch auth.Type {
 	case "apiKey":
 		meta.Name = auth.Name
+	case "":
+		meta.Credential = auth.Credential
 	}
 	return meta
 }

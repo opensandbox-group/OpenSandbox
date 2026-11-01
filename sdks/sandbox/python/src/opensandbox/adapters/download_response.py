@@ -19,6 +19,7 @@ from typing import TypeVar
 
 import httpx
 
+from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.models.filesystem import (
     AsyncReadBytesStream,
     ByteRange,
@@ -93,6 +94,13 @@ class _AsyncResponseByteStream:
             raise StopAsyncIteration
         try:
             return await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except Exception as e:
+            await self.aclose()
+            # Same mapping as the request itself, e.g. a reset mid-body.
+            raise ExceptionConverter.to_sandbox_exception(e) from e
         except BaseException:
             await self.aclose()
             raise
@@ -127,6 +135,13 @@ class _ResponseByteStream:
             raise StopIteration
         try:
             return next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
+        except Exception as e:
+            self.close()
+            # Same mapping as the request itself, e.g. a reset mid-body.
+            raise ExceptionConverter.to_sandbox_exception(e) from e
         except BaseException:
             self.close()
             raise

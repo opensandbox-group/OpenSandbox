@@ -405,8 +405,8 @@ pass "DoH-443 blocking installed (doh_block_v4 set + element + drop rule)"
 info "Test 1: SET_BINDING registers deny-first (fail closed before any policy)"
 set_binding a 10.10.0.5 1 runtime-a att-a '{"defaultAction":"deny"}'
 wait_for 15 "subject a deny-first installed" nft_has 'subj_s_a'
-nft_has 'ip saddr 10.10.0.5 jump subj_s_a' || fail "dispatch rule missing"
-nft_has 'subj_s_a_allow_v4 {' || fail "subject a static sets missing"
+wait_for 10 "subject a dispatch rule" nft_has 'ip saddr 10.10.0.5 jump subj_s_a'
+wait_for 10 "subject a static sets" nft_has 'subj_s_a_allow_v4 {'
 expect_rcode osb-sandbox-a allow.test 3
 pass "deny-first registered (nft + NXDOMAIN, policy pending)"
 
@@ -423,7 +423,7 @@ expect_answers osb-sandbox-a other.test 1.1.1.2
 expect_rcode osb-sandbox-a nope.test 3
 pass "DNS per-subject policy (allow *.test, deny others)"
 
-nft_has '10.99.0.2' || fail "static allow element missing from nft"
+wait_for 10 "static allow element" nft_has '10.99.0.2'
 wait_for 10 "dns-learned dynamic allow" nft_has '1.1.1.1'
 pass "nft static allow + DNS-learned dynamic lease"
 
