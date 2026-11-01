@@ -459,12 +459,35 @@ class InlineCredentialSource(BaseModel):
         return v
 
 
+class ExchangeCredentialSource(BaseModel):
+    """
+    Exchange credential source (OSEP-0025): no local material.
+
+    The egress resolves header sets per request from the header-resolver
+    endpoint; ``endpoint`` is configuration, not secret material.
+    """
+
+    type: Literal["exchange"] = Field(
+        default="exchange", description="Credential source type."
+    )
+    endpoint: str = Field(
+        description="Header-resolver endpoint (unix:///path or https://host[:port])."
+    )
+
+    @field_validator("endpoint")
+    @classmethod
+    def endpoint_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Credential source endpoint cannot be blank")
+        return v
+
+
 class Credential(BaseModel):
     """Sandbox-local Credential Vault credential."""
 
     name: str = Field(description="Sandbox-local credential name.")
-    source: InlineCredentialSource | dict[str, str] = Field(
-        description="Write-only credential source."
+    source: InlineCredentialSource | ExchangeCredentialSource | dict[str, str] = Field(
+        description="Write-only credential source (inline material or exchange endpoint)."
     )
 
     @field_validator("name")
@@ -477,7 +500,10 @@ class Credential(BaseModel):
     @model_validator(mode="after")
     def normalize_source(self) -> "Credential":
         if isinstance(self.source, dict):
-            self.source = InlineCredentialSource.model_validate(self.source)
+            if self.source.get("type", "inline") == "exchange":
+                self.source = ExchangeCredentialSource.model_validate(self.source)
+            else:
+                self.source = InlineCredentialSource.model_validate(self.source)
         return self
 
 
@@ -518,9 +544,16 @@ class CredentialSubstitution(BaseModel):
 
 
 class CredentialAuth(BaseModel):
-    """Typed Credential Vault auth rule."""
+    """Credential Vault auth rule.
 
-    type: Literal["bearer", "basic", "apiKey", "customHeaders", "passthrough"]
+    ``type`` selects one of the five static kinds. Leaving it unset (None)
+    selects the typeless exchange form (OSEP-0025), which sets only
+    ``credential`` — a reference to an exchange-sourced credential.
+    """
+
+    type: Literal["bearer", "basic", "apiKey", "customHeaders", "passthrough"] | None = (
+        None
+    )
     credential: str | None = None
     name: str | None = None
     headers: list[CustomHeaderEntry] | None = None
@@ -554,17 +587,26 @@ class CredentialMetadata(BaseModel):
     """Sanitized credential metadata returned by Credential Vault."""
 
     name: str
-    source_type: str = Field(alias="sourceType")
+    source_type: str = Field(
+        alias="sourceType",
+        description="Credential source kind (inline or exchange).",
+    )
     revision: int
 
     model_config = ConfigDict(populate_by_name=True)
 
 
 class CredentialAuthMetadata(BaseModel):
-    """Sanitized auth metadata returned for a Credential Vault binding."""
+    """Sanitized auth metadata returned for a Credential Vault binding.
 
-    type: str
+    Static kinds carry ``type`` (plus ``name`` for apiKey); the typeless
+    exchange form carries only ``credential`` (a credential reference, never
+    material).
+    """
+
+    type: str | None = None
     name: str | None = None
+    credential: str | None = None
 
 
 class CredentialBindingMetadata(BaseModel):

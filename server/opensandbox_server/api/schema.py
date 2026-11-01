@@ -21,7 +21,7 @@ for request/response validation and serialization.
 
 import ipaddress
 from datetime import datetime
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr, RootModel, field_validator, model_validator
 
@@ -234,9 +234,30 @@ class InlineCredentialSource(BaseModel):
         extra = "forbid"
 
 
+class ExchangeCredentialSource(BaseModel):
+    """Exchange credential source (OSEP-0025): no local material.
+
+    The egress owns endpoint semantics (unix:///path or https://host) and the
+    inline/exchange cross-lock validation authoritatively; the server only
+    checks the wire shape here.
+    """
+
+    type: Literal["exchange"] = Field(..., description="Credential source type.")
+    endpoint: str = Field(
+        ...,
+        description="Header-resolver endpoint; egress validates the scheme.",
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
 class Credential(BaseModel):
     name: str = Field(..., min_length=1, description="Unique credential name.")
-    source: InlineCredentialSource = Field(..., description="Credential value source.")
+    source: InlineCredentialSource | ExchangeCredentialSource = Field(
+        ..., description="Credential value source."
+    )
 
     class Config:
         populate_by_name = True
@@ -333,14 +354,36 @@ class PassthroughCredentialAuth(BaseModel):
         extra = "forbid"
 
 
-CredentialAuth = Annotated[
+class ExchangeCredentialAuth(BaseModel):
+    """Typeless exchange auth (OSEP-0025): only a credential reference.
+
+    The referenced credential must be exchange-sourced; that cross-lock and
+    the rejection of any other field here is enforced authoritatively by the
+    egress (extra="forbid" already pins the server-side wire shape).
+    """
+
+    credential: str = Field(
+        ...,
+        min_length=1,
+        description="Name of the exchange-sourced credential to resolve per request.",
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+# No discriminator: the exchange variant carries no `type` key at all, so the
+# Literal-tagged static variants and the typeless variant are mutually
+# exclusive by shape and the smart union resolves without ambiguity.
+CredentialAuth = (
     BearerCredentialAuth
     | BasicCredentialAuth
     | ApiKeyCredentialAuth
     | CustomHeadersCredentialAuth
-    | PassthroughCredentialAuth,
-    Field(discriminator="type"),
-]
+    | PassthroughCredentialAuth
+    | ExchangeCredentialAuth
+)
 
 
 class CredentialMatch(BaseModel):
@@ -440,9 +483,18 @@ class CredentialVaultMutationRequest(BaseModel):
 
 
 class CredentialAuthMetadata(BaseModel):
-    type: str = Field(..., description="Injected credential shape type.")
+    """Sanitized auth shape — `type` (plus `name` for `apiKey`) for static
+    kinds; `credential` only for the typeless exchange form."""
+
+    type: Optional[str] = Field(
+        default=None, description="Injected credential shape type (static kinds)."
+    )
     name: Optional[str] = Field(
         default=None, description="Header name, for the apiKey shape only."
+    )
+    credential: Optional[str] = Field(
+        default=None,
+        description="Exchange-sourced credential name, typeless form only.",
     )
 
     class Config:
@@ -451,7 +503,11 @@ class CredentialAuthMetadata(BaseModel):
 
 class CredentialMetadata(BaseModel):
     name: str
-    source_type: str = Field(..., alias="sourceType", description="Credential source type.")
+    source_type: str = Field(
+        ...,
+        alias="sourceType",
+        description="Credential source kind (inline or exchange).",
+    )
     revision: int
 
     class Config:

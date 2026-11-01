@@ -136,13 +136,22 @@ function sanitizeCredentialAuthMetadata(
 ): CredentialBindingMetadata["auth"] {
   if (value == null) return undefined;
   const raw = expectObject(value, context);
-  const auth: NonNullable<CredentialBindingMetadata["auth"]> = {
-    type: expectString(raw.type, `${context}.type`),
-  };
-  if (raw.name != null) {
-    auth.name = expectString(raw.name, `${context}.name`);
+  if (raw.type != null) {
+    const auth: NonNullable<CredentialBindingMetadata["auth"]> = {
+      type: expectString(raw.type, `${context}.type`),
+    };
+    if (raw.name != null) {
+      auth.name = expectString(raw.name, `${context}.name`);
+    }
+    return auth;
   }
-  return auth;
+  // Typeless exchange form: only the credential reference rides the wire.
+  if (raw.credential != null) {
+    return {
+      credential: expectString(raw.credential, `${context}.credential`),
+    };
+  }
+  throw new Error(`${context}: expected "type" or "credential"`);
 }
 
 export function sanitizeCredentialMetadata(value: unknown, context: string): CredentialMetadata {

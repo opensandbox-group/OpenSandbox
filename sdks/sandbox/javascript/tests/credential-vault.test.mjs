@@ -91,7 +91,7 @@ function jsonResponse(body, init = {}) {
   });
 }
 
-function createAdapter() {
+function createAdapter(stateOverride) {
   const requests = [];
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(String(input));
@@ -105,29 +105,30 @@ function createAdapter() {
     };
     requests.push(request);
 
+    const state = stateOverride ?? stateResponse();
     if (request.pathname === "/credential-vault") {
       if (request.method === "DELETE") {
         return new Response(null, { status: 204 });
       }
-      return jsonResponse(stateResponse());
+      return jsonResponse(state);
     }
     if (request.pathname === "/credential-vault/credentials") {
       return jsonResponse({
         revision: 9,
-        credentials: [stateResponse().credentials[0]],
+        credentials: [state.credentials[0]],
       });
     }
     if (request.pathname === "/credential-vault/credentials/api-token%2Fprimary") {
-      return jsonResponse(stateResponse().credentials[0]);
+      return jsonResponse(state.credentials[0]);
     }
     if (request.pathname === "/credential-vault/bindings") {
       return jsonResponse({
         revision: 9,
-        bindings: [stateResponse().bindings[0]],
+        bindings: state.bindings,
       });
     }
     if (request.pathname === "/credential-vault/bindings/api%20binding") {
-      return jsonResponse(stateResponse().bindings[0]);
+      return jsonResponse(state.bindings[0]);
     }
     return jsonResponse({ code: "NOT_FOUND", message: "not found" }, { status: 404 });
   };
@@ -250,7 +251,11 @@ test("Credential Vault state omits plaintext secret fields", async () => {
   assert.doesNotMatch(credentialMetadata, /extends Record/);
   assert.doesNotMatch(credentialMetadata, /\bsource\s*[?:]/);
   assert.doesNotMatch(authMetadata, /extends Record/);
-  assert.doesNotMatch(authMetadata, /\bcredential\s*[?:]/);
+  // The typeless exchange form exposes only its credential reference; the
+  // plaintext-value carriers (`headers`, and `credential` values) never ride
+  // the sanitized metadata.
+  assert.match(authMetadata, /\btype\?: string/);
+  assert.match(authMetadata, /\bcredential\?: string/);
   assert.doesNotMatch(authMetadata, /\bheaders\s*[?:]/);
   assert.doesNotMatch(bindingMetadata, /extends Record/);
   assert.match(bindingMetadata, /\bauth\??: CredentialAuthMetadata/);
@@ -265,6 +270,71 @@ test("Egress declarations keep Credential Vault optional for custom adapters", a
   assert.doesNotMatch(egress, /\bcreate\(/);
   assert.match(egressStack, /\begress: Egress/);
   assert.match(egressStack, /\bcredentialVault\??: CredentialVault/);
+});
+
+test("exchange credentials and typeless auth round-trip losslessly (OSEP-0025)", async () => {
+  const exchangeCredential = {
+    name: "spi-signer",
+    source: { type: "exchange", endpoint: "unix:///run/spi/spi.sock" },
+  };
+  const typelessBinding = {
+    name: "internal-api",
+    match: { hosts: ["*.internal.example.com"] },
+    auth: { credential: "spi-signer" },
+  };
+
+  const exchangeState = {
+    revision: 3,
+    credentials: [{ name: "spi-signer", sourceType: "exchange", revision: 3 }],
+    bindings: [
+      {
+        name: "internal-api",
+        revision: 3,
+        match: { hosts: ["*.internal.example.com"] },
+        // Raw auth carries extra keys; the sanitizer must keep exactly the
+        // credential reference and never produce `type: null`.
+        auth: { credential: "spi-signer", headers: [] },
+      },
+    ],
+  };
+  const { adapter, requests } = createAdapter(exchangeState);
+
+  const created = await adapter.create({
+    credentials: [exchangeCredential],
+    bindings: [typelessBinding],
+  });
+  const state = await adapter.get();
+
+  assert.deepEqual(requests[0].body, {
+    credentials: [exchangeCredential],
+    bindings: [typelessBinding],
+  });
+  assert.deepEqual(created, {
+    revision: 3,
+    credentials: [{ name: "spi-signer", sourceType: "exchange", revision: 3 }],
+    bindings: [
+      {
+        name: "internal-api",
+        revision: 3,
+        match: { hosts: ["*.internal.example.com"] },
+        auth: { credential: "spi-signer" },
+      },
+    ],
+  });
+  assert.deepEqual(state, created);
+  assert.equal(Object.hasOwn(state.bindings[0].auth, "type"), false);
+  assert.equal(JSON.stringify(state).includes("spi.sock"), false);
+});
+
+test("sanitizer rejects auth metadata without type or credential", async () => {
+  const brokenState = {
+    revision: 1,
+    credentials: [],
+    bindings: [{ name: "b", revision: 1, auth: {} }],
+  };
+  const { adapter } = createAdapter(brokenState);
+
+  await assert.rejects(() => adapter.get(), /auth: expected "type" or "credential"/);
 });
 
 async function readDistDeclarations() {

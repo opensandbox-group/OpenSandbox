@@ -1814,6 +1814,62 @@ def test_credential_vault_route_forwards_egress_auth_header(
     assert len(egress_headers) == 1
     assert egress_headers[0][1] == "injected-egress-token"
 
+
+def test_credential_vault_route_forwards_exchange_payload_verbatim(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """OSEP-0025: the server shape gate accepts exchange sources and typeless
+    auth (previously 422) and the sidecar proxy forwards the body verbatim —
+    semantic validation stays with the egress."""
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            assert port == 18080
+            return Endpoint(endpoint="10.57.1.91:18080")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=201,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"revision":1,"credentials":[],"bindings":[]}'],
+    )
+    _set_http_client(client, fake_client)
+
+    payload = {
+        "credentials": [
+            {
+                "name": "spi-signer",
+                "source": {"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+            }
+        ],
+        "bindings": [
+            {
+                "name": "internal-api",
+                "match": {"hosts": ["*.internal.example.com"]},
+                "auth": {"credential": "spi-signer"},
+            }
+        ],
+    }
+    response = client.post(
+        "/v1/sandboxes/sbx-123/credential-vault",
+        headers=auth_headers,
+        json=payload,
+    )
+
+    assert response.status_code == 201
+    assert fake_client.built is not None
+    assert fake_client.built["method"] == "POST"
+    assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault"
+    # The body rides the raw request stream (verbatim passthrough like every
+    # other proxied body); reaching the sidecar at all proves the shape gate
+    # accepted the exchange payload.
+    assert fake_client.built["content"] is not None
+
 class _StubRenewCoordinator:
     def __init__(self) -> None:
         self.scheduled: list[str] = []

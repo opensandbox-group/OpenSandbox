@@ -373,6 +373,60 @@ func TestCredentialVaultStateDoesNotRetainPlaintextSecretFields(t *testing.T) {
 	}
 }
 
+func TestExchangeCredentialVaultRoundTrip(t *testing.T) {
+	// Exchange source and typeless auth (OSEP-0025) marshal losslessly, and
+	// the typeless form never emits a forced `"type"` key.
+	body, err := json.Marshal(CredentialVaultCreateRequest{
+		Credentials: []Credential{{
+			Name:   "spi-signer",
+			Source: CredentialSource{Type: CredentialSourceExchange, Endpoint: "unix:///run/spi/spi.sock"},
+		}},
+		Bindings: []CredentialBinding{{
+			Name:  "internal-api",
+			Match: CredentialMatch{Hosts: []string{"*.internal.example.com"}},
+			Auth:  CredentialAuth{Credential: "spi-signer"},
+		}},
+	})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, map[string]any{
+		"credentials": []any{map[string]any{
+			"name": "spi-signer",
+			"source": map[string]any{
+				"type":     "exchange",
+				"endpoint": "unix:///run/spi/spi.sock",
+			},
+		}},
+		"bindings": []any{map[string]any{
+			"name":  "internal-api",
+			"match": map[string]any{"hosts": []any{"*.internal.example.com"}},
+			"auth":  map[string]any{"credential": "spi-signer"},
+		}},
+	}, got)
+	encoded := string(body)
+	require.True(t, !strings.Contains(encoded, `"type":""`), "unexpected empty type key in %s", encoded)
+	require.True(t, !strings.Contains(encoded, `"value"`), "unexpected value key in %s", encoded)
+
+	// Static payloads stay byte-compatible: the inline default-type shortcut
+	// keeps working through the flat CredentialSource model.
+	inline, err := json.Marshal(InlineCredentialSource{Value: "dummy-inline-value"})
+	require.NoError(t, err)
+	var inlineGot map[string]any
+	require.NoError(t, json.Unmarshal(inline, &inlineGot))
+	require.Equal(t, map[string]any{"type": "inline", "value": "dummy-inline-value"}, inlineGot)
+
+	// Sanitized typeless metadata round-trips credential-only (no `type`
+	// emitted); static metadata never leaks a credential reference.
+	typeless, err := json.Marshal(CredentialAuthMetadata{Credential: "spi-signer"})
+	require.NoError(t, err)
+	require.Equal(t, `{"credential":"spi-signer"}`, string(typeless))
+	static, err := json.Marshal(CredentialAuthMetadata{Type: "bearer", Credential: "tok"})
+	require.NoError(t, err)
+	require.Equal(t, `{"type":"bearer"}`, string(static))
+}
+
 func TestCreateSandboxRequestIncludesCredentialProxy(t *testing.T) {
 	data, err := json.Marshal(CreateSandboxRequest{
 		Image:           &ImageSpec{URI: "python:3.12"},
