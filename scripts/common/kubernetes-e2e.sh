@@ -51,7 +51,7 @@ k8s_e2e_build_runtime_images() {
   if [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ]; then
     docker build -f components/ingress/Dockerfile -t "${INGRESS_IMG}" "${REPO_ROOT}"
   fi
-  docker pull "${SANDBOX_TEST_IMAGE}"
+  docker pull --platform=linux/amd64 "${SANDBOX_TEST_IMAGE}"
 }
 
 k8s_e2e_kind_load_runtime_images() {
