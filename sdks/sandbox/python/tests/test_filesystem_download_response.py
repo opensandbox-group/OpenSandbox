@@ -407,3 +407,21 @@ async def test_async_stream_maps_errors_while_reading_the_body(isolated: bool) -
                 pass
         assert isinstance(exc.value.__cause__, httpx.ReadError)
     await adapter._httpx_client.aclose()
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_sync_stream_maps_transport_errors_like_async(isolated: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    config = ConnectionConfigSync(protocol="http", transport=httpx.MockTransport(handler))
+    if isolated:
+        adapter = IsolatedFilesystemAdapterSync(config, _endpoint(), _SESSION_ID)
+    else:
+        adapter = FilesystemAdapterSync(config, _endpoint())
+
+    with pytest.raises(SandboxConnectionException):
+        adapter.read_bytes_stream_detailed("/data.bin")
+    with pytest.raises(SandboxConnectionException):
+        adapter.read_bytes_stream("/data.bin")
+    adapter._httpx_client.close()
