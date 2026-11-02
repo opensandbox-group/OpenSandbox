@@ -1474,9 +1474,9 @@ class SystemAddonActiveVaultStrictParseTest(unittest.TestCase):
         self.assertIsNone(flow.response)
 
     def test_selected_exchange_binding_fails_closed_buffered_and_streamed(self) -> None:
-        # The T3a 503 placeholder was replaced by the T3b resolve branch;
-        # without a connection SNI the resolve can never be built, so the
-        # request still fails closed — 407 buffered, kill streamed.
+        # T3b replaced the 503 placeholder with the resolve branch; without
+        # a connection SNI the resolve cannot be built, so the request still
+        # fails closed — 407 buffered, kill streamed.
         for streamed in (False, True):
             with self.subTest(streamed=streamed):
                 system = _load_system_module()

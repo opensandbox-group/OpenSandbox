@@ -482,8 +482,8 @@ class ExchangeResolveTest(unittest.TestCase):
 
     def test_response_suppression_and_by_value_redaction(self) -> None:
         self._install_vault()
-        # Redactions deliberately miss every rendered variant: the addon must
-        # re-derive them (R9) so echoes cannot leak the resolved value.
+        # Redactions deliberately miss every variant; the addon must
+        # re-derive them (R9).
         self._install_transport(
             lambda payload: _parsed_decision(redactions=[SECRET, SECOND_SECRET])
         )
@@ -749,8 +749,8 @@ class ExchangeResolveTest(unittest.TestCase):
 
         asyncio.run(self.system.requestheaders(flow))
 
-        # The read itself is bounded to limit+1 bytes: an oversized body is
-        # rejected without ever buffering more than the cap allows.
+        # The read itself is bounded; oversized bodies never buffer beyond
+        # the cap.
         self.assertEqual(limit + 1, scripted.amt)
         self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
         self.assertEqual(407, flow.response.status_code)
