@@ -71,15 +71,22 @@ OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS = (
 OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH"
 )
-# OSEP-0025 credential resolver operator configuration, forwarded to the
-# egress sidecar. Must match components/egress/pkg/constants/configuration.go
-# EnvCredentialResolver{Timeout,MaxConcurrency,Auth}.
+# OSEP-0025 credential resolver operator configuration forwarded to the
+# egress sidecar. TIMEOUT/MAX_CONCURRENCY are tuning knobs and flow through
+# the sandbox request env allowlist below. Must match
+# components/egress/pkg/constants/configuration.go
+# EnvCredentialResolver{Timeout,MaxConcurrency}.
 OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"
 )
 OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY"
 )
+# Server-injected from [egress.credential_resolver_auth]; admin-only,
+# deliberately not in ALLOWED_EGRESS_ENV_VARS so request env cannot set it
+# (OSEP-0025 D5: resolver caller auth is operator-provisioned, and the table
+# carries bearer tokens). Must match components/egress/pkg/constants/
+# configuration.go EnvCredentialResolverAuth.
 OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH"
 )
@@ -115,7 +122,6 @@ ALLOWED_EGRESS_ENV_VARS = frozenset({
     OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS,
     OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT,
     OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY,
-    OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH,
     "OPENSANDBOX_EGRESS_POLICY_FILE",
 })
 OPENSANDBOX_RUNTIME_VOLUME_NAME = "opensandbox-bin"

@@ -66,6 +66,7 @@ def _egress_settings(
     resource_limits: Optional[dict[str, str]] = None,
     otlp_endpoint: Optional[str] = None,
     upstream_proxy: Optional[EgressUpstreamProxyConfig] = None,
+    credential_resolver_auth: Optional[SecretStr] = None,
 ) -> EgressWorkloadSettings:
     return EgressWorkloadSettings(
         network_policy=network_policy,
@@ -79,6 +80,7 @@ def _egress_settings(
         resource_limits=resource_limits,
         otlp_endpoint=otlp_endpoint,
         upstream_proxy=upstream_proxy,
+        credential_resolver_auth=credential_resolver_auth,
     )
 
 
@@ -473,8 +475,9 @@ class TestApplyEgressToSpec:
         assert env_by_name["OPENSANDBOX_EGRESS_LOG_LEVEL"] == "debug"
 
     def test_credential_resolver_env_injected_into_sidecar(self):
-        """OSEP-0025: the resolver operator env must flow through the sandbox
-        spec into the egress sidecar (the D13 capability gate reads it there)."""
+        """OSEP-0025: the resolver tuning env must flow through the sandbox
+        spec into the egress sidecar (the D13 capability gate reads it there).
+        The AUTH table is admin-only (D5) and rejected on the request surface."""
         containers: list = []
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -483,13 +486,15 @@ class TestApplyEgressToSpec:
         resolver_env = {
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "5",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "8",
-            "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH": (
-                "https://resolver.internal:443=resolver-token"
-            ),
         }
         sandbox_env, egress_env = split_egress_env(resolver_env)
         assert sandbox_env == {}
         assert egress_env == resolver_env
+
+        with pytest.raises(ValueError, match="not allowed"):
+            split_egress_env(
+                {"OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH": "https://r:443=t"}
+            )
 
         apply_egress_to_spec(
             containers,
@@ -504,6 +509,27 @@ class TestApplyEgressToSpec:
             env_by_name["OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY"]
             == "8"
         )
+
+    def test_credential_resolver_auth_injected_from_config(self):
+        """OSEP-0025 D5: the resolver bearer-token table is server-side
+        config, injected like the upstream-proxy auth — never request env."""
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            _egress_settings(
+                network_policy,
+                credential_resolver_auth=SecretStr(
+                    "https://resolver.internal:443=resolver-token"
+                ),
+            ),
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
         assert (
             env_by_name["OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH"]
             == "https://resolver.internal:443=resolver-token"

@@ -22,6 +22,7 @@ import json
 import os
 import socket
 import ssl
+import stat
 import tempfile
 import threading
 import time
@@ -456,6 +457,35 @@ class ResolveRequestValidationTest(unittest.TestCase):
             resolver.resolve_response(parts, False),
             resolver.resolve_response(parts, False),
         )
+
+
+def _mode(path: str) -> str:
+    return oct(stat.S_IMODE(os.stat(path).st_mode))
+
+
+class SocketDirectoryLayoutTest(unittest.TestCase):
+    """OSEP-0025 R4 layout: socket 0660, 0710 parent only when stub-created.
+
+    A pre-existing parent (e.g. /tmp on a developer machine, sticky 1777, or
+    a dedicated volume prepared by an e2e) must keep its own mode — an
+    unconditional chmod would drop the sticky bit from shared directories.
+    """
+
+    def test_created_directory_gets_0710_and_socket_0660(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_dir = os.path.join(tmp, "created", "spi")
+            socket_path = os.path.join(socket_dir, "resolver.sock")
+            with _ResolverProcess(build_uds_server(socket_path)):
+                self.assertEqual("0o710", _mode(socket_dir))
+                self.assertEqual("0o660", _mode(socket_path))
+
+    def test_pre_existing_directory_keeps_its_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o1777)
+            socket_path = os.path.join(tmp, "resolver.sock")
+            with _ResolverProcess(build_uds_server(socket_path)):
+                self.assertEqual("0o1777", _mode(tmp))
+                self.assertEqual("0o660", _mode(socket_path))
 
 
 if __name__ == "__main__":

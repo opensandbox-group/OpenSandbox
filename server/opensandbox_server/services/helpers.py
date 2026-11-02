@@ -27,11 +27,14 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
+from pydantic import SecretStr
+
 from opensandbox_server.api.schema import Endpoint, Sandbox, SandboxFilter
 from opensandbox_server.services.constants import (
     ALLOWED_EGRESS_ENV_VARS,
     EGRESS_ENV_PREFIX,
     EGRESS_UPSTREAM_EXTRA_CA_PATH,
+    OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH,
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA,
@@ -314,6 +317,17 @@ def upstream_proxy_egress_env(
     return env
 
 
+def credential_resolver_egress_env(auth: Optional[SecretStr]) -> Dict[str, str]:
+    """Env entry injected into the egress sidecar for the operator-configured
+    [egress.credential_resolver_auth] (OSEP-0025 D5). Empty when not
+    configured; sandbox request env can never set this variable."""
+    if auth is None:
+        return {}
+    return {
+        OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH: auth.get_secret_value()
+    }
+
+
 def validate_upstream_proxy_request(
     egress_config: Optional[EgressConfig],
     *,
@@ -361,5 +375,6 @@ __all__ = [
     "matches_filter",
     "split_egress_env",
     "upstream_proxy_egress_env",
+    "credential_resolver_egress_env",
     "validate_upstream_proxy_request",
 ]

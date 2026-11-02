@@ -207,9 +207,11 @@ class ExchangeSidecarRuntime:
             "OPENSANDBOX_EGRESS_RULES": json.dumps(self.policy()),
             "OPENSANDBOX_EGRESS_TOKEN": TOKEN,
             "OPENSANDBOX_EGRESS_SANDBOX_ID": SUBJECT,
-            # Deployment-injected resolver operator env (OSEP-0025 D13): the
-            # sidecar admission gate and the resolve path consume exactly
-            # these three variables.
+            # Resolver operator env (OSEP-0025 D13), deployment-injected:
+            # TIMEOUT/MAX_CONCURRENCY are tenant-tunable knobs; the AUTH
+            # table is admin/operator-provisioned only (D5) — in real
+            # deployments it arrives via [egress.credential_resolver_auth]
+            # server config, never sandbox request env.
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "2",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "4",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH":
@@ -226,10 +228,15 @@ class ExchangeSidecarRuntime:
             self.tls.mkdir()
             self.rulesdir.mkdir()
             # The resolver socket directory lives in a named volume (Linux VM
-            # filesystem): macOS bind mounts cannot chmod a unix socket, and
-            # the stub enforces the production 0710/0660 layout.
+            # filesystem): macOS bind mounts cannot chmod a unix socket. The
+            # caller provisions the production R4 layout (0710 dir); the stub
+            # only chmods directories it creates itself.
             self.docker.run("volume", "create", "--label", self.label, self.spi_volume)
             self.created.add("volume:" + self.spi_volume)
+            self.docker.run(
+                "run", "--rm", "-v", f"{self.spi_volume}:{SPI_DIR}",
+                "--entrypoint", "chmod", self.image, "0710", SPI_DIR,
+            )
             origin_ip = self.address(ORIGIN_IP_SUFFIX)
             self.docker.run(
                 "run", "-d", "--name", self.origin, "--network", self.network,
@@ -346,8 +353,9 @@ class ExchangeSidecarRuntime:
         )
         self.created.add(self.resolver_uds)
         self._wait_log(self.resolver_uds, "test resolver ready:", 20)
-        # The stub enforces the production socket layout (0710 dir / 0660
-        # socket); assert it took so the R4 case cannot pass vacuously.
+        # The 0710 directory is provisioned by this test (caller-owned, like
+        # an operator deployment); the stub adds the 0660 socket and never
+        # chmods a pre-existing parent. Assert both halves of the layout.
         modes = self.docker.run("exec", self.resolver_uds, "stat", "-c", "%a", SPI_DIR, RESOLVER_SOCKET).stdout.split()
         require(modes == ["710", "660"], f"resolver socket layout unexpected: {modes}")
 

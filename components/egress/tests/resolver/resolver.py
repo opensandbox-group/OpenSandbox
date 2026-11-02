@@ -363,10 +363,14 @@ def build_server(
         socket_dir = os.path.dirname(options.uds)
         if socket_dir:
             # Mirror the production active-socket layout (OSEP-0025 R4):
-            # directory 0710 (traversal restricted to owner/group), socket
-            # 0660 — sandbox processes outside the group cannot reach it.
+            # socket 0660 and, for directories this stub creates, a 0710
+            # parent. Pre-existing directories (e.g. /tmp or a dedicated
+            # volume prepared by the caller) keep their own mode — chmod'ing
+            # a shared parent like /tmp would drop its sticky bit.
+            directory_created = not os.path.isdir(socket_dir)
             os.makedirs(socket_dir, mode=0o710, exist_ok=True)
-            os.chmod(socket_dir, 0o710)
+            if directory_created:
+                os.chmod(socket_dir, 0o710)
         if os.path.exists(options.uds):
             # Only a stale socket may be removed; never unlink an arbitrary
             # filesystem object that happens to sit on the requested path.
