@@ -393,7 +393,7 @@ func TestSidecarResolveVaultAccessEnvSubject(t *testing.T) {
 	_, accessErr := s.resolveVaultAccess(nil)
 	require.NotNil(t, accessErr)
 	require.Equal(t, http.StatusServiceUnavailable, accessErr.Status)
-	require.Equal(t, "sandbox identity not configured", accessErr.Reason)
+	require.Equal(t, "sandbox identity unavailable", accessErr.Reason)
 
 	t.Setenv(constants.EnvSandboxID, " sbx-sidecar-7 ")
 	access, accessErr := s.resolveVaultAccess(nil)

@@ -228,6 +228,9 @@ func TestResolveHandlerRequestDiscipline(t *testing.T) {
 		{"float port", http.MethodPost, "application/json",
 			`{"binding":"internal-api","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","port":443.5,"method":"GET","path":"/"}}`,
 			http.StatusBadRequest, "malformed request"},
+		{"null port", http.MethodPost, "application/json",
+			`{"binding":"internal-api","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","port":null,"method":"GET","path":"/"}}`,
+			http.StatusBadRequest, "malformed request"},
 		{"out-of-range port", http.MethodPost, "application/json",
 			`{"binding":"internal-api","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","port":65536,"method":"GET","path":"/"}}`,
 			http.StatusBadRequest, "malformed request"},
@@ -316,11 +319,11 @@ func TestResolveHandlerUnknownSubjectsAndBindings(t *testing.T) {
 
 	// Access failures propagate their own fixed status.
 	h.handler = NewResolveHandler(func(*http.Request) (ResolveAccess, *ResolveAccessError) {
-		return ResolveAccess{}, &ResolveAccessError{Status: http.StatusServiceUnavailable, Reason: "sandbox identity not configured"}
+		return ResolveAccess{}, &ResolveAccessError{Status: http.StatusServiceUnavailable, Reason: "sandbox identity unavailable"}
 	})
 	rec = h.postResolve(validResolveBody())
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	require.Equal(t, "sandbox identity not configured", strings.TrimSpace(rec.Body.String()))
+	require.Equal(t, "sandbox identity unavailable", strings.TrimSpace(rec.Body.String()))
 
 	// A vault that does not exist is a binding-level 404.
 	empty := testResolverReadyStore()
@@ -560,6 +563,33 @@ func TestResolveHandlerClientCachedPerEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, h.postResolve(validResolveBody()).Code)
 	require.Equal(t, 1, h.newCalls, "one endpoint must produce one client")
 	require.Len(t, h.client.recorded(), 2)
+}
+
+func TestResolveHandlerClientCacheBounded(t *testing.T) {
+	// The cache is never evicted; past the cap, clients are rebuilt per
+	// request instead of growing the map without bound.
+	h := newResolveHarness(t)
+	h.client.decision = &ResolverDecision{Headers: map[string]string{}, Suppress: map[string]struct{}{}, Redactions: []string{}}
+	h.client.unblock()
+	// Rotate the captured endpoint past the cap by swapping the credential.
+	for i := 0; i <= maxCachedResolverClients; i++ {
+		_, err := h.store.Patch(MutationRequest{Credentials: &CredentialMutationSet{Replace: []Credential{{
+			Name:   "spi-signer",
+			Source: mustMarshal(map[string]string{"type": "exchange", "endpoint": fmt.Sprintf("unix:///run/spi/%d.sock", i)}),
+		}}}}, testExchangePolicy(t))
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, h.postResolve(validResolveBody()).Code)
+	}
+	require.Len(t, h.handler.clients, maxCachedResolverClients, "cache must not exceed the cap")
+	require.Equal(t, maxCachedResolverClients+1, h.newCalls)
+	// An endpoint still inside the cache keeps reusing its client.
+	_, err := h.store.Patch(MutationRequest{Credentials: &CredentialMutationSet{Replace: []Credential{{
+		Name:   "spi-signer",
+		Source: mustMarshal(map[string]string{"type": "exchange", "endpoint": "unix:///run/spi/0.sock"}),
+	}}}}, testExchangePolicy(t))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, h.postResolve(validResolveBody()).Code)
+	require.Equal(t, maxCachedResolverClients+1, h.newCalls, "cached endpoint must not rebuild")
 }
 
 func TestResolverConfigFromEnvWiring(t *testing.T) {

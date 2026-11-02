@@ -212,8 +212,14 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeResolveSuccess(w, capture.Revision, document.Binding, decision)
 }
 
-// clientFor caches one ResolverClient per captured endpoint; clients are
-// stateless beyond their transport and the env never changes at runtime.
+// maxCachedResolverClients bounds the per-endpoint client cache: entries are
+// never evicted (the handler lives for the process lifetime), so a churning
+// endpoint set must not grow it without limit. Past the cap, clients are
+// rebuilt per request — construction is parse-only, no I/O.
+const maxCachedResolverClients = 64
+
+// clientFor caches one ResolverClient per captured endpoint (hot resolvers
+// are few); the env never changes at runtime.
 func (h *ResolveHandler) clientFor(endpoint string) (ResolverClient, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -224,7 +230,9 @@ func (h *ResolveHandler) clientFor(endpoint string) (ResolverClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.clients[endpoint] = client
+	if len(h.clients) < maxCachedResolverClients {
+		h.clients[endpoint] = client
+	}
 	return client, nil
 }
 
@@ -312,7 +320,13 @@ func decodeResolveRequest(data []byte) (resolveEndpointRequest, error) {
 		return resolveEndpointRequest{}, err
 	}
 	if portRaw, ok := requestFields["port"]; ok {
-		if err := json.Unmarshal(bytes.TrimSpace(portRaw), &document.Request.Port); err != nil {
+		trimmed := bytes.TrimSpace(portRaw)
+		// JSON null unmarshals into an int as a no-op success; reject it
+		// explicitly like every other scalar (no null scalars).
+		if bytes.Equal(trimmed, []byte("null")) {
+			return resolveEndpointRequest{}, errors.New("port must be an integer")
+		}
+		if err := json.Unmarshal(trimmed, &document.Request.Port); err != nil {
 			return resolveEndpointRequest{}, errors.New("port must be an integer")
 		}
 	}
@@ -469,12 +483,13 @@ func writeResolveJSON(w http.ResponseWriter, status int, document resolveEndpoin
 // object, so a same-name replacement — including a delete/recreate whose
 // revision wraps back — with different content is always detectable, while an
 // unrelated mutation that did not touch the captured binding does not
-// invalidate (OSEP-0012 immutable-snapshot semantics).
+// invalidate (OSEP-0012 immutable-snapshot semantics). The active-snapshot
+// tag is deliberately NOT captured: it flips on unrelated mutations and must
+// not gate invalidation.
 type ResolveCapture struct {
 	Credential  string
 	Endpoint    string
 	Revision    int64
-	ActiveTag   string
 	Fingerprint [sha256.Size]byte
 }
 
@@ -504,7 +519,6 @@ func (v *Store) CaptureResolve(bindingName string) (ResolveCapture, error) {
 		Credential:  credential.Name,
 		Endpoint:    exchange.endpoint,
 		Revision:    v.revision,
-		ActiveTag:   v.activeTag,
 		Fingerprint: resolveFingerprint(binding, credential.raw),
 	}, nil
 }

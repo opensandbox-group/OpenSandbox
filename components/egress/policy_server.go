@@ -657,7 +657,7 @@ func (s *policyServer) resolveVaultAccess(_ *http.Request) (credentialvault.Reso
 	if sandboxID == "" {
 		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
 			Status: http.StatusServiceUnavailable,
-			Reason: "sandbox identity not configured",
+			Reason: "sandbox identity unavailable",
 		}
 	}
 	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: s.credentialVault}, nil
