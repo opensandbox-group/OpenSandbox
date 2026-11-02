@@ -22,7 +22,7 @@ export OPEN_SANDBOX_API_KEY=your-api-key
 go run . -timezone Asia/Shanghai -peak-idle 5 -offpeak-idle 0
 ```
 
-Use `OPEN_SANDBOX_PROTOCOL=https` for an HTTPS server. The example routes sandbox health checks through the server proxy. It uses `ubuntu:22.04` with an entrypoint that keeps the sandbox alive; use `-image` to select another compatible image. Run `go run . -h` for all flags.
+Use `OPEN_SANDBOX_PROTOCOL=https` for an HTTPS server. The example uses `ubuntu:22.04` with an entrypoint that keeps the sandbox alive; use `-image` to select another compatible image. Run `go run . -h` for all flags.
 
 ::: warning Sandbox resources
 This command creates real sandboxes when the scheduled target is positive. Use small targets while trying it out. Ctrl+C stops reconciliation, then drains the example's remaining idle sandboxes and waits for their best-effort kill requests to finish before exiting. Failed kills may leave sandboxes running until their TTL expires. Sandboxes already acquired by your application remain the caller's responsibility.

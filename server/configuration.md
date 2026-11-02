@@ -74,6 +74,10 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 
 ## `[proxy]`
 
+::: warning Deprecated — maintenance mode
+The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no new features, security and bug fixes only. Route data-plane traffic through the ingress gateway instead.
+:::
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `resolve_internal` | boolean | `true` | `true`: reverse-proxy targets the sandbox internal IP (Docker bridge / provider internal endpoint). `false`: targets the server-local host-mapped port — required when the server cannot route to sandbox bridge IPs (e.g. server container on a Compose network while sandboxes run on the default bridge; macOS launchd/systemd session). |

@@ -702,6 +702,13 @@ class ServerConfig(BaseModel):
 
 
 class ProxyConfig(BaseModel):
+    """Server proxy settings.
+
+    DEPRECATED: the server-proxied data path is in maintenance mode and only
+    receives security fixes and bug fixes. Route data-plane traffic through the
+    ingress gateway instead.
+    """
+
     resolve_internal: bool = Field(
         default=True,
         description=(

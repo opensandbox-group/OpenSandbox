@@ -19,6 +19,7 @@ Connection configuration for OpenSandbox operations.
 
 import os
 import ssl
+import warnings
 from datetime import timedelta
 
 import httpx  # type: ignore[reportMissingImports]
@@ -111,8 +112,10 @@ class ConnectionConfig(BaseModel):
     use_server_proxy: bool = Field(
         default=False,
         description=(
-            "Using sandbox server as proxy for process execd requests"
-            "It's useful when client sdk can't access the created sandbox directly"
+            "Deprecated: the server-proxied data path is in maintenance mode "
+            "(security and bug fixes only); route data-plane traffic through the "
+            "ingress gateway instead. Routes execd/endpoint requests through the "
+            "sandbox server; useful when the client cannot access the sandbox directly."
         ),
     )
     endpoint_cache_ttl: timedelta = Field(
@@ -227,6 +230,19 @@ class ConnectionConfig(BaseModel):
         except Exception:
             # Avoid raising during cleanup paths.
             pass
+
+    @field_validator("use_server_proxy")
+    @classmethod
+    def _warn_deprecated_use_server_proxy(cls, v: bool) -> bool:
+        if v:
+            warnings.warn(
+                "use_server_proxy is deprecated: the server proxy data path is in "
+                "maintenance mode (security and bug fixes only). Route data-plane "
+                "traffic through the ingress gateway instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return v
 
     @field_validator("protocol")
     @classmethod

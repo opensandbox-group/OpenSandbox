@@ -505,7 +505,6 @@ An explicit `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `apiKey` a
 | `requestTimeoutSeconds` | Request timeout applied to SDK HTTP calls                                                                    | `30`             | -                      |
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
-| `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
 | `enableTracing` | Enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing) | `false` | - |
 | `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
@@ -557,10 +556,8 @@ credential replay. Node.js is unaffected.
 :::
 
 The JavaScript Code Interpreter SDK inherits the sandbox's connection
-configuration. With `useServerProxy: true`, context requests and streamed code
-execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server
-authentication. In direct mode, the SDK does not attach this key to code
-execution requests.
+configuration. The SDK does not automatically attach the configured API key to
+code execution requests.
 
 ### 2. Sandbox Creation Configuration
 
