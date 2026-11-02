@@ -1082,6 +1082,35 @@ def test_proxy_forwards_delete_request_with_body(
     assert fake_client.built["content"] is not None
 
 
+def test_proxy_forwards_get_request_with_body(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    _set_http_client(client, fake_client)
+
+    response = client.request(
+        "GET",
+        "/v1/sandboxes/sbx-123/proxy/44772/search",
+        headers=auth_headers,
+        content=b'{"query": "x"}',
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["method"] == "GET"
+    assert fake_client.built["headers"]["content-length"] == "14"
+    assert fake_client.built["content"] is not None
+
+
 def test_proxy_filters_response_hop_by_hop_headers(
     client: TestClient,
     auth_headers: dict,
