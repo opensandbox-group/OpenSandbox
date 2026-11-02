@@ -457,6 +457,17 @@ async def _proxy_http_request(
                 "message": f"Could not connect to the backend sandbox {endpoint.endpoint}: {e}",
             },
         ) from e
+    except httpx.PoolTimeout as e:
+        # Every connection of the shared client is busy (for example held by
+        # long-lived streamed responses): the server, not the sandbox, is out
+        # of capacity.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "PROXY_POOL_EXHAUSTED",
+                "message": f"No proxy connection to the backend sandbox {endpoint.endpoint} became free in time: {e}",
+            },
+        ) from e
     except (httpx.ReadTimeout, httpx.WriteTimeout) as e:
         raise HTTPException(
             status_code=504,

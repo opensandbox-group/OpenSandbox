@@ -1563,6 +1563,7 @@ def test_proxy_maps_connect_failure_to_502(
         (httpx.RemoteProtocolError("server disconnected"), 502, "BACKEND_RESPONSE_FAILED"),
         (httpx.ReadError("connection reset"), 502, "BACKEND_RESPONSE_FAILED"),
         (httpx.WriteError("broken pipe"), 502, "BACKEND_RESPONSE_FAILED"),
+        (httpx.PoolTimeout("pool exhausted"), 503, "PROXY_POOL_EXHAUSTED"),
     ],
 )
 def test_proxy_maps_backend_failure_after_connect_to_gateway_error(
