@@ -233,6 +233,12 @@ func TestResolveHandlerRequestDiscipline(t *testing.T) {
 		{"null port", http.MethodPost, "application/json",
 			`{"binding":"internal-api","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","port":null,"method":"GET","path":"/"}}`,
 			http.StatusBadRequest, "malformed request"},
+		{"explicit zero port", http.MethodPost, "application/json",
+			`{"binding":"internal-api","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","port":0,"method":"GET","path":"/"}}`,
+			http.StatusBadRequest, "malformed request"},
+		{"negative port", http.MethodPost, "application/json",
+			`{"binding":"internal-api","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","port":-443,"method":"GET","path":"/"}}`,
+			http.StatusBadRequest, "malformed request"},
 		{"out-of-range port", http.MethodPost, "application/json",
 			`{"binding":"internal-api","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","port":65536,"method":"GET","path":"/"}}`,
 			http.StatusBadRequest, "malformed request"},
@@ -281,6 +287,12 @@ func TestResolveHandlerSNIGate(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rec.Code)
 	require.Equal(t, "forbidden", strings.TrimSpace(rec.Body.String()))
 	require.Empty(t, h.client.recorded())
+	// The SNI-gate denial is a resolution decision: it carries the R10 audit
+	// and the closed-set outcome, unlike malformed requests.
+	require.Len(t, h.audits, 1)
+	require.Equal(t, "denied", h.audits[0].Resolution)
+	require.Equal(t, "internal-api", h.audits[0].Binding)
+	require.Equal(t, "api.internal.example.com", h.audits[0].TargetHost)
 
 	// Case and trailing-dot differences normalize to equality.
 	body = `{"binding":"internal-api","sni":"API.internal.example.com.",` +

@@ -148,20 +148,25 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
-	destination, frame, targetErr := buildResolveTarget(document)
-	if targetErr != nil {
-		writeResolveError(w, targetErr.status, targetErr.reason)
-		return
-	}
 
+	// Audit starts after decoding but before target validation: a decoded
+	// request that is then denied (SNI gate, invalid target) is a resolution
+	// decision; only undecodable requests carry no event.
 	started := time.Now()
-	event := ResolveAuditEvent{Binding: document.Binding, TargetHost: frame.Host}
+	event := ResolveAuditEvent{Binding: document.Binding, TargetHost: strings.TrimSpace(document.Request.Host)}
 	outcome := telemetry.ResolutionOutcomeDenied
 	defer func() {
 		event.Resolution = outcome
 		event.Duration = time.Since(started)
 		h.audit(event)
 	}()
+
+	destination, frame, targetErr := buildResolveTarget(document)
+	if targetErr != nil {
+		writeResolveError(w, targetErr.status, targetErr.reason)
+		return
+	}
+	event.TargetHost = frame.Host
 
 	access, accessErr := h.access(r)
 	if accessErr != nil {
@@ -287,8 +292,11 @@ type resolveEndpointHTTPRequest struct {
 	Scheme string
 	Host   string
 	Port   int
-	Method string
-	Path   string
+	// PortPresent distinguishes an explicit "port" from an absent one: an
+	// explicit port is validated in full (0 is not the scheme default).
+	PortPresent bool
+	Method      string
+	Path        string
 }
 
 // decodeResolveRequest strictly decodes the addon request: exact field sets,
@@ -345,6 +353,7 @@ func decodeResolveRequest(data []byte) (resolveEndpointRequest, error) {
 		if err := json.Unmarshal(trimmed, &document.Request.Port); err != nil {
 			return resolveEndpointRequest{}, errors.New("port must be an integer")
 		}
+		document.Request.PortPresent = true
 	}
 	return document, nil
 }
@@ -377,7 +386,7 @@ func buildResolveTarget(document resolveEndpointRequest) (ResolveDestination, Re
 		return ResolveDestination{}, ResolveRequestFrame{}, badRequest
 	}
 	port := document.Request.Port
-	if port == 0 {
+	if !document.Request.PortPresent {
 		if scheme == "https" {
 			port = 443
 		} else {
