@@ -1144,7 +1144,10 @@ def _resolve_exchange_http(
             "POST", path, body=body, headers={"Content-Type": "application/json"}
         )
         response = connection.getresponse()
-        raw = response.read()
+        # Bound the read itself — the size check must not run after an
+        # unbounded buffer: a peer can otherwise force arbitrary bytes into
+        # memory, multiplied by the concurrent per-request resolves.
+        raw = response.read(MAX_RESOLVE_RESPONSE_BYTES + 1)
         if response.status != 200:
             raise CredentialResolveError(f"http_{response.status}")
         return _parse_resolve_response(raw, payload["binding"])
@@ -2057,6 +2060,36 @@ def _live_snapshot_vault(snapshot: Any) -> ActiveVault | None:
     return vault
 
 
+def _reject_ambiguous_binding_path(
+    flow: http.HTTPFlow, vault: ActiveVault
+) -> bool:
+    """Shared credential-path gate for static and exchange injection.
+
+    Rejects dot-segments/backslashes and encodings whose percent-decoding
+    would cross a binding boundary: only requests that would receive a
+    credential are checked, and a resolved/inlined secret must never reach
+    a scope the canonical path does not match. Returns True when the
+    request was rejected.
+    """
+    raw_path = flow.request.path or "/"
+    if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
+        _reject_request(flow, b"request path contains ambiguous segments\n")
+        ctx.log.warn(
+            "credential proxy: rejected request with ambiguous path: "
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+        )
+        return True
+    if _path_decoding_changes_binding(flow, vault):
+        _reject_request(flow, b"request path contains ambiguous segments\n")
+        ctx.log.warn(
+            "credential proxy: rejected request whose percent-decoding crosses "
+            "the credential binding boundary: "
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+        )
+        return True
+    return False
+
+
 def _apply_vault_binding(
     flow: http.HTTPFlow, vault: ActiveVault, live: Any | None = None
 ) -> Any | None:
@@ -2076,31 +2109,8 @@ def _apply_vault_binding(
     if "exchange" in binding:
         return _apply_exchange_binding(flow, vault, binding, live)
 
-    # Reject ambiguous paths only for requests that would receive credentials:
-    # dot-segments or backslashes could redirect credentials to a scope the
-    # canonical path does not match. Encoded slashes (``%2f`` at any decoding
-    # depth) are tolerated here; the next check rejects them when decoding
-    # would cross a binding boundary.
-    raw_path = flow.request.path or "/"
-    if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
-        _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
-            "credential proxy: rejected request with ambiguous path: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
-        )
-        return
-
-    # Encoded separators are safe only when every percent-decoding depth of
-    # the path matches the same credential binding, so the injection decision
-    # is independent of how any downstream processor decodes the path.
-    if _path_decoding_changes_binding(flow, vault):
-        _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
-            "credential proxy: rejected request whose percent-decoding crosses "
-            "the credential binding boundary: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
-        )
-        return
+    if _reject_ambiguous_binding_path(flow, vault):
+        return None
 
     flow.metadata[FLOW_BINDING_KEY] = binding
     # Persist the redactions of the matched revision: body substitutions run
@@ -2162,23 +2172,9 @@ def _apply_exchange_binding(
             f"{binding.get('name')}"
         )
         return None
-    # Same path gates as static injection: an ambiguous or boundary-crossing
-    # encoding must never be handed a resolved credential.
-    raw_path = flow.request.path or "/"
-    if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
-        _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
-            "credential proxy: rejected request with ambiguous path: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
-        )
-        return None
-    if _path_decoding_changes_binding(flow, vault):
-        _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
-            "credential proxy: rejected request whose percent-decoding crosses "
-            "the credential binding boundary: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
-        )
+    # Same path gate as static injection (shared helper): an ambiguous or
+    # boundary-crossing encoding must never be handed a resolved credential.
+    if _reject_ambiguous_binding_path(flow, vault):
         return None
     sni = _connection_sni(flow)
     if sni is None:

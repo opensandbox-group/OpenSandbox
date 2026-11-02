@@ -232,9 +232,12 @@ class _ScriptedResponse:
     def __init__(self, status: int, body: bytes = b"") -> None:
         self.status = status
         self._body = body
+        self.amt: int | None = None
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amt: int | None = None) -> bytes:
+        # Mirror http.client bounded reads: never buffer beyond amt.
+        self.amt = amt
+        return self._body if amt is None else self._body[:amt]
 
     def getheader(self, name: str) -> str | None:
         return None
@@ -721,6 +724,37 @@ class ExchangeResolveTest(unittest.TestCase):
         second.request.headers["Content-Length"] = "0"
         asyncio.run(self.system.requestheaders(second))
         self.assertEqual(407, second.response.status_code)
+
+    def test_transport_read_is_bounded_before_size_check(self) -> None:
+        self._install_vault()
+        limit = self.system.MAX_RESOLVE_RESPONSE_BYTES
+        scripted = _ScriptedResponse(200, b"x" * (limit + 1))
+
+        class FakeConnection:
+            def __init__(self, socket_path: str, timeout: float) -> None:
+                pass
+
+            def request(self, method, path, body=None, headers=None) -> None:
+                pass
+
+            def getresponse(self) -> _ScriptedResponse:
+                return scripted
+
+            def close(self) -> None:
+                pass
+
+        self.system.UnixSocketHTTPConnection = FakeConnection
+        flow = _Flow()
+        flow.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        # The read itself is bounded to limit+1 bytes: an oversized body is
+        # rejected without ever buffering more than the cap allows.
+        self.assertEqual(limit + 1, scripted.amt)
+        self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(407, flow.response.status_code)
+        self.assertNotIn("authorization", flow.request.headers)
 
     def test_parse_resolve_response_rejects_malformed_bodies(self) -> None:
         parse = self.system._parse_resolve_response
