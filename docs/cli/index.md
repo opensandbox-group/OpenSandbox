@@ -493,6 +493,8 @@ osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
 
+The optional `connection`, `output`, and `defaults` sections must be TOML tables (for example, `[connection]`), not scalar values or arrays. Invalid section types produce a configuration error naming the section. Omitted sections use defaults.
+
 Example config file:
 
 ```toml
