@@ -242,7 +242,31 @@ expect_answers() {
   echo "${out}" | grep -q "answers=$3" || fail "dns ${2}: expected answer $3, got '${out}'"
 }
 
-nft_has() { nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q "$1"; }
+# nft_table_flat: the fast-sandbox nft table flattened to single-spaced tokens,
+# so line wrapping or spacing changes in nft's rendering cannot false-fail a
+# grep. An nft error is printed and returned, never silently empty: a broken
+# nft or runner reads as an error, not as "rule missing" (#2541).
+nft_table_flat() {
+  local out
+  if ! out="$(nft list table inet opensandbox-fast-sandbox 2>&1)"; then
+    echo "nft list table inet opensandbox-fast-sandbox failed:" >&2
+    printf '%s\n' "${out}" >&2
+    return 1
+  fi
+  printf '%s\n' "${out}" | tr '\n' '\t' | tr -s ' \t' ' '
+}
+
+nft_has() { nft_table_flat | grep -q "$1"; }
+
+nft_has_set() {
+  local out
+  if ! out="$(nft list set inet opensandbox-fast-sandbox "$1" 2>&1)"; then
+    echo "nft list set inet opensandbox-fast-sandbox $1 failed:" >&2
+    printf '%s\n' "${out}" >&2
+    return 1
+  fi
+  printf '%s\n' "${out}" | tr '\n' '\t' | tr -s ' \t' ' ' | grep -q "$2"
+}
 
 # dns_rcode_is <netns-or-host> <name> <rcode>: probe variant of expect_rcode
 # that returns non-zero instead of failing (usable inside wait_for).
@@ -734,7 +758,7 @@ else
   # DoH-443 blocking under MITM: the Pod-netns INPUT enforcement chain
   # applies the blocklist to the DNATed 443 (the forward hook only sees the
   # real destination for non-MITM traffic).
-  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'doh_block_v4 tcp dport 443 drop' \
+  nft_has 'doh_block_v4 tcp dport 443 drop' \
     || fail "Pod-layer DoH-443 drop missing under MITM"
   if ip netns exec osb-sandbox-a curl -sk -m 2 -o /dev/null https://203.0.113.1/ 2>/dev/null; then
     fail "blocklisted DoH endpoint 203.0.113.1 must be unreachable under MITM"
@@ -853,9 +877,9 @@ else
   # authority NXDOMAINs the name): drop element + forward/input drop rules.
   wait_for 15 "upstream drop set seeded via the Pod resolver" bash -c \
     "nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2'"
-  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'upstream_proxy_v4 tcp dport 3128 drop' \
+  nft_has 'upstream_proxy_v4 tcp dport 3128 drop' \
     || fail "profile-wide forward drop rule missing"
-  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'ct original ip daddr @upstream_proxy_v4' \
+  nft_has 'ct original ip daddr @upstream_proxy_v4' \
     || fail "input-path containment rule missing (intercepted CONNECTs)"
   pass "drop set seeded from the Pod-resolver authority (split-authority union)"
 
@@ -904,7 +928,7 @@ else
   kill "${EGRESS_PID}" 2>/dev/null
   wait "${EGRESS_PID}" 2>/dev/null || true
   EGRESS_PID=""
-  nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2' \
+  nft_has_set upstream_proxy_v4 '10.99.0.2' \
     || fail "drop element must persist in the kernel while the egress daemon is down"
   EGRESS_MITM=1 EGRESS_UPSTREAM_PROXY="http://proxy.test:3128" start_egress
   wait_for 15 "drop set re-seeded after restart" bash -c \
