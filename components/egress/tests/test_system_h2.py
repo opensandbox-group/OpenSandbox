@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -25,6 +26,18 @@ spec = importlib.util.spec_from_file_location(
 )
 system = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(system)
+
+
+def _drive_async_hook(hook):
+    """Run the async requestheaders hook synchronously, like mitmproxy."""
+
+    def run(*args, **kwargs):
+        return asyncio.run(hook(*args, **kwargs))
+
+    return run
+
+
+system.requestheaders = _drive_async_hook(system.requestheaders)
 
 HOST = "bound.example.com"
 SECRET = "synthetic-h2-old-value"

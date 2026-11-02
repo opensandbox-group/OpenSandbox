@@ -24,6 +24,7 @@ drain expiry, and fail-closed boundaries.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import hashlib
 import importlib.util
@@ -216,6 +217,15 @@ class _Flow:
         self.live = False
 
 
+def _drive_async_hook(hook):
+    """Run the async requestheaders hook synchronously, like mitmproxy."""
+
+    def run(*args, **kwargs):
+        return asyncio.run(hook(*args, **kwargs))
+
+    return run
+
+
 def _load_system_module() -> Any:
     mitmproxy = types.ModuleType("mitmproxy")
     mitmproxy.ctx = types.SimpleNamespace(
@@ -232,6 +242,7 @@ def _load_system_module() -> Any:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module.requestheaders = _drive_async_hook(module.requestheaders)
     return module
 
 
