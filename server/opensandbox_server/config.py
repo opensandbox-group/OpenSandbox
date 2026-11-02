@@ -1168,17 +1168,6 @@ class EgressConfig(BaseModel):
             'Requires mode = "dns+nft".'
         ),
     )
-    credential_resolver_auth: Optional[SecretStr] = Field(
-        default=None,
-        description=(
-            "Bearer-token table for OSEP-0025 HTTPS credential resolvers, formatted "
-            "as 'https://host:port=token,...' and injected into every egress sidecar "
-            "as OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH. Server-side only "
-            "(D5: resolver caller auth is operator-provisioned); sandbox request env "
-            "can configure the resolver TIMEOUT/MAX_CONCURRENCY knobs but never this "
-            "table. Never logged."
-        ),
-    )
 
     @field_validator("otlp_endpoint")
     @classmethod

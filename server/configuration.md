@@ -209,7 +209,6 @@ Egress sidecar image and enforcement mode. The sidecar is only attached to sandb
 | `readiness_timeout_seconds` | float | `30.0` | Docker only: max wait for sidecar health endpoint (> 0). |
 | `requests` / `limits` | map \| omitted | `null` | Kubernetes only: sidecar resources. Omit independently; invalid quantities fail config load. |
 | `upstream_proxy` | table \| omitted | `null` | Chain mitmproxy egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`. See below. |
-| `credential_resolver_auth` | string \| omitted | `null` | OSEP-0025 credential resolver bearer-token table (`"https://host:port=token,..."`), injected into every egress sidecar as `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH`. Admin config only. |
 
 ```toml
 [egress]
@@ -222,12 +221,6 @@ url = "http://proxy.example.com:3128"
 # ca_cert_path = "/etc/ssl/private-ca/upstream-proxy-ca.pem"   # Docker only
 # ca_secret_name = "corp-proxy-ca"                            # Kubernetes only
 ```
-
-**`credential_resolver_auth` notes (OSEP-0025):**
-
-- Admin config only (D5: resolver caller auth is operator-provisioned). The resolver tuning knobs `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT` / `..._MAX_CONCURRENCY` may be set per sandbox via request `env`; the auth table cannot — setting `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH` in request env is rejected `400`.
-- Injected as a literal env var into the egress sidecar (visible in `docker inspect`/Pod spec; protect the config file). Never logged by the server.
-- The table's origins must match the exchange vault endpoints' normalized origins (`https://host[:port]`, port defaulting to 443). A malformed table fails the egress D13 capability gate closed: exchange vault writes are rejected until fixed.
 
 **`otlp_endpoint` notes:** must be `http(s)://` (OTLP over HTTP/protobuf only; gRPC silently fails); use a fully qualified name or IP — the sidecar allow rule matches the configured host exactly; sidecar exports **delta** temporality (Prometheus/GMP needs `deltatocumulative`).
 

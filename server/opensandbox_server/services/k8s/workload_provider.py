@@ -21,8 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, List, Any, Optional
 
-from pydantic import SecretStr
-
 from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
 from opensandbox_server.config import EgressUpstreamProxyConfig
 
@@ -42,7 +40,6 @@ class EgressWorkloadSettings:
     resource_limits: Optional[Dict[str, str]]
     otlp_endpoint: Optional[str] = None
     upstream_proxy: Optional[EgressUpstreamProxyConfig] = None
-    credential_resolver_auth: Optional[SecretStr] = None
 
 
 class WorkloadProvider(ABC):

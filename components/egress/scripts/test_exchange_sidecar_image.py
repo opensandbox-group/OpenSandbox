@@ -209,9 +209,9 @@ class ExchangeSidecarRuntime:
             "OPENSANDBOX_EGRESS_SANDBOX_ID": SUBJECT,
             # Resolver operator env (OSEP-0025 D13), deployment-injected:
             # TIMEOUT/MAX_CONCURRENCY are tenant-tunable knobs; the AUTH
-            # table is admin/operator-provisioned only (D5) — in real
-            # deployments it arrives via [egress.credential_resolver_auth]
-            # server config, never sandbox request env.
+            # table is egress-level only (D5) — set directly on the sidecar
+            # by the deployment, never through sandbox request env (this
+            # server wires no auth channel).
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "2",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "4",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH":

@@ -57,10 +57,7 @@ from opensandbox_server.services.endpoint_auth import (
     build_egress_auth_headers,
     merge_endpoint_headers,
 )
-from opensandbox_server.services.helpers import (
-    credential_resolver_egress_env,
-    upstream_proxy_egress_env,
-)
+from opensandbox_server.services.helpers import upstream_proxy_egress_env
 from opensandbox_server.services.validators import (
     ensure_credential_proxy_configured,
     ensure_egress_configured,
@@ -536,10 +533,6 @@ class DockerNetworkingMixin:
             )
         for key, value in upstream_proxy_egress_env(
             self.app_config.egress.upstream_proxy
-        ).items():
-            sidecar_env.append(f"{key}={value}")
-        for key, value in credential_resolver_egress_env(
-            self.app_config.egress.credential_resolver_auth
         ).items():
             sidecar_env.append(f"{key}={value}")
         if credential_proxy_enabled:
