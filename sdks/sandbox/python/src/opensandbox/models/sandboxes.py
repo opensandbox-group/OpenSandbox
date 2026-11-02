@@ -463,10 +463,8 @@ class InlineCredentialSource(BaseModel):
 
 class ExchangeCredentialSource(BaseModel):
     """
-    Exchange credential source (OSEP-0025): no local material.
-
-    The egress resolves header sets per request from the header-resolver
-    endpoint; ``endpoint`` is configuration, not secret material.
+    Exchange credential source (OSEP-0025): no local material; ``endpoint``
+    is configuration, not secret material.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -548,12 +546,9 @@ class CredentialSubstitution(BaseModel):
 
 
 class CredentialAuth(BaseModel):
-    """Credential Vault auth rule.
-
-    ``type`` selects one of the five static kinds. Leaving it unset (None)
-    selects the typeless exchange form (OSEP-0025), which sets only
-    ``credential`` — a reference to an exchange-sourced credential.
-    """
+    """Credential Vault auth rule: ``type`` selects one of the five static
+    kinds; leaving it unset selects the typeless exchange form (OSEP-0025),
+    which sets only ``credential``."""
 
     type: Literal["bearer", "basic", "apiKey", "customHeaders", "passthrough"] | None = (
         None
@@ -617,12 +612,8 @@ class CredentialMetadata(BaseModel):
 
 
 class CredentialAuthMetadata(BaseModel):
-    """Sanitized auth metadata returned for a Credential Vault binding.
-
-    Static kinds carry ``type`` (plus ``name`` for apiKey); the typeless
-    exchange form carries only ``credential`` (a credential reference, never
-    material).
-    """
+    """Sanitized auth metadata: static kinds carry ``type`` (``name`` for
+    apiKey); the typeless form carries only ``credential``."""
 
     type: str | None = None
     name: str | None = None

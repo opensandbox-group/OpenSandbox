@@ -653,29 +653,23 @@ type CredentialSourceType string
 const (
 	// CredentialSourceInline carries write-only inline credential material.
 	CredentialSourceInline CredentialSourceType = "inline"
-	// CredentialSourceExchange resolves header sets per request from a
-	// header-resolver endpoint (OSEP-0025); no local material travels.
+	// CredentialSourceExchange resolves headers per request from a resolver endpoint; no local material.
 	CredentialSourceExchange CredentialSourceType = "exchange"
 )
 
-// CredentialSource is a sandbox-local Credential Vault credential source.
-// Exactly one kind is set, selected by Type: inline material via Value, or a
-// header-resolver endpoint via Endpoint. The egress rejects sources that set
-// both or neither.
+// CredentialSource is a Credential Vault credential source: inline material
+// (Value) or a resolver endpoint (Endpoint), never both.
 type CredentialSource struct {
 	Type     CredentialSourceType `json:"type,omitempty"`
 	Value    string               `json:"value,omitempty"`
 	Endpoint string               `json:"endpoint,omitempty"`
 }
 
-// InlineCredentialSource is an alias kept for inline-only callers; it is the
-// same flat CredentialSource model.
+// InlineCredentialSource is an alias of CredentialSource for inline-only callers.
 type InlineCredentialSource = CredentialSource
 
-// MarshalJSON defaults the source type so callers can use the natural
-// zero-value forms CredentialSource{Value: secret} (inline) and
-// CredentialSource{Endpoint: resolver} (exchange); an empty Type with both
-// or neither field set stays inline and is rejected downstream.
+// MarshalJSON defaults the type for the zero-value forms: Value only →
+// inline, Endpoint only → exchange.
 func (s CredentialSource) MarshalJSON() ([]byte, error) {
 	type credentialSource CredentialSource
 	source := credentialSource(s)
@@ -750,11 +744,8 @@ const (
 	CredentialAuthPassthrough   CredentialAuthType = "passthrough"
 )
 
-// CredentialAuth configures how a binding injects credential material into
-// matching outbound requests. The five static kinds set Type; the typeless
-// exchange form (OSEP-0025) omits Type entirely and sets only Credential, a
-// reference to an exchange-sourced credential. The egress rejects shapes
-// mixing the two (for example a typeless auth with Headers or Substitutions).
+// CredentialAuth configures how a binding injects credential material.
+// Static kinds set Type; the typeless exchange form sets only Credential.
 type CredentialAuth struct {
 	Type          CredentialAuthType       `json:"type,omitempty"`
 	Credential    string                   `json:"credential,omitempty"`
@@ -811,19 +802,16 @@ type CredentialMetadata struct {
 	Revision   int    `json:"revision"`
 }
 
-// CredentialAuthMetadata is sanitized auth metadata returned by Credential
-// Vault. It intentionally does not include credential material. Static kinds
-// carry Type (plus Name for apiKey); the typeless exchange form carries only
-// Credential, a credential reference.
+// CredentialAuthMetadata is sanitized auth metadata. Static kinds carry
+// Type (Name for apiKey); the typeless form carries only Credential.
 type CredentialAuthMetadata struct {
 	Type       string `json:"type,omitempty"`
 	Name       string `json:"name,omitempty"`
 	Credential string `json:"credential,omitempty"`
 }
 
-// MarshalJSON enforces the sanitized wire shape symmetrically: static kinds
-// carry type (plus name for apiKey) while the typeless exchange form carries
-// only the credential reference.
+// MarshalJSON enforces the sanitized shape symmetrically: credential only
+// when typeless, name only when typed.
 func (m CredentialAuthMetadata) MarshalJSON() ([]byte, error) {
 	type credentialAuthMetadata CredentialAuthMetadata
 	out := credentialAuthMetadata(m)

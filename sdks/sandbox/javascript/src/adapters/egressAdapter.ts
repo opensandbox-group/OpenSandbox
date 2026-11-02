@@ -145,7 +145,7 @@ function sanitizeCredentialAuthMetadata(
     }
     return auth;
   }
-  // Typeless exchange form: only the credential reference rides the wire.
+  // Typeless exchange form: credential reference only.
   if (raw.credential != null) {
     return {
       credential: expectString(raw.credential, `${context}.credential`),

@@ -78,11 +78,8 @@ def vault_relay_error(status_code: int, message: str) -> HTTPException:
 
 
 def _sanitize_auth(auth: Optional[dict]) -> Optional[dict]:
-    """Mirror the egress sanitizeAuth: type always, name for apiKey only.
-
-    Typeless exchange auth keeps only its credential reference and must never
-    serialize a ``"type": null`` key.
-    """
+    """Mirror the egress sanitizeAuth: type (name for apiKey) for static
+    kinds; the typeless exchange form keeps only the credential reference."""
     if not isinstance(auth, dict):
         return None
     auth_type = auth.get("type")

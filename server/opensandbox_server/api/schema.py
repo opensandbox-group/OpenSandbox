@@ -235,12 +235,7 @@ class InlineCredentialSource(BaseModel):
 
 
 class ExchangeCredentialSource(BaseModel):
-    """Exchange credential source (OSEP-0025): no local material.
-
-    The egress owns endpoint semantics (unix:///path or https://host) and the
-    inline/exchange cross-lock validation authoritatively; the server only
-    checks the wire shape here.
-    """
+    """Exchange source (OSEP-0025); endpoint semantics stay with the egress."""
 
     type: Literal["exchange"] = Field(..., description="Credential source type.")
     endpoint: str = Field(
@@ -355,12 +350,7 @@ class PassthroughCredentialAuth(BaseModel):
 
 
 class ExchangeCredentialAuth(BaseModel):
-    """Typeless exchange auth (OSEP-0025): only a credential reference.
-
-    The referenced credential must be exchange-sourced; that cross-lock and
-    the rejection of any other field here is enforced authoritatively by the
-    egress (extra="forbid" already pins the server-side wire shape).
-    """
+    """Typeless exchange auth (OSEP-0025); the cross-lock is egress-owned."""
 
     credential: str = Field(
         ...,
@@ -373,9 +363,8 @@ class ExchangeCredentialAuth(BaseModel):
         extra = "forbid"
 
 
-# No discriminator: the exchange variant carries no `type` key at all, so the
-# Literal-tagged static variants and the typeless variant are mutually
-# exclusive by shape and the smart union resolves without ambiguity.
+# No discriminator: the typeless variant carries no `type` key, so union
+# members are mutually exclusive by shape.
 CredentialAuth = (
     BearerCredentialAuth
     | BasicCredentialAuth
@@ -483,11 +472,10 @@ class CredentialVaultMutationRequest(BaseModel):
 
 
 class CredentialAuthMetadata(BaseModel):
-    """Sanitized auth shape — `type` (plus `name` for `apiKey`) for static
-    kinds; `credential` only for the typeless exchange form."""
+    """Sanitized auth shape; the typeless form carries `credential` only."""
 
     type: Optional[str] = Field(
-        default=None, description="Injected credential shape type (static kinds)."
+        default=None, description="Injected credential shape type."
     )
     name: Optional[str] = Field(
         default=None, description="Header name, for the apiKey shape only."

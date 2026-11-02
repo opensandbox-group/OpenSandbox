@@ -103,13 +103,9 @@ export interface InlineCredentialSource extends Record<string, unknown> {
 }
 
 export interface ExchangeCredentialSource extends Record<string, unknown> {
-  /**
-   * Marks the credential as exchange-sourced.
-   */
   type: "exchange";
   /**
-   * Header-resolver endpoint (`unix:///path` or `https://host[:port]`). The
-   * egress validates the endpoint form; no inline material travels with it.
+   * Header-resolver endpoint (`unix:///path` or `https://host[:port]`).
    */
   endpoint: string;
 }
@@ -207,11 +203,8 @@ export type CredentialAuth =
       type: "passthrough";
     } & CredentialAuthSubstitutions)
   /**
-   * Typeless exchange form: only a credential reference whose source must be
-   * exchange-sourced. The egress resolves the header set per request; static
-   * fields (name/headers/substitutions) are not allowed on this form. The
-   * `type?: never` constraint keeps typo'd static kinds compile errors
-   * instead of silently matching this member.
+   * Typeless exchange form: only a credential reference (exchange-sourced).
+   * `type?: never` keeps typo'd static kinds compile errors.
    */
   | ({ credential: string } & { type?: never });
 
@@ -233,8 +226,7 @@ export interface CredentialBinding extends Record<string, unknown> {
 export interface CredentialMetadata {
   name: string;
   /**
-   * Source type only (`inline` or `exchange`); plaintext source material is
-   * never returned.
+   * Source type only (`inline` or `exchange`); never source material.
    */
   sourceType: string;
   revision: number;
@@ -242,7 +234,7 @@ export interface CredentialMetadata {
 
 export interface CredentialAuthMetadata {
   /**
-   * Static auth kind; omitted entirely for the typeless exchange form.
+   * Static auth kind; omitted for the typeless exchange form.
    */
   type?: string;
   /**
@@ -250,7 +242,7 @@ export interface CredentialAuthMetadata {
    */
   name?: string;
   /**
-   * Exchange-sourced credential reference, present only on the typeless form.
+   * Exchange-sourced credential reference, typeless form only.
    */
   credential?: string;
 }
