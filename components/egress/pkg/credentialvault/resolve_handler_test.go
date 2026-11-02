@@ -21,14 +21,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
 // fakeResolveClient is an in-process ResolverClient: records inputs, blocks
@@ -588,6 +592,96 @@ func TestResolveHandlerClientCacheBounded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, h.postResolve(validResolveBody()).Code)
 	require.Equal(t, maxCachedResolverClients+1, h.newCalls, "cached endpoint must not rebuild")
+}
+
+func TestResolveHandlerSemaphoreBoundedPastClientCache(t *testing.T) {
+	// Past the client-cache cap every request builds its own client, so only
+	// the handler semaphore keeps the process-wide concurrency bound.
+	t.Setenv(constants.EnvCredentialResolverMaxConcurrency, "1")
+	store := testResolverReadyStore()
+	_, createErr := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+	require.NoError(t, createErr)
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	slow := &slowCountingClient{mu: &mu, inFlight: &inFlight, max: &maxInFlight, delay: 150 * time.Millisecond}
+	handler := NewResolveHandler(func(*http.Request) (ResolveAccess, *ResolveAccessError) {
+		return ResolveAccess{SandboxID: "sbx-bounded", Store: store}, nil
+	})
+	handler.newClient = func(string) (ResolverClient, error) { return slow, nil }
+
+	done := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			req := httptest.NewRequest(http.MethodPost, "/credential-vault/_resolve", strings.NewReader(validResolveBody()))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			done <- rec.Code
+		}()
+	}
+	require.Equal(t, http.StatusOK, <-done)
+	require.Equal(t, http.StatusOK, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, *slow.max, "handler semaphore must serialize resolves across client instances")
+}
+
+// slowCountingClient tracks concurrent Resolve calls and answers after delay.
+type slowCountingClient struct {
+	mu       *sync.Mutex
+	inFlight *int
+	max      *int
+	delay    time.Duration
+}
+
+func (c *slowCountingClient) Resolve(_ context.Context, _ ResolveInput) (*ResolverDecision, error) {
+	c.mu.Lock()
+	*c.inFlight++
+	if *c.inFlight > *c.max {
+		*c.max = *c.inFlight
+	}
+	c.mu.Unlock()
+	time.Sleep(c.delay)
+	c.mu.Lock()
+	*c.inFlight--
+	c.mu.Unlock()
+	return &ResolverDecision{Headers: map[string]string{}, Suppress: map[string]struct{}{}, Redactions: []string{}}, nil
+}
+
+func TestDefaultResolveAuditEmitsStructuredFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	captured := slogger.MustNew(slogger.Config{Level: "info", OutputPaths: []string{path}})
+	previous := log.Logger
+	log.Logger = captured
+	t.Cleanup(func() {
+		log.Logger = previous
+		_ = captured.Sync()
+	})
+
+	defaultResolveAudit(ResolveAuditEvent{
+		Resolution: "resolved",
+		Credential: "spi-signer",
+		Binding:    "internal-api",
+		TargetHost: "api.internal.example.com",
+		Subject:    "sbx-audit",
+		Duration:   3 * time.Millisecond,
+	})
+	require.NoError(t, captured.Sync())
+	encoded, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	var line map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &line))
+	require.Equal(t, "egress.credential.resolve", line["opensandbox.event"])
+	require.Equal(t, "resolved", line["resolution"])
+	require.Equal(t, "spi-signer", line["credential"])
+	require.Equal(t, "internal-api", line["binding"])
+	require.Equal(t, "api.internal.example.com", line["target.host"])
+	require.Equal(t, "sbx-audit", line["subject"])
+	require.Contains(t, line, "duration_ms")
+	require.NotContains(t, string(encoded), "Bearer", "audit never carries values")
 }
 
 func TestResolverConfigFromEnvWiring(t *testing.T) {

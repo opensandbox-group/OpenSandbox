@@ -16,6 +16,7 @@ package credentialvault
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -29,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -68,6 +71,12 @@ type ResolveHandler struct {
 	access    ResolveAccessFunc
 	newClient func(endpoint string) (ResolverClient, error)
 	audit     func(event ResolveAuditEvent)
+	// The handler semaphore is the process-wide resolve bound: past the
+	// client-cache cap each request builds its own client, and per-client
+	// semaphores would no longer bound anything. timeout bounds queueing
+	// and the call (T2a semantics).
+	timeout   time.Duration
+	semaphore chan struct{}
 
 	mu      sync.Mutex
 	clients map[string]ResolverClient
@@ -79,6 +88,8 @@ func NewResolveHandler(access ResolveAccessFunc) *ResolveHandler {
 		access:    access,
 		newClient: NewResolverClientFromEnv,
 		audit:     defaultResolveAudit,
+		timeout:   ResolverTimeoutFromEnv(),
+		semaphore: make(chan struct{}, ResolverMaxConcurrencyFromEnv()),
 		clients:   make(map[string]ResolverClient),
 	}
 }
@@ -95,8 +106,15 @@ type ResolveAuditEvent struct {
 }
 
 func defaultResolveAudit(event ResolveAuditEvent) {
-	log.Infof("credential_resolve_audit resolution=%s credential=%s binding=%s target_host=%s subject=%s duration_ms=%d",
-		event.Resolution, event.Credential, event.Binding, event.TargetHost, event.Subject, event.Duration.Milliseconds())
+	log.Logger.With(
+		slogger.Field{Key: "opensandbox.event", Value: "egress.credential.resolve"},
+		slogger.Field{Key: "resolution", Value: event.Resolution},
+		slogger.Field{Key: "credential", Value: event.Credential},
+		slogger.Field{Key: "binding", Value: event.Binding},
+		slogger.Field{Key: "target.host", Value: event.TargetHost},
+		slogger.Field{Key: "subject", Value: event.Subject},
+		slogger.Field{Key: "duration_ms", Value: event.Duration.Milliseconds()},
+	).Infof("credential resolve audit")
 	telemetry.RecordCredentialResolution(event.Resolution, event.Duration.Seconds())
 }
 
@@ -168,7 +186,17 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, http.StatusServiceUnavailable, "resolver unavailable")
 		return
 	}
-	decision, err := client.Resolve(r.Context(), ResolveInput{
+	resolveCtx, cancelResolve := context.WithTimeout(r.Context(), h.timeout)
+	defer cancelResolve()
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	case <-resolveCtx.Done():
+		outcome = telemetry.ResolutionOutcomeTimeout
+		writeResolveError(w, http.StatusGatewayTimeout, "resolver timeout")
+		return
+	}
+	decision, err := client.Resolve(resolveCtx, ResolveInput{
 		Subject:     access.SandboxID,
 		Credential:  capture.Credential,
 		Binding:     document.Binding,
@@ -208,7 +236,8 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // maxCachedResolverClients bounds the never-evicted per-endpoint cache; past
-// the cap, clients are rebuilt per request (construction is parse-only).
+// the cap, clients are rebuilt per request (construction is parse-only). The
+// handler semaphore keeps the process-wide concurrency bound either way.
 const maxCachedResolverClients = 64
 
 // clientFor caches one ResolverClient per endpoint; the env never changes.
