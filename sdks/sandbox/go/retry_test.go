@@ -731,3 +731,28 @@ func TestBackoff_UnsetMaxBackoffDoesNotCapToZero(t *testing.T) {
 		assert.Fail(t, fmt.Sprintf("backoff(4) = %v, want 1.6s (uncapped)", got))
 	}
 }
+
+func TestRetryDelay_CapsRetryAfter(t *testing.T) {
+	cfg := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0}
+	slowCfg := RetryConfig{InitialBackoff: 2 * time.Minute, Multiplier: 2.0}
+	tests := []struct {
+		name       string
+		cfg        RetryConfig
+		retryAfter time.Duration
+		expected   time.Duration
+	}{
+		{"no retry-after", cfg, 0, 500 * time.Millisecond},
+		{"retry-after below backoff", cfg, 100 * time.Millisecond, 500 * time.Millisecond},
+		{"retry-after above backoff", cfg, 5 * time.Second, 5 * time.Second},
+		{"retry-after above cap", cfg, 24 * time.Hour, retryAfterCap},
+		{"backoff above cap", slowCfg, 24 * time.Hour, 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &APIError{StatusCode: http.StatusServiceUnavailable, RetryAfter: tt.retryAfter}
+			if got := retryDelay(&tt.cfg, 0, err); got != tt.expected {
+				t.Errorf("retryDelay() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
