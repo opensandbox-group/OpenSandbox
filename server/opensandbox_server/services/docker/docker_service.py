@@ -459,12 +459,18 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._metadata_store.delete(sandbox_id)
 
     def _restore_existing_sandboxes(self) -> None:
-        """On startup, rebuild expiration timers for containers already running."""
+        """On startup, rebuild expiration timers for containers already running.
+
+        ``ignore_removed=True`` skips containers removed between the list
+        summary and the per-container inspect (same race as ``list_sandboxes``).
+        Any other Docker error is re-raised so startup fails instead of
+        serving with no expiration timers for existing sandboxes.
+        """
         try:
-            containers = self.docker_client.containers.list(all=True)
+            containers = self.docker_client.containers.list(all=True, ignore_removed=True)
         except DockerException as exc:
-            logger.warning(f"Failed to restore existing sandboxes: {exc}")
-            return
+            logger.error(f"Failed to restore existing sandboxes: {exc}")
+            raise
 
         restored = 0
         seen_sidecars: set[str] = set()

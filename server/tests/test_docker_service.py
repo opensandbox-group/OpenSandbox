@@ -21,6 +21,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, PropertyMock, patch
 
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound as DockerNotFound
+from docker.models.containers import ContainerCollection
 import pytest
 from fastapi import HTTPException, status
 from pydantic import SecretStr, ValidationError
@@ -3652,6 +3653,64 @@ def test_restore_existing_sandboxes_ignores_manual_cleanup_without_warning():
 
     mock_schedule.assert_not_called()
     mock_warning.assert_not_called()
+
+
+def test_restore_existing_sandboxes_lists_with_ignore_removed():
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service.docker_client.containers, "list", return_value=[]) as mock_list:
+        service._restore_existing_sandboxes()
+
+    mock_list.assert_called_once_with(all=True, ignore_removed=True)
+
+
+def test_restore_existing_sandboxes_skips_container_removed_during_listing(tmp_path):
+    """A container removed between list and inspect must not abort the restore."""
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    client = MagicMock()
+    client.api.containers.return_value = [{"Id": "removed-id"}, {"Id": "alive-id"}]
+
+    def inspect_container(container_id):
+        if container_id == "removed-id":
+            raise DockerNotFound("No such container: removed-id")
+        return {
+            "Id": container_id,
+            "Config": {
+                "Labels": {
+                    SANDBOX_ID_LABEL: "alive-sandbox",
+                    SANDBOX_EXPIRES_AT_LABEL: expires_at.isoformat(),
+                }
+            },
+        }
+
+    client.api.inspect_container.side_effect = inspect_container
+
+    with (
+        patch.object(service.docker_client, "containers", ContainerCollection(client=client)),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        service._restore_existing_sandboxes()
+
+    mock_schedule.assert_called_once_with("alive-sandbox", expires_at)
+
+
+def test_restore_existing_sandboxes_raises_on_docker_list_error():
+    """A daemon error must fail startup instead of silently skipping all timers."""
+    service = DockerSandboxService(config=_app_config())
+
+    with (
+        patch.object(
+            service.docker_client.containers, "list", side_effect=APIError("daemon error")
+        ),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        with pytest.raises(APIError):
+            service._restore_existing_sandboxes()
+
+    mock_schedule.assert_not_called()
+
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
 def test_container_snapshot_restore_reports_snapshot_id_without_image(mock_docker):
