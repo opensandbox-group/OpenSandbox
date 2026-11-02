@@ -71,6 +71,7 @@ import json
 import os
 import re
 import socket
+import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
 from urllib.parse import quote, quote_plus, unquote
@@ -1008,7 +1009,7 @@ def _validate_active_vault_etag(value: str | None) -> str:
 
 class CredentialResolveError(Exception):
     """Resolve failure with a log-safe reason: transport | invalid_response
-    | http_<status>. Resolve content never reaches logs."""
+    | deadline | http_<status>. Resolve content never reaches logs."""
 
 
 def _env_int_range(name: str, default: int, bounds: tuple[int, int]) -> int:
@@ -2096,7 +2097,7 @@ def _apply_vault_binding(
 
     substituted_surfaces = _apply_requestheaders_substitutions(flow, binding)
     if _flow_rejected(flow):
-        return
+        return None
 
     injected_names: list[str] = []
     for header in binding.get("headers") or []:
@@ -2200,14 +2201,25 @@ async def _resolve_exchange_binding(
             "path": flow.request.path or "/",
         },
     }
+    budget = _resolve_budget_seconds()
     try:
+        deadline = time.monotonic() + budget
         async with _resolve_limiter():
-            decision = await asyncio.to_thread(
-                _resolve_exchange_http,
-                socket_path,
-                _resolve_budget_seconds(),
-                path,
-                payload,
+            # The deadline covers semaphore and executor queueing too, not
+            # just the socket: a queued resolve fails within the budget
+            # instead of stacking timeout batches behind a slow resolver.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CredentialResolveError("deadline")
+            decision = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _resolve_exchange_http,
+                    socket_path,
+                    remaining,
+                    path,
+                    payload,
+                ),
+                timeout=remaining,
             )
         _install_exchange_headers(flow, vault, binding, decision)
     except CredentialResolveError as error:
@@ -2217,6 +2229,15 @@ async def _resolve_exchange_binding(
         ctx.log.warn(
             f"credential proxy: exchange resolve failed binding={name} "
             f"reason={error}"
+        )
+        return
+    except asyncio.TimeoutError:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        ctx.log.warn(
+            f"credential proxy: exchange resolve failed binding={name} "
+            "reason=deadline"
         )
         return
     except Exception:  # noqa: BLE001 - unexpected failures fail closed too

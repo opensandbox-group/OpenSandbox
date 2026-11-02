@@ -296,7 +296,10 @@ class ExchangeResolveTest(TestCase):
         self.assertEqual(
             self.system.DEFAULT_CREDENTIAL_PROXY_SOCKET, socket_path
         )
-        self.assertEqual(2.25, timeout)
+        # End-to-end deadline: the socket timeout is the budget remaining
+        # after semaphore/executor queueing, so never more than 2.25s.
+        self.assertLessEqual(timeout, 2.25)
+        self.assertGreater(timeout, 2.0)
         self.assertEqual(self.system.CREDENTIAL_RESOLVE_PATH, path)
         self.assertEqual(
             {
@@ -671,7 +674,41 @@ class ExchangeResolveTest(TestCase):
 
                 asyncio.run(self.system.requestheaders(flow))
 
-                self.assertEqual(expected, calls[0][1])
+                timeout = calls[0][1]
+                self.assertLessEqual(timeout, expected)
+                self.assertGreater(timeout, expected - 0.25)
+
+    def test_queued_resolves_fail_within_deadline(self) -> None:
+        # Semaphore + executor queueing share the same budget: a request
+        # queued behind a slow resolve fails at its own deadline (407),
+        # never one timeout-batch later.
+        os.environ[self.system.CREDENTIAL_RESOLVER_TIMEOUT_ENV] = "1"
+        os.environ[self.system.CREDENTIAL_RESOLVER_MAX_CONCURRENCY_ENV] = "1"
+        self._install_vault()
+
+        def behavior(payload: dict) -> dict:
+            time.sleep(1.0)
+            return _parsed_decision()
+
+        self._install_transport(behavior)
+        first = _Flow()
+        second = _Flow()
+
+        async def main() -> None:
+            await asyncio.gather(
+                self.system.requestheaders(first),
+                self.system.requestheaders(second),
+            )
+
+        asyncio.run(main())
+
+        self.assertEqual(SECRET, first.request.headers["authorization"])
+        self.assertTrue(second.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(407, second.response.status_code)
+        self.assertNotIn("authorization", second.request.headers)
+        self.assertTrue(
+            any("reason=deadline" in message for message in self.log.messages)
+        )
 
     # -- transport wire format ---------------------------------------------------
 
