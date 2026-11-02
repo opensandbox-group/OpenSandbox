@@ -772,11 +772,15 @@ func (s *fastSandboxPolicyServer) dropSubjectStateLocked(subj subject.Subject) e
 // recordBindingState records a validated network attempt before enforcement
 // (a failed deny-first may already have kernel effects; retries must compare
 // its network). sandboxName is the envelope's SandboxRef.Name — the wire
-// sandboxId. Called outside the registry lock.
+// sandboxId; the CR name is immutable per fence, so only a non-empty name is
+// recorded (a degenerate replay cannot erase the identity). Called outside
+// the registry lock.
 func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment, sandboxName string) {
 	s.mu.Lock()
 	s.subjAtt[subj] = att
-	s.subjSandbox[subj] = strings.TrimSpace(sandboxName)
+	if name := strings.TrimSpace(sandboxName); name != "" {
+		s.subjSandbox[subj] = name
+	}
 	s.mu.Unlock()
 }
 
