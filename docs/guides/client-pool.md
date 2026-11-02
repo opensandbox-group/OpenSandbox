@@ -256,6 +256,8 @@ try {
 
 ### Go
 
+When a Go `Start(ctx)` restart or concurrent `Shutdown(ctx, ...)` waits for an earlier shutdown to finish, cancelling its context stops only that wait and returns the context error. It does not interrupt or mark the earlier cleanup complete.
+
 Inside a function returning `error`, with `ctx` and the usual `context`, `fmt`, `time`, and `opensandbox` imports:
 
 ```go
