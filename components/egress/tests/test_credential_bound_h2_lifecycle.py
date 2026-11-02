@@ -1139,7 +1139,16 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
                         layers.HttpErrorHook,
                     ),
                 ):
-                    getattr(system, hook.name)(hook.flow)
+                    # requestheaders became a coroutine with OSEP-0025 (the
+                    # exchange resolve defers I/O to an await): drive async
+                    # hooks to completion like mitmproxy does, or the hook
+                    # body never runs and the handle metadata below is
+                    # missing. The live path never suspends here (no
+                    # exchange vaults in this module), so awaiting matches
+                    # the pre-async synchronous behavior exactly.
+                    hook_result = getattr(system, hook.name)(hook.flow)
+                    if asyncio.iscoroutine(hook_result):
+                        await hook_result
                     if isinstance(hook, layers.HttpRequestHeadersHook):
                         admitted_handles.append(
                             hook.flow.metadata[system.FLOW_REQUEST_HANDLE_KEY]

@@ -17,7 +17,11 @@
 from enum import Enum
 
 
-class PassthroughCredentialAuthType(str, Enum):
+class CredentialAuthType(str, Enum):
+    APIKEY = "apiKey"
+    BASIC = "basic"
+    BEARER = "bearer"
+    CUSTOMHEADERS = "customHeaders"
     PASSTHROUGH = "passthrough"
 
     def __str__(self) -> str:

@@ -50,9 +50,11 @@ from opensandbox.models.templates import (
     TemplateInfo,
     TemplateStatus,
 )
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
 from opensandbox_cli.commands.terminal import _make_stdin_reader, stream_pty
-from opensandbox_cli.config import load_config_file
+from opensandbox_cli.config import load_config_file, resolve_config
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
 
@@ -273,6 +275,53 @@ class TestConfigSet:
         parsed = load_config_file(cfg_path)
         assert parsed["connection"]["request_timeout"] == 45
         assert parsed["connection"]["use_server_proxy"] is True
+
+    @pytest.mark.parametrize("value", ["007123", "1e10", "NaN", "1_000", "1.50"])
+    def test_set_keeps_text_a_number_would_change(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.delenv("OPEN_SANDBOX_API_KEY", raising=False)
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.api_key", value],
+        )
+
+        assert result.exit_code == 0
+        assert load_config_file(cfg_path)["connection"]["api_key"] == value
+        assert resolve_config(config_path=cfg_path)["api_key"] == value
+
+    @pytest.mark.parametrize(
+        ("key", "value", "resolved_key", "expected"),
+        [
+            ("connection.request_timeout", "1e2", "request_timeout", 100),
+            ("connection.use_server_proxy", "1.00", "use_server_proxy", True),
+        ],
+    )
+    def test_set_still_infers_numbers_for_typed_keys(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        key: str,
+        value: str,
+        resolved_key: str,
+        expected: object,
+    ) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli, ["--config", str(cfg_path), "config", "set", key, value]
+        )
+
+        assert result.exit_code == 0
+        assert resolve_config(config_path=cfg_path)[resolved_key] == expected
 
     def test_set_reports_invalid_existing_toml(
         self, runner: CliRunner, tmp_path: Path
@@ -2601,6 +2650,7 @@ def _invoke_terminal(
     *,
     incoming: list,
     stdin_chunks: list[bytes] | None = None,
+    connect_error: Exception | None = None,
 ):
     """Run `osb terminal` with the execd PTY boundary fully mocked.
 
@@ -2630,6 +2680,8 @@ def _invoke_terminal(
 
     def fake_connect(url: str, additional_headers: dict | None = None):
         connect_calls.append((url, additional_headers))
+        if connect_error is not None:
+            raise connect_error
         return ws
 
     with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
@@ -2731,6 +2783,26 @@ class TestTerminal:
         assert result.exit_code == 1
         assert "Shell startup failed" in result.stderr
         assert "no such dir" in result.stderr
+        assert delete.call_args.args[2] == "sess-1"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError("connection refused"),
+            websockets.InvalidStatus(Response(403, "Forbidden", Headers())),
+        ],
+    )
+    def test_failed_connect_deletes_session(
+        self, runner: CliRunner, error: Exception
+    ) -> None:
+        result, _, _, delete, _, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=[],
+            connect_error=error,
+        )
+
+        assert result.exit_code == 1
         assert delete.call_args.args[2] == "sess-1"
 
     def test_server_error_frames_are_reported_on_stderr(

@@ -20,12 +20,6 @@ from .activity_probe import ActivityProbe
 from .allocation_summary import AllocationSummary
 from .allocation_summary_mode import AllocationSummaryMode
 from .allocation_summary_state import AllocationSummaryState
-from .api_key_credential_auth import ApiKeyCredentialAuth
-from .api_key_credential_auth_type import ApiKeyCredentialAuthType
-from .basic_credential_auth import BasicCredentialAuth
-from .basic_credential_auth_type import BasicCredentialAuthType
-from .bearer_credential_auth import BearerCredentialAuth
-from .bearer_credential_auth_type import BearerCredentialAuthType
 from .create_fsb_template_request import CreateFsbTemplateRequest
 from .create_fsb_template_request_env import CreateFsbTemplateRequestEnv
 from .create_fsb_template_request_format import CreateFsbTemplateRequestFormat
@@ -39,7 +33,9 @@ from .create_sandbox_response_extensions import CreateSandboxResponseExtensions
 from .create_sandbox_response_metadata import CreateSandboxResponseMetadata
 from .create_snapshot_request import CreateSnapshotRequest
 from .credential import Credential
+from .credential_auth import CredentialAuth
 from .credential_auth_metadata import CredentialAuthMetadata
+from .credential_auth_type import CredentialAuthType
 from .credential_binding import CredentialBinding
 from .credential_binding_list_response import CredentialBindingListResponse
 from .credential_binding_metadata import CredentialBindingMetadata
@@ -50,14 +46,14 @@ from .credential_match_schemes_item import CredentialMatchSchemesItem
 from .credential_metadata import CredentialMetadata
 from .credential_mutation_set import CredentialMutationSet
 from .credential_proxy_config import CredentialProxyConfig
+from .credential_source import CredentialSource
+from .credential_source_type import CredentialSourceType
 from .credential_substitution import CredentialSubstitution
 from .credential_substitution_in_item import CredentialSubstitutionInItem
 from .credential_vault_create_request import CredentialVaultCreateRequest
 from .credential_vault_mutation_request import CredentialVaultMutationRequest
 from .credential_vault_state import CredentialVaultState
 from .custom_header_entry import CustomHeaderEntry
-from .custom_headers_credential_auth import CustomHeadersCredentialAuth
-from .custom_headers_credential_auth_type import CustomHeadersCredentialAuthType
 from .endpoint import Endpoint
 from .endpoint_headers import EndpointHeaders
 from .error_response import ErrorResponse
@@ -73,8 +69,6 @@ from .idle_policy import IdlePolicy
 from .idle_policy_on_idle import IdlePolicyOnIdle
 from .image_spec import ImageSpec
 from .image_spec_auth import ImageSpecAuth
-from .inline_credential_source import InlineCredentialSource
-from .inline_credential_source_type import InlineCredentialSourceType
 from .lifecycle_hook import LifecycleHook
 from .list_fsb_templates_response import ListFsbTemplatesResponse
 from .list_sandboxes_response import ListSandboxesResponse
@@ -88,8 +82,6 @@ from .network_rule_action import NetworkRuleAction
 from .ossfs import OSSFS
 from .ossfs_version import OSSFSVersion
 from .pagination_info import PaginationInfo
-from .passthrough_credential_auth import PassthroughCredentialAuth
-from .passthrough_credential_auth_type import PassthroughCredentialAuthType
 from .patch_sandbox_metadata_request import PatchSandboxMetadataRequest
 from .periodic_lifecycle_hook import PeriodicLifecycleHook
 from .platform_spec import PlatformSpec
@@ -115,12 +107,6 @@ __all__ = (
     "AllocationSummary",
     "AllocationSummaryMode",
     "AllocationSummaryState",
-    "ApiKeyCredentialAuth",
-    "ApiKeyCredentialAuthType",
-    "BasicCredentialAuth",
-    "BasicCredentialAuthType",
-    "BearerCredentialAuth",
-    "BearerCredentialAuthType",
     "CreateFsbTemplateRequest",
     "CreateFsbTemplateRequestEnv",
     "CreateFsbTemplateRequestFormat",
@@ -134,7 +120,9 @@ __all__ = (
     "CreateSandboxResponseMetadata",
     "CreateSnapshotRequest",
     "Credential",
+    "CredentialAuth",
     "CredentialAuthMetadata",
+    "CredentialAuthType",
     "CredentialBinding",
     "CredentialBindingListResponse",
     "CredentialBindingMetadata",
@@ -145,14 +133,14 @@ __all__ = (
     "CredentialMetadata",
     "CredentialMutationSet",
     "CredentialProxyConfig",
+    "CredentialSource",
+    "CredentialSourceType",
     "CredentialSubstitution",
     "CredentialSubstitutionInItem",
     "CredentialVaultCreateRequest",
     "CredentialVaultMutationRequest",
     "CredentialVaultState",
     "CustomHeaderEntry",
-    "CustomHeadersCredentialAuth",
-    "CustomHeadersCredentialAuthType",
     "Endpoint",
     "EndpointHeaders",
     "ErrorResponse",
@@ -168,8 +156,6 @@ __all__ = (
     "IdlePolicyOnIdle",
     "ImageSpec",
     "ImageSpecAuth",
-    "InlineCredentialSource",
-    "InlineCredentialSourceType",
     "LifecycleHook",
     "ListFsbTemplatesResponse",
     "ListSandboxesResponse",
@@ -183,8 +169,6 @@ __all__ = (
     "OSSFS",
     "OSSFSVersion",
     "PaginationInfo",
-    "PassthroughCredentialAuth",
-    "PassthroughCredentialAuthType",
     "PatchSandboxMetadataRequest",
     "PeriodicLifecycleHook",
     "PlatformSpec",

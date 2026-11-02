@@ -17,8 +17,9 @@
 from enum import Enum
 
 
-class BearerCredentialAuthType(str, Enum):
-    BEARER = "bearer"
+class CredentialSourceType(str, Enum):
+    EXCHANGE = "exchange"
+    INLINE = "inline"
 
     def __str__(self) -> str:
         return str(self.value)

@@ -186,12 +186,17 @@ class IsolatedFilesystemAdapter(Filesystem):
 
         async def _iter() -> AsyncGenerator[bytes, None]:
             try:
+                yield b""
                 async for chunk in response.body:
                     yield chunk
             finally:
                 await response.body.aclose()
 
-        return _iter()
+        # Start the generator so its finally block also runs when it is
+        # closed or dropped before the caller reads the first chunk.
+        chunks = _iter()
+        await anext(chunks)
+        return chunks
 
     async def read_bytes_stream_detailed(
         self,

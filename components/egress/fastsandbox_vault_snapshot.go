@@ -402,7 +402,7 @@ func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subjec
 	pol := validation
 	entry, ok := s.vaults[subj]
 	if !ok || entry.fence != fence {
-		entry = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence}
+		entry = vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence}
 	}
 	if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 		return err
@@ -420,7 +420,7 @@ func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subjec
 // validateImportedVault runs the imported revision through the exact Reload
 // the live install will use, on a scratch store.
 func validateImportedVault(vf credentialvault.VaultFile, body credentialvault.VaultFileBody, pol *policy.NetworkPolicy) error {
-	scratch := credentialvault.NewStore(nil, func() bool { return true })
+	scratch := credentialvault.NewSubjectStore()
 	return scratch.Reload(vf.Revision, credentialvault.CreateRequest(body), pol)
 }
 

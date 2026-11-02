@@ -193,7 +193,7 @@ Core responsibilities:
 - Stage the `execd` binary from `[runtime].execd_image` into the sandbox and install a bootstrap launcher before starting the user entrypoint.
 - Support network modes `host`, `bridge`, `none`, `pasta`, `slirp4netns`, and custom user-defined networks. The user-mode modes (`pasta`, `slirp4netns`) expose no host-routable container IP and are reached through the published host ports.
 - Allocate host ports for `execd` and user service endpoints in non-host network modes.
-- Restore expiration timers for existing managed containers after server restart.
+- Restore expiration timers for existing managed containers after server restart. Restore runs once, during server startup. Containers removed while the restore is listing are skipped. Any other Docker error during that listing makes server startup fail instead of leaving existing sandboxes without expiration timers. Run the server under a supervisor that restarts it (for example systemd `Restart=on-failure`, or a container restart policy); restore runs again on the next successful start. If the Docker error persists, the server keeps failing to start until the daemon is healthy again.
 - Support host bind mounts, Docker named volumes via the `pvc` volume model, and OSSFS-backed mounts.
 - Attach an egress sidecar when `networkPolicy` is requested and Docker networking is compatible.
 - Create Docker-backed persistent snapshots as local images and restore sandboxes from those snapshot images.

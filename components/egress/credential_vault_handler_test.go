@@ -105,7 +105,7 @@ func TestCredentialVaultActiveUnixSocketReturnsSnapshot(t *testing.T) {
 		require.NoError(t, os.RemoveAll(tmpDir))
 	})
 	socketPath := filepath.Join(tmpDir, "credential-proxy", "active.sock")
-	_, cleanup, err := credentialvault.StartActiveSocketServerRequestAware(srv.handleCredentialVaultActive, socketPath, -1)
+	_, cleanup, err := credentialvault.StartActiveSocketServerRequestAware(srv.handleCredentialVaultActive, nil, socketPath, -1)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)

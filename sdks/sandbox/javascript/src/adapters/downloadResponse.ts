@@ -98,10 +98,13 @@ class ResponseByteStream implements ReadBytesStream {
       return;
     }
 
-    this.reader = body.getReader();
+    const reader = body.getReader();
+    this.reader = reader;
     try {
-      while (true) {
-        const { done, value } = await this.reader.read();
+      // close() may run while the consumer holds a chunk; stop instead of
+      // reading from the released reader.
+      while (!this.closed) {
+        const { done, value } = await reader.read();
         if (done) return;
         if (value) yield value;
       }

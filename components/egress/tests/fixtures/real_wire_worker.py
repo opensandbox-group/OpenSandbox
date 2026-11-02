@@ -25,6 +25,7 @@ Usage: ``real_wire_worker.py {ech-parse|h1-parse}``
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -91,6 +92,15 @@ class _ClientConn:
         self.state = "open"
 
 
+def _drive_async_hook(hook):
+    """Run the async requestheaders hook synchronously, like mitmproxy."""
+
+    def run(*args, **kwargs):
+        return asyncio.run(hook(*args, **kwargs))
+
+    return run
+
+
 def _load_system_module() -> object:
     spec = importlib.util.spec_from_file_location(
         "opensandbox_wire_system", MITMSCRIPTS / "system.py"
@@ -98,6 +108,7 @@ def _load_system_module() -> object:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module.requestheaders = _drive_async_hook(module.requestheaders)
     return module
 
 

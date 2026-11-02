@@ -1082,6 +1082,35 @@ def test_proxy_forwards_delete_request_with_body(
     assert fake_client.built["content"] is not None
 
 
+def test_proxy_forwards_get_request_with_body(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    _set_http_client(client, fake_client)
+
+    response = client.request(
+        "GET",
+        "/v1/sandboxes/sbx-123/proxy/44772/search",
+        headers=auth_headers,
+        content=b'{"query": "x"}',
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["method"] == "GET"
+    assert fake_client.built["headers"]["content-length"] == "14"
+    assert fake_client.built["content"] is not None
+
+
 def test_proxy_filters_response_hop_by_hop_headers(
     client: TestClient,
     auth_headers: dict,
@@ -1563,6 +1592,7 @@ def test_proxy_maps_connect_failure_to_502(
         (httpx.RemoteProtocolError("server disconnected"), 502, "BACKEND_RESPONSE_FAILED"),
         (httpx.ReadError("connection reset"), 502, "BACKEND_RESPONSE_FAILED"),
         (httpx.WriteError("broken pipe"), 502, "BACKEND_RESPONSE_FAILED"),
+        (httpx.PoolTimeout("pool exhausted"), 503, "PROXY_POOL_EXHAUSTED"),
     ],
 )
 def test_proxy_maps_backend_failure_after_connect_to_gateway_error(
@@ -1813,6 +1843,62 @@ def test_credential_vault_route_forwards_egress_auth_header(
     ]
     assert len(egress_headers) == 1
     assert egress_headers[0][1] == "injected-egress-token"
+
+
+def test_credential_vault_route_forwards_exchange_payload_verbatim(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """OSEP-0025: the server shape gate accepts exchange sources and typeless
+    auth (previously 422) and the sidecar proxy forwards the body verbatim —
+    semantic validation stays with the egress."""
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            assert port == 18080
+            return Endpoint(endpoint="10.57.1.91:18080")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=201,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"revision":1,"credentials":[],"bindings":[]}'],
+    )
+    _set_http_client(client, fake_client)
+
+    payload = {
+        "credentials": [
+            {
+                "name": "spi-signer",
+                "source": {"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+            }
+        ],
+        "bindings": [
+            {
+                "name": "internal-api",
+                "match": {"hosts": ["*.internal.example.com"]},
+                "auth": {"credential": "spi-signer"},
+            }
+        ],
+    }
+    response = client.post(
+        "/v1/sandboxes/sbx-123/credential-vault",
+        headers=auth_headers,
+        json=payload,
+    )
+
+    assert response.status_code == 201
+    assert fake_client.built is not None
+    assert fake_client.built["method"] == "POST"
+    assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault"
+    # The body rides the raw request stream (verbatim passthrough like every
+    # other proxied body); reaching the sidecar at all proves the shape gate
+    # accepted the exchange payload.
+    assert fake_client.built["content"] is not None
 
 class _StubRenewCoordinator:
     def __init__(self) -> None:

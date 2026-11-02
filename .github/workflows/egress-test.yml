@@ -348,6 +348,9 @@ jobs:
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install -y nftables
 
+      - name: Record nft version
+        run: nft --version
+
       - name: Install mitmproxy (MITM smoke phase, mirrors the egress image)
         run: |
           sudo apt-get install -y python3-venv

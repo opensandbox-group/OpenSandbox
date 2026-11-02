@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import http.server
 import importlib.util
@@ -122,6 +123,15 @@ class _Flow:
         self.killable = False
 
 
+def _drive_async_hook(hook):
+    """Run the async requestheaders hook synchronously, like mitmproxy."""
+
+    def run(*args, **kwargs):
+        return asyncio.run(hook(*args, **kwargs))
+
+    return run
+
+
 def _load_system_module() -> Any:
     mitmproxy = types.ModuleType("mitmproxy")
     mitmproxy.ctx = types.SimpleNamespace(
@@ -150,6 +160,7 @@ def _load_system_module() -> Any:
         sys.modules, {"mitmproxy": mitmproxy, "mitmproxy.tls": mitmproxy_tls}
     ):
         spec.loader.exec_module(module)
+    module.requestheaders = _drive_async_hook(module.requestheaders)
     return module
 
 
@@ -1463,6 +1474,9 @@ class SystemAddonActiveVaultStrictParseTest(unittest.TestCase):
         self.assertIsNone(flow.response)
 
     def test_selected_exchange_binding_fails_closed_buffered_and_streamed(self) -> None:
+        # T3b replaced the 503 placeholder with the resolve branch; without
+        # a connection SNI the resolve cannot be built, so the request still
+        # fails closed — 407 buffered, kill streamed.
         for streamed in (False, True):
             with self.subTest(streamed=streamed):
                 system = _load_system_module()
@@ -1495,7 +1509,7 @@ class SystemAddonActiveVaultStrictParseTest(unittest.TestCase):
                     self.assertIsNone(flow.response)
                 else:
                     self.assertFalse(flow.killed)
-                    self.assertEqual(503, flow.response.status_code)
+                    self.assertEqual(407, flow.response.status_code)
 
 
 @unittest.skipUnless(

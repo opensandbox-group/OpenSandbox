@@ -70,6 +70,36 @@ _FULL_REVISION = {
     ],
 }
 
+# Exchange vault revision (OSEP-0025): an exchange-sourced credential plus a
+# typeless binding referencing it, alongside static records.
+_EXCHANGE_CREDENTIAL = {
+    "name": "spi-signer",
+    "source": {"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+}
+_TYPELESS_BINDING = {
+    "name": "internal-api",
+    "match": {"hosts": ["*.internal.example.com"]},
+    "auth": {"credential": "spi-signer"},
+}
+
+
+def _exchange_full_revision() -> dict:
+    return {
+        "revision": 2,
+        "credentials": [
+            _EXCHANGE_CREDENTIAL,
+            {"name": "tok", "source": {"type": "inline", "value": "sekrit"}},
+        ],
+        "bindings": [
+            _TYPELESS_BINDING,
+            {
+                "name": "ext",
+                "match": {"hosts": ["ext.test"]},
+                "auth": {"type": "apiKey", "name": "X-Api-Key", "credential": "tok"},
+            },
+        ],
+    }
+
 
 class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
     """Scripted FastPath: records relay calls, answers with fixed outcomes."""
@@ -305,6 +335,183 @@ def test_public_reads_sanitize_credential_values(vault_fsb):
         f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault/bindings/nope"
     )
     assert binding_missing.status_code == 404
+
+
+def test_create_with_exchange_vault_relays_losslessly(vault_fsb):
+    """OSEP-0025 core acceptance: an exchange source plus a typeless binding
+    passes the server shape gate (previously 422) and relays byte-shape
+    intact; endpoint semantics stay with the egress."""
+    client, fake, _ = vault_fsb
+    fake.outcome = (201, _vault_ack(1))
+    response = client.post(
+        f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
+        json={
+            "credentials": [_EXCHANGE_CREDENTIAL],
+            "bindings": [_TYPELESS_BINDING],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = json.loads(fake.payloads[0])
+    assert body["credentials"] == [_EXCHANGE_CREDENTIAL]
+    assert body["bindings"] == [_TYPELESS_BINDING]
+
+
+def test_public_reads_sanitize_exchange_vault(vault_fsb):
+    """Sanitized reads carry `sourceType: exchange` and the typeless auth
+    credential reference, never the endpoint, and never `"type": null`."""
+    client, fake, _ = vault_fsb
+    fake.outcome = (200, json.dumps(_exchange_full_revision()).encode())
+
+    response = client.get(f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault")
+    assert response.status_code == 200
+    assert "spi.sock" not in response.text
+    assert '"type": null' not in response.text
+    state = response.json()
+    assert state["credentials"] == [
+        {"name": "spi-signer", "sourceType": "exchange", "revision": 2},
+        {"name": "tok", "sourceType": "inline", "revision": 2},
+    ]
+    assert state["bindings"][0]["auth"] == {"credential": "spi-signer"}
+    assert state["bindings"][1]["auth"] == {"type": "apiKey", "name": "X-Api-Key"}
+
+
+def test_patch_merges_exchange_records_losslessly(vault_fsb):
+    """PATCH-added exchange records re-serialize verbatim; untouched exchange
+    records round-trip through the merge unchanged."""
+    client, fake, _ = vault_fsb
+    https_exchange = {
+        "name": "corp-resolver",
+        "source": {"type": "exchange", "endpoint": "https://header-resolver.internal"},
+    }
+    fake.outcomes = [
+        (200, json.dumps(_exchange_full_revision()).encode()),
+        (200, _vault_ack(3)),
+    ]
+    response = client.patch(
+        f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
+        json={
+            "credentials": {"add": [https_exchange]},
+            "bindings": {
+                "add": [
+                    {
+                        "name": "internal-api-2",
+                        "match": {"hosts": ["*.corp.example.com"]},
+                        "auth": {"credential": "corp-resolver"},
+                    }
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    merged = json.loads(fake.payloads[1])
+    assert merged["expectedRevision"] == 2
+    # Records are name-sorted in the PUT body: the added exchange credential
+    # re-serializes from the request shape; the read-back exchange credential
+    # and inline value round-trip verbatim (relay-only surface).
+    assert merged["credentials"] == [
+        https_exchange,
+        _EXCHANGE_CREDENTIAL,
+        _FULL_REVISION["credentials"][0],
+    ]
+    # Bindings are name-sorted too: untouched records round-trip verbatim,
+    # the added typeless binding re-serializes from the request shape.
+    assert merged["bindings"] == [
+        _exchange_full_revision()["bindings"][1],
+        _TYPELESS_BINDING,
+        {
+            "name": "internal-api-2",
+            "match": {"hosts": ["*.corp.example.com"]},
+            "auth": {"credential": "corp-resolver"},
+        },
+    ]
+
+
+def test_endpoint_semantics_stay_with_egress(vault_fsb):
+    """The server checks shape only: any string endpoint relays through and an
+    egress 400 (scheme validation, cross-lock) passes the relay mapping."""
+    client, fake, _ = vault_fsb
+    fake.outcome = (201, _vault_ack(1))
+    response = client.post(
+        f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
+        json={
+            "credentials": [
+                {"name": "weird", "source": {"type": "exchange", "endpoint": "ftp://x"}}
+            ],
+            "bindings": [],
+        },
+    )
+    assert response.status_code == 201
+
+    fake.calls.clear()
+    fake.outcome = (400, b"unsupported resolver endpoint scheme")
+    response = client.post(
+        f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
+        json={
+            "credentials": [
+                {"name": "weird", "source": {"type": "exchange", "endpoint": "ftp://x"}}
+            ],
+            "bindings": [],
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "SANDBOX::INVALID_PARAMETER"
+
+
+def test_exchange_shape_violations_are_422(vault_fsb):
+    """The smart union stays unambiguous: each malformed exchange shape is
+    rejected while `extra="forbid"` remains in force."""
+    client, _, _ = vault_fsb
+    cases = [
+        # exchange source without endpoint
+        {
+            "credentials": [{"name": "x", "source": {"type": "exchange"}}],
+            "bindings": [],
+        },
+        # inline-only field on an exchange source
+        {
+            "credentials": [
+                {"name": "x", "source": {"type": "exchange", "endpoint": "e", "value": "v"}}
+            ],
+            "bindings": [],
+        },
+        # exchange-only field on an inline source
+        {
+            "credentials": [{"name": "x", "source": {"type": "inline", "endpoint": "e"}}],
+            "bindings": [],
+        },
+        # `type: exchange` is not a static auth kind; typeless must omit type
+        {
+            "credentials": [],
+            "bindings": [
+                {"name": "b", "match": {"hosts": ["h"]}, "auth": {"type": "exchange", "credential": "x"}}
+            ],
+        },
+        # typeless auth with a static-only field
+        {
+            "credentials": [],
+            "bindings": [
+                {
+                    "name": "b",
+                    "match": {"hosts": ["h"]},
+                    "auth": {"credential": "x", "substitutions": []},
+                }
+            ],
+        },
+        # explicit null type is not the typeless form
+        {
+            "credentials": [],
+            "bindings": [
+                {"name": "b", "match": {"hosts": ["h"]}, "auth": {"type": None, "credential": "x"}}
+            ],
+        },
+    ]
+    for case in cases:
+        response = client.post(
+            f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault", json=case
+        )
+        assert response.status_code == 422, case
 
 
 def test_patch_composes_get_merge_put_with_expected_revision(vault_fsb):
