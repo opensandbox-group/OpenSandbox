@@ -120,8 +120,7 @@ func startPolicyServer(
 	} else {
 		handler.credentialVault = credentialvault.NewStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
 	}
-	// D13 capability gate: derived from the operator env once at assembly;
-	// malformed resolver config fails exchange admission closed.
+	// D13 capability gate from env; malformed config fails exchange admission.
 	resolverConfig, resolverConfigErr := credentialvault.ResolverConfigFromEnv()
 	if resolverConfigErr != nil {
 		log.Warnf("credential resolver operator configuration not ready: %v", resolverConfigErr)
@@ -325,8 +324,7 @@ func (s *policyServer) handleCredentialVaultSubresource(w http.ResponseWriter, r
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	case path == "_resolve":
-		// Same permission model as _active: the resolve RPC is served only on
-		// the active socket to the mitm addon, never on the TCP surface.
+		// Socket-only like _active: never served on the TCP surface.
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -648,10 +646,9 @@ func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter, r *htt
 	handleActiveVaultSnapshot(w, r, s.credentialVault)
 }
 
-// resolveVaultAccess derives the sidecar resolve subject: the sandbox
-// identity this egress serves, injected as env at pod creation — never a
-// protocol-supplied value. The store is the sidecar's single vault; the
-// same derivation runs at recheck and is byte-identical.
+// resolveVaultAccess derives the sidecar resolve subject: the pod-injected
+// sandbox identity, never a protocol value. The store is the single vault;
+// the recheck derivation is byte-identical.
 func (s *policyServer) resolveVaultAccess(_ *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
 	sandboxID := strings.TrimSpace(os.Getenv(constants.EnvSandboxID))
 	if sandboxID == "" {

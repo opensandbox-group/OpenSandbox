@@ -35,18 +35,16 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
-// Addon → egress resolve RPC (OSEP-0025 T2b). The addon owns binding
-// evaluation on the active snapshot; this endpoint owns the per-request
-// resolver call. Discipline: capture under the Store read lock, release
-// before the resolver call (a slow resolver must never pin a Store lock),
-// recheck by binding content fingerprint afterwards (D12) — a bare revision
-// cannot detect a same-name replacement or a delete/recreate revision
-// wraparound, and an unrelated mutation must not invalidate.
+// Addon → egress resolve RPC (OSEP-0025): the addon owns binding evaluation,
+// this endpoint owns the per-request resolver call. Capture under the Store
+// read lock, release before the resolver call, recheck by binding content
+// fingerprint (D12) — a bare revision misses same-name replacement and
+// delete/recreate wraparound, and unrelated mutations must not invalidate.
 
 const maxResolveRequestBytes = 64 << 10
 
-// ResolveAccess is the requesting sandbox's resolve authorization: the wire
-// subject (the egress-authoritative sandboxId, D11) and its vault Store.
+// ResolveAccess is the requesting sandbox's resolve access: the wire subject
+// (sandboxId, D11) and its vault Store.
 type ResolveAccess struct {
 	SandboxID string
 	Store     *Store
@@ -60,10 +58,9 @@ type ResolveAccessError struct {
 
 func (e *ResolveAccessError) Error() string { return e.Reason }
 
-// ResolveAccessFunc derives resolve access from the request. It runs once
-// before the resolver call (capture) and once after it (recheck); the subject
-// never comes from the protocol surface and the client IP never crosses the
-// resolver boundary.
+// ResolveAccessFunc derives resolve access from the request; it runs at
+// capture and again at recheck. The subject never comes from the protocol;
+// the client IP never crosses the resolver boundary.
 type ResolveAccessFunc func(r *http.Request) (ResolveAccess, *ResolveAccessError)
 
 // ResolveHandler serves POST /credential-vault/_resolve.
@@ -86,7 +83,7 @@ func NewResolveHandler(access ResolveAccessFunc) *ResolveHandler {
 	}
 }
 
-// ResolveAuditEvent is the R10 audit record: names, decision, and target host
+// ResolveAuditEvent is the R10 audit record: names, decision and target host
 // only — credential values never appear.
 type ResolveAuditEvent struct {
 	Resolution string // resolved | denied | timeout
@@ -103,9 +100,9 @@ func defaultResolveAudit(event ResolveAuditEvent) {
 	telemetry.RecordCredentialResolution(event.Resolution, event.Duration.Seconds())
 }
 
-// ServeHTTP implements the §2 contract: strict JSON (no duplicate keys, exact
-// field sets), exact Content-Type, bounded body, fixed error vocabulary, and
-// the capture-release-recheck flow around the resolver call.
+// ServeHTTP serves the OSEP-0025 resolve contract: strict JSON, exact
+// Content-Type, bounded body, fixed error vocabulary, capture-release-
+// recheck.
 func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		drainResolveBody(r)
@@ -190,11 +187,9 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Recheck (D12): the resolver call ran without any lock held. Any
-	// identity change (subject replaced, store replaced) or captured-state
-	// change (binding or credential content, vault deleted) discards the
-	// resolved headers — never serve credentials resolved under state the
-	// caller no longer owns.
+	// Recheck (D12): discard on any identity change (subject or store
+	// replaced) or captured-state change — never serve credentials resolved
+	// under state the caller no longer owns.
 	recheckAccess, accessErr := h.access(r)
 	if accessErr != nil ||
 		recheckAccess.SandboxID != access.SandboxID ||
@@ -212,14 +207,11 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeResolveSuccess(w, capture.Revision, document.Binding, decision)
 }
 
-// maxCachedResolverClients bounds the per-endpoint client cache: entries are
-// never evicted (the handler lives for the process lifetime), so a churning
-// endpoint set must not grow it without limit. Past the cap, clients are
-// rebuilt per request — construction is parse-only, no I/O.
+// maxCachedResolverClients bounds the never-evicted per-endpoint cache; past
+// the cap, clients are rebuilt per request (construction is parse-only).
 const maxCachedResolverClients = 64
 
-// clientFor caches one ResolverClient per captured endpoint (hot resolvers
-// are few); the env never changes at runtime.
+// clientFor caches one ResolverClient per endpoint; the env never changes.
 func (h *ResolveHandler) clientFor(endpoint string) (ResolverClient, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -236,7 +228,7 @@ func (h *ResolveHandler) clientFor(endpoint string) (ResolverClient, error) {
 	return client, nil
 }
 
-// resolveFailureResponse maps T2a error classes to the §2 status table.
+// resolveFailureResponse maps resolver error classes to contract statuses.
 func resolveFailureResponse(err error) (status int, reason string, timedOut bool) {
 	var resolverErr *ResolverError
 	if !errors.As(err, &resolverErr) {
@@ -255,10 +247,6 @@ func resolveFailureResponse(err error) (status int, reason string, timedOut bool
 		return http.StatusServiceUnavailable, "resolver unavailable", false
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Request decoding and target construction
-// ---------------------------------------------------------------------------
 
 type resolveEndpointRequest struct {
 	Binding string
@@ -321,8 +309,7 @@ func decodeResolveRequest(data []byte) (resolveEndpointRequest, error) {
 	}
 	if portRaw, ok := requestFields["port"]; ok {
 		trimmed := bytes.TrimSpace(portRaw)
-		// JSON null unmarshals into an int as a no-op success; reject it
-		// explicitly like every other scalar (no null scalars).
+		// JSON null into an int is a no-op success; reject like the rest.
 		if bytes.Equal(trimmed, []byte("null")) {
 			return resolveEndpointRequest{}, errors.New("port must be an integer")
 		}
@@ -349,9 +336,8 @@ func decodeStrictStringField(fields map[string]json.RawMessage, name string) (st
 	return value, nil
 }
 
-// buildResolveTarget validates and normalizes the outbound frame and applies
-// the SNI gate: the resolver's proof binds to the destination, so the
-// client-visible host must equal the connection's SNI (403 otherwise).
+// buildResolveTarget normalizes the outbound frame and applies the SNI gate
+// (host != sni → 403): the resolver proof binds to the destination.
 func buildResolveTarget(document resolveEndpointRequest) (ResolveDestination, ResolveRequestFrame, *resolveRequestError) {
 	badRequest := &resolveRequestError{status: http.StatusBadRequest, reason: "malformed request"}
 	forbidden := &resolveRequestError{status: http.StatusForbidden, reason: "forbidden"}
@@ -413,10 +399,6 @@ func drainResolveBody(r *http.Request) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, maxResolveRequestBytes+1))
 }
 
-// ---------------------------------------------------------------------------
-// Response encoding
-// ---------------------------------------------------------------------------
-
 type resolveResponseHeader struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
@@ -473,19 +455,11 @@ func writeResolveJSON(w http.ResponseWriter, status int, document resolveEndpoin
 	_, _ = w.Write(encoded)
 }
 
-// ---------------------------------------------------------------------------
-// Store capture (D12)
-// ---------------------------------------------------------------------------
-
-// ResolveCapture is the immutable per-binding resolve state captured under
-// the Store read lock and released before the resolver call. Fingerprint is
-// over the binding content and the referenced credential's exact source
-// object, so a same-name replacement — including a delete/recreate whose
-// revision wraps back — with different content is always detectable, while an
-// unrelated mutation that did not touch the captured binding does not
-// invalidate (OSEP-0012 immutable-snapshot semantics). The active-snapshot
-// tag is deliberately NOT captured: it flips on unrelated mutations and must
-// not gate invalidation.
+// ResolveCapture is the per-binding resolve state captured under the Store
+// read lock and released before the resolver call. Fingerprint digests the
+// binding plus the referenced credential's source: same-name replacement and
+// delete/recreate wraparound are detectable, unrelated mutations do not
+// invalidate (D12). No active-snapshot tag — it flips on unrelated mutations.
 type ResolveCapture struct {
 	Credential  string
 	Endpoint    string
@@ -493,10 +467,8 @@ type ResolveCapture struct {
 	Fingerprint [sha256.Size]byte
 }
 
-// CaptureResolve captures the exchange binding's resolve inputs: the
-// referenced exchange credential's resolver endpoint plus the content
-// fingerprint. Non-exchange bindings, unknown names, and missing vaults are
-// not resolvable (ErrNotFound).
+// CaptureResolve captures an exchange binding's resolve inputs; static
+// bindings, unknown names and missing vaults are not resolvable (ErrNotFound).
 func (v *Store) CaptureResolve(bindingName string) (ResolveCapture, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -523,9 +495,8 @@ func (v *Store) CaptureResolve(bindingName string) (ResolveCapture, error) {
 	}, nil
 }
 
-// resolveFingerprint digests the binding and credential source content. The
-// comparison happens outside any lock; the digest itself is computed under
-// the capturing read lock so it names the exact captured state.
+// resolveFingerprint names the exact captured state; the recheck comparison
+// happens outside any lock.
 func resolveFingerprint(binding Binding, credentialRaw json.RawMessage) [sha256.Size]byte {
 	bindingBytes, _ := json.Marshal(binding)
 	h := sha256.New()
@@ -541,15 +512,9 @@ func resolveFingerprint(binding Binding, credentialRaw json.RawMessage) [sha256.
 	return [sha256.Size]byte(h.Sum(nil))
 }
 
-// ---------------------------------------------------------------------------
-// Resolver capability gate wiring (D13)
-// ---------------------------------------------------------------------------
-
-// ResolverConfigFromEnv derives the exchange capability gate from the
-// operator env. A malformed timeout or auth-table value fails its flag closed
-// (exchange vaults are then rejected at admission); absent values keep the
-// documented defaults and count as ready. The returned error is diagnostic
-// only — the config itself is authoritative.
+// ResolverConfigFromEnv derives the D13 capability gate from the operator
+// env: malformed timeout/auth values fail their flag closed, absent values
+// keep the defaults. The returned error is diagnostic only.
 func ResolverConfigFromEnv() (ResolverConfig, error) {
 	config := ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true}
 	var diag error
@@ -569,9 +534,8 @@ func ResolverConfigFromEnv() (ResolverConfig, error) {
 	return config, diag
 }
 
-// NewSubjectStore creates a per-subject store (fast-sandbox profile) with
-// the resolver capability gate derived from the operator env, so a reloaded
-// exchange vault is admitted under the same D13 gate as a fresh write.
+// NewSubjectStore creates a per-subject store (fast-sandbox) with the D13
+// gate derived from env, so reloaded exchange vaults face the same gate.
 func NewSubjectStore() *Store {
 	store := NewStore(nil, func() bool { return true })
 	config, err := ResolverConfigFromEnv()

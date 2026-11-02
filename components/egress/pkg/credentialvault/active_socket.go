@@ -38,8 +38,8 @@ func StartActiveSocketServer(
 // StartActiveSocketServerRequestAware passes the request to active-vault
 // handlers. Sidecar handlers inspect conditional snapshot headers; fast-sandbox
 // handlers additionally dispatch clientIp (source IP -> subject -> snapshot).
-// resolveHandler (an http.Handler) serves POST /credential-vault/_resolve;
-// nil keeps the route mounted but forbidden.
+// resolveHandler serves POST /credential-vault/_resolve; nil mounts the route
+// forbidden.
 func StartActiveSocketServerRequestAware(
 	activeHandler func(http.ResponseWriter, *http.Request),
 	resolveHandler http.Handler,

@@ -32,8 +32,7 @@ import (
 )
 
 // fakeResolveClient is an in-process ResolverClient: records inputs, blocks
-// each call until release (or returns immediately), and answers with a fixed
-// decision or error.
+// each call until release, answers with a fixed decision or error.
 type fakeResolveClient struct {
 	mu       sync.Mutex
 	inputs   []ResolveInput
@@ -139,9 +138,8 @@ func TestResolveHandlerHappyPath(t *testing.T) {
 	require.Equal(t, []string{"authorization", "x-signature"}, document.SuppressHeaders)
 	require.Equal(t, []string{"Bearer secret-value", "secret-value", "sig"}, document.Redactions)
 
-	// The wire subject is the resolved sandboxId, the destination carries the
-	// normalized authority (default port), and the frame headers serialize as
-	// an empty object.
+	// Wire subject is the resolved sandboxId; authority carries the default
+	// port; frame headers serialize as an empty object.
 	recorded := h.client.recorded()
 	require.Len(t, recorded, 1)
 	require.Equal(t, "sbx_01HZYEXAMPLE", recorded[0].Subject)
@@ -632,10 +630,8 @@ func TestNewSubjectStoreAdmitsExchangeOnlyWithReadyEnv(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// ---------------------------------------------------------------------------
-// Stub-backed end-to-end (tests/resolver/resolver.py): asserts the wire
-// subject, the deterministic signature, timeout and fail-once classes.
-// ---------------------------------------------------------------------------
+// Stub-backed end-to-end (tests/resolver/resolver.py): the wire subject, the
+// deterministic signature, and timeout classification.
 
 func TestResolveHandlerStubEndToEnd(t *testing.T) {
 	socketPath := fmt.Sprintf("%s/r.sock", shortTempDir(t))

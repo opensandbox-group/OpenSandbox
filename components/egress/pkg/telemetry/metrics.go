@@ -193,16 +193,15 @@ func registerEgressMetrics() error {
 	}
 	credentialResolutions, err = meter.Int64Counter(
 		"egress.credential.resolutions_total",
-		metric.WithDescription("Credential header resolutions by closed-set outcome (resolved|denied|timeout). "+
-			"Credential and binding names are tenant-provided and are never attached (OSEP-0025 R10/OSEP-0010)."),
+		metric.WithDescription("Credential header resolutions by closed-set outcome (resolved|denied|timeout); "+
+			"credential and binding names are never attached (OSEP-0025 R10)."),
 	)
 	if err != nil {
 		return err
 	}
 	credentialResolutionDur, err = meter.Float64Histogram(
 		"egress.credential.resolution.duration",
-		metric.WithDescription("Credential header resolution wall-clock latency, outcome-tagged; "+
-			"bounded by the resolver timeout (max 120s)."),
+		metric.WithDescription("Credential header resolution latency, outcome-tagged; bounded by the resolver timeout."),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(
 			0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
@@ -371,8 +370,8 @@ func RecordNftablesUpdateFailed(operation string) {
 	nftUpdateFailed.Add(context.Background(), 1, egressMetricOptWith(attribute.String("operation", operation)))
 }
 
-// Closed-set credential resolution outcomes (OSEP-0025 R10). Tenant-provided
-// names are audit-log fields only, never metric dimensions.
+// Closed-set credential resolution outcomes (OSEP-0025 R10); tenant-provided
+// names stay in audit logs, never metric dimensions.
 const (
 	ResolutionOutcomeResolved = "resolved"
 	ResolutionOutcomeDenied   = "denied"
