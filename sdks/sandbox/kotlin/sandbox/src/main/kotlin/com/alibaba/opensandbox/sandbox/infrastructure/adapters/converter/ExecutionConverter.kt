@@ -52,7 +52,8 @@ object ExecutionConverter {
 internal fun Duration.toCommandTimeoutMillis(): Long {
     require(!isNegative) { "Timeout must be non-negative, got: $this" }
     return try {
-        toMillis()
+        val millis = toMillis()
+        if (minusMillis(millis).isZero) millis else Math.addExact(millis, 1L)
     } catch (e: ArithmeticException) {
         throw IllegalArgumentException("Timeout is too large to represent in milliseconds: $this", e)
     }
