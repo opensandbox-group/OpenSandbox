@@ -251,7 +251,10 @@ func seedExchangeVaultFor(t *testing.T, srv *fastSandboxPolicyServer, s subject.
 // TestVaultExchangeSlowResolveDoesNotBlockOtherSubjects: a subject whose
 // resolver is slow neither blocks another subject's resolve nor the
 // non-resolve vault surface — no shared lock is held across the resolver
-// call (OSEP-0025 caveat 7).
+// call (OSEP-0025 caveat 7). The assertions are RELATIVE (B completes while
+// A is still parked at its resolver), not wall-clock budgets that flake on
+// a loaded CI runner; the 1.5s/0s resolver split makes the ordering
+// unambiguous.
 func TestVaultExchangeSlowResolveDoesNotBlockOtherSubjects(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	slow := startFakeResolverServer(t, 1500*time.Millisecond)
@@ -274,24 +277,32 @@ func TestVaultExchangeSlowResolveDoesNotBlockOtherSubjects(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	require.Len(t, slow.requests, 1, "the slow subject's resolve must be parked at its resolver")
+	<-slow.requests
+	slowDone := func() bool {
+		select {
+		case <-completed:
+			return true
+		default:
+			return false
+		}
+	}
 
-	// Another subject's resolve completes on its own (fast) resolver while
-	// the first is still parked.
-	started := time.Now()
+	// Another subject's resolve runs to completion WHILE the first is still
+	// parked — a shared lock held across the resolver call would serialize
+	// the two behind the 1.5s delay.
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, exchangeResolveRequest("10.0.0.9"))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
-	require.Less(t, time.Since(started), 900*time.Millisecond, "a slow resolver must not delay other subjects")
+	require.False(t, slowDone(), "the fast subject resolved only after the parked resolve returned — resolves were serialized")
 	served := <-fast.requests
 	require.Equal(t, "fsb-iso-b", served.Subject)
 
 	// The non-resolve vault surface (what non-bound hosts and snapshot
-	// fetches ride) answers promptly too.
-	started = time.Now()
+	// fetches ride) answers while the slow resolve stays parked too.
 	code, snapshot := activeSnapshotFor(t, srv, testIP)
 	require.Equal(t, http.StatusOK, code)
 	assert.Contains(t, snapshot, `"exchange":{"credential":"spi-signer"}`)
-	require.Less(t, time.Since(started), 500*time.Millisecond, "active snapshots must not wait on any resolver")
+	require.False(t, slowDone(), "the active snapshot answered only after the parked resolve returned")
 
 	select {
 	case recorder := <-completed:

@@ -327,7 +327,11 @@ start_egress() {
   fi
   # Optional credential-resolver operator configuration (OSEP-0025 Test 15):
   # the origin-scoped HTTPS caller-auth table, plus the resolver CA the Go
-  # TLS stack honors via SSL_CERT_FILE (kept scoped to the HTTPS phase).
+  # TLS stack honors via SSL_CERT_FILE. CAVEAT: SSL_CERT_FILE REPLACES the
+  # process's entire trust pool, not just the resolver path — harmless in
+  # this harness (the egress dials no other TLS endpoint) but NOT production
+  # guidance: install the resolver CA into the host trust store, or wait for
+  # a dedicated CA pool on the resolver client (T8 operator docs).
   local resolver_env=()
   if [ -n "${EGRESS_RESOLVER_AUTH-}" ]; then
     resolver_env=(OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH="${EGRESS_RESOLVER_AUTH}")
