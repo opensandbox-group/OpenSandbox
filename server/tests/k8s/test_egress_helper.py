@@ -472,6 +472,43 @@ class TestApplyEgressToSpec:
         assert env_by_name["OPENSANDBOX_EGRESS_DENY_WEBHOOK"] == "https://hook.example.com"
         assert env_by_name["OPENSANDBOX_EGRESS_LOG_LEVEL"] == "debug"
 
+    def test_credential_resolver_env_injected_into_sidecar(self):
+        """OSEP-0025: the resolver operator env must flow through the sandbox
+        spec into the egress sidecar (the D13 capability gate reads it there)."""
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+        resolver_env = {
+            "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "5",
+            "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "8",
+            "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH": (
+                "https://resolver.internal:443=resolver-token"
+            ),
+        }
+        sandbox_env, egress_env = split_egress_env(resolver_env)
+        assert sandbox_env == {}
+        assert egress_env == resolver_env
+
+        apply_egress_to_spec(
+            containers,
+            _egress_settings(network_policy, env=egress_env),
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        assert (
+            env_by_name["OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"] == "5"
+        )
+        assert (
+            env_by_name["OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY"]
+            == "8"
+        )
+        assert (
+            env_by_name["OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH"]
+            == "https://resolver.internal:443=resolver-token"
+        )
+
     def test_extra_env_none_value_becomes_empty_string(self):
         containers: list = []
         network_policy = NetworkPolicy(

@@ -141,6 +141,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+      - name: Run exchange sidecar resolver image regression
+        run: |
+          docker build -f components/egress/Dockerfile \
+            -t opensandbox-egress:exchange-sidecar-ci .
+          python components/egress/scripts/test_exchange_sidecar_image.py \
+            --image opensandbox-egress:exchange-sidecar-ci --artifacts /tmp/exchange-sidecar-image-evidence
+
+      - name: Upload exchange sidecar image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exchange-sidecar-image-evidence
+          path: /tmp/exchange-sidecar-image-evidence
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Run mitmscripts unit and runtime tests
         working-directory: components/egress
         run: |
