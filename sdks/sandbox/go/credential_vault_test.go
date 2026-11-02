@@ -417,14 +417,24 @@ func TestExchangeCredentialVaultRoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(inline, &inlineGot))
 	require.Equal(t, map[string]any{"type": "inline", "value": "dummy-inline-value"}, inlineGot)
 
+	// The endpoint-only zero-value form defaults to exchange instead of
+	// mislabeling the source as inline.
+	exchangeDefault, err := json.Marshal(CredentialSource{Endpoint: "unix:///run/spi/spi.sock"})
+	require.NoError(t, err)
+	require.Equal(t, `{"type":"exchange","endpoint":"unix:///run/spi/spi.sock"}`, string(exchangeDefault))
+
 	// Sanitized typeless metadata round-trips credential-only (no `type`
-	// emitted); static metadata never leaks a credential reference.
+	// emitted); static metadata never leaks a credential reference; the
+	// guard is symmetric and also strips name from the typeless form.
 	typeless, err := json.Marshal(CredentialAuthMetadata{Credential: "spi-signer"})
 	require.NoError(t, err)
 	require.Equal(t, `{"credential":"spi-signer"}`, string(typeless))
 	static, err := json.Marshal(CredentialAuthMetadata{Type: "bearer", Credential: "tok"})
 	require.NoError(t, err)
 	require.Equal(t, `{"type":"bearer"}`, string(static))
+	typelessWithName, err := json.Marshal(CredentialAuthMetadata{Name: "X-Api-Key", Credential: "spi-signer"})
+	require.NoError(t, err)
+	require.Equal(t, `{"credential":"spi-signer"}`, string(typelessWithName))
 }
 
 func TestCreateSandboxRequestIncludesCredentialProxy(t *testing.T) {

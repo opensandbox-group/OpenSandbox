@@ -285,7 +285,15 @@ test("exchange credentials and typeless auth round-trip losslessly (OSEP-0025)",
 
   const exchangeState = {
     revision: 3,
-    credentials: [{ name: "spi-signer", sourceType: "exchange", revision: 3 }],
+    credentials: [
+      {
+        name: "spi-signer",
+        sourceType: "exchange",
+        revision: 3,
+        // Raw relay-style source rides the wire; the sanitizer must strip it.
+        source: { type: "exchange", endpoint: "unix:///run/spi/spi.sock" },
+      },
+    ],
     bindings: [
       {
         name: "internal-api",
@@ -322,8 +330,32 @@ test("exchange credentials and typeless auth round-trip losslessly (OSEP-0025)",
     ],
   });
   assert.deepEqual(state, created);
+  assert.equal(Object.hasOwn(state.credentials[0], "source"), false);
   assert.equal(Object.hasOwn(state.bindings[0].auth, "type"), false);
   assert.equal(JSON.stringify(state).includes("spi.sock"), false);
+});
+
+test("sanitizer recovers the legacy type:null skew shape", async () => {
+  // During rollout skew a client can still receive the pre-fix sanitized
+  // shape `{"type": null, "credential": ...}`; it must read back as the
+  // typeless form, not crash and not surface `type: null`.
+  const skewState = {
+    revision: 3,
+    credentials: [],
+    bindings: [
+      {
+        name: "internal-api",
+        revision: 3,
+        match: { hosts: ["*.internal.example.com"] },
+        auth: { type: null, credential: "spi-signer" },
+      },
+    ],
+  };
+  const { adapter } = createAdapter(skewState);
+
+  const state = await adapter.get();
+
+  assert.deepEqual(state.bindings[0].auth, { credential: "spi-signer" });
 });
 
 test("sanitizer rejects auth metadata without type or credential", async () => {

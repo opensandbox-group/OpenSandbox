@@ -673,12 +673,18 @@ type CredentialSource struct {
 type InlineCredentialSource = CredentialSource
 
 // MarshalJSON defaults the source type so callers can use the natural
-// zero-value form CredentialSource{Value: secret} for inline material.
+// zero-value forms CredentialSource{Value: secret} (inline) and
+// CredentialSource{Endpoint: resolver} (exchange); an empty Type with both
+// or neither field set stays inline and is rejected downstream.
 func (s CredentialSource) MarshalJSON() ([]byte, error) {
 	type credentialSource CredentialSource
 	source := credentialSource(s)
 	if source.Type == "" {
-		source.Type = CredentialSourceInline
+		if source.Endpoint != "" && source.Value == "" {
+			source.Type = CredentialSourceExchange
+		} else {
+			source.Type = CredentialSourceInline
+		}
 	}
 	return json.Marshal(source)
 }
@@ -815,14 +821,16 @@ type CredentialAuthMetadata struct {
 	Credential string `json:"credential,omitempty"`
 }
 
-// MarshalJSON enforces the sanitized wire shape: static kinds carry type
-// (plus name for apiKey) while only the typeless exchange form carries the
-// credential reference.
+// MarshalJSON enforces the sanitized wire shape symmetrically: static kinds
+// carry type (plus name for apiKey) while the typeless exchange form carries
+// only the credential reference.
 func (m CredentialAuthMetadata) MarshalJSON() ([]byte, error) {
 	type credentialAuthMetadata CredentialAuthMetadata
 	out := credentialAuthMetadata(m)
 	if out.Type != "" {
 		out.Credential = ""
+	} else {
+		out.Name = ""
 	}
 	return json.Marshal(out)
 }

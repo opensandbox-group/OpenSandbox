@@ -209,11 +209,11 @@ export type CredentialAuth =
   /**
    * Typeless exchange form: only a credential reference whose source must be
    * exchange-sourced. The egress resolves the header set per request; static
-   * fields (name/headers/substitutions) are not allowed on this form.
+   * fields (name/headers/substitutions) are not allowed on this form. The
+   * `type?: never` constraint keeps typo'd static kinds compile errors
+   * instead of silently matching this member.
    */
-  | {
-      credential: string;
-    };
+  | ({ credential: string } & { type?: never });
 
 export interface CredentialBinding extends Record<string, unknown> {
   /**

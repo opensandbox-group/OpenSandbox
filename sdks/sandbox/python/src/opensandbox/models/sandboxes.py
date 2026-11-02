@@ -445,6 +445,8 @@ class InlineCredentialSource(BaseModel):
     Write-only inline credential material for Credential Vault.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     value: str = Field(repr=False, description="Inline credential value.")
     type: Literal["inline"] = Field(
         default="inline",
@@ -466,6 +468,8 @@ class ExchangeCredentialSource(BaseModel):
     The egress resolves header sets per request from the header-resolver
     endpoint; ``endpoint`` is configuration, not secret material.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["exchange"] = Field(
         default="exchange", description="Credential source type."
@@ -558,6 +562,22 @@ class CredentialAuth(BaseModel):
     name: str | None = None
     headers: list[CustomHeaderEntry] | None = None
     substitutions: list[CredentialSubstitution] | None = None
+
+    @model_validator(mode="after")
+    def typeless_form_must_only_carry_credential(self) -> "CredentialAuth":
+        if self.type is not None:
+            return self
+        if not (self.credential or "").strip():
+            raise ValueError(
+                "CredentialAuth requires either a static 'type' or an"
+                " exchange 'credential' reference"
+            )
+        if self.name is not None or self.headers is not None or self.substitutions is not None:
+            raise ValueError(
+                "The typeless exchange auth form carries only 'credential';"
+                " 'name', 'headers', and 'substitutions' require a static 'type'"
+            )
+        return self
 
 
 class CredentialBinding(BaseModel):
