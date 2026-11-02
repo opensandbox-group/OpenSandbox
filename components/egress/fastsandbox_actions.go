@@ -718,7 +718,9 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		if err := s.applyPolicy(subj, pol); err != nil {
 			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
 		}
-		s.clearPendingPolicy(subj)
+		// The pending slot stays: it now mirrors what is enforced, so a
+		// data-plane-ready replayed after a lost ack is idempotent (same
+		// rationale as the relay PUT and policy import).
 		log.Infof("subject %s: data-plane-ready, policy active applyPolicy=%dms", subj, time.Since(applyStarted).Milliseconds())
 		return http.StatusOK, nil
 	default:
