@@ -26,6 +26,8 @@ import (
 
 const disableMetricsEnv = "OPENSANDBOX_DISABLE_METRICS"
 
+const createMetricTimeout = 5 * time.Second
+
 type sandboxCreateMetricsEvent struct {
 	EventType        string `json:"eventType"`
 	SandboxID        string `json:"sandboxId,omitempty"`
@@ -63,17 +65,20 @@ func reportSandboxCreateMetric(cfg ConnectionConfig, sandboxID, image string, du
 	go func() {
 		defer func() { _ = recover() }()
 
+		ctx, cancel := context.WithTimeout(context.Background(), createMetricTimeout)
+		defer cancel()
+
 		url := cfg.GetBaseURL() + "/" + APIVersion + "/metrics/events"
 		client := cfg.HTTPClient
 		if client == nil {
-			client = &http.Client{Timeout: 5 * time.Second}
+			client = &http.Client{Timeout: createMetricTimeout}
 		}
 		// Metrics bypass NewClient, but must apply the same redirect protection
 		// without changing a caller-owned client or its redirect policy.
 		cloned := *client
 		cloned.CheckRedirect = protectedHeaderRedirectPolicy(client.CheckRedirect, cfg.GetAuthHeader())
 		client = &cloned
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return
 		}
