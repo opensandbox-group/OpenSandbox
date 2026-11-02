@@ -83,6 +83,12 @@ func validateResolverEndpoint(endpoint string) (string, error) {
 		if parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawFragment != "" {
 			return "", fmt.Errorf("exchange credential endpoint %q must not carry a query or fragment", endpoint)
 		}
+		// Aligned with parseResolverEndpoint: a prefix the transport rejects
+		// must fail at admission, not surface as per-request 503s. A bare "/"
+		// is the empty prefix and stays valid.
+		if path := parsed.EscapedPath(); path != "/" && strings.HasSuffix(path, "/") {
+			return "", fmt.Errorf("exchange credential endpoint %q path prefix must not end with /", endpoint)
+		}
 		return endpoint, nil
 	default:
 		return "", fmt.Errorf("exchange credential endpoint %q must use the unix:/// or https:// scheme", endpoint)

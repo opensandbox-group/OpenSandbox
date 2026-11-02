@@ -28,6 +28,7 @@ func TestExchangeSourceFactoryAcceptsSupportedEndpoints(t *testing.T) {
 		"https://header-resolver.internal",
 		"https://resolver.internal:8443",
 		"https://resolver.internal/prefix",
+		"https://resolver.internal/", // bare "/" is the empty prefix on the wire
 	} {
 		t.Run(endpoint, func(t *testing.T) {
 			source, err := NewSourceRegistry().Create(mustMarshal(map[string]string{"type": "exchange", "endpoint": endpoint}))
@@ -50,6 +51,11 @@ func TestExchangeSourceFactoryRejects(t *testing.T) {
 		{"port zero", `{"type":"exchange","endpoint":"https://resolver.internal:0"}`},
 		{"query string", `{"type":"exchange","endpoint":"https://resolver.internal/prefix?debug=1"}`},
 		{"fragment", `{"type":"exchange","endpoint":"https://resolver.internal/prefix#section"}`},
+		// The transport-side validator (parseResolverEndpoint) rejects a
+		// trailing-slash prefix; admission must agree so the vault write
+		// fails instead of every resolve turning into a 503.
+		{"https trailing slash prefix", `{"type":"exchange","endpoint":"https://resolver.corp/api/"}`},
+		{"https trailing slash only path", `{"type":"exchange","endpoint":"https://resolver.corp/api//"}`},
 		{"unix relative path", `{"type":"exchange","endpoint":"unix://spi.sock"}`},
 		{"unix empty path", `{"type":"exchange","endpoint":"unix:///"}`},
 		{"unknown field", `{"type":"exchange","endpoint":"unix:///run/spi.sock","value":"secret"}`},

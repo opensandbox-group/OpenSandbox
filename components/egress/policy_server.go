@@ -120,6 +120,12 @@ func startPolicyServer(
 	} else {
 		handler.credentialVault = credentialvault.NewStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
 	}
+	// D13 capability gate from env; malformed config fails exchange admission.
+	resolverConfig, resolverConfigErr := credentialvault.ResolverConfigFromEnv()
+	if resolverConfigErr != nil {
+		log.Warnf("credential resolver operator configuration not ready: %v", resolverConfigErr)
+	}
+	handler.credentialVault.SetResolverConfig(resolverConfig)
 	handler.credentialVaultRequireTLS = constants.IsTruthy(os.Getenv(constants.EnvCredentialVaultRequireTLS))
 	handler.setAlwaysRules(alwaysDeny, alwaysAllow)
 	if liveRevision {
@@ -149,7 +155,10 @@ func startPolicyServer(
 		if err != nil {
 			return nil, nil, fmt.Errorf("lookup credential proxy user %q: %w", mitmproxy.RunAsUser, err)
 		}
-		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServerRequestAware(handler.handleCredentialVaultActive, socketPath, int(mitmGID))
+		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServerRequestAware(
+			handler.handleCredentialVaultActive,
+			credentialvault.NewResolveHandler(handler.resolveVaultAccess),
+			socketPath, int(mitmGID))
 		if err != nil {
 			return nil, nil, fmt.Errorf("credential vault active socket: %w", err)
 		}
@@ -309,6 +318,15 @@ func (s *policyServer) handleCredentialVaultSubresource(w http.ResponseWriter, r
 	case path == "_active":
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	case path == "_resolve":
+		// Socket-only like _active: never served on the TCP surface.
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -626,6 +644,20 @@ func (s *policyServer) handleCredentialVaultBinding(w http.ResponseWriter, name 
 
 func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter, r *http.Request) {
 	handleActiveVaultSnapshot(w, r, s.credentialVault)
+}
+
+// resolveVaultAccess derives the sidecar resolve subject: the pod-injected
+// sandbox identity, never a protocol value. The store is the single vault;
+// the recheck derivation is byte-identical.
+func (s *policyServer) resolveVaultAccess(_ *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	sandboxID := strings.TrimSpace(os.Getenv(constants.EnvSandboxID))
+	if sandboxID == "" {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
+			Status: http.StatusServiceUnavailable,
+			Reason: "sandbox identity unavailable",
+		}
+	}
+	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: s.credentialVault}, nil
 }
 
 func (s *policyServer) handleGet(w http.ResponseWriter) {
