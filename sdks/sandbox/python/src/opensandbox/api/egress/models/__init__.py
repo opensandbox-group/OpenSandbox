@@ -16,14 +16,10 @@
 
 """Contains all the data models used in inputs/outputs"""
 
-from .api_key_credential_auth import ApiKeyCredentialAuth
-from .api_key_credential_auth_type import ApiKeyCredentialAuthType
-from .basic_credential_auth import BasicCredentialAuth
-from .basic_credential_auth_type import BasicCredentialAuthType
-from .bearer_credential_auth import BearerCredentialAuth
-from .bearer_credential_auth_type import BearerCredentialAuthType
 from .credential import Credential
+from .credential_auth import CredentialAuth
 from .credential_auth_metadata import CredentialAuthMetadata
+from .credential_auth_type import CredentialAuthType
 from .credential_binding import CredentialBinding
 from .credential_binding_list_response import CredentialBindingListResponse
 from .credential_binding_metadata import CredentialBindingMetadata
@@ -33,33 +29,25 @@ from .credential_match import CredentialMatch
 from .credential_match_schemes_item import CredentialMatchSchemesItem
 from .credential_metadata import CredentialMetadata
 from .credential_mutation_set import CredentialMutationSet
+from .credential_source import CredentialSource
+from .credential_source_type import CredentialSourceType
 from .credential_substitution import CredentialSubstitution
 from .credential_substitution_in_item import CredentialSubstitutionInItem
 from .credential_vault_create_request import CredentialVaultCreateRequest
 from .credential_vault_mutation_request import CredentialVaultMutationRequest
 from .credential_vault_state import CredentialVaultState
 from .custom_header_entry import CustomHeaderEntry
-from .custom_headers_credential_auth import CustomHeadersCredentialAuth
-from .custom_headers_credential_auth_type import CustomHeadersCredentialAuthType
-from .inline_credential_source import InlineCredentialSource
-from .inline_credential_source_type import InlineCredentialSourceType
 from .network_policy import NetworkPolicy
 from .network_policy_default_action import NetworkPolicyDefaultAction
 from .network_rule import NetworkRule
 from .network_rule_action import NetworkRuleAction
-from .passthrough_credential_auth import PassthroughCredentialAuth
-from .passthrough_credential_auth_type import PassthroughCredentialAuthType
 from .policy_status_response import PolicyStatusResponse
 
 __all__ = (
-    "ApiKeyCredentialAuth",
-    "ApiKeyCredentialAuthType",
-    "BasicCredentialAuth",
-    "BasicCredentialAuthType",
-    "BearerCredentialAuth",
-    "BearerCredentialAuthType",
     "Credential",
+    "CredentialAuth",
     "CredentialAuthMetadata",
+    "CredentialAuthType",
     "CredentialBinding",
     "CredentialBindingListResponse",
     "CredentialBindingMetadata",
@@ -69,21 +57,17 @@ __all__ = (
     "CredentialMatchSchemesItem",
     "CredentialMetadata",
     "CredentialMutationSet",
+    "CredentialSource",
+    "CredentialSourceType",
     "CredentialSubstitution",
     "CredentialSubstitutionInItem",
     "CredentialVaultCreateRequest",
     "CredentialVaultMutationRequest",
     "CredentialVaultState",
     "CustomHeaderEntry",
-    "CustomHeadersCredentialAuth",
-    "CustomHeadersCredentialAuthType",
-    "InlineCredentialSource",
-    "InlineCredentialSourceType",
     "NetworkPolicy",
     "NetworkPolicyDefaultAction",
     "NetworkRule",
     "NetworkRuleAction",
-    "PassthroughCredentialAuth",
-    "PassthroughCredentialAuthType",
     "PolicyStatusResponse",
 )

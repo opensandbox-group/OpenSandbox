@@ -68,6 +68,7 @@ export type {
   ActivityProbe,
   IdlePolicy,
   RenewalPolicy,
+  ExchangeCredentialSource,
   InlineCredentialSource,
   LifecycleHook,
   ListSnapshotsParams,

@@ -38,7 +38,8 @@ class CredentialBindingMetadata:
         name (str):
         revision (int): See CredentialMetadata.revision for the Fsb caveat.
         match (CredentialMatch | Unset):
-        auth (CredentialAuthMetadata | Unset): Sanitized auth shape — type always, name for apiKey only.
+        auth (CredentialAuthMetadata | Unset): Sanitized auth shape — `type` (plus `name` for `apiKey`) for static
+            kinds; `credential` only for the typeless exchange form.
     """
 
     name: str

@@ -29,15 +29,17 @@ from opensandbox.sync.adapters.egress_adapter import EgressAdapterSync
 
 
 class _CredentialVaultAsyncTransport(httpx.AsyncBaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, post_response: dict | None = None) -> None:
         self.requests: list[httpx.Request] = []
+        self._post_response = post_response
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.method == "POST" and request.url.path == "/credential-vault":
             return httpx.Response(
                 201,
-                json={
+                json=self._post_response
+                or {
                     "revision": 1,
                     "credentials": [
                         {"name": "gitlab-token", "sourceType": "inline", "revision": 1}
@@ -165,3 +167,63 @@ def test_sync_credential_vault_get_and_delete() -> None:
     with pytest.raises(SandboxApiException) as exc_info:
         adapter.get_credential("missing")
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_async_credential_vault_exchange_round_trip() -> None:
+    """OSEP-0025: exchange sources and typeless auth serialize losslessly and
+    the sanitized typeless read shape (credential reference, no `type`) parses
+    without surfacing a `type: null`."""
+    transport = _CredentialVaultAsyncTransport(
+        post_response={
+            "revision": 1,
+            "credentials": [
+                {"name": "spi-signer", "sourceType": "exchange", "revision": 1}
+            ],
+            "bindings": [
+                {
+                    "name": "internal-api",
+                    "revision": 1,
+                    "auth": {"credential": "spi-signer"},
+                    "match": {"hosts": ["*.internal.example.com"]},
+                }
+            ],
+        }
+    )
+    adapter = EgressAdapter(
+        ConnectionConfig(transport=transport),
+        SandboxEndpoint(endpoint="sandbox.internal:18080"),
+    )
+
+    state = await adapter.create(
+        credentials=[
+            {
+                "name": "spi-signer",
+                "source": {"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+            }
+        ],
+        bindings=[
+            {
+                "name": "internal-api",
+                "match": {"hosts": ["*.internal.example.com"]},
+                "auth": {"credential": "spi-signer"},
+            }
+        ],
+    )
+
+    post_body = json.loads(transport.requests[0].content)
+    assert post_body["credentials"][0] == {
+        "name": "spi-signer",
+        "source": {"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+    }
+    assert post_body["bindings"][0]["auth"] == {"credential": "spi-signer"}
+    assert "type" not in post_body["bindings"][0]["auth"]
+
+    assert state.credentials[0] is not None
+    assert state.credentials[0].source_type == "exchange"
+    typeless = state.bindings[0].auth
+    assert typeless is not None
+    assert typeless.credential == "spi-signer"
+    dumped = typeless.model_dump(by_alias=True, exclude_none=True)
+    assert dumped == {"credential": "spi-signer"}
+    assert "type" not in dumped
