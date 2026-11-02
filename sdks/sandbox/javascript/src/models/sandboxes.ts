@@ -100,6 +100,7 @@ export interface InlineCredentialSource extends Record<string, unknown> {
    * requests and is never present in Credential Vault state responses.
    */
   value: string;
+  endpoint?: never;
 }
 
 export interface ExchangeCredentialSource extends Record<string, unknown> {
@@ -108,6 +109,7 @@ export interface ExchangeCredentialSource extends Record<string, unknown> {
    * Header-resolver endpoint (`unix:///path` or `https://host[:port]`).
    */
   endpoint: string;
+  value?: never;
 }
 
 export interface Credential extends Record<string, unknown> {
@@ -204,9 +206,14 @@ export type CredentialAuth =
     } & CredentialAuthSubstitutions)
   /**
    * Typeless exchange form: only a credential reference (exchange-sourced).
-   * `type?: never` keeps typo'd static kinds compile errors.
+   * Static-only fields are `never` so they stay compile errors here.
    */
-  | ({ credential: string } & { type?: never });
+  | ({ credential: string } & {
+      type?: never;
+      name?: never;
+      headers?: never;
+      substitutions?: never;
+    });
 
 export interface CredentialBinding extends Record<string, unknown> {
   /**

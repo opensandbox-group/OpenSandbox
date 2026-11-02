@@ -243,11 +243,16 @@ test("Credential Vault state omits plaintext secret fields", async () => {
 
   const dts = await readDistDeclarations();
   const inlineCredentialSource = declarationBlock(dts, "InlineCredentialSource");
+  const exchangeCredentialSource = declarationBlock(dts, "ExchangeCredentialSource");
   const credentialMetadata = declarationBlock(dts, "CredentialMetadata");
   const authMetadata = declarationBlock(dts, "CredentialAuthMetadata");
   const bindingMetadata = declarationBlock(dts, "CredentialBindingMetadata");
 
   assert.match(inlineCredentialSource, /\btype\?: "inline"/);
+  // Cross-variant keys stay compile errors: each source variant forbids the
+  // other kind's field.
+  assert.match(inlineCredentialSource, /\bendpoint\?: never/);
+  assert.match(exchangeCredentialSource, /\bvalue\?: never/);
   assert.doesNotMatch(credentialMetadata, /extends Record/);
   assert.doesNotMatch(credentialMetadata, /\bsource\s*[?:]/);
   assert.doesNotMatch(authMetadata, /extends Record/);
@@ -259,6 +264,8 @@ test("Credential Vault state omits plaintext secret fields", async () => {
   assert.doesNotMatch(authMetadata, /\bheaders\s*[?:]/);
   assert.doesNotMatch(bindingMetadata, /extends Record/);
   assert.match(bindingMetadata, /\bauth\??: CredentialAuthMetadata/);
+  // Static-only auth fields stay compile errors on the typeless member.
+  assert.match(dts, /type\?: never;\s*\n\s*name\?: never;\s*\n\s*headers\?: never;\s*\n\s*substitutions\?: never/);
 });
 
 test("Egress declarations keep Credential Vault optional for custom adapters", async () => {
