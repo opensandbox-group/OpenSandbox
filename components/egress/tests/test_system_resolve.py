@@ -31,10 +31,10 @@ import sys
 import threading
 import time
 import types
-import unittest
+import unittest.mock as mock
 from pathlib import Path
 from typing import Any
-from unittest import mock
+from unittest import TestCase, main
 from urllib.parse import quote, quote_plus
 
 MITMSCRIPTS = Path(__file__).resolve().parents[1] / "mitmscripts"
@@ -243,7 +243,7 @@ class _ScriptedResponse:
         return None
 
 
-class ExchangeResolveTest(unittest.TestCase):
+class ExchangeResolveTest(TestCase):
     def setUp(self) -> None:
         self.system = _load_system_module()
         self.log: _Log = self.system.ctx.log
@@ -832,4 +832,4 @@ class ExchangeResolveTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

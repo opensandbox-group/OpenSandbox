@@ -72,7 +72,7 @@ import os
 import re
 import socket
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
 from urllib.parse import quote, quote_plus, unquote
 
 from mitmproxy import ctx, http
@@ -1867,7 +1867,7 @@ def _observe_tls_shadow(
             ctx.log.warn("credential proxy: tls-shadow observer_error")
 
 
-def _requestheaders_pull(flow: http.HTTPFlow) -> Any | None:
+def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
     """Pull-mode processing; returns an awaitable only when an exchange
     binding defers its resolve I/O to the caller."""
     try:
@@ -2069,7 +2069,7 @@ def _reject_ambiguous_binding_path(
 
 def _apply_vault_binding(
     flow: http.HTTPFlow, vault: ActiveVault, live: Any | None = None
-) -> Any | None:
+) -> Awaitable[None] | None:
     """Shared binding selection, ambiguity checks and credential injection.
 
     Returns an awaitable only for pull-mode exchange bindings (their resolve
@@ -2126,6 +2126,7 @@ def _apply_vault_binding(
             f"{binding.get('name')} revision={vault.revision} "
             f"host={_request_host(flow)} method={flow.request.method}"
         )
+    return None
 
 
 def _apply_exchange_binding(
@@ -2133,7 +2134,7 @@ def _apply_exchange_binding(
     vault: ActiveVault,
     binding: dict[str, Any],
     live: Any | None,
-) -> Any | None:
+) -> Awaitable[None] | None:
     """Gate one exchange binding, then defer its resolve I/O.
 
     Live snapshots never carry exchange (the egress admission gate rejects
