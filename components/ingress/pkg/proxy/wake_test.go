@@ -94,6 +94,13 @@ func (f *fakeLifecycle) ResumeSandbox(context.Context, sandbox.EndpointTarget, s
 	return sandbox.ResumeAccepted, nil
 }
 
+// resumeCount reads resumes under the lock: the flight goroutine writes it.
+func (f *fakeLifecycle) resumeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resumes
+}
+
 type recordingActivity struct {
 	mu      sync.Mutex
 	entries []string
@@ -183,9 +190,9 @@ func TestProxyWakesPausedSandboxOnResolutionFailure(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, "served", response.Body.String())
-	require.Equal(t, 2, provider.calls)    // failed resolution + retry after wake
-	require.Equal(t, 1, lifecycle.resumes) // one resume flight
-	require.Zero(t, provider.invalids)     // resolution failures never touch the route cache
+	require.Equal(t, 2, provider.calls)          // failed resolution + retry after wake
+	require.Equal(t, 1, lifecycle.resumeCount()) // one resume flight
+	require.Zero(t, provider.invalids)           // resolution failures never touch the route cache
 }
 
 func TestProxyWakeBudgetExhaustionAnswersMarkedRetryAfter(t *testing.T) {
@@ -207,7 +214,7 @@ func TestProxyWakeBudgetExhaustionAnswersMarkedRetryAfter(t *testing.T) {
 	body := response.Body.String()
 	require.Contains(t, body, "sandbox_wake_timeout")
 	require.Contains(t, body, "sandbox-123")
-	require.Equal(t, 1, lifecycle.resumes)
+	require.Equal(t, 1, lifecycle.resumeCount())
 }
 
 func TestProxyStaleRouteWakeBudgetExhaustionStaysBare(t *testing.T) {
@@ -230,7 +237,7 @@ func TestProxyStaleRouteWakeBudgetExhaustionStaysBare(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 	require.Equal(t, "1", response.Header().Get("Retry-After"))
 	require.Empty(t, response.Header().Get("OpenSandbox-Wake"))
-	require.Equal(t, 1, lifecycle.resumes)
+	require.Equal(t, 1, lifecycle.resumeCount())
 }
 
 func TestProxyStripsUpstreamWakeMarker(t *testing.T) {
@@ -266,7 +273,7 @@ func TestProxyWakeTerminalSandboxAnswersNotFound(t *testing.T) {
 	p.ServeHTTP(response, request)
 
 	require.Equal(t, http.StatusNotFound, response.Code)
-	require.Zero(t, lifecycle.resumes)
+	require.Zero(t, lifecycle.resumeCount())
 }
 
 func TestProxyStaleRouteReplaysReplayableRequestAfterWake(t *testing.T) {
@@ -296,7 +303,7 @@ func TestProxyStaleRouteReplaysReplayableRequestAfterWake(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, "recovered", response.Body.String())
 	require.Equal(t, 2, hits.load())
-	require.Equal(t, 1, lifecycle.resumes)
+	require.Equal(t, 1, lifecycle.resumeCount())
 	require.Positive(t, provider.invalids) // stale route invalidated the cache
 }
 
@@ -323,7 +330,7 @@ func TestProxyStaleRouteKeepsFiftyThreeForForwardedPost(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 	require.Equal(t, "1", response.Header().Get("Retry-After"))
 	require.Equal(t, 1, hits.load()) // executed exactly once upstream
-	require.Zero(t, lifecycle.resumes)
+	require.Zero(t, lifecycle.resumeCount())
 }
 
 func TestProxyStaleRouteKeepsFiftyThreeForOversizedBody(t *testing.T) {
@@ -346,7 +353,7 @@ func TestProxyStaleRouteKeepsFiftyThreeForOversizedBody(t *testing.T) {
 	// no resume is triggered.
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 	require.Equal(t, "1", response.Header().Get("Retry-After"))
-	require.Zero(t, lifecycle.resumes)
+	require.Zero(t, lifecycle.resumeCount())
 }
 
 func TestCaptureBodyForReplayShortCircuitsAndBuffers(t *testing.T) {

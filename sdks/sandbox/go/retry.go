@@ -276,12 +276,22 @@ func (r *RetryConfig) backoff(attempt int) time.Duration {
 		multiplier = 1
 	}
 	delay := float64(r.InitialBackoff) * math.Pow(multiplier, float64(attempt))
-	if r.MaxBackoff > 0 && delay > float64(r.MaxBackoff) {
-		delay = float64(r.MaxBackoff)
+	// An unset MaxBackoff still saturates at the largest Duration, which also
+	// keeps an infinite delay from turning into NaN under jitter.
+	maxDelay := float64(math.MaxInt64)
+	if r.MaxBackoff > 0 {
+		maxDelay = float64(r.MaxBackoff)
+	}
+	if delay > maxDelay {
+		delay = maxDelay
 	}
 	if r.Jitter > 0 {
 		jitter := delay * r.Jitter
 		delay = delay - jitter + rand.Float64()*2*jitter
+	}
+	// Converting a float at or above 2^63 to Duration wraps to a negative value.
+	if delay >= float64(math.MaxInt64) {
+		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(delay)
 }
@@ -323,14 +333,20 @@ func parseRetryAfterValue(val string) (time.Duration, bool) {
 	if val == "" {
 		return 0, false
 	}
-	if secs, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+	number := strings.TrimSpace(val)
+	secs, err := strconv.ParseInt(number, 10, 64)
+	// ParseInt can report overflow before examining trailing non-digits.
+	if errors.Is(err, strconv.ErrRange) {
+		digits := strings.TrimLeft(number, "+-")
+		if strings.Trim(digits, "0123456789") != "" {
+			return 0, false
+		}
+		err = nil // ParseInt has already clamped the value to an int64 bound.
+	}
+	if err == nil {
 		if secs < 0 {
 			return 0, true
 		}
-		// Saturate before multiplying: wrapping to a negative duration would
-		// turn server back-pressure into an immediate retry. ParseInt also
-		// saturates positive values that exceed int64, independently of the
-		// platform's int width.
 		if secs > math.MaxInt64/int64(time.Second) {
 			return time.Duration(math.MaxInt64), true
 		}

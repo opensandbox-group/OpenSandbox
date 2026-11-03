@@ -739,6 +739,20 @@ func TestBackoff_UnsetMaxBackoffDoesNotCapToZero(t *testing.T) {
 	}
 }
 
+func TestBackoff_SaturatesInsteadOfOverflowing(t *testing.T) {
+	// Without a MaxBackoff, a long retry run must not wrap to a negative delay.
+	exact := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0}
+	jittered := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0, Jitter: 0.25}
+	for _, attempt := range []int{35, 40, 64, 2000} {
+		if got := exact.backoff(attempt); got != time.Duration(math.MaxInt64) {
+			t.Errorf("backoff(%d) = %v, want the maximum duration", attempt, got)
+		}
+		if got := jittered.backoff(attempt); got < time.Duration(math.MaxInt64)/2 {
+			t.Errorf("jittered backoff(%d) = %v, want a saturated delay", attempt, got)
+		}
+	}
+}
+
 func TestRetry_LargeWakeRetryAfterExhaustsDeadline(t *testing.T) {
 	wait, present := parseRetryAfterValue("9223372036854775807")
 	client := &Client{retry: &RetryConfig{WakeOverallDeadline: time.Millisecond}}
@@ -753,6 +767,14 @@ func TestRetry_LargeWakeRetryAfterExhaustsDeadline(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("oversized Retry-After should exhaust the deadline before retrying; got %d attempts", attempts)
+	}
+}
+
+func TestParseRetryAfterRejectsOverflowWithTrailingGarbage(t *testing.T) {
+	for _, value := range []string{"999999999999999999999999x", "-999999999999999999999999x"} {
+		if _, present := parseRetryAfterValue(value); present {
+			t.Errorf("malformed Retry-After %q reported as present", value)
+		}
 	}
 }
 

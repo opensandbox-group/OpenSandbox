@@ -66,7 +66,10 @@ from opensandbox_server.services.k8s.error_helpers import (
 )
 from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
-from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
+from opensandbox_server.services.k8s.list_helpers import (
+    _build_list_sandboxes_response,
+    build_sandbox_label_selector,
+)
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
     _is_quota_exhausted_status,
@@ -1350,10 +1353,16 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             logger.error(f"Error getting sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("get sandbox", e) from e
 
-    def list_sandbox_objects(self) -> list[Sandbox]:
+    def list_sandbox_objects(
+        self,
+        metadata: Optional[Dict[str, str]] = None,
+        label_selector: Optional[str] = None,
+    ) -> list[Sandbox]:
+        if label_selector is None:
+            label_selector = build_sandbox_label_selector(metadata)
         workloads = self.workload_provider.list_workloads(
             namespace=self._resolve_namespace(),
-            label_selector=SANDBOX_ID_LABEL,
+            label_selector=label_selector,
         )
         tenant = get_current_tenant()
         sandboxes = []
@@ -1367,7 +1376,11 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
-            return _build_list_sandboxes_response(self.list_sandbox_objects(), request)
+            metadata = request.filter.metadata if request.filter else None
+            return _build_list_sandboxes_response(
+                self.list_sandbox_objects(metadata=metadata),
+                request,
+            )
             
         except Exception as e:
             logger.error(f"Error listing sandboxes: {e}")

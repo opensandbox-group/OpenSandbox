@@ -160,6 +160,12 @@ opensandbox-controller:
 
     logLevel: debug
 
+    # Scope the controller informer cache to the sandbox workload
+    # namespaces (OOM avoidance on large shared clusters); empty or
+    # omitted watches the whole cluster
+    namespaces:
+      - opensandbox
+
     snapshot:
       registry: myregistry.example.com/opensandbox/snapshots
       snapshotPushSecret: registry-snapshot-push-secret
@@ -230,6 +236,20 @@ helm install ingress-gateway manifests/charts/ingress-gateway \
   --namespace opensandbox-system \
   --set gateway.service.type=LoadBalancer
 ```
+
+#### 5. Scope the Controller Cache on Large Shared Clusters
+
+The controller watches Pods and Jobs through its informer cache. On large shared clusters a cluster-wide cache can exceed the controller's memory limit during startup (the Pod gets OOM-killed before Ready). Scope the cache to the namespaces that hold your Pool/BatchSandbox workloads:
+
+```bash
+helm install opensandbox-controller manifests/charts/controller \
+  --set controller.namespaces='{opensandbox}' \
+  --namespace opensandbox-system
+```
+
+With the umbrella chart, use `--set opensandbox-controller.controller.namespaces='{opensandbox}'` (same key nested under the sub-chart prefix).
+
+Every watched namespace must be listed — the CRs, their Pods, and snapshot commit Jobs are only reconciled inside the scope. Multi-tenant deployments with BatchSandboxes spread across many namespaces should leave this empty (cluster-wide, the default). The equivalent controller flag is `--namespaces=ns-a,ns-b`.
 
 ## Rendered-Manifests (GitOps) Deployment
 

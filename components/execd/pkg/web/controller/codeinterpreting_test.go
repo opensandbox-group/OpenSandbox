@@ -38,7 +38,7 @@ type fakeCodeRunner struct {
 	validateBashSessionCwd func(_, _ string) error
 }
 
-func (f *fakeCodeRunner) CreateContext(_ *runtime.CreateContextRequest) (string, error) {
+func (f *fakeCodeRunner) CreateContext(_ context.Context, _ *runtime.CreateContextRequest) (string, error) {
 	return "", nil
 }
 

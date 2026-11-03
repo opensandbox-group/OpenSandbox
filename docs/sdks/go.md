@@ -540,6 +540,7 @@ defer cancel()
 template, err := manager.CreateTemplate(buildCtx, opensandbox.CreateTemplateRequest{
     Image:          "alpine:3.19",
     Publish:        "s3://bucket/publish",
+    Format:         opensandbox.TemplateFormatNative,
     ResourceLimits: opensandbox.ResourceLimits{"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
     Readiness:      &opensandbox.TemplateReadiness{Probe: "tcp://127.0.0.1:44772"},
     Metadata:       map[string]string{"team": "backend"},
