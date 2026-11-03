@@ -662,6 +662,8 @@ if _, err := sandbox.PatchMetadata(ctx, opensandbox.MetadataPatch{
 
 Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 
+Successful `PauseSandbox`, `ResumeSandbox`, and `DeleteSandbox` requests remove cached endpoints for that sandbox from the client's endpoint cache, so subsequent lookups fetch current endpoint information. Failed requests leave cached entries intact; other sandboxes are unaffected.
+
 | Method | Description |
 |--------|-------------|
 | `CreateSandbox(ctx, req)` | Create a new sandbox from a container image |
