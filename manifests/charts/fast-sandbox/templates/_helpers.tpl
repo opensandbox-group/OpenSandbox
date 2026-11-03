@@ -70,3 +70,15 @@ Namespace the workloads run in.
 {{- define "fast-sandbox.namespace" -}}
 {{- default "opensandbox-system" .Values.systemNamespace }}
 {{- end }}
+
+{{/*
+Whether DART P2P artifact delivery is enabled. Defaults to true when the
+p2p map is absent from the values tree, so `helm upgrade --reuse-values`
+from a pre-p2p-switch release (whose reused values carry no runtime.p2p
+key and therefore skip the new chart default) keeps rendering the DART
+resources instead of failing on a nil lookup.
+*/}}
+{{- define "fast-sandbox.p2pEnabled" -}}
+{{- $p2p := dig "p2p" (dict) (.Values.runtime | default dict) -}}
+{{- if hasKey $p2p "enabled" -}}{{ $p2p.enabled }}{{- else -}}true{{- end -}}
+{{- end -}}

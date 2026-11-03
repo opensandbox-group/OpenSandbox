@@ -72,7 +72,7 @@ subjects:
 - kind: ServiceAccount
   name: fast-sandbox-firecracker-runtime
   namespace: {{ $ns }}
-{{- if .Values.runtime.p2p.enabled }}
+{{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
 ---
 # Headless Service backing DART peer discovery: DNS seeding hands out the
 # ready runtime Pod IPs so node-local DART daemons can find each other
@@ -121,7 +121,7 @@ data:
     stateRoot: {{ .Values.runtime.stateRoot }}
     registryConfig: /etc/fast-sandbox/agent/registry.json
     hostnameFile: /etc/hostname
-    {{- if .Values.runtime.p2p.enabled }}
+    {{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
     p2p:
       dart:
         addr: http://127.0.0.1:8145
@@ -266,7 +266,7 @@ spec:
           initialDelaySeconds: 2
           periodSeconds: 5
           timeoutSeconds: 3
-        {{- if .Values.runtime.p2p.enabled }}
+        {{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
         ports:
         - name: peer
           containerPort: {{ .Values.runtime.dartPeerPort }}

@@ -9,7 +9,7 @@ Components:
   - firecracker-runtime (per-node UDS management API + node readiness
     loop: host checks, Firecracker asset install, self-applied scheduling
     labels + FirecrackerReady condition; janitor sidecar
-{{- if .Values.runtime.p2p.enabled }}
+{{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
     + DART P2P delivery, peer discovery Service:
     dart.{{ include "fast-sandbox.namespace" . }}.svc
 {{- else }}
