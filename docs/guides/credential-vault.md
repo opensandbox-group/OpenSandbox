@@ -55,17 +55,15 @@ The private active-vault socket is a hard availability dependency for all traffi
 ## Persistence Across Pause and Resume
 
 ::: warning In-memory state
-Credential Vault entries are process-local memory in the egress sidecar; they are not part of the sandbox root filesystem or the `BatchSandbox` Pod template. Kubernetes pause deletes the Pod after snapshotting, so the fresh egress sidecar created by resume starts with an empty vault. Credential injection does not resume until a trusted client creates the credentials and bindings again.
+For sidecar-profile sandboxes the vault is process-local memory in the egress sidecar — not part of the sandbox root filesystem or the Pod template. Kubernetes pause deletes the Pod after snapshotting, so resume starts with an empty vault; Docker pause/unpause keeps the processes, but any sidecar replacement or restart is equally empty. Either way, re-create the vault after the sandbox is `Running`, before work that depends on those credentials.
 
-Keep the original vault request or an equivalent secret-manager reference in a trusted control plane outside the sandbox. After the sandbox returns to `Running`, call the Credential Vault create API again before allowing work that depends on those credentials. Do not persist real credential values in sandbox metadata, environment variables, snapshots, or logs.
-
-Docker pause/unpause retains the existing container processes, but any egress sidecar replacement or restart also creates a new in-memory vault and requires the same re-injection procedure.
+Keep the original vault request (or a secret-manager reference) in a trusted control plane outside the sandbox. Never persist real credential values in sandbox metadata, environment variables, snapshots, or logs.
 :::
 
 ::: info Fast-sandbox profile: server-routed vault
-For template-backed (fsb) sandboxes the vault is egress-held: the server pushes complete vault revisions to the egress vault over the FastPath handler relay and the relay response is the synchronous egress-validated ack. The same SDK entry points (`sandbox.credential_vault` / `credentialVault` / `CredentialVault`) work for template-backed sandboxes through the server-routed API — no sidecar endpoint is resolved. The vault is **not** carried at create time: create the sandbox first, then call the vault API.
+For template-backed (fsb) sandboxes the vault is egress-held: the server relays complete vault revisions to the egress and the relay response is the synchronous egress-validated ack. The same SDK entry points work unchanged (`sandbox.credential_vault` / `credentialVault` / `CredentialVault`) — but the vault is **not** carried at create time: create the sandbox first, then call the vault API.
 
-Everything else is unchanged for this profile: values are write-only and stripped from every read, `PATCH` is atomic (composed server-side over the relay; a `412` means another writer won the revision — re-read and retry with the fresh `expectedRevision`), and the vault persists egress-locally (memory plus one plaintext v1 file per sandbox under a Pod-scoped `emptyDir`), so an egress container restart inside the live Pod recovers locally when the Fastlet replays the bindings, and a Kubernetes pause/resume carries the vault files in the snapshot bundle (export strictly before teardown, re-stamped import at restore). The vault volume is part of the credential trust surface (mount it with `medium: Memory` to keep plaintext off node disk). See [fast-sandbox networking](/architecture/fast-sandbox/networking#credential-delivery).
+Values stay write-only, and `PATCH` stays atomic (`412` = another writer won the revision — re-read and retry with the fresh `expectedRevision`). The vault persists egress-locally (memory plus one plaintext v1 file per sandbox under a Pod-scoped `emptyDir`): an egress restart inside the live Pod recovers when the Fastlet replays the bindings, and pause/resume carries the vault files in the snapshot bundle (export before teardown, re-stamped import at restore). The volume is part of the credential trust surface — mount it with `medium: Memory`. See [fast-sandbox networking](/architecture/fast-sandbox/networking#credential-delivery).
 :::
 
 ## Service Mesh Compatibility
@@ -161,9 +159,7 @@ Substitution is disabled by default and is exact, literal, and case-sensitive. O
 | `header` | Replaces placeholders in the original request headers, excluding hop-by-hop and security-sensitive headers such as `Host`, `Content-Length`, and forwarding headers. Substitutions run before Credential Vault injects auth headers, so the sidecar does not rewrite the credential headers it creates. |
 | `body` | Replaces placeholders in UTF-8 request bodies. For `application/json`, the replacement is encoded as JSON string contents, so put the placeholder inside a quoted JSON string. For `application/x-www-form-urlencoded`, the replacement is form-encoded. Compressed and multipart bodies are skipped. |
 
-The sidecar applies all replacements for a surface against the original request text in one pass. Inserted credential values are not scanned again for later placeholders, which prevents one secret from accidentally rewriting another secret. When a body is rewritten, the sidecar updates `Content-Length` and removes `Transfer-Encoding` because the forwarded request now has a fixed-size buffered body.
-
-The placeholder, raw credential value, URL-encoded value, form-encoded value, and JSON-escaped values are added to the active redaction set. A binding with substitutions that matched the request but did not find any placeholder emits a substitution-miss log without exposing credential values.
+Replacements for each surface run against the original request text in one pass, and inserted values are never re-scanned — one secret cannot rewrite another. A rewritten body becomes a fixed-size buffered body with an updated `Content-Length`. The placeholder and every encoding of the value (raw, URL-, form-, JSON-escaped) join the active redaction set; a matched binding that finds no placeholder logs a substitution miss without exposing values.
 
 Example configuration:
 
@@ -415,9 +411,7 @@ All sandbox SDKs use the same wire contract. The main differences are naming and
 | Kotlin/JVM | `.credentialProxyEnabled(true)` or `.credentialProxy { enabled(true) }` | `sandbox.credentialVault()` | `create(request)`, `patch(request)` |
 | C#/.NET | `CredentialProxy = new CredentialProxyConfig { Enabled = true }` | `sandbox.CredentialVault` or sandbox helpers | `CreateCredentialVaultAsync(...)`, `PatchCredentialVaultAsync(...)` |
 
-The vault APIs return sanitized metadata. Plaintext credential values are write-only and are not returned by `get`, `list`, or patch responses.
-
-The same entry points and methods work for template-backed (fsb) sandboxes: the SDK routes the vault through the lifecycle server, which relays revisions to the egress-held vault. No sidecar endpoint is resolved for them, and the `credentialProxy` create-time flag is ignored on that profile (the vault is set after creation, through the API).
+Plaintext values are write-only — `get`, `list`, and patch responses carry sanitized metadata only. The same entry points work for template-backed (fsb) sandboxes through the server relay; the `credentialProxy` create-time flag is ignored on that profile (set the vault after creation, through the API).
 
 ## Claude Code With Anthropic
 
