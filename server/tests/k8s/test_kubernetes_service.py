@@ -38,7 +38,9 @@ from opensandbox_server.api.schema import (
     ImageAuth,
     ListSandboxesRequest,
     NetworkPolicy,
+    PaginationRequest,
     PlatformSpec,
+    SandboxFilter,
     SandboxLifecycle,
 )
 from opensandbox_server.config import (
@@ -2450,6 +2452,87 @@ class TestListSandboxes:
         assert len(response.items) == 1
         assert response.items[0].id == "test-sandbox-123"
         assert response.pagination.total_items == 1
+
+    def test_list_sandboxes_appends_metadata_filters_to_label_selector(
+        self, k8s_service, mock_workload
+    ):
+        mock_workload["metadata"]["labels"] = {
+            "opensandbox.io/id": "test-sandbox-123",
+            "team": "infra",
+            "env": "prod",
+        }
+        k8s_service.workload_provider.list_workloads.return_value = [mock_workload]
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = "10.0.0.1:8080"
+        k8s_service.workload_provider.get_expiration.return_value = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        )
+
+        request = ListSandboxesRequest(
+            filter=SandboxFilter(metadata={"team": "infra", "env": "prod"}),
+            pagination=PaginationRequest(page=1, page_size=20),
+        )
+        response = k8s_service.list_sandboxes(request)
+
+        assert len(response.items) == 1
+        k8s_service.workload_provider.list_workloads.assert_called_with(
+            namespace="test-namespace",
+            label_selector="opensandbox.io/id,env=prod,team=infra",
+        )
+
+    def test_list_sandboxes_omits_unexpressible_metadata_filters_from_selector_but_filters_in_python(
+        self, k8s_service, mock_workload
+    ):
+        import copy
+
+        matching_workload = copy.deepcopy(mock_workload)
+        matching_workload["metadata"]["name"] = "sbx-match"
+        matching_workload["metadata"]["labels"] = {
+            "opensandbox.io/id": "sbx-match",
+            "team": "infra",
+            "desc": "has spaces in value",
+        }
+
+        non_matching_workload = copy.deepcopy(mock_workload)
+        non_matching_workload["metadata"]["name"] = "sbx-nomatch"
+        non_matching_workload["metadata"]["labels"] = {
+            "opensandbox.io/id": "sbx-nomatch",
+            "team": "infra",
+            "desc": "different desc",
+        }
+
+        k8s_service.workload_provider.list_workloads.return_value = [
+            matching_workload,
+            non_matching_workload,
+        ]
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = "10.0.0.1:8080"
+        k8s_service.workload_provider.get_expiration.return_value = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        )
+
+        request = ListSandboxesRequest(
+            filter=SandboxFilter(metadata={"team": "infra", "desc": "has spaces in value"}),
+            pagination=PaginationRequest(page=1, page_size=20),
+        )
+        response = k8s_service.list_sandboxes(request)
+
+        k8s_service.workload_provider.list_workloads.assert_called_with(
+            namespace="test-namespace",
+            label_selector="opensandbox.io/id,team=infra",
+        )
+        assert len(response.items) == 1
+        assert response.items[0].id == "sbx-match"
     
     def test_list_sandboxes_with_pagination(self, k8s_service, mock_workload):
         workloads = []
