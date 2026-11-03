@@ -55,7 +55,7 @@ The private active-vault socket is a hard availability dependency for all traffi
 ## Persistence Across Pause and Resume
 
 ::: warning In-memory state
-For sidecar-profile sandboxes the vault is process-local memory in the egress sidecar — not part of the sandbox root filesystem or the Pod template. Kubernetes pause deletes the Pod after snapshotting, so resume starts with an empty vault; Docker pause/unpause keeps the processes, but any sidecar replacement or restart is equally empty. Either way, re-create the vault after the sandbox is `Running`, before work that depends on those credentials.
+For sidecar-profile sandboxes the vault is process-local memory in the egress sidecar — not part of the sandbox root filesystem or the Pod template. Kubernetes pause deletes the Pod after snapshotting, so resume starts with an empty vault: re-create it once the sandbox is `Running`, before work that depends on those credentials. Docker pause/unpause preserves the sidecar and its vault — no re-creation needed; only a sidecar replacement or restart resets to an empty vault and requires re-injection.
 
 Keep the original vault request (or a secret-manager reference) in a trusted control plane outside the sandbox. Never persist real credential values in sandbox metadata, environment variables, snapshots, or logs.
 :::
@@ -375,7 +375,7 @@ try:
     result = sandbox.commands.run(
         "curl -fsS https://api.internal.example.com/v1/foo?a=1"
     )
-    print(result.stdout)
+    print(result.text)
 finally:
     sandbox.kill()
 ```
