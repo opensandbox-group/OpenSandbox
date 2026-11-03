@@ -46,11 +46,7 @@ At a high level:
 
 When the active-vault check succeeds, requests that do not match any credential binding are forwarded unchanged. Credential path-safety checks apply only after a binding matches and the request would otherwise receive credentials. The active-vault check itself runs before binding selection for every intercepted flow, including requests to hosts that would not match a binding.
 
-The active vault used by the MITM process is served over a local Unix domain socket inside the sidecar. The sandbox workload cannot fetch this active state over the normal server proxy path.
-
-Each new flow conditionally reads that private endpoint with the cached opaque snapshot tag in `If-None-Match`. A `304 Not Modified` response reuses the same immutable in-process snapshot without rendering or transferring secret values; a `200 OK` response carries a fully validated replacement snapshot and a new opaque `ETag`. Successful create and patch responses are acknowledged only after the store has changed that tag, so the next flow immediately observes the new credentials without a cache-TTL delay.
-
-The opaque tag is separate from the public vault revision. Deleting a vault and creating it again can reset the public revision to `1`, but the recreated vault receives a different tag and cannot reuse plaintext from the deleted snapshot. A `404 Not Found` from the private endpoint is the normal "no active vault" result: the MITM process clears its cached snapshot and continues without credential injection.
+Each flow reads that private endpoint with a cached opaque snapshot tag in `If-None-Match`: a `304 Not Modified` reuses the in-process snapshot without transferring secret values, a `200 OK` returns a fully validated replacement, and successful create/patch acks guarantee the next flow sees the new credentials with no cache-TTL delay. The tag is separate from the public revision — a deleted-and-recreated vault gets a different tag and cannot reuse plaintext from the old snapshot — and a `404` is the normal "no active vault" result: no injection, traffic continues.
 
 ::: warning Runtime availability dependency
 The private active-vault socket is a hard availability dependency for all traffic intercepted by Credential Proxy, not only traffic that ultimately matches a credential binding. A timeout, refused connection, unexpected EOF, `5xx` response, malformed snapshot, or invalid `ETag` clears the affected plaintext cache and fails the request closed before any upstream forwarding. Small requests whose bodies are safely buffered receive a local `503 Service Unavailable` response. Requests that are already streaming, may cross the streaming threshold, or have an unknown body length are terminated instead, because mitmproxy cannot safely synthesize a local response after streaming has started. Operators should monitor the sidecar and private socket as part of the egress data plane's availability.
@@ -261,15 +257,32 @@ The rules that keep the two worlds unambiguous:
 - The typeless form carries only `credential` — `name`, `headers`, and `substitutions` are not valid on it. Substitutions always require a static type.
 - Static and exchange bindings can coexist in one vault, including on the same host with disjoint `paths`/`methods` scopes.
 
-::: tip How a bound request flows
-The binding `match` semantics are identical to the static path. On a match, the egress derives the caller identity from the connection (the sandbox id — never client-supplied), calls the resolver at the credential's endpoint with the request context, and injects the returned headers into the outbound request. Every returned header is redacted from the response path by name and by value, and resolved material is never persisted — it exists for exactly one request. The same vault travels pause/resume and egress restarts as pure configuration and re-resolves on demand.
-:::
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Sandbox app
+    participant Egr as Egress (MITM + vault)
+    participant Res as Resolver (unix:// or https://)
+    participant Up as Upstream API
+
+    App->>Egr: GET https://api.internal.example.com/v1/foo?a=1
+    Note over Egr: binding match (host/method/path)<br/>typeless auth → exchange credential
+    Egr->>Res: POST /resolve {subject: sandboxId, credential, binding, destination, request}
+    Note over Res: mint / sign fresh headers<br/>(identity scheme + caching are resolver-internal)
+    Res-->>Egr: 200 {headers}
+    Egr->>Up: request + fresh headers injected
+    Up-->>Egr: response
+    Egr-->>App: response — every injected header redacted by name and value
+    note over Egr,Res: any failure (unreachable, timeout, invalid response,<br/>binding mutated mid-flight) → 407 or stream kill,<br/>never forwarded uncredentialed
+```
+
+The egress derives the caller identity from the connection — the sandbox id, never client-supplied — and sends it as `subject`, so one shared resolver can select per-sandbox identity. Resolved material exists for exactly one request: it is never persisted, and the vault travels pause/resume and egress restarts as pure configuration, re-resolving on demand.
 
 ### Failure Semantics
 
 Resolution failure fails closed, never open: if the resolver is unreachable, slow beyond the timeout, returns an invalid or oversized response, or the bound credential is mutated mid-flight, the matched request is denied — a local `407` for buffered requests, a terminated stream for requests already streaming. The request is never forwarded without credentials, and a failed resolve never poisons the next one. Static bindings in the same vault keep flowing during a resolver outage.
 
-Per-request resolution is bounded: each resolve carries a timeout (default 2s) and shares a concurrency limit (default 32), so one slow resolver delays only its own matched requests — never other sandboxes, other bindings, or non-bound traffic.
+Per-request resolution is bounded by the limits below, so one slow resolver delays only its own matched requests — never other sandboxes, other bindings, or non-bound traffic.
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
