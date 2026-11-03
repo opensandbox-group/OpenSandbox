@@ -294,6 +294,51 @@ func TestNewMergedView_BindViewPassthroughSemantics(t *testing.T) {
 	if !found {
 		t.Fatalf("search results missing rebased /data/plain.txt: %v", results)
 	}
+
+	// Agent-planted symlinks inside a rw bind pointing outside the bind source
+	// must be rejected on both mutations and reads (#2332).
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim.txt")
+	if err := os.WriteFile(victim, []byte("v"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(rwSrc, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.WriteFile("/data/link/pwn.txt", []byte("x"), 0o644); err == nil {
+		t.Fatal("WriteFile through symlinked parent accepted")
+	}
+	if err := view.Remove("/data/link/victim.txt"); err == nil {
+		t.Fatal("Remove through symlinked parent accepted")
+	}
+	if err := view.Chmod("/data/link/victim.txt", 0o777); err == nil {
+		t.Fatal("Chmod through symlinked parent accepted")
+	}
+	if err := view.MkdirAll("/data/link/newdir", 0o755); err == nil {
+		t.Fatal("MkdirAll through symlinked parent accepted")
+	}
+	if err := view.Rename("/data/link/victim.txt", "/data/renamed.txt"); err == nil {
+		t.Fatal("Rename with symlinked source parent accepted")
+	}
+	if err := view.Rename("/data/plain.txt", "/data/link/moved.txt"); err == nil {
+		t.Fatal("Rename with symlinked destination parent accepted")
+	}
+	if _, err := view.ReadFile("/data/link/victim.txt"); err == nil {
+		t.Fatal("ReadFile through escaping symlink accepted")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("victim deleted or moved through symlink escape: %v", err)
+	}
+	// RemoveAll on the planted link drops the link, never its target tree.
+	if err := view.RemoveAll("/data/link"); err != nil {
+		t.Fatalf("RemoveAll of the planted link itself: %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("RemoveAll followed the planted link: %v", err)
+	}
 }
 
 // TestNewMergedView_BindsWithoutOverlaysDoesNotPanic guards the defensive
