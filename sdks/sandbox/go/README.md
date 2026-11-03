@@ -341,6 +341,7 @@ mgr := opensandbox.NewSandboxManager(config)
 tpl, err := mgr.CreateTemplate(ctx, opensandbox.CreateTemplateRequest{
     Image:   "python:3.11",
     Publish: "s3://bucket/templates/py311",
+    Format:  opensandbox.TemplateFormatNative,
     ResourceLimits: map[string]string{
         "cpu": "1", "memory": "512Mi", "disk": "2Gi",
     },
