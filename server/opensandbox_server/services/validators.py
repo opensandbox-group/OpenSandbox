@@ -91,6 +91,10 @@ def _is_valid_label_value(value: str) -> bool:
     return bool(LABEL_VALUE_RE.fullmatch(value))
 
 
+is_valid_label_key = _is_valid_label_key
+is_valid_label_value = _is_valid_label_value
+
+
 def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
     """
     Validate metadata keys/values against Kubernetes label rules.
