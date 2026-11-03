@@ -81,6 +81,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.metrics.enabled | bool | `false` | Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`) |
 | controller.metrics.port | int | `8080` | Port for the metrics endpoint |
 | controller.metrics.secure | bool | `false` | Serve metrics over HTTPS with authn/authz (`--metrics-secure`). Set to false to serve plain HTTP for scraping without TLS/RBAC (e.g. PodMonitoring). |
+| controller.namespaces | list | `[]` | Namespaces used to scope the controller informer cache (`--namespaces`). Empty (default) watches the whole cluster. On large shared clusters, list the namespaces holding Pool/BatchSandbox workloads to shrink the cache and avoid startup OOMs. Every watched namespace (CRs and their Pods/Jobs) must be listed; multi-tenant deployments spread across many namespaces should keep this empty. |
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
