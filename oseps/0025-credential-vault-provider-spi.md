@@ -3,8 +3,8 @@ title: Credential Vault Exchange and Delegated Header Resolution
 authors:
   - "@Pangjiping"
 creation-date: 2026-10-28
-last-updated: 2026-10-30
-status: draft
+last-updated: 2026-11-03
+status: implementing
 ---
 
 # OSEP-0025: Credential Vault Exchange and Delegated Header Resolution
@@ -14,6 +14,7 @@ status: draft
 - [Motivation](#motivation)
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
+  - [Follow-ups (declared, non-blocking)](#follow-ups-declared-non-blocking)
 - [Requirements](#requirements)
 - [Proposal](#proposal)
   - [Notes/Constraints/Caveats](#notesconstraintscaveats)
@@ -63,6 +64,14 @@ Second, sandboxes that need such identities today use ad-hoc mitm addons and per
 3. Putting credential scope or audience policy into the vault API; a resolver derives scope from request context itself.
 4. Injecting at connection level (mTLS/X509-SVID); injection remains HTTP header substitution, as in OSEP-0012's MVP.
 5. Adding new sandbox-facing lifecycle APIs; callers continue to use the existing egress Credential Vault API.
+
+### Follow-ups (declared, non-blocking)
+
+Declared out of v1 by the scope note; none of them changes the contracts in this document:
+
+1. **Soak and performance matrices** — long-run stability (leaks, unbounded growth) and latency characterization of the per-request resolver hop across transports, profiles, and envelope bounds.
+2. **Body signing** — extending resolver proofs from headers to request bodies needs a contract change (body digest in the resolve request) and different timing (the body must be hashed before resolution completes); header substitution remains the v1 surface (Non-Goal 4).
+3. **Full OSEP-0023 integration depth and recovery/drain hardening** — exchange support in the live revision runtime (today rejected by the version-skew gate) and graceful drain of in-flight resolutions on shutdown; tracked in issue #2562 with explicit unblock conditions.
 
 ## Requirements
 
@@ -323,7 +332,7 @@ HTTP framing: both transports issue `POST` with `Content-Type: application/json`
 }
 ```
 
-The `destination` block reflects the validated outbound destination as verified by the egress (scheme, authority including port, and SNI), so a resolver can bind a proof to the connection identity and distinguish `http://host` from `https://host`. Header names in the response are validated before injection.
+The `destination` block reflects the validated outbound destination as verified by the egress (scheme, authority including port, and SNI), so a resolver can bind a proof to the connection identity and distinguish `http://host` from `https://host`. `request.path` carries the full request target — path plus query string (`/v1/foo?a=1`), exactly as the egress admitted it — so a resolver can bind signatures to the complete target; it is never a normalized or query-stripped path. Header names in the response are validated before injection.
 
 **Subject identity.** The wire value is the sandbox's `sandboxId` — the external, lifecycle-level identifier — identical in both profiles, so a resolver operator provisions exactly one identity namespace keyed on the identifier callers already use. `subject` is an egress-internal concept; it never crosses the resolver boundary. The egress fills the `sandboxId` authoritatively: the sidecar egress holds the identity of the sandbox it serves; the fast-sandbox egress maps the connection's source IP through its internal subject registry, which is seeded from the same `sandboxId`. The raw client IP is never forwarded, and no protocol surface accepts a client-declared subject (R6).
 
