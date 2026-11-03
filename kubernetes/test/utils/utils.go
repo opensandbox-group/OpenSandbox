@@ -15,6 +15,7 @@
 package utils
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -82,28 +83,31 @@ func LoadPulledImageToKindClusterWithName(name string) error {
 		"ctr", "--namespace=k8s.io", "images", "import", "--digests", "--snapshotter=overlayfs", "-")
 
 	pipeReader, pipeWriter := io.Pipe()
+	var saveErrBuf, importErrBuf bytes.Buffer
 	saveCmd.Stdout = pipeWriter
+	saveCmd.Stderr = &saveErrBuf
 	importCmd.Stdin = pipeReader
+	importCmd.Stderr = &importErrBuf
 
 	var importErr error
 	importDone := make(chan struct{})
 	go func() {
 		defer close(importDone)
-		output, err := importCmd.CombinedOutput()
-		if err != nil {
-			importErr = fmt.Errorf("%q failed with error %q: %w", strings.Join(importCmd.Args, " "), string(output), err)
-		}
+		importErr = importCmd.Run()
 	}()
 
-	saveOutput, saveErr := saveCmd.CombinedOutput()
+	saveErr := saveCmd.Run()
 	_ = pipeWriter.Close()
 	<-importDone
 	_ = pipeReader.Close()
 
 	if saveErr != nil {
-		return fmt.Errorf("%q failed with error %q: %w", strings.Join(saveCmd.Args, " "), string(saveOutput), saveErr)
+		return fmt.Errorf("%q failed with error %q: %w", strings.Join(saveCmd.Args, " "), strings.TrimSpace(saveErrBuf.String()), saveErr)
 	}
-	return importErr
+	if importErr != nil {
+		return fmt.Errorf("%q failed with error %q: %w", strings.Join(importCmd.Args, " "), strings.TrimSpace(importErrBuf.String()), importErr)
+	}
+	return nil
 }
 
 // GetNonEmptyLines converts given command output string into individual objects
