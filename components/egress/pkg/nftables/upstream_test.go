@@ -51,12 +51,10 @@ func TestBuildRulesetWithoutUpstreamProxyOmitsScopedSets(t *testing.T) {
 	rendered, err := buildRuleset(policy.DefaultDenyPolicy(), Options{BlockDoT: true})
 	require.NoError(t, err)
 	require.NotContains(t, rendered, "upstream_proxy")
-	// OSEP-0025 D16: the egress installs no automatic OUTPUT exception for
-	// its own dials (e.g. the credential resolver). Without an explicitly
-	// configured UID-scoped endpoint, the ruleset must contain no
-	// process-identity-scoped accept rule at all — locally re-originated
-	// dials face the same default-deny OUTPUT policy as sandbox traffic, and
-	// resolver reachability stays an operator-provisioned exclusion.
+	// OSEP-0025 D16: no automatic OUTPUT exception for the egress's own dials
+	// (e.g. the credential resolver) — no UID-scoped accept rule exists unless
+	// an operator endpoint is configured. Resolver reachability stays an
+	// operator-provisioned exclusion.
 	require.NotContains(t, rendered, "meta skuid")
 }
 

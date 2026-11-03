@@ -325,13 +325,10 @@ start_egress() {
   if [ -n "${upstream}" ]; then
     upstream_env=(OPENSANDBOX_EGRESS_UPSTREAM_PROXY="${upstream}")
   fi
-  # Optional credential-resolver operator configuration (OSEP-0025 Test 15):
-  # the resolver CA the Go TLS stack honors via SSL_CERT_FILE. CAVEAT:
-  # SSL_CERT_FILE REPLACES the process's entire trust pool, not just the
-  # resolver path — harmless in this harness (the egress dials no other TLS
-  # endpoint) but NOT production guidance: install the resolver CA into the
-  # host trust store, or wait for a dedicated CA pool on the resolver client
-  # (T8 operator docs). Caller auth (D5) is deferred: no auth env exists.
+  # Optional resolver CA honored by the Go TLS stack via SSL_CERT_FILE.
+  # CAVEAT: SSL_CERT_FILE replaces the process's whole trust pool — fine in
+  # this harness, NOT production guidance (T8 operator docs). Caller auth
+  # (D5) is deferred: no auth env exists.
   local resolver_env=()
   if [ -n "${EGRESS_RESOLVER_CA_FILE-}" ]; then
     resolver_env+=(SSL_CERT_FILE="${EGRESS_RESOLVER_CA_FILE}")

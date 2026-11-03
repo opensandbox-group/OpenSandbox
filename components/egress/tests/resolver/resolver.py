@@ -319,11 +319,9 @@ def build_server(
     if transport == "uds":
         socket_dir = os.path.dirname(options.uds)
         if socket_dir:
-            # Mirror the production active-socket layout (OSEP-0025 R4):
-            # socket 0660 and, for directories this stub creates, a 0710
-            # parent. Pre-existing directories (e.g. /tmp or a dedicated
-            # volume prepared by the caller) keep their own mode — chmod'ing
-            # a shared parent like /tmp would drop its sticky bit.
+            # Production R4 layout (OSEP-0025): socket 0660, and a 0710
+            # parent only for directories this stub creates — a pre-existing
+            # parent (e.g. /tmp, sticky) keeps its own mode.
             directory_created = not os.path.isdir(socket_dir)
             os.makedirs(socket_dir, mode=0o710, exist_ok=True)
             if directory_created:

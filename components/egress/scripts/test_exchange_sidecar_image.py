@@ -4,48 +4,31 @@
 
 """Real Docker image coverage of the OSEP-0025 egress sidecar exchange line.
 
-Builds the ordinary components/egress/Dockerfile image (or takes --image),
-then runs the real sidecar profile (plain store, transparent mitm, dns+nft)
-against the T6 test resolver and an independent HTTPS origin on a Docker
-network:
+Runs the real sidecar profile (plain store, transparent mitm, dns+nft)
+against the T6 test resolver and an independent HTTPS origin:
 
-- UDS happy path: an exchange vault resolves per request through the stub
-  resolver; the origin echo proves subject/credential/binding/authority/path
-  via the deterministic ``x-test-signature`` marker;
-- fail-closed matrix: resolver down, resolver timeout, and a vault mutation
-  invalidating an in-flight resolution all fail closed (407 buffered, kill
-  streamed) with no pass-through, while static inline bindings keep working;
-- R4: the resolver UDS socket directory is 0710 and the socket 0660; a
-  sandbox process (uid 65534) cannot traverse the directory nor connect;
-- D16 reachability: with the HTTPS resolver deliberately absent from the
-  (default-deny) policy, even the egress cannot dial it — no automatic
-  OUTPUT exception exists. In the sidecar profile the egress's own :443
-  dials are transparently re-originated by mitmdump, so the operator
-  UID-scoped nft exclusion must cover the mitm uid (the same rule shape as
-  the upstream-proxy mechanism); with it the egress resolve succeeds.
+- UDS happy path: per-request exchange resolution, asserted end-to-end via
+  the deterministic ``x-test-signature`` marker;
+- fail-closed matrix: resolver down / timeout / in-flight invalidation →
+  407 (buffered) or kill (streamed), no pass-through; static inline
+  bindings keep working;
+- R4: resolver socket layout 0710/0660; a sandbox process (uid 65534)
+  cannot traverse the directory nor connect;
+- D16: the resolver is absent from the default-deny policy, so even the
+  egress cannot dial it (no automatic OUTPUT exception). The operator
+  UID-scoped nft exclusion must cover the mitm uid — transparent
+  interception re-originates the egress's :443 dials from mitmdump.
 
-  KNOWN LIMITATION (D5 deferred): that exclusion is NOT a resolver trust
-  boundary. Transparent interception re-originates sandbox resolver dials
-  from the same mitm uid, and the resolver has no caller authentication,
-  so a sandbox process that disables TLS verification can POST /resolve
-  and mint credentials for any subject (R4 gap). The e2e encodes this
-  current behavior as a tripwire: once D5 lands, the sandbox /resolve
-  call must fail closed instead. ``unix://`` endpoints (socket
-  permissions) are the only egress-only resolver boundary today.
+D5 is deferred: resolver dials carry no caller authentication. The
+UID-scoped exclusion therefore unblocks the egress's own dials but is NOT
+a sandbox boundary — sandbox resolver dials are re-originated from the
+same mitm uid, so a sandbox that disables TLS verification can resolve
+for any subject (R4 gap, asserted as a tripwire below; flip when D5
+lands). ``unix://`` socket permissions are the only egress-only boundary
+today.
 
-Operator note (input for the deployment guide): the exclusion used here is
-``nft insert rule inet opensandbox egress ip daddr <resolver-ip> tcp dport
-443 meta skuid <mitm-uid> accept`` — it unblocks the egress's own
-re-originated dials under default-deny. It does not isolate the resolver
-from the sandbox (see the limitation above); until OSEP-0025 D5 caller
-authentication lands, treat HTTPS resolvers as sandbox-reachable, and
-prefer ``unix://`` resolvers where the socket permissions can act as the
-trust boundary. Resolver hosts must still never be added to the
-sandbox-visible allow sets.
-
-Unavailable Docker/build prerequisites FAIL. Evidence (per-case results,
-origin/resolver/egress logs) is written to an artifacts directory without
-credential values.
+Evidence (per-case results, container logs) is written to an artifacts
+directory without credential values.
 """
 
 from __future__ import annotations
@@ -215,10 +198,8 @@ class ExchangeSidecarRuntime:
             "OPENSANDBOX_EGRESS_RULES": json.dumps(self.policy()),
             "OPENSANDBOX_EGRESS_TOKEN": TOKEN,
             "OPENSANDBOX_EGRESS_SANDBOX_ID": SUBJECT,
-            # Resolver operator env (OSEP-0025 D13), deployment-injected:
-            # TIMEOUT/MAX_CONCURRENCY are tenant-tunable knobs. Caller
-            # authentication is deferred (D5 not implemented): resolver dials
-            # carry no Authorization header.
+            # Resolver operator env (D13). Caller auth is deferred (D5):
+            # resolver dials carry no Authorization header.
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "2",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "4",
             "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA": "/run/live-origin/ca.pem",
@@ -232,10 +213,9 @@ class ExchangeSidecarRuntime:
             self.shared.mkdir()
             self.tls.mkdir()
             self.rulesdir.mkdir()
-            # The resolver socket directory lives in a named volume (Linux VM
-            # filesystem): macOS bind mounts cannot chmod a unix socket. The
-            # caller provisions the production R4 layout (0710 dir); the stub
-            # only chmods directories it creates itself.
+            # Named volume: macOS bind mounts cannot chmod a unix socket.
+            # The test provisions the R4 0710 layout; the stub only chmods
+            # directories it creates.
             self.docker.run("volume", "create", "--label", self.label, self.spi_volume)
             self.created.add("volume:" + self.spi_volume)
             self.docker.run(
@@ -269,8 +249,7 @@ class ExchangeSidecarRuntime:
                 args += ["--env", key + "=" + value]
             self.docker.run(*args, self.image)
             self.created.add(self.egress)
-            # The sandbox role: a separate container in the egress network
-            # namespace (exactly the deployed sidecar topology) that ALSO has
+            # The sandbox role: a separate container in the egress netns with
             # the resolver socket directory mounted — the worst case for R4.
             self.docker.run(
                 "run", "-d", "--name", self.sandbox,
@@ -358,9 +337,7 @@ class ExchangeSidecarRuntime:
         )
         self.created.add(self.resolver_uds)
         self._wait_log(self.resolver_uds, "test resolver ready:", 20)
-        # The 0710 directory is provisioned by this test (caller-owned, like
-        # an operator deployment); the stub adds the 0660 socket and never
-        # chmods a pre-existing parent. Assert both halves of the layout.
+        # 0710 dir provisioned by the test, 0660 socket by the stub.
         modes = self.docker.run("exec", self.resolver_uds, "stat", "-c", "%a", SPI_DIR, RESOLVER_SOCKET).stdout.split()
         require(modes == ["710", "660"], f"resolver socket layout unexpected: {modes}")
 
@@ -487,8 +464,8 @@ def test_uds_happy_path(runtime: ExchangeSidecarRuntime):
     require(signature == expected_signature(path),
             f"signature mismatch: expected {expected_signature(path)} got {signature} (echo={echo})")
     require(echo.get("x_test_subject") == SUBJECT, f"subject mismatch: {echo}")
-    # The driver masks authorization values by design; presence plus the
-    # exact injected-marker length ("Bearer test-" + credential) is asserted.
+    # The driver masks authorization values by design; the marker length
+    # ("Bearer test-" + credential) is the presence check.
     require(str(echo.get("authorization", "")).startswith("present(22 chars)"),
             f"authorization marker missing: {echo.get('authorization')!r}")
 
@@ -549,12 +526,10 @@ def test_resolver_down_fail_closed(runtime: ExchangeSidecarRuntime):
     require("credential resolution unavailable" in buffered.get("body", ""),
             f"fixed 407 body expected: {buffered.get('body')!r}")
 
-    # Streamed fail-closed: the binding is methods=["GET"], so the probe is
-    # a GET whose chunked body never terminates — the addon matches the
-    # binding at requestheaders, the resolve fails (resolver down), and
-    # because the request may be streamed (Transfer-Encoding, no length) it
-    # is killed instead of answered. The kill is immediate: a passive stall
-    # would surface as a client timeout instead of a hard transport error.
+    # Streamed fail-closed: a GET (the binding is GET-only) with an
+    # unterminated chunked body. The addon resolves at requestheaders, the
+    # resolve fails, and the streamed flow is killed — immediately, not by
+    # a passive stall (a timeout error fails the case).
     raw = (
         f"GET /echo HTTP/1.1\r\nHost: {BOUND}\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
@@ -635,8 +610,7 @@ def test_resolution_invalidation_fail_closed(runtime: ExchangeSidecarRuntime):
 def test_d16_https_resolver_reachability(runtime: ExchangeSidecarRuntime):
     resolver_ip = runtime.address(RESOLVER_IP_SUFFIX)
 
-    # Swap the vault to the HTTPS resolver (deployment PKI installed first).
-    # 404 means a fresh single-case run with no prior vault.
+    # Swap the vault to the HTTPS resolver (404 = fresh single-case run).
     deleted = runtime.vault("DELETE", "/credential-vault")
     require(deleted.get("status") in (204, 404), f"vault delete failed: {deleted}")
     runtime.start_https_resolver()
@@ -647,21 +621,18 @@ def test_d16_https_resolver_reachability(runtime: ExchangeSidecarRuntime):
     created = runtime.vault("POST", "/credential-vault", exchange_vault_body(f"https://{RESOLVER_HOST}"))
     require(created.get("status") == 201, f"https exchange vault create failed: {created}")
 
-    # Without an operator exclusion the resolver is unreachable even for the
-    # egress itself: the ruleset has no automatic OUTPUT exception, so the
-    # re-originated resolver dial dead-ends in the default-deny policy.
+    # No operator exclusion yet: the ruleset has no automatic OUTPUT
+    # exception, so even the egress's resolver dial dead-ends in the
+    # default-deny policy.
     denied = runtime.request("/echo")
     require(denied.get("status") == 407, f"unexempted egress resolver dial must fail closed: {denied}")
 
     listing = runtime.exec_egress("nft", "list", "table", "inet", "opensandbox").stdout
     require("meta skuid" not in listing, "egress must not install process-scoped accept rules on its own")
 
-    # Operator-provisioned UID-scoped exclusion. In the sidecar profile the
-    # egress's own :443 dials are transparently re-originated by mitmdump
-    # (uid 10042), so the exclusion is scoped to that uid — the same rule
-    # shape as the operator upstream-proxy mechanism. This unblocks the
-    # egress's re-originated dials under default-deny; it is NOT a resolver
-    # trust boundary (see the tripwire below).
+    # Operator UID-scoped exclusion, scoped to the mitm uid because that is
+    # who re-originates the egress's :443 dials (upstream-proxy rule shape).
+    # Not a trust boundary — see the tripwire below.
     mitm_uid = runtime.exec_egress("id", "-u", "mitmproxy").stdout.strip()
     require(mitm_uid == "10042", f"mitmproxy uid changed: {mitm_uid}")
     runtime.exec_egress(
@@ -675,10 +646,8 @@ def test_d16_https_resolver_reachability(runtime: ExchangeSidecarRuntime):
     require(echo.get("x_test_signature") == expected_signature("/echo"),
             f"https resolver signature mismatch: {echo}")
 
-    # Compliant sandbox clients hold neither the mitm CA nor the resolver
-    # PKI (the sandbox shares the netns, not the egress filesystem), so
-    # their TLS conversation fails verification. This is PKI hygiene, not
-    # a trust boundary.
+    # Compliant sandbox clients hold no mitm/resolver CA (shared netns, not
+    # filesystem), so TLS fails verification — PKI hygiene, not a boundary.
     https_probe = (
         "import urllib.request, urllib.error\n"
         "try:\n"
@@ -697,12 +666,11 @@ def test_d16_https_resolver_reachability(runtime: ExchangeSidecarRuntime):
     require(outcome != "https-ok" and not outcome.startswith("http 2"),
             f"sandbox reached the resolver: {outcome!r}")
 
-    # KNOWN-LIMITATION TRIPWIRE (R4 gap, D5 deferred): a sandbox process
-    # that disables TLS verification is transparently intercepted and
-    # re-originated by mitmdump from the excluded uid, and the resolver has
-    # no caller authentication — so it can resolve for an arbitrary subject
-    # today. This asserts the CURRENT behavior so the gap stays visible;
-    # when D5 caller authentication lands, flip this to require denial.
+    # TRIPWIRE (R4 gap, D5 deferred): a sandbox that disables TLS
+    # verification is re-originated by mitmdump from the excluded uid, and
+    # the resolver authenticates nobody — so an attacker-chosen subject
+    # resolves today. Asserts current behavior; flip to denial when D5
+    # lands.
     mint_document = json.dumps({
         "subject": "sbx-attacker",
         "credential": CREDENTIAL,

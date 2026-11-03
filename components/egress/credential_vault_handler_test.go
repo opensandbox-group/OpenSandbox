@@ -756,12 +756,11 @@ func TestCredentialVaultMixedStaticAndExchangeHandler(t *testing.T) {
 	require.NotContains(t, createdBody, "unix:///run/spi")
 }
 
-// OSEP-0025 T4: live revision runtime wiring. The store is selected in
-// startPolicyServer via NewLiveStore when EnvExperimentalRevisionRuntime is
-// truthy. The live admission rejects exchange creates with the fixed
-// vocabulary even with a ready resolver configuration (store level), and the
-// live write handler keeps its sanitized fixed error boundary (no prepare
-// error text crosses it), while inline-only vaults keep working.
+// OSEP-0025 T4: the live runtime (NewLiveStore, selected in startPolicyServer
+// when EnvExperimentalRevisionRuntime is truthy) rejects exchange creates with
+// the fixed vocabulary even with a ready resolver configuration; the live
+// write handler sanitizes every prepare failure to its fixed boundary, and
+// inline-only vaults keep working.
 func TestCredentialVaultLiveRevisionRuntimeRejectsExchangeHandler(t *testing.T) {
 	liveWriteFixtureEnv(t)
 	gate := mitmproxy.NewHealthGate()

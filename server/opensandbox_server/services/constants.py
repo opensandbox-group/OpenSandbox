@@ -71,12 +71,10 @@ OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS = (
 OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH"
 )
-# OSEP-0025 credential resolver operator configuration forwarded to the
-# egress sidecar. TIMEOUT/MAX_CONCURRENCY are tuning knobs and flow through
-# the sandbox request env allowlist below. Must match
-# components/egress/pkg/constants/configuration.go
-# EnvCredentialResolver{Timeout,MaxConcurrency}. Resolver caller
-# authentication (D5) is deferred: no auth env exists on either side.
+# OSEP-0025 credential resolver tuning env forwarded to the egress sidecar
+# (must match components/egress/pkg/constants/configuration.go
+# EnvCredentialResolver{Timeout,MaxConcurrency}). Resolver caller auth (D5)
+# is deferred: no auth env exists on either side.
 OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"
 )
