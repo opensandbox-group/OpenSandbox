@@ -70,6 +70,14 @@ controller:
   # are created by the controller; build it with manifests/release/build-fast-sandbox.sh).
   # Empty uses the release-<appVersion> companion image tag.
   sandboxtemplateBuilderImage: ""
+  # -- Extra labels merged into the controller pod template labels.
+  podLabels: {}
+  # -- Extra annotations merged into the controller pod template annotations.
+  podAnnotations: {}
+  # -- Node selector for the controller pod.
+  nodeSelector: {}
+  # -- Affinity for the controller pod.
+  affinity: {}
   # -- Resource requests and limits for the controller
   resources:
     limits:
@@ -199,6 +207,23 @@ runtime:
   # it with your own coarse selector only if the cluster hosts unrelated
   # node pools.
   nodeSelector: {}
+  # -- Extra labels merged into the firecracker-runtime pod template labels.
+  podLabels: {}
+  # -- Extra annotations merged into the firecracker-runtime pod template
+  # annotations (on top of the built-in prometheus.io/* ones).
+  podAnnotations: {}
+  # -- Affinity for the firecracker-runtime DaemonSet pod.
+  affinity: {}
+  # -- DART P2P artifact delivery: when true (default) the chart renders
+  # the dart headless Service, the DaemonSet peer port, and the default
+  # agent.yaml p2p block (each node runs a node-local DART child and peers
+  # fetch blocks from each other). When false the agent pulls artifacts
+  # directly from the origin store (upstream semantics: an empty p2p
+  # config section means direct header-signed pulls) and none of the DART
+  # resources are rendered. Ignored when runtime.config overrides the
+  # whole agent.yaml.
+  p2p:
+    enabled: true
   # -- Container resources for the DaemonSet. Setting requests matters more
   # than limits here: without them the pod is BestEffort and is evicted
   # first under node pressure, taking down the management API for every
@@ -226,7 +251,8 @@ runtime:
   stateRoot: /var/lib/fast-sandbox/firecracker
   # -- Node hostPath sharing the agent UDS socket with fastlet Pods
   socketDir: /run/fast-sandbox/firecracker
-  # -- DART P2P peer listen port (also the headless dart Service port)
+  # -- DART P2P peer listen port (also the headless dart Service port;
+  # rendered only when runtime.p2p.enabled=true)
   dartPeerPort: 9000
   # -- Agent config (agent.yaml). Empty = the chart default (upstream
   # config/dev/agent-config.yaml with the dart discover URL pointing at

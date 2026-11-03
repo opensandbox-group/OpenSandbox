@@ -20,6 +20,13 @@ spec:
     metadata:
       labels:
         {{- include "fast-sandbox.controllerSelectorLabels" . | nindent 8 }}
+        {{- with .Values.controller.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.controller.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -81,9 +88,17 @@ spec:
           mountPath: /etc/fast-sandbox/builder-pod-template
           readOnly: true
       serviceAccountName: fast-sandbox-controller
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.controller.tolerations }}
       tolerations:
       {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
       - name: artifact-store

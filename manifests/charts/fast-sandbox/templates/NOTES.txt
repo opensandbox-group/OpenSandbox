@@ -6,10 +6,16 @@ Components:
     Service: fast-sandbox-fastpath.{{ include "fast-sandbox.namespace" . }}.svc:9090
 {{- end }}
 {{- if .Values.runtime.enabled }}
-  - firecracker-runtime (per-node UDS management API + DART P2P + node
-    readiness loop: host checks, Firecracker asset install, self-applied
-    scheduling labels + FirecrackerReady condition; janitor sidecar;
-    peer discovery Service: dart.{{ include "fast-sandbox.namespace" . }}.svc)
+  - firecracker-runtime (per-node UDS management API + node readiness
+    loop: host checks, Firecracker asset install, self-applied scheduling
+    labels + FirecrackerReady condition; janitor sidecar
+{{- if .Values.runtime.p2p.enabled }}
+    + DART P2P delivery, peer discovery Service:
+    dart.{{ include "fast-sandbox.namespace" . }}.svc
+{{- else }}
+    + direct origin artifact pulls (DART P2P disabled via runtime.p2p.enabled=false)
+{{- end }}
+  )
 {{- if .Values.runtime.oci.enabled }}
     + OverlayBD OCI stack: install-oci-tools init, overlaybd-ublkd
     sidecar (socket /run/fast-sandbox/overlaybd/ublkd.sock), agent
