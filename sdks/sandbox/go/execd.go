@@ -193,7 +193,7 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 	}
 
 	var result *CommandLogsResponse
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+path, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -575,7 +575,7 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 	reqPath := "/files/download?" + params.Encode()
 
 	var resp *http.Response
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+reqPath, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -599,6 +599,7 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 			defer r.Body.Close()
 			return handleError(r)
 		}
+		r.Body = keepAttemptBody(ctx, r.Body)
 		resp = r
 		return nil
 	})

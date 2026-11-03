@@ -17,12 +17,16 @@ package opensandbox
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -383,18 +387,21 @@ func retrySleep(ctx context.Context, d time.Duration) error {
 // for any method — request bodies are re-marshaled per attempt, so replay is
 // always safe — under its own attempt count and wall-clock budget. Bare 503
 // responses follow the generic rules untouched.
-func (c *Client) withRetry(ctx context.Context, fn func() error) error {
+//
+// fn must issue its request with the context it receives: after a marked wake
+// response it is bounded by the remaining wake budget.
+func (c *Client) withRetry(ctx context.Context, fn func(context.Context) error) error {
 	return c.withRetryMethod(ctx, http.MethodGet, fn)
 }
 
 // withRetryMethod executes fn with the generic retry policy tailored to method.
-func (c *Client) withRetryMethod(ctx context.Context, method string, fn func() error) error {
+func (c *Client) withRetryMethod(ctx context.Context, method string, fn func(context.Context) error) error {
 	return c.withRetryWake(ctx, method, fn)
 }
 
 // withRetryWake applies the generic policy together with the OSEP-0024 wake
 // contract.
-func (c *Client) withRetryWake(ctx context.Context, method string, fn func() error) error {
+func (c *Client) withRetryWake(ctx context.Context, method string, fn func(context.Context) error) error {
 	return c.retryLoop(ctx, method, true, fn)
 }
 
@@ -403,15 +410,15 @@ func (c *Client) withRetryWake(ctx context.Context, method string, fn func() err
 // never forwarded it, so replaying it cannot execute anything twice and is safe
 // even for a streaming POST bootstrap. Every other failure, including a bare
 // 503, is returned to the caller unwrapped (OSEP-0017).
-func (c *Client) withWakeRetry(ctx context.Context, method string, fn func() error) error {
+func (c *Client) withWakeRetry(ctx context.Context, method string, fn func(context.Context) error) error {
 	return c.retryLoop(ctx, method, false, fn)
 }
 
 // retryLoop is the shared retry engine. generic controls whether transient
 // failures other than a marked wake timeout are retried according to method.
-func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn func() error) error {
+func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn func(context.Context) error) error {
 	if c.retry == nil || (c.retry.MaxRetries == 0 && !c.retry.wakeEnabled()) {
-		return fn()
+		return fn(ctx)
 	}
 
 	wakeMaxAttempts := c.retry.WakeMaxAttempts
@@ -433,7 +440,24 @@ func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn 
 	retriesUsed := 0
 	started := time.Now()
 	for {
-		lastErr = fn()
+		// Once a marked wake response started the wake phase, every further
+		// attempt's wait for response headers is bounded by the remaining
+		// overall budget, not only the waits between attempts.
+		if wakeAttempts > 0 && wakeDeadline >= 0 {
+			attemptCtx, attempt := startWakeAttempt(ctx, wakeDeadline-time.Since(started))
+			lastErr = fn(attemptCtx)
+			if attempt.finish(lastErr == nil) && lastErr != nil && ctx.Err() == nil {
+				// The attempt may already have reached the sandbox, so this is
+				// not a SandboxWakeTimeoutError and must not be replayed.
+				return &wakeBudgetExceededError{
+					Attempts: wakeAttempts,
+					Waited:   time.Since(started),
+					Deadline: wakeDeadline,
+				}
+			}
+		} else {
+			lastErr = fn(ctx)
+		}
 		if lastErr == nil {
 			return nil
 		}
@@ -482,4 +506,98 @@ func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn 
 			return err
 		}
 	}
+}
+
+// wakeBudgetExceededError is returned when the overall wake budget expires
+// while an attempt sent after a marked wake response is still waiting for
+// response headers. Unlike SandboxWakeTimeoutError it does not prove the
+// request was never forwarded.
+type wakeBudgetExceededError struct {
+	Attempts int
+	Waited   time.Duration
+	Deadline time.Duration
+}
+
+func (e *wakeBudgetExceededError) Error() string {
+	return fmt.Sprintf(
+		"opensandbox: wake overall deadline %s exceeded after %d marked wake attempt(s) and %s while waiting for a response; the request may have reached the sandbox",
+		e.Deadline, e.Attempts, e.Waited,
+	)
+}
+
+func (e *wakeBudgetExceededError) Unwrap() error { return context.DeadlineExceeded }
+
+// Wake attempt states: the remaining budget either expires before the first
+// response byte or the response arrives first and the budget stops applying.
+const (
+	wakeAttemptPending int32 = iota
+	wakeAttemptResponded
+	wakeAttemptExpired
+)
+
+type wakeAttemptKey struct{}
+
+// wakeAttempt bounds one attempt's wait for response headers by the remaining
+// wake budget. The established response, notably an SSE stream or a download
+// body, is not bounded by it.
+type wakeAttempt struct {
+	state  atomic.Int32
+	timer  *time.Timer
+	cancel context.CancelFunc
+	kept   atomic.Bool
+}
+
+// startWakeAttempt derives the context of an attempt that must receive its
+// response headers within remaining. An earlier caller deadline still applies.
+func startWakeAttempt(ctx context.Context, remaining time.Duration) (context.Context, *wakeAttempt) {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	a := &wakeAttempt{cancel: cancel}
+	a.timer = time.AfterFunc(remaining, func() {
+		if a.state.CompareAndSwap(wakeAttemptPending, wakeAttemptExpired) {
+			cancel()
+		}
+	})
+	attemptCtx = httptrace.WithClientTrace(attemptCtx, &httptrace.ClientTrace{
+		GotFirstResponseByte: func() {
+			if a.state.CompareAndSwap(wakeAttemptPending, wakeAttemptResponded) {
+				a.timer.Stop()
+			}
+		},
+	})
+	return context.WithValue(attemptCtx, wakeAttemptKey{}, a), a
+}
+
+// finish releases the attempt context unless a successful attempt handed it
+// to a response body via keepAttemptBody, and reports whether the wake budget
+// expired before the response arrived.
+func (a *wakeAttempt) finish(succeeded bool) bool {
+	a.timer.Stop()
+	if !succeeded || !a.kept.Load() {
+		a.cancel()
+	}
+	return a.state.Load() == wakeAttemptExpired
+}
+
+// keepAttemptBody ties the attempt context's lifetime to body for responses
+// read after the retry loop returns. Without a bounded wake attempt in ctx it
+// returns body unchanged.
+func keepAttemptBody(ctx context.Context, body io.ReadCloser) io.ReadCloser {
+	a, _ := ctx.Value(wakeAttemptKey{}).(*wakeAttempt)
+	if a == nil {
+		return body
+	}
+	a.kept.Store(true)
+	return &cancelOnCloseBody{ReadCloser: body, cancel: a.cancel}
+}
+
+// cancelOnCloseBody releases the request context once the body is closed.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
