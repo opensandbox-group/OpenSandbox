@@ -180,9 +180,8 @@ func (p *DefaultSandboxPool) reconcileLoop(ctx context.Context) {
 		case <-p.done:
 			return
 		case <-p.ticker.C:
-			if p.reconciler.shouldBackoff() {
-				continue
-			}
+			// Backoff gates creation inside reconcileTick, not maintenance:
+			// keep observing destroy fences, reaping, and shrinking idle entries.
 			// Do not use ReconcileInterval as context timeout — the interval
 			// controls how often ticks fire, not how long each tick may run.
 			// Sandbox creation has its own timeouts (WarmupReadyTimeout).
