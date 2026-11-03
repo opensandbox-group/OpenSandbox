@@ -229,6 +229,151 @@ content-type: application/json
 {"client_secret":"body \"secret\" value"}
 ```
 
+## Exchange Credentials (Dynamic Header Resolution)
+
+Static credentials are delivered once at vault creation and rendered at revision time. Some credentials cannot work that way: identity-derived tokens (STS or OAuth2 client-credentials grants, SPIFFE-style signed proofs) are short-lived and computed from request context — an audience derived from the destination, or a signature bound to the method, path, and headers of one specific request. Exchange credentials cover this case: the credential does not carry a value, it names a **header resolver**; when a bound request arrives, the egress asks that resolver for a fresh header set and injects the response. The sandbox process never sees or holds the material, exactly like the static path.
+
+An exchange credential declares where to resolve; a typeless binding auth declares when:
+
+```jsonc
+// vault create payload (POST /sandboxes/{id}/credential-vault)
+{
+  "credentials": [
+    { "name": "spi-signer", "source": { "type": "exchange", "endpoint": "unix:///run/spi/spi.sock" } },
+    { "name": "corp-resolver", "source": { "type": "exchange", "endpoint": "https://header-resolver.internal" } }
+  ],
+  "bindings": [
+    { "name": "internal-api",
+      "match": { "hosts": ["*.internal.example.com"], "methods": ["GET"], "paths": ["/v1/*"] },
+      "auth": { "credential": "spi-signer" } }   // no "type": typeless = exchange reference
+  ]
+}
+```
+
+The rules that keep the two worlds unambiguous:
+
+- Auth with a static `type` (`bearer`, `basic`, `apiKey`, `customHeaders`) must reference an `inline` credential; auth **without** `type` must reference an `exchange` credential. Cross-references are rejected with `400`.
+- The typeless form carries only `credential` — `name`, `headers`, and `substitutions` are not valid on it. Substitutions always require a static type.
+- Static and exchange bindings can coexist in one vault, including on the same host with disjoint `paths`/`methods` scopes.
+
+::: tip How a bound request flows
+The binding `match` semantics are identical to the static path. On a match, the egress derives the caller identity from the connection (the sandbox id — never client-supplied), calls the resolver at the credential's endpoint with the request context, and injects the returned headers into the outbound request. Every returned header is redacted from the response path by name and by value, and resolved material is never persisted — it exists for exactly one request. The same vault travels pause/resume and egress restarts as pure configuration and re-resolves on demand.
+:::
+
+### Failure Semantics
+
+Resolution failure fails closed, never open: if the resolver is unreachable, slow beyond the timeout, returns an invalid or oversized response, or the bound credential is mutated mid-flight, the matched request is denied — a local `407` for buffered requests, a terminated stream for requests already streaming. The request is never forwarded without credentials, and a failed resolve never poisons the next one. Static bindings in the same vault keep flowing during a resolver outage.
+
+Per-request resolution is bounded: each resolve carries a timeout (default 2s) and shares a concurrency limit (default 32), so one slow resolver delays only its own matched requests — never other sandboxes, other bindings, or non-bound traffic.
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT` | `2s` | Per-request resolver timeout, range 1s..120s. |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY` | `32` | Maximum concurrent resolves per egress process, range 1..1024. |
+
+A vault that references an exchange credential is rejected at write time unless the egress was started with resolver configuration (fail closed; inline-only vaults are unaffected).
+
+### Running a Resolver
+
+A resolver is any service that answers one route: `POST /resolve` with a JSON document describing the request, and returns the headers to inject. Both transports use the same framing — HTTP over a Unix socket for `unix:///path/to.sock`, TLS for `https://host[:port][/prefix]`:
+
+```jsonc
+// egress -> resolver
+{
+  "subject": "fsb-4f8a...",                 // the sandbox id, filled authoritatively by the egress
+  "credential": "spi-signer",
+  "binding": "internal-api",
+  "destination": { "scheme": "https", "authority": "api.internal.example.com:443", "sni": "api.internal.example.com" },
+  "request": { "method": "GET", "host": "api.internal.example.com", "path": "/v1/foo?a=1", "headers": {} }
+}
+
+// 200 OK
+{ "headers": { "authorization": "Bearer ...", "x-signature": "..." } }
+```
+
+`request.path` is the full request target including the query string, so a resolver can bind signatures to the complete target. The optional `redactions` field on the response is additive only — the egress redacts every returned header regardless.
+
+Hard requirements on a resolver endpoint:
+
+- **Reachable only by the egress process.** A sandbox that could call the resolver directly could mint credentials and bypass the policy plane. Unix sockets are scoped by directory/socket permissions (for example `0710`/`0660`); for `https://` endpoints, scope reachability at the network layer to the egress (the same UID-scoped exclusions used for upstream proxies) and never add a resolver host to a sandbox's egress allow list. HTTPS caller authentication (egress-presented bearer tokens) is declared follow-up work and is not implemented yet — resolver trust currently rests on TLS plus network reachability.
+- **Bounded responses.** The egress enforces an envelope — 64KiB total, at most 16 headers, 8KiB per value, 64 redaction entries — and denies the request when exceeded.
+- **Per-request semantics.** Input includes request context; caching and rotation are resolver-internal and invisible to the contract.
+
+A runnable reference resolver (with deterministic signatures and fault injection) ships at `components/egress/tests/resolver/resolver.py` in the repository.
+
+### Python SDK Example
+
+This example grants a sandbox access to an internal API through a signing resolver. The host-side script writes only the resolver endpoint into the vault; the sandbox code uses plain `requests` with no credential material anywhere in the process, environment, or logs.
+
+```python
+import os
+from datetime import timedelta
+
+from opensandbox import SandboxSync
+from opensandbox.models.sandboxes import (
+    Credential,
+    CredentialBinding,
+    CredentialProxyConfig,
+    NetworkPolicy,
+    NetworkRule,
+    SandboxImageSpec,
+)
+
+API_HOST = "api.internal.example.com"
+RESOLVER_ENDPOINT = "unix:///run/spi/spi.sock"  # or "https://header-resolver.internal"
+
+sandbox = SandboxSync.create(
+    image=SandboxImageSpec(os.getenv("SANDBOX_IMAGE", "opensandbox/code-interpreter:latest")),
+    timeout=timedelta(minutes=15),
+    network_policy=NetworkPolicy(
+        defaultAction="deny",
+        egress=[NetworkRule(action="allow", target=API_HOST)],
+    ),
+    credential_proxy=CredentialProxyConfig(enabled=True),
+)
+
+try:
+    state = sandbox.credential_vault.create(
+        credentials=[
+            Credential(
+                name="spi-signer",
+                source={"type": "exchange", "endpoint": RESOLVER_ENDPOINT},
+            )
+        ],
+        bindings=[
+            CredentialBinding(
+                name="internal-api",
+                match={
+                    "schemes": ["https"],
+                    "hosts": [API_HOST],
+                    "methods": ["GET"],
+                    "paths": ["/v1/*"],
+                },
+                auth={"credential": "spi-signer"},  # typeless: exchange reference
+            )
+        ],
+    )
+    print(f"vault revision {state.revision}")
+
+    # The sandbox process carries no credentials. Fresh, per-request headers
+    # are injected on the way out; if the resolver is down this call fails
+    # closed with 407 instead of leaking an unauthenticated request.
+    result = sandbox.commands.run(
+        "curl -fsS https://api.internal.example.com/v1/foo?a=1"
+    )
+    print(result.stdout)
+finally:
+    sandbox.kill()
+```
+
+The typed model `ExchangeCredentialSource` (`from opensandbox.models.sandboxes import ExchangeCredentialSource`) is equivalent to the `source` dict form; the typeless auth form is validated client-side — `CredentialAuth(credential="spi-signer")` without `type` accepts only the credential reference.
+
+Reads are sanitized for exchange credentials the same way as for inline ones: `get`/`list` return `sourceType: "exchange"` and the typeless auth as `{"credential": "spi-signer"}`; the endpoint is treated as configuration and never carries resolved material.
+
+::: info SDK support
+Exchange credentials are implemented in the Python, JavaScript/TypeScript, and Go SDKs. Kotlin and C# support is tracked as follow-up (T5b); until it lands, use the raw lifecycle API for those languages.
+:::
+
 ## Egress Sidecar Configuration
 
 | Environment variable | Default | Description |
