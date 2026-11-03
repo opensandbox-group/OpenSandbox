@@ -12,7 +12,7 @@ The `pvc` backend is a runtime-neutral abstraction. In Kubernetes it maps to a P
 :::
 
 ::: info Docker mount destinations
-For all Docker volume backends (`host`, `pvc`, and `ossfs`), `mountPath` must resolve to a non-root path and be unique within the request after POSIX path normalization. For example, `/mnt/data`, `/mnt/data/`, and `/mnt/./data` identify the same destination. Invalid destinations return HTTP 400 with `VOLUME::INVALID_MOUNT_PATH` before volume provisioning. Nested destinations such as `/mnt/data` and `/mnt/data/cache`, and the same source mounted at distinct destinations, are supported.
+For all Docker volume backends (`host`, `pvc`, and `ossfs`), `mountPath` must resolve to a non-root path, must not contain `:`, and must be unique after POSIX path normalization, both within the request and against paths the server mounts itself (`docker.sandbox_binds` destinations, the execd isolation directory when isolation is enabled, and `/oem` for Windows sandboxes). For example, `/mnt/data`, `/mnt/data/`, and `/mnt/./data` identify the same destination. Invalid destinations return HTTP 400 with `VOLUME::INVALID_MOUNT_PATH` before volume provisioning. Nested destinations such as `/mnt/data` and `/mnt/data/cache`, and the same source mounted at distinct destinations, are supported.
 :::
 
 ## Why Named Volumes over Host Paths?
