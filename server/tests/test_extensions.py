@@ -22,7 +22,9 @@ from opensandbox_server.extensions import (
     access_renew_extend_seconds_from_lifecycle,
     apply_access_renew_extend_seconds_to_mapping,
     apply_extensions_to_mapping,
+    CREATION_ASYNC_KEY,
     extract_extensions_from_mapping,
+    is_async_creation_requested,
     validate_extensions,
     validate_renew_policy_conflict,
 )
@@ -32,6 +34,30 @@ def _lifecycle(extend_seconds: int | None) -> SandboxLifecycle:
     if extend_seconds is None:
         return SandboxLifecycle()
     return SandboxLifecycle(renewalPolicy={"extendSeconds": extend_seconds})
+
+
+class TestCreationAsyncExtension:
+    def test_enable_accepted(self):
+        assert validate_extensions({CREATION_ASYNC_KEY: "enable"}) is None
+
+    @pytest.mark.parametrize("value", ["", "true", "disable", "Enable", " enable ", None])
+    def test_other_values_rejected(self, value):
+        with pytest.raises(HTTPException) as exc:
+            validate_extensions({CREATION_ASYNC_KEY: value})
+        assert exc.value.status_code == 400
+        assert CREATION_ASYNC_KEY in exc.value.detail["message"]
+
+    @pytest.mark.parametrize(
+        "extensions,expected",
+        [
+            (None, False),
+            ({}, False),
+            ({CREATION_ASYNC_KEY: "true"}, False),
+            ({CREATION_ASYNC_KEY: "enable"}, True),
+        ],
+    )
+    def test_is_async_creation_requested(self, extensions, expected):
+        assert is_async_creation_requested(extensions) is expected
 
 
 class TestAccessRenewExtendSecondsFromLifecycle:

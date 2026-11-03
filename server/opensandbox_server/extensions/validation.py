@@ -24,7 +24,10 @@ from opensandbox_server.constants import (
     RENEW_EXTEND_MIN_SECONDS,
 )
 from opensandbox_server.extensions.codec import access_renew_extend_seconds_from_lifecycle
-from opensandbox_server.extensions.keys import ACCESS_RENEW_EXTEND_SECONDS_KEY
+from opensandbox_server.extensions.keys import (
+    ACCESS_RENEW_EXTEND_SECONDS_KEY,
+    CREATION_ASYNC_KEY,
+)
 from opensandbox_server.services.constants import SandboxErrorCodes
 
 if TYPE_CHECKING:
@@ -124,6 +127,24 @@ def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
         )
 
 
+def _validate_creation_async(extensions: Dict[str, str]) -> None:
+    """If ``creation.async`` is set, require ``"enable"``; omit the key to disable."""
+    if CREATION_ASYNC_KEY not in extensions:
+        return
+    raw = extensions[CREATION_ASYNC_KEY]
+    if raw != "enable":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    f'Invalid extensions["{CREATION_ASYNC_KEY}"]: expected "enable" '
+                    f"(omit the key to disable), got {raw!r}."
+                ),
+            },
+        )
+
+
 def validate_extensions(extensions: Optional[Dict[str, str]]) -> None:
     """
     Validate well-known keys in ``extensions`` for sandbox creation.
@@ -138,6 +159,7 @@ def validate_extensions(extensions: Optional[Dict[str, str]]) -> None:
         return
 
     _validate_access_renew_extend_seconds(extensions)
+    _validate_creation_async(extensions)
 
 
 def validate_renew_policy_conflict(

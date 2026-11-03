@@ -343,6 +343,8 @@ Client / SDK / CLI / MCP
 
 Creation is asynchronous from the API perspective. Clients should poll `GET /v1/sandboxes/{sandboxId}` or use SDK readiness helpers.
 
+On the Kubernetes runtime, the server normally waits until the sandbox is ready before responding. Set `extensions["creation.async"] = "enable"` to get a `Pending` response as soon as the workload CR exists. The server does not watch the sandbox afterwards: no create timeout applies and nothing is rolled back. `GET /v1/sandboxes/{sandboxId}` reports whatever the workload status says, so failures the controller detects (pod failure, unschedulable platform) show as `Failed`, while quota or pool-capacity waits stay `Pending`. The caller (or `expireTime`) must delete sandboxes it gives up on. Docker ignores the key; FastSandbox (`templateId`) rejects it like any other unsupported extension.
+
 ### 7.2 Command, File, and Code Execution
 
 ```text

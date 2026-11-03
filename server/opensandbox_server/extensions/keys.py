@@ -23,6 +23,10 @@ ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY = "opensandbox.io/access-renew-extend-s
 # execd can use bwrap namespace isolation (OSEP-0013).
 BOOTSTRAP_EXECD_ISOLATION_KEY = "bootstrap.execd.isolation"
 
+# "enable" makes Kubernetes create return once the workload CR exists (state Pending)
+# instead of waiting for the sandbox to become ready.
+CREATION_ASYNC_KEY = "creation.async"
+
 # Default mount path for the isolation upper directory.
 # Must match the execd DefaultConfig().UpperRoot value.
 ISOLATION_UPPER_MOUNT_PATH = "/var/lib/execd/isolation"
