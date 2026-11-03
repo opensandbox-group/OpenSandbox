@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Dict, Mapping, MutableMapping, Optional
 from opensandbox_server.extensions.keys import (
     ACCESS_RENEW_EXTEND_SECONDS_KEY,
     ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
+    CREATION_ASYNC_KEY,
     EXTENSIONS_ANNOTATION_PREFIX,
     ANNOTATION_METADATA_PREFIX,
 )
@@ -67,6 +68,13 @@ def apply_access_renew_extend_seconds_to_mapping(
     if not s:
         return
     mapping[metadata_key] = s
+
+
+def is_async_creation_requested(extensions: Optional[Dict[str, str]]) -> bool:
+    """True when ``extensions["creation.async"]`` is ``"enable"``."""
+    if not extensions:
+        return False
+    return extensions.get(CREATION_ASYNC_KEY) == "enable"
 
 
 def apply_extensions_to_mapping(

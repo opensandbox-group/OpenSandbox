@@ -1422,6 +1422,71 @@ class TestWaitForSandboxReady:
         assert "exceeded quota" in exc_info.value.detail["message"]
         k8s_service.workload_provider.delete_workload.assert_called_once()
 
+class TestKubernetesSandboxServiceAsyncCreate:
+    """extensions["creation.async"]="enable" returns once the workload CR exists."""
+
+    @pytest.mark.asyncio
+    async def test_returns_pending_without_waiting_for_ready(
+        self, k8s_service, create_sandbox_request
+    ):
+        create_sandbox_request.extensions = {
+            "creation.async": "enable",
+            "opensandbox.extensions.custom-label": "v",
+        }
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+
+        with patch.object(k8s_service, "_wait_for_sandbox_ready") as mock_wait:
+            response = await k8s_service.create_sandbox(create_sandbox_request)
+
+        mock_wait.assert_not_called()
+        assert response.status.state == "Pending"
+        assert response.status.reason == "CREATING"
+        assert response.extensions == {"opensandbox.extensions.custom-label": "v"}
+        assert response.metadata == create_sandbox_request.metadata
+        k8s_service.workload_provider.create_workload.assert_called_once()
+        k8s_service.workload_provider.delete_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_keeps_managed_pvcs(self, k8s_service, create_sandbox_request):
+        create_sandbox_request.extensions = {"creation.async": "enable"}
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+
+        with patch.object(k8s_service, "_ensure_pvc_volumes", return_value=["pvc-1"]), \
+             patch.object(k8s_service, "_attach_pvc_owner_references"), \
+             patch.object(k8s_service, "_cleanup_managed_pvcs") as cleanup, \
+             patch("opensandbox_server.services.k8s.kubernetes_service.ensure_volumes_valid"):
+            create_sandbox_request.volumes = [MagicMock()]
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+        cleanup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_omitted_key_keeps_synchronous_behavior(
+        self, k8s_service, create_sandbox_request, mock_workload
+    ):
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        response = await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert response.status.state == "Running"
+
+
 class TestKubernetesSandboxServiceRenew:
     def test_renew_expiration_rejects_manual_cleanup_sandbox(self, k8s_service):
         k8s_service.workload_provider.get_workload.return_value = MagicMock()

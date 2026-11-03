@@ -33,6 +33,7 @@ from opensandbox_server.extensions import (
     apply_access_renew_extend_seconds_to_mapping,
     apply_extensions_to_mapping,
     extract_extensions_from_mapping,
+    is_async_creation_requested,
 )
 from opensandbox_server.extensions.keys import ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY
 from opensandbox_server.api.schema import (
@@ -1040,7 +1041,10 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         """
         Create a new sandbox using Kubernetes Pod.
 
-        Wait for the Pod to be Running and have an IP address before returning.
+        Wait for the Pod to be Running and have an IP address before returning,
+        unless ``extensions["creation.async"]`` is ``"enable"``: then return
+        ``Pending`` once the workload CR exists. Readiness is not watched:
+        the sandbox is reported from the workload status like any other.
         """
         pool_ref = (request.extensions or {}).get("poolRef", "").strip()
         has_pool_ref = bool(pool_ref)
@@ -1216,6 +1220,27 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 created_managed_pvcs,
                 workload_info,
             )
+
+            if is_async_creation_requested(request.extensions):
+                response = CreateSandboxResponse(
+                    id=sandbox_id,
+                    status=SandboxStatus(
+                        state="Pending",
+                        reason="CREATING",
+                        message="Sandbox workload created; provisioning in progress",
+                        last_transition_at=created_at,
+                    ),
+                    created_at=created_at,
+                    expires_at=context.expires_at,
+                    metadata=request.metadata,
+                    extensions=extract_extensions_from_mapping(context.annotations),
+                    entrypoint=request.entrypoint,
+                    platform=request.platform,
+                )
+                # The caller owns the sandbox (and its PVCs) from here.
+                managed_pvcs_may_exist = False
+                workload_left_alive = False
+                return response
 
             try:
                 kubernetes_config = self.app_config.kubernetes

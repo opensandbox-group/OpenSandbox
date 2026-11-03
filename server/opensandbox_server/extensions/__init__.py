@@ -21,11 +21,13 @@ from opensandbox_server.extensions.codec import (
     apply_access_renew_extend_seconds_to_mapping,
     apply_extensions_to_mapping,
     extract_extensions_from_mapping,
+    is_async_creation_requested,
 )
 from opensandbox_server.extensions.keys import (
     ACCESS_RENEW_EXTEND_SECONDS_KEY,
     ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
     BOOTSTRAP_EXECD_ISOLATION_KEY,
+    CREATION_ASYNC_KEY,
     EXTENSIONS_ANNOTATION_PREFIX,
     ANNOTATION_METADATA_PREFIX,
     ISOLATION_UPPER_MOUNT_PATH,
@@ -45,6 +47,8 @@ __all__ = [
     "validate_extensions",
     "validate_renew_policy_conflict",
     "access_renew_extend_seconds_from_lifecycle",
+    "is_async_creation_requested",
+    "CREATION_ASYNC_KEY",
     "apply_access_renew_extend_seconds_to_mapping",
     "apply_extensions_to_mapping",
     "extract_extensions_from_mapping",
