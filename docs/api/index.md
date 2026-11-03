@@ -53,6 +53,12 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 
 **Expiration updates:** `renew-expiration` sets `expiresAt` to the supplied future timestamp, which may be earlier than, equal to, or later than the current expiration. The configured `server.max_sandbox_timeout_seconds` applies only to `timeout` on creation; it does not cap expiration updates. See [Sandbox expiration](/getting-started/configuration#sandbox-expiration).
 
+**Unknown fields:** In sandbox creation requests, `image`, `image.auth`, `platform`, each `volumes[]` object and its `host`, `pvc` or `ossfs` backend, and `credentialProxy` reject unrecognized fields with HTTP 422 (`extra_forbidden`), matching their `additionalProperties: false` schemas. The `renew-expiration` and snapshot-creation bodies do the same. Correct misspellings such as `readonly` to `readOnly`.
+
+Supported aliases and snake_case field names remain accepted individually; sending both for one field in these objects now returns 422. Unknown top-level fields in `CreateSandboxRequest` are still ignored. The `metadata`, `env`, `extensions` and `resourceLimits` maps remain open, subject to existing key/value validation.
+
+For `image.auth`, send only `username` and `password`; `password` may contain a registry authentication token. Remove extra fields such as `token` or Docker-config metadata. The JavaScript/TypeScript SDK forwards this object as supplied, so its legacy `token` property also causes 422.
+
 **Concurrent Docker lifecycle requests:** Recognized conflicts on the main container return `409 Conflict` when removal is already in progress or the container is no longer in the state required by pause or resume. A missing main container returns `404 Not Found` when reported by the operation or confirmed by the follow-up lookup. For resume, these mappings apply only after any required sidecar rollback succeeds. Pause/resume sidecar failures, failed rollbacks, and unrelated main-container or lookup failures retain their existing `500` responses.
 
 **Optional `Sandbox.allocation` response field:**

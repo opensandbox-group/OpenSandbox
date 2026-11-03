@@ -68,6 +68,9 @@ class ImageAuth(BaseModel):
     username: str = Field(..., description="Registry username or service account")
     password: str = Field(..., description="Registry password or authentication token")
 
+    class Config:
+        extra = "forbid"
+
 
 class ImageSpec(BaseModel):
     """
@@ -84,6 +87,9 @@ class ImageSpec(BaseModel):
         description="Registry authentication credentials (required for private registries)",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class PlatformSpec(BaseModel):
     """
@@ -98,6 +104,9 @@ class PlatformSpec(BaseModel):
         ...,
         description="Target CPU architecture (for example 'amd64' or 'arm64').",
     )
+
+    class Config:
+        extra = "forbid"
 
 
 # ============================================================================
@@ -215,6 +224,7 @@ class CredentialProxyConfig(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 # ============================================================================
@@ -749,6 +759,9 @@ class Host(BaseModel):
         pattern=r"^(/|[A-Za-z]:[\\/])",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class PVC(BaseModel):
     """
@@ -823,6 +836,7 @@ class PVC(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 class OSSFS(BaseModel):
@@ -872,6 +886,7 @@ class OSSFS(BaseModel):
     )
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
     @model_validator(mode="after")
     def validate_inline_credentials(self) -> "OSSFS":
@@ -930,6 +945,7 @@ class Volume(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
     @model_validator(mode="after")
     def validate_exactly_one_backend(self) -> "Volume":
@@ -1324,6 +1340,9 @@ class CreateSnapshotRequest(BaseModel):
         description="Optional human-readable snapshot name",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class Snapshot(BaseModel):
     """
@@ -1484,6 +1503,7 @@ class RenewSandboxExpirationRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 class RenewSandboxExpirationResponse(BaseModel):
