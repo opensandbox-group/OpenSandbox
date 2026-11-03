@@ -540,6 +540,29 @@ await sandbox.CreateCredentialVaultAsync(
     });
 ```
 
+Exchange-sourced credentials (OSEP-0025) carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form.
+
+```csharp
+await sandbox.CreateCredentialVaultAsync(
+    new[]
+    {
+        new Credential
+        {
+            Name = "spi-signer",
+            Source = new ExchangeCredentialSource("unix:///run/spi/spi.sock")
+        }
+    },
+    new[]
+    {
+        new CredentialBinding
+        {
+            Name = "internal-api",
+            Match = new CredentialMatch { Hosts = new[] { "*.internal.example.com" } },
+            Auth = CredentialAuth.Exchange("spi-signer")
+        }
+    });
+```
+
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.
 
 ### 6. Timeout and Retry Behavior

@@ -222,6 +222,202 @@ public class EgressAdapterCredentialVaultTests
         JsonSerializer.Serialize(state).Should().NotContain("server-should-not-return-values");
     }
 
+    [Fact]
+    public async Task CreateAsync_ShouldSendExchangeSourceAndTypelessAuthAndParseSanitizedState()
+    {
+        var handler = new CaptureHandler(_ => """
+        {
+          "revision": 3,
+          "credentials": [
+            {
+              "name": "spi-signer",
+              "sourceType": "exchange",
+              "revision": 3,
+              "source": { "type": "exchange", "endpoint": "unix:///run/spi/spi.sock" }
+            },
+            { "name": "corp-resolver", "sourceType": "exchange", "revision": 3 }
+          ],
+          "bindings": [
+            {
+              "name": "internal-api",
+              "revision": 3,
+              "match": { "hosts": ["*.internal.example.com"] },
+              "auth": { "credential": "spi-signer" }
+            }
+          ]
+        }
+        """);
+        var adapter = CreateAdapter(handler);
+
+        var state = await adapter.CreateAsync(
+            [
+                new Credential
+                {
+                    Name = "spi-signer",
+                    Source = new ExchangeCredentialSource("unix:///run/spi/spi.sock")
+                },
+                new Credential
+                {
+                    Name = "corp-resolver",
+                    Source = new ExchangeCredentialSource { Endpoint = "https://resolver.internal:8443/prefix" }
+                }
+            ],
+            [
+                new CredentialBinding
+                {
+                    Name = "internal-api",
+                    Match = new CredentialMatch { Hosts = ["*.internal.example.com"] },
+                    Auth = CredentialAuth.Exchange("spi-signer")
+                }
+            ]);
+
+        handler.Requests.Should().ContainSingle();
+        var body = handler.Requests[0].Body!;
+        body.Should().NotContain("\"type\":null");
+        using var json = JsonDocument.Parse(body);
+        var root = json.RootElement;
+        var sources = root.GetProperty("credentials").EnumerateArray().Select(c => c.GetProperty("source")).ToList();
+        JsonSerializer.Serialize(sources[0], (JsonSerializerOptions?)null).Should().Be(
+            "{\"type\":\"exchange\",\"endpoint\":\"unix:///run/spi/spi.sock\"}");
+        JsonSerializer.Serialize(sources[1], (JsonSerializerOptions?)null).Should().Be(
+            "{\"type\":\"exchange\",\"endpoint\":\"https://resolver.internal:8443/prefix\"}");
+        var auth = root.GetProperty("bindings")[0].GetProperty("auth");
+        auth.EnumerateObject().Select(p => p.Name).Should().Equal("credential");
+        auth.GetProperty("credential").GetString().Should().Be("spi-signer");
+
+        state.Revision.Should().Be(3);
+        state.Credentials.Should().HaveCount(2).And.OnlyContain(c => c.SourceType == "exchange");
+        state.Bindings.Should().ContainSingle().Which.Auth!.Type.Should().BeNull();
+        state.Bindings[0].Auth!.Credential.Should().Be("spi-signer");
+        JsonSerializer.Serialize(state).Should().NotContain("spi.sock");
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldRecoverLegacyTypeNullSkewWithoutSurfacingTypeNull()
+    {
+        var handler = new CaptureHandler(_ => """
+        {
+          "revision": 3,
+          "credentials": [],
+          "bindings": [
+            {
+              "name": "internal-api",
+              "revision": 3,
+              "match": { "hosts": ["*.internal.example.com"] },
+              "auth": { "type": null, "credential": "spi-signer" }
+            }
+          ]
+        }
+        """);
+        var adapter = CreateAdapter(handler);
+
+        var state = await adapter.GetAsync();
+
+        state.Bindings.Should().ContainSingle().Which.Auth!.Type.Should().BeNull();
+        state.Bindings[0].Auth!.Credential.Should().Be("spi-signer");
+        JsonSerializer.Serialize(state).Should().NotContain("\"type\":null");
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldRejectIllegalMixedVaultShapes()
+    {
+        var handler = new CaptureHandler(_ => CredentialVaultStateResponse());
+        var adapter = CreateAdapter(handler);
+        var match = new CredentialMatch { Hosts = ["*.internal.example.com"] };
+
+        var exchangeWithValue = new Credential
+        {
+            Name = "spi-signer",
+            Source = new CredentialSource { Type = "exchange", Endpoint = "unix:///run/spi/spi.sock", Value = "secret" }
+        };
+        var act = () => adapter.CreateAsync([exchangeWithValue], []);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        var inlineWithEndpoint = new Credential
+        {
+            Name = "tok",
+            Source = new CredentialSource { Type = "inline", Value = "secret", Endpoint = "unix:///x" }
+        };
+        act = () => adapter.CreateAsync([inlineWithEndpoint], []);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        var unknownSourceType = new Credential
+        {
+            Name = "tok",
+            Source = new CredentialSource { Type = "voucher", Value = "secret" }
+        };
+        act = () => adapter.CreateAsync([unknownSourceType], []);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        var typelessWithName = new CredentialBinding
+        {
+            Name = "internal-api",
+            Match = match,
+            Auth = new CredentialAuth { Credential = "spi-signer", Name = "X-Api-Key" }
+        };
+        act = () => adapter.CreateAsync([], [typelessWithName]);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        var emptyAuth = new CredentialBinding
+        {
+            Name = "internal-api",
+            Match = match,
+            Auth = new CredentialAuth()
+        };
+        act = () => adapter.CreateAsync([], [emptyAuth]);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        handler.Requests.Should().BeEmpty("illegal shapes must fail before reaching the wire");
+    }
+
+    [Fact]
+    public async Task PatchAsync_ShouldRejectIllegalMixedVaultShapes()
+    {
+        var handler = new CaptureHandler(_ => CredentialVaultStateResponse());
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.PatchAsync(new CredentialVaultPatchRequest
+        {
+            Bindings = new CredentialBindingMutationSet
+            {
+                Add =
+                [
+                    new CredentialBinding
+                    {
+                        Name = "internal-api",
+                        Match = new CredentialMatch { Hosts = ["*.internal.example.com"] },
+                        Auth = new CredentialAuth { Credential = "spi-signer", Substitutions = [] }
+                    }
+                ]
+            }
+        });
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        handler.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void VaultSourceAndAuthSerialization_ShouldKeepStaticBytesAndOmitNullType()
+    {
+        JsonSerializer.Serialize(new InlineCredentialSource { Value = "dummy-inline-value" }).Should().Be(
+            "{\"type\":\"inline\",\"value\":\"dummy-inline-value\"}");
+        JsonSerializer.Serialize(CredentialSource.Inline("dummy-inline-value")).Should().Be(
+            "{\"type\":\"inline\",\"value\":\"dummy-inline-value\"}");
+        JsonSerializer.Serialize(new ExchangeCredentialSource { Endpoint = "unix:///run/spi/spi.sock" }).Should().Be(
+            "{\"type\":\"exchange\",\"endpoint\":\"unix:///run/spi/spi.sock\"}");
+        JsonSerializer.Serialize(CredentialSource.Exchange("unix:///run/spi/spi.sock")).Should().Be(
+            "{\"type\":\"exchange\",\"endpoint\":\"unix:///run/spi/spi.sock\"}");
+
+        JsonSerializer.Serialize(CredentialAuth.Exchange("spi-signer")).Should().Be(
+            "{\"credential\":\"spi-signer\"}");
+        JsonSerializer.Serialize(new CredentialAuth { Type = "bearer", Credential = "tok" }).Should().Be(
+            "{\"type\":\"bearer\",\"credential\":\"tok\"}");
+        JsonSerializer.Serialize(new CredentialAuthMetadata { Type = null, Credential = "spi-signer" }).Should().Be(
+            "{\"credential\":\"spi-signer\"}");
+        JsonSerializer.Serialize(new CredentialAuthMetadata { Type = "apiKey", Name = "X-Test-Key" }).Should().Be(
+            "{\"type\":\"apiKey\",\"name\":\"X-Test-Key\"}");
+    }
+
     private static EgressAdapter CreateAdapter(
         HttpMessageHandler handler,
         IReadOnlyDictionary<string, string>? headers = null)
