@@ -409,7 +409,7 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doAttempt(c.httpClient, req)
 	if err != nil {
 		if sent.Load() {
 			err = &requestSentError{err: err}
@@ -483,7 +483,7 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 		// SSE uses a dedicated non-pooled, timeout-free client so long streams
 		// are not killed by the overall request timeout and are never carried
 		// over a stale pooled connection.
-		r, err := c.streamHTTPClient().Do(req)
+		r, err := doAttempt(c.streamHTTPClient(), req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}

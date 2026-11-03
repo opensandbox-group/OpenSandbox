@@ -207,7 +207,7 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 		}
 		req.Header.Set("Accept", "text/plain")
 
-		resp, err := e.client.httpClient.Do(req)
+		resp, err := doAttempt(e.client.httpClient, req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}
@@ -591,7 +591,7 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 			req.Header.Set("Range", rangeHeader)
 		}
 
-		r, err := e.client.transferHTTPClient().Do(req)
+		r, err := doAttempt(e.client.transferHTTPClient(), req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}

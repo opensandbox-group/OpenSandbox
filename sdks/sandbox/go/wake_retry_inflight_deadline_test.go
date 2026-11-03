@@ -54,6 +54,29 @@ func holdHeaders(release <-chan struct{}) http.HandlerFunc {
 	}
 }
 
+// stallMidHeaders sends the start of a response header block over a hijacked
+// connection and then stalls until the client gives up or the test ends.
+func stallMidHeaders(release <-chan struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
+		_ = buf.Flush()
+		readDone := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(io.Discard, conn)
+			close(readDone)
+		}()
+		select {
+		case <-readDone:
+		case <-release:
+		}
+	}
+}
+
 func inflightWakeConfig(deadline time.Duration) RetryConfig {
 	return RetryConfig{WakeMaxAttempts: 3, WakeOverallDeadline: deadline}
 }
@@ -70,41 +93,47 @@ func TestWakeOverallDeadline_BoundsInflightRetry(t *testing.T) {
 			return client.RunCommand(ctx, RunCommandRequest{Command: "true"}, func(StreamEvent) error { return nil })
 		},
 	}
+	stalls := map[string]func(<-chan struct{}) http.HandlerFunc{
+		"no-headers":      holdHeaders,
+		"partial-headers": stallMidHeaders,
+	}
 	for name, call := range cases {
-		t.Run(name, func(t *testing.T) {
-			release := make(chan struct{})
-			srv, calls := newInflightWakeServer(t, holdHeaders(release))
-			t.Cleanup(func() { close(release) })
+		for stallName, stall := range stalls {
+			t.Run(name+"/"+stallName, func(t *testing.T) {
+				release := make(chan struct{})
+				srv, calls := newInflightWakeServer(t, stall(release))
+				t.Cleanup(func() { close(release) })
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			started := time.Now()
-			err := call(ctx, srv.URL)
-			elapsed := time.Since(started)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				started := time.Now()
+				err := call(ctx, srv.URL)
+				elapsed := time.Since(started)
 
-			if got := calls.Load(); got != 2 {
-				t.Fatalf("calls = %d, want one marked response and one blocked retry", got)
-			}
-			if elapsed > time.Second {
-				t.Fatalf("40ms wake budget did not bound the in-flight retry: elapsed %v", elapsed)
-			}
-			var budgetErr *wakeBudgetExceededError
-			if !errors.As(err, &budgetErr) {
-				t.Fatalf("err = %v, want wake budget exceeded", err)
-			}
-			if budgetErr.Attempts != 1 {
-				t.Fatalf("Attempts = %d, want 1", budgetErr.Attempts)
-			}
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("err = %v, want it to match context.DeadlineExceeded", err)
-			}
-			// The retry may have reached the sandbox: it must not be reported
-			// as a never-forwarded wake timeout.
-			var wakeErr *SandboxWakeTimeoutError
-			if errors.As(err, &wakeErr) {
-				t.Fatalf("err = %v, must not be a SandboxWakeTimeoutError", err)
-			}
-		})
+				if got := calls.Load(); got != 2 {
+					t.Fatalf("calls = %d, want one marked response and one blocked retry", got)
+				}
+				if elapsed > time.Second {
+					t.Fatalf("40ms wake budget did not bound the in-flight retry: elapsed %v", elapsed)
+				}
+				var budgetErr *wakeBudgetExceededError
+				if !errors.As(err, &budgetErr) {
+					t.Fatalf("err = %v, want wake budget exceeded", err)
+				}
+				if budgetErr.Attempts != 1 {
+					t.Fatalf("Attempts = %d, want 1", budgetErr.Attempts)
+				}
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("err = %v, want it to match context.DeadlineExceeded", err)
+				}
+				// The retry may have reached the sandbox: it must not be reported
+				// as a never-forwarded wake timeout.
+				var wakeErr *SandboxWakeTimeoutError
+				if errors.As(err, &wakeErr) {
+					t.Fatalf("err = %v, must not be a SandboxWakeTimeoutError", err)
+				}
+			})
+		}
 	}
 }
 

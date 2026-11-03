@@ -347,7 +347,7 @@ func (e *ExecdClient) IsolatedRunLogs(ctx context.Context, sessionID, runID stri
 		}
 		req.Header.Set("Accept", "text/plain")
 
-		resp, err := e.client.httpClient.Do(req)
+		resp, err := doAttempt(e.client.httpClient, req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}

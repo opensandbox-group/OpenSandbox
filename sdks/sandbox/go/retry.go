@@ -23,7 +23,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -527,8 +526,8 @@ func (e *wakeBudgetExceededError) Error() string {
 
 func (e *wakeBudgetExceededError) Unwrap() error { return context.DeadlineExceeded }
 
-// Wake attempt states: the remaining budget either expires before the first
-// response byte or the response arrives first and the budget stops applying.
+// Wake attempt states: the remaining budget either expires before the final
+// response headers or the headers arrive first and the budget stops applying.
 const (
 	wakeAttemptPending int32 = iota
 	wakeAttemptResponded
@@ -557,14 +556,29 @@ func startWakeAttempt(ctx context.Context, remaining time.Duration) (context.Con
 			cancel()
 		}
 	})
-	attemptCtx = httptrace.WithClientTrace(attemptCtx, &httptrace.ClientTrace{
-		GotFirstResponseByte: func() {
-			if a.state.CompareAndSwap(wakeAttemptPending, wakeAttemptResponded) {
-				a.timer.Stop()
-			}
-		},
-	})
 	return context.WithValue(attemptCtx, wakeAttemptKey{}, a), a
+}
+
+// doAttempt sends req with client. When req carries a bounded wake attempt,
+// the wake budget stops applying once Do has returned the final response
+// headers; a response that lost the race against the budget is discarded.
+// The first response byte is not enough: the peer may stall mid-headers, or
+// the byte may belong to a redirect hop.
+func doAttempt(client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	a, _ := req.Context().Value(wakeAttemptKey{}).(*wakeAttempt)
+	if a == nil {
+		return resp, nil
+	}
+	if a.state.CompareAndSwap(wakeAttemptPending, wakeAttemptResponded) {
+		a.timer.Stop()
+		return resp, nil
+	}
+	_ = resp.Body.Close()
+	return nil, context.DeadlineExceeded
 }
 
 // finish releases the attempt context unless a successful attempt handed it
