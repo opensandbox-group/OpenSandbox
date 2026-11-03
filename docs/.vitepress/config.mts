@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 const sdkSidebar = [
   {
@@ -45,7 +46,7 @@ const sdkSidebar = [
   },
 ];
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: "OpenSandbox",
   description: "Universal Sandbox Infrastructure for AI Applications",
   cleanUrls: true,
@@ -429,4 +430,4 @@ export default defineConfig({
       level: [2, 3],
     },
   },
-});
+}));
