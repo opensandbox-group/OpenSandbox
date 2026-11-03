@@ -21,6 +21,7 @@ Credential Vault is OpenSandbox's outbound credential broker for sandboxed agent
 - Sandbox create request includes an outbound network policy.
 - The outbound network policy should use `defaultAction="deny"` and explicitly allow every host referenced by a credential binding. Default-allow remains temporarily supported for backward compatibility but emits a security warning.
 - Sandbox create request enables Credential Proxy.
+- Exchange credentials (dynamic header resolution, the section below) require OpenSandbox release **1.2.1** or newer — the egress image, the server, and the Python/JavaScript/Go SDKs from the same release. Kotlin and C# SDK support is follow-up work.
 - Sandbox pods are not running with an additional transparent service-mesh sidecar (for example Istio/Envoy injection) in the same network namespace. Credential Vault currently assumes the OpenSandbox egress sidecar is the only transparent outbound interception layer in the pod.
 - The sandbox image has the tools you want to run. For Claude Code, use an image with Node.js and npm, such as the OpenSandbox code-interpreter image.
 
@@ -231,6 +232,10 @@ content-type: application/json
 
 ## Exchange Credentials (Dynamic Header Resolution)
 
+::: tip New in 1.2.1
+Exchange credentials ship in OpenSandbox release **1.2.1**. The egress image, the server, and the Python/JavaScript/Go SDKs must all come from that release or newer; inline credentials behave identically on older releases.
+:::
+
 Static credentials are delivered once at vault creation and rendered at revision time. Some credentials cannot work that way: identity-derived tokens (STS or OAuth2 client-credentials grants, SPIFFE-style signed proofs) are short-lived and computed from request context — an audience derived from the destination, or a signature bound to the method, path, and headers of one specific request. Exchange credentials cover this case: the credential does not carry a value, it names a **header resolver**; when a bound request arrives, the egress asks that resolver for a fresh header set and injects the response. The sandbox process never sees or holds the material, exactly like the static path.
 
 An exchange credential declares where to resolve; a typeless binding auth declares when:
@@ -371,7 +376,7 @@ The typed model `ExchangeCredentialSource` (`from opensandbox.models.sandboxes i
 Reads are sanitized for exchange credentials the same way as for inline ones: `get`/`list` return `sourceType: "exchange"` and the typeless auth as `{"credential": "spi-signer"}`; the endpoint is treated as configuration and never carries resolved material.
 
 ::: info SDK support
-Exchange credentials are implemented in the Python, JavaScript/TypeScript, and Go SDKs. Kotlin and C# support is tracked as follow-up (T5b); until it lands, use the raw lifecycle API for those languages.
+Exchange credentials require release 1.2.1+ and are implemented in the Python, JavaScript/TypeScript, and Go SDKs. Kotlin and C# support is tracked as follow-up (T5b); until it lands, use the raw lifecycle API for those languages.
 :::
 
 ## Egress Sidecar Configuration
