@@ -22,6 +22,7 @@ import json
 import os
 import socket
 import ssl
+import stat
 import tempfile
 import threading
 import time
@@ -133,10 +134,10 @@ class _ResolverProcess:
 
 def build_uds_server(socket_path: str, argv: list[str] | None = None) -> Any:
     options = resolver.parse_args(["--uds", socket_path, *(argv or [])])
-    return resolver.build_server(options, transport="uds", expected_token=None)
+    return resolver.build_server(options, transport="uds")
 
 
-def build_https_server(port: int, expected_token: str | None) -> Any:
+def build_https_server(port: int) -> Any:
     options = resolver.parse_args(
         [
             "--https", f"127.0.0.1:{port}",
@@ -144,7 +145,7 @@ def build_https_server(port: int, expected_token: str | None) -> Any:
             "--tls-key", str(KEY),
         ]
     )
-    return resolver.build_server(options, transport="https", expected_token=expected_token)
+    return resolver.build_server(options, transport="https")
 
 
 def free_port() -> int:
@@ -303,20 +304,11 @@ class ResolverUDSTest(unittest.TestCase):
 
 
 class ResolverHTTPSTest(unittest.TestCase):
-    """HTTPS transport: Bearer caller authentication, fail closed."""
+    """HTTPS transport: TLS only, no caller authentication (D5 deferred)."""
 
     def setUp(self) -> None:
-        self._original_auth = os.environ.get(resolver._AUTH_ENV)
-        os.environ.pop(resolver._AUTH_ENV, None)
-        self.addCleanup(self._restore_auth)
         self.port = free_port()
         self.context = ssl.create_default_context(cafile=str(CERT))
-
-    def _restore_auth(self) -> None:
-        if self._original_auth is None:
-            os.environ.pop(resolver._AUTH_ENV, None)
-        else:
-            os.environ[resolver._AUTH_ENV] = self._original_auth
 
     def post(self, body: bytes, headers: dict[str, str] | None = None,
              timeout: float = 10) -> tuple[int, bytes]:
@@ -333,55 +325,42 @@ class ResolverHTTPSTest(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_happy_path_with_configured_token(self) -> None:
-        server = build_https_server(self.port, "caller-secret")
+    def test_happy_path_over_tls(self) -> None:
+        server = build_https_server(self.port)
         with _ResolverProcess(server):
-            status, _ = self.post(
-                dumps(VALID_REQUEST), {"Authorization": "Bearer caller-secret"}
-            )
+            status, payload = self.post(dumps(VALID_REQUEST))
         self.assertEqual(200, status)
+        self.assertEqual(
+            "Bearer test-spi-signer",
+            json.loads(payload)["headers"]["authorization"],
+        )
 
-    def test_wrong_token_rejected_with_401(self) -> None:
-        server = build_https_server(self.port, "caller-secret")
+    def test_authorization_header_is_ignored(self) -> None:
+        # Caller authentication is deferred: any supplied Authorization is
+        # neither required nor interpreted.
+        server = build_https_server(self.port)
         with _ResolverProcess(server):
             status, _ = self.post(
-                dumps(VALID_REQUEST), {"Authorization": "Bearer wrong"}
-            )
-        self.assertEqual(401, status)
-
-    def test_missing_authorization_rejected_with_401(self) -> None:
-        server = build_https_server(self.port, "caller-secret")
-        with _ResolverProcess(server):
-            status, _ = self.post(dumps(VALID_REQUEST))
-        self.assertEqual(401, status)
-
-    def test_unconfigured_origin_fails_closed_with_401(self) -> None:
-        server = build_https_server(self.port, None)
-        with _ResolverProcess(server):
-            authorized, _ = self.post(
                 dumps(VALID_REQUEST), {"Authorization": "Bearer anything"}
             )
-            anonymous, _ = self.post(dumps(VALID_REQUEST))
-        self.assertEqual(401, authorized)
-        self.assertEqual(401, anonymous)
-
-    def test_token_lookup_from_egress_auth_environment(self) -> None:
-        origin = f"https://127.0.0.1:{self.port}"
-        os.environ[resolver._AUTH_ENV] = f"{origin}=env-token,https://other=unused"
-        token = resolver.expected_token_for_origin(origin, None)
-        self.assertEqual("env-token", token)
-        server = build_https_server(self.port, token)
-        with _ResolverProcess(server):
-            status, _ = self.post(
-                dumps(VALID_REQUEST), {"Authorization": "Bearer env-token"}
-            )
         self.assertEqual(200, status)
 
-    def test_authorization_override_wins_over_environment(self) -> None:
-        os.environ[resolver._AUTH_ENV] = f"https://127.0.0.1:{self.port}=env-token"
-        self.assertEqual(
-            "override", resolver.expected_token_for_origin("https://x", "override")
-        )
+    def test_wrong_path_answers_404(self) -> None:
+        server = build_https_server(self.port)
+        with _ResolverProcess(server):
+            connection = http.client.HTTPSConnection(
+                "127.0.0.1", self.port, context=self.context, timeout=10
+            )
+            try:
+                connection.request("POST", "/nope", body=dumps(VALID_REQUEST), headers={
+                    "Content-Type": "application/json",
+                })
+                response = connection.getresponse()
+                status = response.status
+                response.read()
+            finally:
+                connection.close()
+        self.assertEqual(404, status)
 
 
 class ResolverFaultInjectionTest(unittest.TestCase):
@@ -456,6 +435,35 @@ class ResolveRequestValidationTest(unittest.TestCase):
             resolver.resolve_response(parts, False),
             resolver.resolve_response(parts, False),
         )
+
+
+def _mode(path: str) -> str:
+    return oct(stat.S_IMODE(os.stat(path).st_mode))
+
+
+class SocketDirectoryLayoutTest(unittest.TestCase):
+    """OSEP-0025 R4 layout: socket 0660, 0710 parent only when stub-created.
+
+    A pre-existing parent (e.g. /tmp on a developer machine, sticky 1777, or
+    a dedicated volume prepared by an e2e) must keep its own mode — an
+    unconditional chmod would drop the sticky bit from shared directories.
+    """
+
+    def test_created_directory_gets_0710_and_socket_0660(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_dir = os.path.join(tmp, "created", "spi")
+            socket_path = os.path.join(socket_dir, "resolver.sock")
+            with _ResolverProcess(build_uds_server(socket_path)):
+                self.assertEqual("0o710", _mode(socket_dir))
+                self.assertEqual("0o660", _mode(socket_path))
+
+    def test_pre_existing_directory_keeps_its_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o1777)
+            socket_path = os.path.join(tmp, "resolver.sock")
+            with _ResolverProcess(build_uds_server(socket_path)):
+                self.assertEqual("0o1777", _mode(tmp))
+                self.assertEqual("0o660", _mode(socket_path))
 
 
 if __name__ == "__main__":

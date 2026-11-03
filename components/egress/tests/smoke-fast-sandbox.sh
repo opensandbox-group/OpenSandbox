@@ -325,17 +325,11 @@ start_egress() {
   if [ -n "${upstream}" ]; then
     upstream_env=(OPENSANDBOX_EGRESS_UPSTREAM_PROXY="${upstream}")
   fi
-  # Optional credential-resolver operator configuration (OSEP-0025 Test 15):
-  # the origin-scoped HTTPS caller-auth table, plus the resolver CA the Go
-  # TLS stack honors via SSL_CERT_FILE. CAVEAT: SSL_CERT_FILE REPLACES the
-  # process's entire trust pool, not just the resolver path — harmless in
-  # this harness (the egress dials no other TLS endpoint) but NOT production
-  # guidance: install the resolver CA into the host trust store, or wait for
-  # a dedicated CA pool on the resolver client (T8 operator docs).
+  # Optional resolver CA honored by the Go TLS stack via SSL_CERT_FILE.
+  # CAVEAT: SSL_CERT_FILE replaces the process's whole trust pool — fine in
+  # this harness, NOT production guidance (T8 operator docs). Caller auth
+  # (D5) is deferred: no auth env exists.
   local resolver_env=()
-  if [ -n "${EGRESS_RESOLVER_AUTH-}" ]; then
-    resolver_env=(OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH="${EGRESS_RESOLVER_AUTH}")
-  fi
   if [ -n "${EGRESS_RESOLVER_CA_FILE-}" ]; then
     resolver_env+=(SSL_CERT_FILE="${EGRESS_RESOLVER_CA_FILE}")
   fi
@@ -1324,22 +1318,20 @@ else
   pass "no pollution after resolver recovery (fresh signature)"
 
   ###############################################################################
-  info "Test 15b: exchange over the HTTPS resolver transport (caller-auth table)"
-  # Same chain over https:// + OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH:
-  # the origin-scoped bearer token reaches the stub (without it the stub
-  # answers 401 and the sandbox would see 407), TLS verifies against the
+  info "Test 15b: exchange over the HTTPS resolver transport (TLS)"
+  # Same chain over https:// with no caller authentication (D5 deferred —
+  # resolver dials carry no Authorization header): TLS verifies against the
   # fixture CA via SSL_CERT_FILE, and the wire subject stays the sandboxId.
   python3 "${SCRIPT_DIR}/resolver/resolver.py" --https 127.0.0.1:18443 \
     --tls-cert "${SCRIPT_DIR}/resolver/fixtures/test-localhost-cert.pem" \
     --tls-key "${SCRIPT_DIR}/resolver/fixtures/test-localhost-key.pem" \
-    --auth smoke-resolver-token >"${RESOLVER_HTTPS_LOG}" 2>&1 &
+    >"${RESOLVER_HTTPS_LOG}" 2>&1 &
   RESOLVER_HTTPS_PID=$!
   wait_for 10 "T6 resolver stub (https)" grep -q "test resolver ready" "${RESOLVER_HTTPS_LOG}"
 
   kill "${EGRESS_PID}" 2>/dev/null
   wait "${EGRESS_PID}" 2>/dev/null || true
   EGRESS_PID=""
-  EGRESS_RESOLVER_AUTH="https://127.0.0.1:18443=smoke-resolver-token" \
   EGRESS_RESOLVER_CA_FILE="${SCRIPT_DIR}/resolver/fixtures/test-localhost-cert.pem" \
   EGRESS_MITM=1 start_egress
 
@@ -1356,8 +1348,8 @@ else
   echo "${out}" | grep -qi "x-test-signature: ${EX_SIG}" \
     || fail "https resolver signature mismatch (want ${EX_SIG}); got: ${out}"
   echo "${out}" | grep -qi 'authorization: bearer test-spi-signer' \
-    || fail "https resolver headers must reach the upstream (auth table + TLS ok); got: ${out}"
-  pass "exchange happy path https (caller-auth token, TLS, same wire subject)"
+    || fail "https resolver headers must reach the upstream (TLS ok); got: ${out}"
+  pass "exchange happy path https (TLS transport, same wire subject)"
 
   kill "${RESOLVER_HTTPS_PID}" 2>/dev/null || true
   wait "${RESOLVER_HTTPS_PID}" 2>/dev/null || true

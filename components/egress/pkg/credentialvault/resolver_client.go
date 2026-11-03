@@ -26,7 +26,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -141,9 +140,6 @@ type ResolverClientOptions struct {
 	Timeout time.Duration
 	// MaxConcurrency bounds in-flight resolves; 0 selects the default.
 	MaxConcurrency int
-	// Auth maps normalized origins ("https://host:port") to bearer tokens
-	// (D5); unmatched origins resolve without an Authorization header.
-	Auth map[string]string
 	// TLSClientConfig overrides HTTPS TLS (test/deployment seam); nil keeps
 	// system verification.
 	TLSClientConfig *tls.Config
@@ -191,10 +187,10 @@ func NewResolverClient(options ResolverClientOptions) (ResolverClient, error) {
 		}
 		client.requestURL = (&url.URL{Scheme: "http", Host: "localhost", Path: parsed.resolvePath}).String()
 	} else {
-		if parsed.origin == "" {
+		if parsed.authority == "" {
 			return nil, resolverErrorf(ResolverInvalidRequest, "missing_https_origin")
 		}
-		// Proxy stays nil: the token must never leak through an outbound proxy.
+		// Proxy stays nil: resolver dials never traverse an outbound proxy.
 		transport = &http.Transport{
 			DisableKeepAlives:      true,
 			ForceAttemptHTTP2:      false,
@@ -203,10 +199,6 @@ func NewResolverClient(options ResolverClientOptions) (ResolverClient, error) {
 		}
 		client.requestURL = (&url.URL{Scheme: "https", Host: parsed.authority, Path: parsed.resolvePath}).String()
 		client.hostHeader = parsed.authority
-		// D5: origin-scoped bearer token; an unmatched origin sends no header.
-		if token, ok := options.Auth[parsed.origin]; ok {
-			client.authorization = "Bearer " + token
-		}
 	}
 	httpClient.Transport = transport
 	client.http = httpClient
@@ -217,7 +209,6 @@ type parsedResolverEndpoint struct {
 	network     string // "unix" or "tcp"
 	socketPath  string // unix only
 	authority   string // https host[:port] as configured
-	origin      string // normalized "https://host:port" (D5 lookup key)
 	resolvePath string // request target: prefix + "/resolve"
 }
 
@@ -248,10 +239,6 @@ func parseResolverEndpoint(endpoint string) (*parsedResolverEndpoint, error) {
 		if raw.RawQuery != "" || raw.Fragment != "" || raw.User != nil {
 			return nil, resolverErrorf(ResolverInvalidRequest, "https_endpoint_rejects_query_fragment_userinfo")
 		}
-		origin, err := normalizeResolverOrigin(raw)
-		if err != nil {
-			return nil, err
-		}
 		prefix := raw.Path
 		if prefix == "/" {
 			prefix = ""
@@ -262,71 +249,11 @@ func parseResolverEndpoint(endpoint string) (*parsedResolverEndpoint, error) {
 		return &parsedResolverEndpoint{
 			network:     "tcp",
 			authority:   raw.Host,
-			origin:      origin,
 			resolvePath: prefix + "/resolve",
 		}, nil
 	default:
 		return nil, resolverErrorf(ResolverInvalidRequest, "unsupported_endpoint_scheme")
 	}
-}
-
-// normalizeResolverOrigin canonicalizes to "https://host:port" (D5).
-func normalizeResolverOrigin(u *url.URL) (string, error) {
-	if strings.ToLower(u.Scheme) != "https" {
-		return "", resolverErrorf(ResolverInvalidRequest, "origin_requires_https_scheme")
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "" {
-		return "", resolverErrorf(ResolverInvalidRequest, "origin_requires_host")
-	}
-	port := u.Port()
-	if port == "" {
-		port = "443"
-	}
-	if net.ParseIP(host) != nil && strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	return "https://" + host + ":" + port, nil
-}
-
-// ParseResolverAuthEnv parses "origin=token,..." entries (D5). Origins are
-// normalized; malformed entries and empty tokens fail closed.
-func ParseResolverAuthEnv(raw string) (map[string]string, error) {
-	tokens := make(map[string]string)
-	for _, entry := range strings.Split(raw, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		origin, token, found := strings.Cut(entry, "=")
-		origin = strings.TrimSpace(origin)
-		token = strings.TrimSpace(token)
-		if !found || origin == "" || token == "" {
-			return nil, fmt.Errorf("invalid resolver auth entry (want origin=token)")
-		}
-		normalized, err := normalizeResolverOriginString(origin)
-		if err != nil {
-			return nil, fmt.Errorf("invalid resolver auth origin %q: %w", origin, err)
-		}
-		if _, duplicate := tokens[normalized]; duplicate {
-			return nil, fmt.Errorf("duplicate resolver auth origin %q", origin)
-		}
-		tokens[normalized] = token
-	}
-	return tokens, nil
-}
-
-func normalizeResolverOriginString(origin string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(origin))
-	if err != nil {
-		return "", err
-	}
-	// Reject path-qualified origins: normalization would silently broaden
-	// the token's scope (D5 keys are exactly scheme://host:port).
-	if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
-		return "", errors.New("origin must be scheme://host:port")
-	}
-	return normalizeResolverOrigin(parsed)
 }
 
 // ResolverTimeoutFromEnv reads the timeout env (seconds); bad values keep
@@ -353,32 +280,16 @@ func ResolverMaxConcurrencyFromEnv() int {
 // NewResolverClientFromEnv builds a client from the resolver envs; wiring
 // supplies the endpoint.
 func NewResolverClientFromEnv(endpoint string) (ResolverClient, error) {
-	auth, err := authTokensFromEnv()
-	if err != nil {
-		return nil, err
-	}
-	return NewResolverClient(ResolverClientOptions{
-		Endpoint: endpoint,
-		Auth:     auth,
-	})
-}
-
-func authTokensFromEnv() (map[string]string, error) {
-	raw := strings.TrimSpace(os.Getenv(constants.EnvCredentialResolverAuth))
-	if raw == "" {
-		return nil, nil
-	}
-	return ParseResolverAuthEnv(raw)
+	return NewResolverClient(ResolverClientOptions{Endpoint: endpoint})
 }
 
 // resolverClient is the UDS/HTTPS transport; construct via NewResolverClient.
 type resolverClient struct {
-	http          *http.Client
-	requestURL    string
-	hostHeader    string // https: endpoint authority; empty for unix (localhost)
-	authorization string // D5: "Bearer <token>" only when the origin matched
-	timeout       time.Duration
-	concurrency   chan struct{}
+	http        *http.Client
+	requestURL  string
+	hostHeader  string // https: endpoint authority; empty for unix (localhost)
+	timeout     time.Duration
+	concurrency chan struct{}
 }
 
 var _ ResolverClient = (*resolverClient)(nil)
@@ -412,9 +323,6 @@ func (c *resolverClient) Resolve(ctx context.Context, input ResolveInput) (*Reso
 	if c.hostHeader != "" {
 		// D15: Host is the endpoint authority (localhost over unix).
 		request.Host = c.hostHeader
-	}
-	if c.authorization != "" {
-		request.Header.Set("Authorization", c.authorization)
 	}
 	request.Close = true
 

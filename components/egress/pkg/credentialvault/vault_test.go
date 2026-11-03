@@ -638,7 +638,7 @@ func testExchangePolicy(t *testing.T) *policy.NetworkPolicy {
 
 func testResolverReadyStore() *Store {
 	store := NewStore(nil, func() bool { return true })
-	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
 	return store
 }
 
@@ -828,28 +828,16 @@ func TestCredentialVaultMixedInlineAndExchangeBindingsAreValid(t *testing.T) {
 }
 
 func TestCredentialVaultExchangeRequiresResolverConfiguration(t *testing.T) {
-	tests := []struct {
-		name   string
-		config ResolverConfig
-	}{
-		{"unset", ResolverConfig{}},
-		{"timeout only", ResolverConfig{TimeoutConfigured: true}},
-		{"auth only", ResolverConfig{AuthTableParsed: true}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			store := NewStore(nil, func() bool { return true })
-			store.SetResolverConfig(tc.config)
-			_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
-			require.ErrorContains(t, err, "credential resolver operator configuration")
-			_, err = store.PrepareReplace(ReplaceRequest{CreateRequest: testExchangeVaultRequest()}, testExchangePolicy(t))
-			require.Error(t, err)
-		})
-	}
-
 	store := NewStore(nil, func() bool { return true })
-	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	store.SetResolverConfig(ResolverConfig{})
 	_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+	require.ErrorContains(t, err, "credential resolver operator configuration")
+	_, err = store.PrepareReplace(ReplaceRequest{CreateRequest: testExchangeVaultRequest()}, testExchangePolicy(t))
+	require.Error(t, err)
+
+	store = NewStore(nil, func() bool { return true })
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
+	_, err = store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
 	require.NoError(t, err)
 }
 
@@ -859,14 +847,14 @@ func TestCredentialVaultExchangeGateCoversUnreferencedCredentials(t *testing.T) 
 	_, err := store.Create(request, testExchangePolicy(t))
 	require.ErrorContains(t, err, "credential resolver operator configuration")
 
-	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
 	_, err = store.Create(request, testExchangePolicy(t))
 	require.NoError(t, err)
 }
 
 func TestCredentialVaultLiveRevisionRuntimeRejectsExchange(t *testing.T) {
 	store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
-	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true})
+	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
 	_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
 	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
 	_, err = store.PrepareCreate(testExchangeVaultRequest(), testExchangePolicy(t))

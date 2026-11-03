@@ -70,18 +70,12 @@ func TestParseResolverEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "tcp", parsed.network)
 	require.Equal(t, "resolver.internal:8443", parsed.authority)
-	require.Equal(t, "https://resolver.internal:8443", parsed.origin)
 	require.Equal(t, "/base/resolve", parsed.resolvePath)
 
 	parsed, err = parseResolverEndpoint("https://resolver.internal")
 	require.NoError(t, err)
 	require.Equal(t, "resolver.internal", parsed.authority)
-	require.Equal(t, "https://resolver.internal:443", parsed.origin)
 	require.Equal(t, "/resolve", parsed.resolvePath)
-
-	parsed, err = parseResolverEndpoint("https://RESOLVER.Internal:443")
-	require.NoError(t, err)
-	require.Equal(t, "https://resolver.internal:443", parsed.origin)
 
 	for _, bad := range []string{
 		"",
@@ -97,52 +91,6 @@ func TestParseResolverEndpoint(t *testing.T) {
 	} {
 		_, err = parseResolverEndpoint(bad)
 		require.Error(t, err, "endpoint %q must be rejected", bad)
-	}
-}
-
-func TestNormalizeResolverOrigin(t *testing.T) {
-	origin, err := normalizeResolverOriginString("HTTPS://Resolver.Example.COM:8443")
-	require.NoError(t, err)
-	require.Equal(t, "https://resolver.example.com:8443", origin)
-
-	origin, err = normalizeResolverOriginString("https://resolver.example.com")
-	require.NoError(t, err)
-	require.Equal(t, "https://resolver.example.com:443", origin)
-
-	origin, err = normalizeResolverOriginString("https://[::1]:8443")
-	require.NoError(t, err)
-	require.Equal(t, "https://[::1]:8443", origin)
-
-	_, err = normalizeResolverOriginString("http://resolver.example.com:8080")
-	require.Error(t, err)
-}
-
-func TestParseResolverAuthEnv(t *testing.T) {
-	tokens, err := ParseResolverAuthEnv("https://resolver.internal:8443=alpha, https://other.internal=beta ,,")
-	require.NoError(t, err)
-	require.Equal(t, map[string]string{
-		"https://resolver.internal:8443": "alpha",
-		"https://other.internal:443":     "beta",
-	}, tokens)
-
-	tokens, err = ParseResolverAuthEnv("")
-	require.NoError(t, err)
-	require.Empty(t, tokens)
-
-	for _, bad := range []string{
-		"resolver.internal=alpha",
-		"https://resolver.internal:8443=",
-		"=alpha",
-		"notaentry",
-		"https://resolver.internal:8443=alpha,https://resolver.internal:8443=beta",
-		// Path-qualified origins would silently broaden the token scope.
-		"https://resolver.internal/base=alpha",
-		"https://resolver.internal?zone=1=alpha",
-		"https://resolver.internal:8443/#frag=alpha",
-		"https://user@resolver.internal:8443=alpha",
-	} {
-		_, err = ParseResolverAuthEnv(bad)
-		require.Error(t, err, "auth table %q must be rejected", bad)
 	}
 }
 
@@ -164,18 +112,12 @@ func TestResolverEnvDefaults(t *testing.T) {
 }
 
 func TestNewResolverClientFromEnv(t *testing.T) {
-	t.Setenv(constants.EnvCredentialResolverAuth, "https://resolver.internal:8443=alpha")
 	client, err := NewResolverClientFromEnv("https://resolver.internal:8443/base")
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	t.Setenv(constants.EnvCredentialResolverAuth, "https://resolver.internal:8443=")
-	_, err = NewResolverClientFromEnv("https://resolver.internal:8443/base")
+	_, err = NewResolverClientFromEnv("tcp://resolver.internal:8443")
 	require.Error(t, err)
-
-	t.Setenv(constants.EnvCredentialResolverAuth, "")
-	_, err = NewResolverClientFromEnv("https://resolver.internal:8443/base")
-	require.NoError(t, err)
 }
 
 func TestMarshalResolveInputValidation(t *testing.T) {
@@ -341,7 +283,6 @@ func TestHTTPSFrameAndHappyPath(t *testing.T) {
 		Endpoint:        endpoint + "/egress-resolver",
 		Timeout:         time.Second,
 		MaxConcurrency:  1,
-		Auth:            map[string]string{endpoint: "secret-token"},
 		TLSClientConfig: tlsConfig,
 	})
 	require.NoError(t, err)
@@ -355,8 +296,9 @@ func TestHTTPSFrameAndHappyPath(t *testing.T) {
 	require.Equal(t, "/egress-resolver/resolve", frame.path)
 	require.Equal(t, strings.TrimPrefix(endpoint, "https://"), frame.host)
 	require.Equal(t, "application/json", frame.content)
-	// D5: only the configured origin's token is presented.
-	require.Equal(t, "Bearer secret-token", frame.auth)
+	// Caller authentication is deferred (D5 not implemented): resolver dials
+	// carry no Authorization header.
+	require.Empty(t, frame.auth)
 	require.NotNil(t, frame.body)
 	keys := make([]string, 0, len(frame.body))
 	for key := range frame.body {
@@ -416,11 +358,10 @@ func TestUDSFrameAndNoAuthorization(t *testing.T) {
 	})
 
 	client, err := NewResolverClient(ResolverClientOptions{
-		// D5: a UDS endpoint never carries auth — the socket is the boundary.
-		Endpoint:       "uds://" + socketPath,
-		Timeout:        time.Second,
+		Endpoint: "uds://" + socketPath,
+		Timeout:  time.Second,
+		// A UDS endpoint never carries auth — the socket is the boundary.
 		MaxConcurrency: 1,
-		Auth:           map[string]string{"https://anything:443": "must-not-leak"},
 	})
 	require.NoError(t, err)
 	_, err = client.Resolve(context.Background(), resolverTestInput())
@@ -431,22 +372,6 @@ func TestUDSFrameAndNoAuthorization(t *testing.T) {
 	require.Equal(t, "localhost", frame.host)
 	require.Equal(t, "/resolve", frame.path)
 	require.Empty(t, frame.auth, "UDS resolves must never carry an Authorization header")
-}
-
-func TestHTTPSUnconfiguredOriginSendsNoAuthorization(t *testing.T) {
-	var captured capturedRequest
-	endpoint, tlsConfig := startEnvelopeServer(t, http.StatusOK, `{"headers":{"x-a":"1"}}`, &captured)
-	client, err := NewResolverClient(ResolverClientOptions{
-		Endpoint:        endpoint,
-		Timeout:         time.Second,
-		MaxConcurrency:  1,
-		Auth:            map[string]string{"https://other-resolver.internal:8443": "global-token"},
-		TLSClientConfig: tlsConfig,
-	})
-	require.NoError(t, err)
-	_, err = client.Resolve(context.Background(), resolverTestInput())
-	require.NoError(t, err)
-	require.Empty(t, captured.snapshot().auth, "an unmatched origin must never carry Authorization")
 }
 
 func TestResolverDeniedLimits(t *testing.T) {

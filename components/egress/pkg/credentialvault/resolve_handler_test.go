@@ -698,7 +698,6 @@ func TestDefaultResolveAuditEmitsStructuredFields(t *testing.T) {
 
 func TestResolverConfigFromEnvWiring(t *testing.T) {
 	t.Setenv(constants.EnvCredentialResolverTimeout, "5")
-	t.Setenv(constants.EnvCredentialResolverAuth, "https://resolver.internal:8443=token-1")
 	config, diag := ResolverConfigFromEnv()
 	require.NoError(t, diag)
 	require.True(t, config.Ready())
@@ -707,30 +706,21 @@ func TestResolverConfigFromEnvWiring(t *testing.T) {
 	config, diag = ResolverConfigFromEnv()
 	require.Error(t, diag)
 	require.False(t, config.TimeoutConfigured)
-	require.True(t, config.AuthTableParsed)
-
-	t.Setenv(constants.EnvCredentialResolverTimeout, "5")
-	t.Setenv(constants.EnvCredentialResolverAuth, "https://resolver.internal:8443")
-	config, diag = ResolverConfigFromEnv()
-	require.Error(t, diag)
-	require.False(t, config.AuthTableParsed)
-	require.True(t, config.TimeoutConfigured)
 
 	// Absent values keep defaults and count as ready.
 	t.Setenv(constants.EnvCredentialResolverTimeout, "")
-	t.Setenv(constants.EnvCredentialResolverAuth, "")
 	config, diag = ResolverConfigFromEnv()
 	require.NoError(t, diag)
 	require.True(t, config.Ready())
 }
 
 func TestNewSubjectStoreAdmitsExchangeOnlyWithReadyEnv(t *testing.T) {
-	t.Setenv(constants.EnvCredentialResolverAuth, "https://r=,broken") // malformed table
+	t.Setenv(constants.EnvCredentialResolverTimeout, "0") // malformed: outside [1,120]
 	store := NewSubjectStore()
 	_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
 	require.ErrorContains(t, err, "exchange credentials are not supported until the credential resolver operator configuration is ready")
 
-	t.Setenv(constants.EnvCredentialResolverAuth, "")
+	t.Setenv(constants.EnvCredentialResolverTimeout, "")
 	store = NewSubjectStore()
 	_, err = store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
 	require.NoError(t, err)

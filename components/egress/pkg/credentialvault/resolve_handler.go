@@ -551,22 +551,16 @@ func resolveFingerprint(binding Binding, credentialRaw json.RawMessage) [sha256.
 }
 
 // ResolverConfigFromEnv derives the D13 capability gate from the operator
-// env: malformed timeout/auth values fail their flag closed, absent values
-// keep the defaults. The returned error is diagnostic only.
+// env: a malformed timeout value fails its flag closed, an absent value
+// keeps the default. The returned error is diagnostic only.
 func ResolverConfigFromEnv() (ResolverConfig, error) {
-	config := ResolverConfig{TimeoutConfigured: true, AuthTableParsed: true}
+	config := ResolverConfig{TimeoutConfigured: true}
 	var diag error
 	if raw := strings.TrimSpace(os.Getenv(constants.EnvCredentialResolverTimeout)); raw != "" {
 		seconds, err := strconv.Atoi(raw)
 		if err != nil || seconds < 1 || seconds > 120 {
 			config.TimeoutConfigured = false
 			diag = fmt.Errorf("%s value is not an integer in [1,120]", constants.EnvCredentialResolverTimeout)
-		}
-	}
-	if _, err := ParseResolverAuthEnv(os.Getenv(constants.EnvCredentialResolverAuth)); err != nil {
-		config.AuthTableParsed = false
-		if diag == nil {
-			diag = err
 		}
 	}
 	return config, diag

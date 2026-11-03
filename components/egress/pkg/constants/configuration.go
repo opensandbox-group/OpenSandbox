@@ -41,12 +41,11 @@ const (
 
 // Credential header resolver client (OSEP-0025); owned by
 // pkg/credentialvault/resolver_client.go — consumers use the client interface
-// only. Auth is "scheme://host:port=token,..." (D5); endpoints without a
-// matching origin resolve without an Authorization header. Never logged.
+// only. Caller authentication (D5) is deferred: resolver dials carry no
+// Authorization header.
 const (
 	EnvCredentialResolverTimeout        = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"         // seconds, 1..120
 	EnvCredentialResolverMaxConcurrency = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY" // 1..1024
-	EnvCredentialResolverAuth           = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH"
 )
 
 // Fast Sandbox profile: the egress control plane serves N sandboxes
