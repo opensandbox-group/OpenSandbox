@@ -161,21 +161,100 @@ public class CredentialProxyConfig
 }
 
 /// <summary>
-/// Write-only inline credential material for Credential Vault.
+/// Write-only Credential Vault credential source. Exactly one variant is set,
+/// selected by <see cref="Type"/>: inline material via <see cref="Value"/>, or
+/// a header-resolver endpoint via <see cref="Endpoint"/> (OSEP-0025 exchange).
+/// The egress rejects sources that mix or omit both.
 /// </summary>
-public class InlineCredentialSource
+public class CredentialSource
 {
     /// <summary>
-    /// Gets or sets the credential source type.
+    /// Gets or sets the credential source type: "inline" or "exchange". Defaults to "inline".
     /// </summary>
     [JsonPropertyName("type")]
     public string Type { get; set; } = "inline";
 
     /// <summary>
-    /// Gets or sets the inline credential value.
+    /// Gets or sets the inline credential value. Required when <see cref="Type"/> is "inline";
+    /// must be absent otherwise. Write-only: never present in vault read responses.
     /// </summary>
     [JsonPropertyName("value")]
-    public required string Value { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; set; }
+
+    /// <summary>
+    /// Gets or sets the header-resolver endpoint (unix:///path or https://host[:port]).
+    /// Required when <see cref="Type"/> is "exchange"; must be absent otherwise.
+    /// Endpoint is configuration, not secret material.
+    /// </summary>
+    [JsonPropertyName("endpoint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Endpoint { get; set; }
+
+    /// <summary>
+    /// Creates an inline credential source carrying write-only secret material.
+    /// </summary>
+    public static CredentialSource Inline(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            throw new ArgumentException("Credential source value cannot be empty.", nameof(value));
+        }
+
+        return new CredentialSource { Type = "inline", Value = value };
+    }
+
+    /// <summary>
+    /// Creates an exchange credential source (OSEP-0025) resolved per request
+    /// from the header-resolver endpoint.
+    /// </summary>
+    public static CredentialSource Exchange(string endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            throw new ArgumentException("Credential source endpoint cannot be blank.", nameof(endpoint));
+        }
+
+        return new CredentialSource { Type = "exchange", Endpoint = endpoint };
+    }
+}
+
+/// <summary>
+/// Write-only inline credential material for Credential Vault; the flat
+/// <see cref="CredentialSource"/> model with the "inline" default.
+/// </summary>
+public class InlineCredentialSource : CredentialSource
+{
+}
+
+/// <summary>
+/// Exchange credential source (OSEP-0025): no local material. The egress
+/// resolves header sets per request from the header-resolver endpoint;
+/// the endpoint is configuration, not secret material.
+/// </summary>
+public class ExchangeCredentialSource : CredentialSource
+{
+    /// <summary>
+    /// Initializes an exchange source; <see cref="CredentialSource.Type"/> defaults to "exchange".
+    /// </summary>
+    public ExchangeCredentialSource()
+    {
+        Type = "exchange";
+    }
+
+    /// <summary>
+    /// Initializes an exchange source with the given header-resolver endpoint.
+    /// </summary>
+    public ExchangeCredentialSource(string endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            throw new ArgumentException("Credential source endpoint cannot be blank.", nameof(endpoint));
+        }
+
+        Type = "exchange";
+        Endpoint = endpoint;
+    }
 }
 
 /// <summary>
@@ -190,10 +269,10 @@ public class Credential
     public required string Name { get; set; }
 
     /// <summary>
-    /// Gets or sets the write-only credential source.
+    /// Gets or sets the write-only credential source (inline material or exchange endpoint).
     /// </summary>
     [JsonPropertyName("source")]
-    public required InlineCredentialSource Source { get; set; }
+    public required CredentialSource Source { get; set; }
 }
 
 /// <summary>
@@ -276,39 +355,64 @@ public class CredentialSubstitution
 }
 
 /// <summary>
-/// Typed Credential Vault auth rule.
+/// Credential Vault auth rule. <see cref="Type"/> selects one of the five
+/// static kinds (bearer, basic, apiKey, customHeaders, passthrough); leaving
+/// it null selects the typeless exchange form (OSEP-0025), which carries only
+/// a credential reference to an exchange-sourced credential. The egress
+/// rejects shapes mixing the two.
 /// </summary>
 public class CredentialAuth
 {
     /// <summary>
     /// Gets or sets the auth rule type: bearer, basic, apiKey, customHeaders, or passthrough.
+    /// Leave unset for the typeless exchange form; a null type is never serialized.
     /// </summary>
     [JsonPropertyName("type")]
-    public required string Type { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Type { get; set; }
 
     /// <summary>
-    /// Gets or sets the referenced credential name for bearer, basic, or apiKey auth.
+    /// Gets or sets the referenced credential name for bearer, basic, apiKey,
+    /// or the typeless exchange form.
     /// </summary>
     [JsonPropertyName("credential")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Credential { get; set; }
 
     /// <summary>
     /// Gets or sets the API key header or query parameter name.
     /// </summary>
     [JsonPropertyName("name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Name { get; set; }
 
     /// <summary>
     /// Gets or sets custom header injection entries.
     /// </summary>
     [JsonPropertyName("headers")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<CustomHeaderEntry>? Headers { get; set; }
 
     /// <summary>
     /// Gets or sets scoped placeholder substitutions for matching requests.
     /// </summary>
     [JsonPropertyName("substitutions")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<CredentialSubstitution>? Substitutions { get; set; }
+
+    /// <summary>
+    /// Creates the typeless exchange auth form (OSEP-0025): only a credential
+    /// reference to an exchange-sourced credential.
+    /// </summary>
+    public static CredentialAuth Exchange(string credential)
+    {
+        if (string.IsNullOrWhiteSpace(credential))
+        {
+            throw new ArgumentException("The typeless exchange auth form requires a credential reference.", nameof(credential));
+        }
+
+        return new CredentialAuth { Credential = credential };
+    }
 }
 
 /// <summary>
@@ -347,7 +451,8 @@ public class CredentialMetadata
     public required string Name { get; set; }
 
     /// <summary>
-    /// Gets or sets the credential source type.
+    /// Gets or sets the credential source kind ("inline" or "exchange");
+    /// source material never rides this model.
     /// </summary>
     [JsonPropertyName("sourceType")]
     public required string SourceType { get; set; }
@@ -360,21 +465,33 @@ public class CredentialMetadata
 }
 
 /// <summary>
-/// Sanitized auth metadata returned for a Credential Vault binding.
+/// Sanitized auth metadata returned for a Credential Vault binding. Static
+/// kinds carry <see cref="Type"/> (plus <see cref="Name"/> for apiKey); the
+/// typeless exchange form carries only <see cref="Credential"/>, a credential
+/// reference (never material). A null type is never serialized.
 /// </summary>
 public class CredentialAuthMetadata
 {
     /// <summary>
-    /// Gets or sets the auth rule type.
+    /// Gets or sets the auth rule type; null for the typeless exchange form.
     /// </summary>
     [JsonPropertyName("type")]
-    public required string Type { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Type { get; set; }
 
     /// <summary>
     /// Gets or sets the API key header or query parameter name when applicable.
     /// </summary>
     [JsonPropertyName("name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the exchange-sourced credential reference, typeless form only.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Credential { get; set; }
 }
 
 /// <summary>
