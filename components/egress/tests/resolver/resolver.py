@@ -21,12 +21,11 @@ client exists.
 
 Transports:
 
-- ``--uds PATH``: HTTP over a Unix domain socket (bound 0660); no caller
-  authentication — the socket permissions are the trust boundary.
-- ``--https HOST:PORT --tls-cert PEM --tls-key PEM``: TLS with Bearer caller
-  authentication; the token is ``--auth`` or is looked up by origin in
-  ``OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH``. Without a configured
-  token every request is rejected with 401 (fail closed).
+- ``--uds PATH``: HTTP over a Unix domain socket (bound 0660); the socket
+  permissions are the trust boundary.
+- ``--https HOST:PORT --tls-cert PEM --tls-key PEM``: TLS without caller
+  authentication (OSEP-0025 D5 caller auth is deferred); TLS is the
+  transport only.
 
 Framing (D15): fixed at ``POST /resolve``; other paths answer 404; UDS mode
 never inspects Host. ``subject`` is the egress-authoritative sandboxId, and
@@ -44,7 +43,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import hmac
 import http.client
 import http.server
 import json
@@ -67,7 +65,6 @@ MAX_DRAIN_BYTES = 1024 * 1024
 _REQUEST_FIELDS = {"subject", "credential", "binding", "destination", "request"}
 _DESTINATION_FIELDS = {"scheme", "authority", "sni"}
 _REQUEST_REQUEST_FIELDS = {"method", "host", "path", "headers"}
-_AUTH_ENV = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH"
 
 
 class _BadRequest(Exception):
@@ -179,27 +176,6 @@ def resolve_response(
     return {"headers": headers, "redactions": redactions}
 
 
-def expected_token_for_origin(origin: str, auth_override: str | None) -> str | None:
-    """Resolve the caller token for this server's origin.
-
-    ``auth_override`` (``--auth``) wins; otherwise the token table in
-    ``OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH`` is searched for
-    ``origin=token`` entries. ``None`` means no token is configured and the
-    HTTPS listener must reject every caller.
-    """
-    if auth_override:
-        return auth_override
-    raw = os.environ.get(_AUTH_ENV, "")
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        configured_origin, separator, token = entry.partition("=")
-        if separator and configured_origin.strip() == origin:
-            return token.strip() or None
-    return None
-
-
 class _UnixHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -245,18 +221,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
         self.close_connection = True
-
-    def _authenticate(self) -> bool:
-        """Bearer caller authentication; HTTPS only, fail closed."""
-        expected = self.server.expected_token
-        if expected is not None:
-            values = self.headers.get_all("Authorization", [])
-            supplied = values[0] if len(values) == 1 else ""
-            if hmac.compare_digest(supplied, "Bearer " + expected):
-                return True
-        self._drain_request()
-        self._reply(401, {"error": "unauthorized"})
-        return False
 
     def _json_body(self) -> dict[str, Any]:
         # Consume the body per its declared length before rejecting the
@@ -305,8 +269,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._drain(int(lengths[0]))
 
     def do_POST(self) -> None:
-        if self.server.transport == "https" and not self._authenticate():
-            return
         if self.path != "/resolve":
             self._drain_request()
             self._reply(404, {"error": "not_found"})
@@ -336,14 +298,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         )
 
     def do_GET(self) -> None:
-        if self.server.transport == "https" and not self._authenticate():
-            return
         self._drain_request()
         self._reply(405, {"error": "method_not_allowed"})
 
     def _unsupported(self) -> None:
-        if self.server.transport == "https" and not self._authenticate():
-            return
         self._drain_request()
         self._reply(405, {"error": "method_not_allowed"})
 
@@ -356,7 +314,6 @@ def build_server(
     options: argparse.Namespace,
     *,
     transport: str,
-    expected_token: str | None,
 ) -> http.server.HTTPServer:
     """Construct (but do not start) the resolver server for one transport."""
     if transport == "uds":
@@ -390,7 +347,6 @@ def build_server(
         context.load_cert_chain(options.tls_cert, options.tls_key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
     server.transport = transport
-    server.expected_token = expected_token
     server.options = options
     server.exceptions = []
     server.request_timeout = max(30.0, options.delay / 1000.0 * 2 + 5.0)
@@ -424,12 +380,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--tls-cert", metavar="PEM", help="TLS certificate (required with --https)")
     parser.add_argument("--tls-key", metavar="PEM", help="TLS private key (required with --https)")
-    parser.add_argument(
-        "--auth",
-        metavar="TOKEN",
-        help="expected caller bearer token; defaults to the entry for this "
-        f"origin in {_AUTH_ENV}",
-    )
     parser.add_argument("--delay", type=int, default=0, metavar="MS", help="sleep before every response")
     parser.add_argument(
         "--fail",
@@ -467,15 +417,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     options = parse_args(argv)
     transport = "uds" if options.uds else "https"
-    origin = f"https://{options.https}" if transport == "https" else None
     server = build_server(
         options,
         transport=transport,
-        expected_token=(
-            expected_token_for_origin(origin, options.auth)
-            if transport == "https"
-            else None
-        ),
     )
     serve(server)
     return 0

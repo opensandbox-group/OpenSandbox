@@ -474,9 +474,7 @@ class TestApplyEgressToSpec:
 
     def test_credential_resolver_env_injected_into_sidecar(self):
         """OSEP-0025: the resolver tuning env must flow through the sandbox
-        spec into the egress sidecar (the D13 capability gate reads it there).
-        The AUTH table is egress-level only — not wired by this server and
-        rejected on the request surface."""
+        spec into the egress sidecar (the D13 capability gate reads it there)."""
         containers: list = []
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -489,11 +487,6 @@ class TestApplyEgressToSpec:
         sandbox_env, egress_env = split_egress_env(resolver_env)
         assert sandbox_env == {}
         assert egress_env == resolver_env
-
-        with pytest.raises(ValueError, match="not allowed"):
-            split_egress_env(
-                {"OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH": "https://r:443=t"}
-            )
 
         apply_egress_to_spec(
             containers,

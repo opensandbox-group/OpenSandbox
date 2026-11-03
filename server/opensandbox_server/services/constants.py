@@ -75,10 +75,8 @@ OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH = (
 # egress sidecar. TIMEOUT/MAX_CONCURRENCY are tuning knobs and flow through
 # the sandbox request env allowlist below. Must match
 # components/egress/pkg/constants/configuration.go
-# EnvCredentialResolver{Timeout,MaxConcurrency}. The AUTH bearer-token table
-# (EnvCredentialResolverAuth) stays egress-level only: this server does not
-# wire or inject it, and request env carrying any other OPENSANDBOX_EGRESS_
-# key — including the auth table — is rejected.
+# EnvCredentialResolver{Timeout,MaxConcurrency}. Resolver caller
+# authentication (D5) is deferred: no auth env exists on either side.
 OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"
 )

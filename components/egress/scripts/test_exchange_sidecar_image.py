@@ -62,7 +62,6 @@ ENTRYPOINT = ["/opt/opensandbox-egress/supervisor",
               "/opt/opensandbox-egress/egress"]
 TOKEN = "xchg-sidecar-test-token"
 STATIC_SECRET = "xchg-static-secret"
-HTTPS_RESOLVER_TOKEN = "xchg-https-resolver-token"
 SUBJECT = "sbx-xchg-subject"
 BOUND = "api.internal.example.com"
 STATIC = "code.example.com"
@@ -98,7 +97,7 @@ def require(condition, message):
         raise Failure(message)
 
 
-FIXTURE_SECRETS = (TOKEN, STATIC_SECRET, HTTPS_RESOLVER_TOKEN)
+FIXTURE_SECRETS = (TOKEN, STATIC_SECRET)
 
 
 def sanitize(text: str) -> str:
@@ -208,14 +207,11 @@ class ExchangeSidecarRuntime:
             "OPENSANDBOX_EGRESS_TOKEN": TOKEN,
             "OPENSANDBOX_EGRESS_SANDBOX_ID": SUBJECT,
             # Resolver operator env (OSEP-0025 D13), deployment-injected:
-            # TIMEOUT/MAX_CONCURRENCY are tenant-tunable knobs; the AUTH
-            # table is egress-level only (D5) — set directly on the sidecar
-            # by the deployment, never through sandbox request env (this
-            # server wires no auth channel).
+            # TIMEOUT/MAX_CONCURRENCY are tenant-tunable knobs. Caller
+            # authentication is deferred (D5 not implemented): resolver dials
+            # carry no Authorization header.
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "2",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "4",
-            "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_AUTH":
-                f"https://{RESOLVER_HOST}:443={HTTPS_RESOLVER_TOKEN}",
             "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA": "/run/live-origin/ca.pem",
         }
 
@@ -384,7 +380,6 @@ class ExchangeSidecarRuntime:
             "/fixtures/resolver.py",
             "--https", f"{resolver_ip}:443",
             "--tls-cert", "/run/tls/leaf.pem", "--tls-key", "/run/tls/key.pem",
-            "--auth", HTTPS_RESOLVER_TOKEN,
         )
         self.created.add(self.resolver_https)
         self._wait_log(self.resolver_https, "test resolver ready:", 20)

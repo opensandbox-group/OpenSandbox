@@ -270,15 +270,14 @@ func NewLiveStore(gate *mitmproxy.HealthGate, requireToken func() bool, config m
 }
 
 // ResolverConfig reports whether the resolver operator configuration is
-// ready (D13): resolve timeout configured and the endpoint auth table parsed.
-// The zero value is not ready — exchange vaults fail closed until injected.
+// ready (D13): resolve timeout configured. The zero value is not ready —
+// exchange vaults fail closed until injected.
 type ResolverConfig struct {
 	TimeoutConfigured bool
-	AuthTableParsed   bool
 }
 
 func (c ResolverConfig) Ready() bool {
-	return c.TimeoutConfigured && c.AuthTableParsed
+	return c.TimeoutConfigured
 }
 
 // SetResolverConfig installs the exchange capability gate's readiness. Call

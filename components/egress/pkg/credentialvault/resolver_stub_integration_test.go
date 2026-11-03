@@ -32,7 +32,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/stretchr/testify/require"
 )
 
@@ -211,54 +210,27 @@ func stubHTTPSArgs(t *testing.T, port int) []string {
 	}
 }
 
-func TestStubIntegrationHTTPSAuthOriginTable(t *testing.T) {
-	// Pre-bind the port: the stub reads its auth table at startup.
+func TestStubIntegrationHTTPS(t *testing.T) {
+	// Pre-bind the port so the stub's advertised endpoint matches the dial.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	port := listener.Addr().(*net.TCPAddr).Port
 	require.NoError(t, listener.Close())
 	origin := fmt.Sprintf("https://127.0.0.1:%d", port)
 
-	// One env table drives both the stub's expected token and the client.
-	authEntry := constants.EnvCredentialResolverAuth + "=" + origin + "=resolver-token-1"
-	stub := startStubResolver(t, []string{authEntry}, stubHTTPSArgs(t, port)...)
+	stub := startStubResolver(t, nil, stubHTTPSArgs(t, port)...)
 	require.Equal(t, origin, stub.endpoint)
 
 	client, err := NewResolverClient(ResolverClientOptions{
 		Endpoint:        stub.endpoint,
 		Timeout:         5 * time.Second,
 		MaxConcurrency:  4,
-		Auth:            map[string]string{origin: "resolver-token-1"},
 		TLSClientConfig: stubResolverTLSConfig(t),
 	})
 	require.NoError(t, err)
 	decision, err := client.Resolve(context.Background(), resolverTestInput())
 	require.NoError(t, err)
 	requireStubHappyDecision(t, decision)
-}
-
-func TestStubIntegrationHTTPSUnmatchedOriginGetsNoToken(t *testing.T) {
-	// The client holds only another origin's token; the stub must 401.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := listener.Addr().(*net.TCPAddr).Port
-	require.NoError(t, listener.Close())
-	origin := fmt.Sprintf("https://127.0.0.1:%d", port)
-
-	authEntry := constants.EnvCredentialResolverAuth + "=" + origin + "=resolver-token-1"
-	stub := startStubResolver(t, []string{authEntry}, stubHTTPSArgs(t, port)...)
-
-	client, err := NewResolverClient(ResolverClientOptions{
-		Endpoint:        stub.endpoint,
-		Timeout:         5 * time.Second,
-		MaxConcurrency:  4,
-		Auth:            map[string]string{"https://unrelated-resolver.internal:8443": "resolver-token-1"},
-		TLSClientConfig: stubResolverTLSConfig(t),
-	})
-	require.NoError(t, err)
-	_, err = client.Resolve(context.Background(), resolverTestInput())
-	resolverErr := requireKind(t, err, ResolverRejected)
-	require.Equal(t, http.StatusUnauthorized, resolverErr.Status)
 }
 
 func TestStubIntegrationTimeoutClass(t *testing.T) {

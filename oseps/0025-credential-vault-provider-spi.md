@@ -88,7 +88,7 @@ Second, sandboxes that need such identities today use ad-hoc mitm addons and per
 ### Notes/Constraints/Caveats
 
 1. **Additive by construction.** Sandboxes that use only `inline` credentials observe zero behavior change; static credential behavior is untouched.
-2. **Resolver reachability is part of the trust model.** A sandbox that can mint credentials by calling the resolver directly bypasses the entire policy plane. `unix://` resolvers are scoped by socket permissions; `https://` resolvers must require caller authentication (for example an egress-only token provisioned through operator configuration, never through the sandbox).
+2. **Resolver reachability is part of the trust model.** A sandbox that can mint credentials by calling the resolver directly bypasses the entire policy plane. `unix://` resolvers are scoped by socket permissions; `https://` caller authentication is **deferred** (see the resolver contract below) — until it lands, `https://` resolvers are only as trusted as their network reachability, so operators must scope resolver reachability to the egress exactly as they do for upstream proxies.
 3. **The subject is an opaque routing key, not a delegation.** The vault performs no identity delegation; the subject→identity authorization mapping belongs to the resolver's operator domain, which configures and audits it.
 4. **Resolver outage means denial, never bypass.** An unreachable or slow resolver is indistinguishable from a policy denial for exchange bindings.
 5. **Per-request latency is bounded.** The vault applies a fixed resolution timeout; whether the resolver served a cached token or performed a fresh signature is invisible to the contract.
@@ -101,7 +101,7 @@ Second, sandboxes that need such identities today use ad-hoc mitm addons and per
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Sandbox calls the resolver directly and mints credentials | Full policy bypass | `unix://` socket permissions; `https://` resolvers require caller authentication provisioned outside the sandbox (R4) |
+| Sandbox calls the resolver directly and mints credentials | Full policy bypass | `unix://` socket permissions; for `https://`, operator-scoped reachability (UID-scoped egress exclusions, R4) — caller authentication deferred |
 | Client forges subject identity | Cross-subject credential use | Subject never accepted from the addon protocol; resolved from client IP with the existing authoritative mapping |
 | Exchanged values leak through reads or diagnostics | Credential exposure | Resolution output exists per request only; redacted by name and value; never persisted |
 | Resolver outage breaks exchange-bound traffic | Availability regression | Documented as fail-closed semantics; operators monitor resolver health; static bindings are unaffected |
@@ -338,7 +338,7 @@ Hard requirements on a resolver endpoint, none of which dictate an implementatio
 | Per-request semantics | input includes request context; output differs per request |
 | Absent/unreachable = denial | no fallback to uncredentialed pass-through |
 
-Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox.
+Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: deferred** — caller authentication is not implemented yet; resolver dials carry no Authorization header and the egress exposes no auth configuration. Scope resolver reachability (network-level, UID-scoped exclusions) to the egress process in the meantime.
 
 ### Example Instantiations
 
@@ -384,7 +384,7 @@ Audit events gain fields, never values: `credential` (resolver name), `resolutio
 
 - Exchange bindings add a per-request resolver hop (bounded by the resolution timeout; resolvers cache internally).
 - Exchange-bound availability now depends on resolver health; this is inherent to brokered identity but is a real operational change.
-- HTTPS resolver caller authentication is new operator configuration to get right.
+- HTTPS resolver caller authentication is new operator configuration to get right (deferred; not implemented yet).
 
 ## Alternatives
 
