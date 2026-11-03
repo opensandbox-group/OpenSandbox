@@ -315,6 +315,27 @@ Hard requirements on a resolver endpoint:
 
 A runnable reference resolver (with deterministic signatures and fault injection) ships at `components/egress/tests/resolver/resolver.py` in the repository.
 
+### Quick-Start: a Runnable Resolver
+
+That reference resolver is a single stdlib-only Python file — enough to wire the full path end to end and to develop against. It creates the production socket layout itself (`0710` directory, `0660` socket); run it as the egress user (or a user sharing its group) so the egress process can connect:
+
+```bash
+# 1. Place the resolver (from the repository; the egress image ships python3).
+install -D -m 0755 components/egress/tests/resolver/resolver.py /opt/resolver/resolver.py
+
+# 2. Start it on the socket your vault's endpoint names.
+sudo -u <egress-user> python3 /opt/resolver/resolver.py --uds /run/spi/spi.sock
+
+# 3. Verify POST /resolve from the egress environment.
+curl -fsS --unix-socket /run/spi/spi.sock http://localhost/resolve \
+  -H 'content-type: application/json' \
+  -d '{"subject":"fsb-demo","credential":"spi-signer","binding":"internal-api",
+       "destination":{"scheme":"https","authority":"api.internal.example.com:443","sni":"api.internal.example.com"},
+       "request":{"method":"GET","host":"api.internal.example.com","path":"/v1/foo?a=1","headers":{}}}'
+```
+
+A working resolver answers `200` with deterministic headers — `authorization: Bearer test-spi-signer`, `x-test-subject` echoing the subject, and `x-test-signature = sha256(subject|credential|binding|authority|path)` — and supports `--delay <ms>`, `--fail once|rate`, and `--incomplete-redactions` for outage drills. In containerized deployments the same file runs next to the egress with a shared socket volume (the fast-sandbox integration verify drives it exactly that way). It is a test harness, not an identity service: for production, put your real signing service behind the same `POST /resolve` contract.
+
 ### Python SDK Example
 
 This example grants a sandbox access to an internal API through a signing resolver. The host-side script writes only the resolver endpoint into the vault; the sandbox code uses plain `requests` with no credential material anywhere in the process, environment, or logs.
