@@ -54,7 +54,7 @@ This roadmap describes the intended project direction for roughly the next 12 mo
 |------|--------|----------|-------|
 | Lifecycle API stability | Ongoing | [specs/](specs/README.md), [OSEPs](oseps/README.md) | Preserve compatibility and require clear migration paths for user-visible changes. |
 | Security documentation | Ongoing | [SECURITY.md](SECURITY.md), [docs/](docs/) | Keep vulnerability reporting, security expectations, and deployment guidance current. |
-| Open project governance | Ongoing | [GOVERNANCE.md](GOVERNANCE.md), [CONTRIBUTING.md](CONTRIBUTING.md) | Maintain a lightweight, public decision process as the project grows. |
+| Open project governance | Ongoing | [CHARTER.md](CHARTER.md), [GOVERNANCE.md](GOVERNANCE.md), [CONTRIBUTING.md](CONTRIBUTING.md) | Maintain a lightweight, public decision process as the project grows. |
 
 ## Not Currently Planned
 

@@ -61,7 +61,11 @@ k8s_e2e_kind_load_runtime_images() {
   if [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ]; then
     kind load docker-image --name "${KIND_CLUSTER}" "${INGRESS_IMG}"
   fi
-  kind load docker-image --name "${KIND_CLUSTER}" "${SANDBOX_TEST_IMAGE}"
+  # Load the multi-arch test image without kind load: it runs
+  # "ctr images import --all-platforms", which fails with "content digest ...
+  # not found" when only the pulled platform's blobs exist locally
+  # (kubernetes-sigs/kind#4255). Import the docker-save tar directly instead.
+  docker save "${SANDBOX_TEST_IMAGE}" | docker exec --privileged -i "${KIND_CLUSTER}-control-plane" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
 }
 
 k8s_e2e_apply_pvc_and_seed() {
@@ -181,7 +185,7 @@ configToml: |
   [runtime]
   type = "kubernetes"
   execd_image = "${EXECD_IMG}"
-  execd_run_as_init = ${E2E_EXECD_RUN_AS_INIT:-false}
+  execd_run_as_init = ${E2E_EXECD_RUN_AS_INIT:-true}
 
   [egress]
   image = "${EGRESS_IMG}"

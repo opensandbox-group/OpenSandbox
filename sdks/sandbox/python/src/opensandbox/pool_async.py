@@ -1284,17 +1284,28 @@ class SandboxPoolAsync:
                 self._in_flight_condition.notify_all()
 
     async def _await_in_flight_drain(self, timeout: timedelta) -> bool:
-        deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout.total_seconds()
         async with self._in_flight_condition:
             while self._in_flight > 0:
-                remaining = deadline - asyncio.get_running_loop().time()
+                remaining = deadline - loop.time()
                 if remaining <= 0:
                     return False
                 try:
                     await asyncio.wait_for(self._in_flight_condition.wait(), remaining)
                 except (asyncio.TimeoutError, TimeoutError):
-                    return self._in_flight == 0
+                    if self._in_flight > 0:
+                        return False
+        # Kills handed off by those operations target ids already dropped from
+        # the store, so they drain under the same budget.
+        cleanup_tasks = set(self._cleanup_tasks)
+        if not cleanup_tasks:
             return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        _, pending = await asyncio.wait(cleanup_tasks, timeout=remaining)
+        return not pending
 
     async def _stop_reconcile(
         self,

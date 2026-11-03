@@ -104,7 +104,9 @@ install-golint:
 
 .PHONY: golint
 golint: fmt install-golint
-	"$(GOLANGCI_LINT)" run -v ./...
+	# execd targets Linux; lint with GOOS=linux so platform-tagged files
+	# (e.g. *_linux.go consumers) resolve the same way as CI.
+	GOOS=linux "$(GOLANGCI_LINT)" run -v ./...
 
 ##@ Native helpers
 

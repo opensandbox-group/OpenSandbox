@@ -59,9 +59,21 @@ func validVaultSubjectID(uid string) bool {
 
 // handleVaultRelay serves /vault/{sandboxUid} for all four relay verbs.
 func (s *fastSandboxPolicyServer) handleVaultRelay(w http.ResponseWriter, r *http.Request) {
-	uid := strings.TrimPrefix(r.URL.Path, constants.VaultRelayPathPrefix)
+	prefix := constants.VaultRelayPathPrefix
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		prefix = constants.ActionsV2VaultRelayPathPrefix
+	}
+	uid := strings.TrimPrefix(r.URL.Path, prefix)
 	if !validVaultSubjectID(uid) {
 		http.Error(w, "missing or invalid sandbox uid in path", http.StatusBadRequest)
+		return
+	}
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		ownerLock := s.ownerLock(subject.FromSandboxUID(uid))
+		ownerLock.RLock()
+		defer ownerLock.RUnlock()
+	}
+	if !s.validateRelayOwner(w, r, uid) {
 		return
 	}
 	subj := subject.FromSandboxUID(uid)

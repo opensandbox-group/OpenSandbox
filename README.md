@@ -273,4 +273,4 @@ Tagged release images are signed keylessly with Cosign and include provenance at
 
 OpenSandbox is a project of the [Agentic AI Foundation (AAIF)](https://aaif.io/projects/opensandbox).
 
-Licensed under the [Apache 2.0 License](LICENSE).
+Code is licensed under the [Apache 2.0 License](LICENSE). See the [contribution guide](CONTRIBUTING.md#license) for documentation licensing and contribution terms.

@@ -60,6 +60,10 @@ Foreground `stdout` and `stderr` event text preserves the command's line endings
 
 A successful foreground `POST /command` ends with `execution_complete` carrying `exit_code: 0`. This optional field is omitted from background startup acknowledgements and code execution events; absence is not an exit status. Non-zero command exits retain `error.exit_code` on the `error` event. Older execd versions omit the successful exit code, so clients may retain their existing foreground-only completion inference. A stream that ends before a terminal event does not establish success.
 
+::: warning Legacy SDK compatibility
+SDKs built before `sandbox-api 1.0.18` do not know the `exit_code` key, and when a consumer classpath resolves an incompatible kotlinx-serialization runtime, decoding the unknown key crashes with `AbstractMethodError` — the command finishes inside the sandbox but the client call never returns and logs nothing. Setting `EXECD_SSE_LEGACY_COMPAT=true` makes execd omit the field from both events for such fleets; successful commands lose nothing because the value is a constant 0 and newer SDKs infer it. The long-term fix is upgrading the sandbox SDK to a build that shades its serialization runtime (`sandbox-api` 1.0.18 or newer), which removes the dependency-conflict hazard for every field added in the future.
+:::
+
 Bash-session runs stream one merged `stdout` event stream (session stderr is merged into it) with the same line-ending contract: event text preserves `\n`, `\r`, or `\r\n`, and concatenating event text reconstructs the run's output. Blank lines are preserved as events containing only the line ending, and the final event may be an unterminated fragment. A line longer than 16 MiB is split across several events, and only the last of them ends with the line ending.
 
 Sessions use Bash when the image provides it and fall back to POSIX `sh` on minimal images — commands sent to a fallback session must be `sh`-compatible. Windows sandboxes are supported (environment names are case-insensitive; batch files require shell syntax).

@@ -40,6 +40,8 @@ var (
 	nftUpdateFailed         metric.Int64Counter
 	tlsShadowRequests       metric.Int64Counter
 	tlsAdmissionConnections metric.Int64Counter
+	credentialResolutions   metric.Int64Counter
+	credentialResolutionDur metric.Float64Histogram
 
 	lastNftRuleCount atomic.Int64
 )
@@ -185,6 +187,25 @@ func registerEgressMetrics() error {
 		"egress.nftables.updates.failed_total",
 		metric.WithDescription("nft updates that failed, by operation. A failed dynamic_add "+
 			"means an allowed destination is unreachable while the policy says otherwise."),
+	)
+	if err != nil {
+		return err
+	}
+	credentialResolutions, err = meter.Int64Counter(
+		"egress.credential.resolutions_total",
+		metric.WithDescription("Credential header resolutions by closed-set outcome (resolved|denied|timeout); "+
+			"credential and binding names are never attached (OSEP-0025 R10)."),
+	)
+	if err != nil {
+		return err
+	}
+	credentialResolutionDur, err = meter.Float64Histogram(
+		"egress.credential.resolution.duration",
+		metric.WithDescription("Credential header resolution latency, outcome-tagged; bounded by the resolver timeout."),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(
+			0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
+		),
 	)
 	if err != nil {
 		return err
@@ -347,4 +368,23 @@ func RecordNftablesUpdateFailed(operation string) {
 		return
 	}
 	nftUpdateFailed.Add(context.Background(), 1, egressMetricOptWith(attribute.String("operation", operation)))
+}
+
+// Closed-set credential resolution outcomes (OSEP-0025 R10); tenant-provided
+// names stay in audit logs, never metric dimensions.
+const (
+	ResolutionOutcomeResolved = "resolved"
+	ResolutionOutcomeDenied   = "denied"
+	ResolutionOutcomeTimeout  = "timeout"
+)
+
+// RecordCredentialResolution records one resolve RPC outcome. outcome must be
+// one of the closed-set constants above.
+func RecordCredentialResolution(outcome string, seconds float64) {
+	if credentialResolutions == nil || credentialResolutionDur == nil {
+		return
+	}
+	opt := egressMetricOptWith(attribute.String("resolution", outcome))
+	credentialResolutions.Add(context.Background(), 1, opt)
+	credentialResolutionDur.Record(context.Background(), seconds, opt)
 }

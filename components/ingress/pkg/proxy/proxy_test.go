@@ -19,6 +19,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"testing"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
@@ -161,4 +163,36 @@ func findAvailablePort() (int, error) {
 
 	port := listener.Addr().(*net.TCPAddr).Port
 	return port, nil
+}
+
+func TestStatusCapturingResponseWriterRecordsFinalStatusAfterEarlyHints(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Link", "</app.css>; rel=preload")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	assert.NoError(t, err)
+
+	sw := &statusCapturingResponseWriter{ResponseWriter: httptest.NewRecorder(), statusCode: http.StatusOK}
+	httputil.NewSingleHostReverseProxy(target).ServeHTTP(sw, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	assert.Equal(t, http.StatusNotFound, sw.statusCode)
+	assert.True(t, sw.written)
+}
+
+func TestStatusCapturingResponseWriterInformationalStatusDoesNotCommit(t *testing.T) {
+	for _, code := range []int{http.StatusContinue, http.StatusEarlyHints} {
+		sw := &statusCapturingResponseWriter{ResponseWriter: httptest.NewRecorder(), statusCode: http.StatusOK}
+		sw.WriteHeader(code)
+		assert.False(t, sw.written, "status %d", code)
+		assert.Equal(t, http.StatusOK, sw.statusCode, "status %d", code)
+	}
+
+	// 101 is the final response of a protocol upgrade.
+	sw := &statusCapturingResponseWriter{ResponseWriter: httptest.NewRecorder(), statusCode: http.StatusOK}
+	sw.WriteHeader(http.StatusSwitchingProtocols)
+	assert.True(t, sw.written)
+	assert.Equal(t, http.StatusSwitchingProtocols, sw.statusCode)
 }

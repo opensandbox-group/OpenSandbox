@@ -97,7 +97,7 @@ Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), ren
 
 `up`: preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → **MITM CA material (Secret + echo leaf cert)** → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → **TLS echo endpoint (kind-network container)** → SandboxTemplate golden image **built through the server `POST /templates` API, CA baked** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check, **pinned CA fingerprint**).
 
-`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
+`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → **execd-as-init in-guest process verify** (PID 1 = guest init; execd `--init` supervises the workload; orphan reparented and reaped; hardening report `init_mode=subreaper`) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
 
 `verify-overlaybd`: overlaybd SandboxTemplate build (oci:// publication) → the same verify matrix against the overlaybd template.
 
@@ -123,6 +123,7 @@ The RustFS migration replaces the previous `MINIO_*` and `MC_IMAGE` overrides. B
 | `POOL_MIN` / `POOL_MAX` | `2` / `2` | pool capacity (auto `1`/`1` when `KIND_SINGLE=1`) |
 | `WARM_IMAGES` | `0` | `1` = preheat pool instead of on-demand first-sandbox pull |
 | `SBX_IMAGE` / `EXECD` | `opensandbox/fsb-sandbox-golden:latest` / `opensandbox/execd:latest` | template build inputs |
+| `EXECD_RUN_AS_INIT` | `true` | OSEP-0018 execd-as-init: templates bake `EXECD_INIT=1` (pinned by the init-mode verify stage); `false` = classic topology, that stage fails. |
 | `RUSTFS_IMAGE` / `RC_IMAGE` | `rustfs/rustfs:latest` / `rustfs/rc:latest` | RustFS server and CLI images |
 | `RUSTFS_PORT` | `19000` | host-side S3 API publish; in-cluster clients use the RustFS container IP on port `9000` |
 | `RUSTFS_CONSOLE_PORT` | `19001` | host-side RustFS console publish (human-only; override on port collision) |

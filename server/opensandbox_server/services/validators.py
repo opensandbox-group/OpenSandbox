@@ -423,7 +423,7 @@ def ensure_valid_host_path(
         norm_path = _normalize_prefix_path(path)
         is_allowed = any(
             norm_path == _normalize_prefix_path(prefix)
-            or norm_path.startswith(_normalize_prefix_path(prefix) + "/")
+            or norm_path.startswith(_normalize_prefix_path(prefix).rstrip("/") + "/")
             for prefix in allowed_prefixes
         )
         if not is_allowed:

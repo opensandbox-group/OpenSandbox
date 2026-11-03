@@ -17,6 +17,8 @@
 
 from typing import TypeVar
 
+import httpx
+
 from opensandbox.transport._async_retry import RetryAsyncTransport
 from opensandbox.transport._sync_retry import RetrySyncTransport
 from opensandbox.transport.retry import (
@@ -63,6 +65,32 @@ def streaming_transport(transport: _T) -> _T:
     return transport
 
 
+# execd sends an SSE ``ping`` every 3 seconds while a command runs, so a stream
+# that stays silent for much longer has stopped. The read timeout is an idle
+# limit, not a command deadline: every byte (pings included) resets it. The
+# floor keeps a short ``request_timeout`` from cutting a healthy stream between
+# pings and matches the Go SDK's response-header timeout. Waiting for the
+# response headers is a read in httpx, so this also bounds a sandbox that
+# accepts the connection and never answers (for example a paused one).
+SSE_READ_TIMEOUT_FLOOR_SECONDS = 30.0
+
+
+def sse_timeout(request_timeout_seconds: float) -> httpx.Timeout:
+    """
+    Timeout for a streaming (SSE) client.
+
+    Connect and write follow ``request_timeout``; read is bounded by
+    ``max(request_timeout, SSE_READ_TIMEOUT_FLOOR_SECONDS)`` so a silent
+    stream raises ``httpx.ReadTimeout`` instead of blocking forever.
+    """
+    return httpx.Timeout(
+        connect=request_timeout_seconds,
+        read=max(request_timeout_seconds, SSE_READ_TIMEOUT_FLOOR_SECONDS),
+        write=request_timeout_seconds,
+        pool=None,
+    )
+
+
 __all__ = [
     "JitterMode",
     "RetryAsyncTransport",
@@ -70,6 +98,8 @@ __all__ = [
     "RetryEvent",
     "RetryPolicy",
     "RetrySyncTransport",
+    "SSE_READ_TIMEOUT_FLOOR_SECONDS",
+    "sse_timeout",
     "streaming_transport",
     "unwrap_retry_transport",
 ]

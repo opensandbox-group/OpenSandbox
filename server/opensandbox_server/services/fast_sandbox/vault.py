@@ -78,11 +78,18 @@ def vault_relay_error(status_code: int, message: str) -> HTTPException:
 
 
 def _sanitize_auth(auth: Optional[dict]) -> Optional[dict]:
-    """Mirror the egress sanitizeAuth: type always, name for apiKey only."""
+    """Mirror the egress sanitizeAuth: type (name for apiKey) for static
+    kinds; the typeless exchange form keeps only the credential reference."""
     if not isinstance(auth, dict):
         return None
-    metadata: dict[str, Any] = {"type": auth.get("type")}
-    if auth.get("type") == "apiKey" and auth.get("name") is not None:
+    auth_type = auth.get("type")
+    if auth_type is None:
+        credential = auth.get("credential")
+        if not isinstance(credential, str) or not credential:
+            return None
+        return {"credential": credential}
+    metadata: dict[str, Any] = {"type": auth_type}
+    if auth_type == "apiKey" and auth.get("name") is not None:
         metadata["name"] = auth.get("name")
     return metadata
 

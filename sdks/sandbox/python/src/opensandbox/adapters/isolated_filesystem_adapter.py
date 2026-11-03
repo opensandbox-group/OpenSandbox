@@ -36,14 +36,20 @@ from opensandbox.adapters.converter.response_handler import (
     extract_request_id,
     handle_api_error,
 )
+from opensandbox.adapters.download_response import (
+    create_read_bytes_response,
+    iter_async_response_bytes,
+)
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
+    AsyncReadBytesStream,
     ContentReplaceEntry,
     ContentReplaceResult,
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -126,6 +132,20 @@ class IsolatedFilesystemAdapter(Filesystem):
         offset: int | None = None,
         limit: int | None = None,
     ) -> bytes:
+        return (
+            await self.read_bytes_detailed(
+                path, range_header=range_header, offset=offset, limit=limit
+            )
+        ).body
+
+    async def read_bytes_detailed(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[bytes]:
         try:
             url = self._get_url(self.DOWNLOAD_PATH)
             params: dict[str, str] = {"path": path}
@@ -139,7 +159,11 @@ class IsolatedFilesystemAdapter(Filesystem):
 
             response = await self._httpx_client.get(url, headers=headers, params=params)
             response.raise_for_status()
-            return response.content
+            return create_read_bytes_response(
+                response,
+                response.content,
+                line_based=offset is not None or limit is not None,
+            )
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -152,6 +176,37 @@ class IsolatedFilesystemAdapter(Filesystem):
         offset: int | None = None,
         limit: int | None = None,
     ) -> AsyncGenerator[bytes, None]:
+        response = await self.read_bytes_stream_detailed(
+            path,
+            chunk_size=chunk_size,
+            range_header=range_header,
+            offset=offset,
+            limit=limit,
+        )
+
+        async def _iter() -> AsyncGenerator[bytes, None]:
+            try:
+                yield b""
+                async for chunk in response.body:
+                    yield chunk
+            finally:
+                await response.body.aclose()
+
+        # Start the generator so its finally block also runs when it is
+        # closed or dropped before the caller reads the first chunk.
+        chunks = _iter()
+        await anext(chunks)
+        return chunks
+
+    async def read_bytes_stream_detailed(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[AsyncReadBytesStream]:
         try:
             url = self._get_url(self.DOWNLOAD_PATH)
             params: dict[str, str] = {"path": path}
@@ -178,15 +233,11 @@ class IsolatedFilesystemAdapter(Filesystem):
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-
-            async def _iter() -> AsyncGenerator[bytes, None]:
-                try:
-                    async for chunk in response.aiter_bytes(chunk_size=chunk_size):
-                        yield chunk
-                finally:
-                    await response.aclose()
-
-            return _iter()
+            return create_read_bytes_response(
+                response,
+                iter_async_response_bytes(response, chunk_size),
+                line_based=offset is not None or limit is not None,
+            )
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 

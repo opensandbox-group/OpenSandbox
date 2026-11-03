@@ -583,7 +583,7 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 		delete(s.vaults, subj)
 	}
 	entry := vaultEntry{
-		store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence,
+		store: credentialvault.NewSubjectStore(), fence: fence,
 		fileMeta: previousMeta, vaultStateProtected: protectedBefore,
 	}
 	fs, err := s.vaultFiles.storeFor(subj)

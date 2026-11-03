@@ -351,6 +351,36 @@ class TestEnsureValidHostPath:
         allowed = ["/data/opensandbox"]
         assert ensure_valid_host_path("/data/opensandbox", allowed) is None
 
+    @pytest.mark.parametrize("path", ["/", "/data", "/data/opensandbox"])
+    def test_allowed_posix_root_prefix(self, path):
+        assert ensure_valid_host_path(path, ["/"]) is None
+
+    @pytest.mark.parametrize("prefix", ["D:/", "D:\\"])
+    @pytest.mark.parametrize("path", ["d:/", "D:/data", r"d:\data\opensandbox"])
+    def test_allowed_windows_drive_root_prefix(self, path, prefix):
+        assert ensure_valid_host_path(path, [prefix]) is None
+
+    @pytest.mark.parametrize(
+        "path,prefix",
+        [("D:/data", "/"), ("/data", "D:/"), ("E:/data", "D:/")],
+    )
+    def test_root_prefix_does_not_allow_other_roots(self, path, prefix):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_host_path(path, [prefix])
+        assert exc_info.value.status_code == 400
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
+
+    @pytest.mark.parametrize("path", ["/data", "D:/data"])
+    def test_empty_allowlist_rejects_host_paths(self, path):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_host_path(path, [])
+        assert exc_info.value.status_code == 400
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
+
     def test_allowed_prefix_match_windows_paths(self):
         allowed = [r"D:\sandbox-mnt"]
         assert ensure_valid_host_path(r"D:\sandbox-mnt\ReMe", allowed) is None
@@ -489,6 +519,23 @@ class TestEnsureVolumesValid:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.DUPLICATE_VOLUME_NAME
 
+    @pytest.mark.parametrize("mount_path", ["/", "/mnt/data", "/mnt/data/", "/mnt/./data"])
+    def test_mount_destination_constraints_are_runtime_specific(self, mount_path):
+        volumes = [
+            Volume(
+                name="data",
+                pvc=PVC(claim_name="shared-data"),
+                mount_path="/mnt/data",
+            ),
+            Volume(
+                name="other",
+                pvc=PVC(claim_name="shared-data"),
+                mount_path=mount_path,
+            ),
+        ]
+
+        assert ensure_volumes_valid(volumes) is None
+
     def test_invalid_volume_name_rejected_by_pydantic(self):
         from pydantic import ValidationError
 
@@ -539,6 +586,13 @@ class TestEnsureVolumesValid:
             ensure_volumes_valid([volume], allowed_host_prefixes=["/data/opensandbox"])
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
+
+    def test_host_path_root_allowlist_accepts_descendant(self):
+        volume = Volume.model_validate(
+            {"name": "data", "host": {"path": "/data"}, "mountPath": "/mnt/data"}
+        )
+
+        assert ensure_volumes_valid([volume], allowed_host_prefixes=["/"]) is None
 
     def test_ossfs_invalid_version_rejected_by_schema(self):
         from pydantic import ValidationError

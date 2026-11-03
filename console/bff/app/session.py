@@ -14,14 +14,11 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any, Literal
+from typing import Any
 
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from app.config import Settings
-
-Role = Literal["tenant", "admin"]
 
 
 def _serializer(settings: Settings) -> URLSafeTimedSerializer:

@@ -15,7 +15,7 @@ from credential_bound_h2 import BoundH2Server, dependency_versions_supported
 from revision_receiver import Revision
 from mitmproxy import connection, http
 from mitmproxy.addons.proxyserver import Proxyserver
-from mitmproxy.proxy import commands, events, server, server_hooks
+from mitmproxy.proxy import commands, server, server_hooks
 from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.layers import http as layers
 import h2.config

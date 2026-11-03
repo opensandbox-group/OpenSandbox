@@ -20,8 +20,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 	"github.com/gin-gonic/gin"
+
+	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
 func serveFilesystemIdentity(c *gin.Context, _, _ uint32) {

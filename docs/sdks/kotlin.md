@@ -391,6 +391,8 @@ files.forEach(f -> System.out.println("Found: " + f.getPath()));
 sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 ```
 
+Use `readByteArrayDetailed` or `readStreamDetailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `isPartial` before appending a resumed download, and close a detailed stream body with try-with-resources or Kotlin's `use`. Custom adapters that do not override these methods throw `UnsupportedOperationException`.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:

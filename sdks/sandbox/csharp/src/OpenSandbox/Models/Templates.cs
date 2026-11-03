@@ -77,7 +77,7 @@ public class TemplateStatus
     public required string Phase { get; set; }
 
     /// <summary>
-    /// Gets or sets the S3 manifest reference of the published artifacts;
+    /// Gets or sets the published S3 manifest reference or immutable OCI reference;
     /// present when the phase is Succeeded.
     /// </summary>
     [JsonPropertyName("manifestRef")]
@@ -108,8 +108,8 @@ public class CreateTemplateRequest
     public required string Image { get; set; }
 
     /// <summary>
-    /// Gets or sets the S3-compatible publish target for the built artifacts,
-    /// e.g. "s3://bucket/publish".
+    /// Gets or sets s3://bucket/publish (native) or oci://registry/repository
+    /// (overlaybd, without a tag or digest).
     /// </summary>
     [JsonPropertyName("publish")]
     public required string Publish { get; set; }
@@ -175,7 +175,7 @@ public class TemplateInfo
     public required string Image { get; set; }
 
     /// <summary>
-    /// Gets or sets the S3-compatible publish target.
+    /// Gets or sets the S3-compatible or repository-only OCI publish target.
     /// </summary>
     [JsonPropertyName("publish")]
     public required string Publish { get; set; }

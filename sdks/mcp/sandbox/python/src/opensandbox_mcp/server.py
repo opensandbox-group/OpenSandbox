@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -22,6 +23,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
+from opensandbox.exceptions import SandboxException
 from opensandbox.models.execd import Execution, RunCommandOpts
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
@@ -123,7 +125,18 @@ def register_tools(
         def decorator(func):
             if name_prefix:
                 func.__name__ = f"{name_prefix}{func.__name__}"
-            return mcp.tool()(func)
+
+            # MCP 2.x reports any exception other than ToolError as a bare
+            # "Error executing tool"; SDK errors (not found, auth, ...) are
+            # expected outcomes the client needs to see.
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
+                try:
+                    return await func(*args, **kwargs)
+                except SandboxException as exc:
+                    raise ToolError(str(exc)) from exc
+
+            return mcp.tool()(wrapper)
 
         return decorator
 

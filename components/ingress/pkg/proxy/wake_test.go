@@ -94,12 +94,6 @@ func (f *fakeLifecycle) ResumeSandbox(context.Context, sandbox.EndpointTarget, s
 	return sandbox.ResumeAccepted, nil
 }
 
-func (f *fakeLifecycle) resumeCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.resumes
-}
-
 type recordingActivity struct {
 	mu      sync.Mutex
 	entries []string

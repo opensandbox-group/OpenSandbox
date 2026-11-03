@@ -11,10 +11,14 @@ The contributing guide is maintained in the repository root to keep GitHub's con
   Read the Contributing Guide on GitHub →
 </a>
 
+## Project Governance
+
+Governance documents are maintained in the repository:
+
+- [Technical Charter](https://github.com/opensandbox-group/OpenSandbox/blob/main/CHARTER.md): formal governance and project policies.
+- [Governance Guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/GOVERNANCE.md): project working practices.
+- [Maintainer Roster](https://github.com/opensandbox-group/OpenSandbox/blob/main/MAINTAINERS.md): current project and component maintainers.
+
 ## Contributor Advancement
 
-OpenSandbox maintains an explicit advancement process for contributors to become component maintainers or project maintainers. For nomination requirements, voting periods, and approval thresholds, see the project governance guide:
-
-<a href="https://github.com/opensandbox-group/OpenSandbox/blob/main/GOVERNANCE.md#becoming-a-maintainer" target="_blank">
-  Read the Maintainer Advancement Process on GitHub →
-</a>
+For nomination requirements, voting periods, and approval thresholds, see the [Maintainer Advancement Process](https://github.com/opensandbox-group/OpenSandbox/blob/main/GOVERNANCE.md#becoming-a-maintainer).

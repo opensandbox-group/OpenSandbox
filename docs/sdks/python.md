@@ -417,7 +417,7 @@ await sandbox.files.delete_files(["/tmp/hello.txt"])
 
 For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`; use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()` also accept `offset` and `limit` for partial reads.
 
-Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
+Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. A connection failure while reading a download body raises the same SDK exception as a failed request (for example `SandboxConnectionException`), with the underlying `httpx` error as its `__cause__`; this applies to the sync streams too. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
 
 ```python
 from contextlib import aclosing
@@ -427,6 +427,19 @@ async with aclosing(await sandbox.files.read_bytes_stream("/tmp/large.bin")) as 
         if enough_data(chunk):
             break
 ```
+
+Use `read_bytes_detailed` or `read_bytes_stream_detailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check the optional `DownloadFilesystem` capability before calling them:
+
+```python
+from opensandbox.services import DownloadFilesystem
+
+files = sandbox.files
+if isinstance(files, DownloadFilesystem):
+    download = await files.read_bytes_detailed("/tmp/data.bin", range_header="bytes=5-")
+    print(download.is_partial, download.total_size, download.content_range)
+```
+
+Check `is_partial` before appending a resumed download. Use `async with download.body` for a detailed stream so it closes even on early exit. The synchronous equivalent uses `DownloadFilesystemSync` from `opensandbox.sync.services` and `with download.body`.
 
 #### File operations with an explicit identity
 
@@ -540,7 +553,7 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 | `api_key`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
 | `domain`          | The endpoint domain of the sandbox service (`host[:port]` or a full URL); a trailing `/` or `/v1` is ignored | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`        | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `request_timeout` | Timeout for API requests; command streams (SSE) wait at most `max(request_timeout, 30s)` for the response and between stream bytes | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
 | `follow_redirects` | Follow HTTP redirects for SDK requests    | `False`                      | -                      |

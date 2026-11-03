@@ -55,7 +55,7 @@ def template_group(ctx: click.Context) -> None:
     "--publish",
     "-p",
     default=None,
-    help="S3-compatible publish target for the built artifacts (e.g. s3://bucket/publish). Required unless --file is used.",
+    help="Publish target: s3://bucket/publish (native) or oci://registry/repository (overlaybd, no tag or digest). Required unless --file is used.",
 )
 @click.option(
     "--file",

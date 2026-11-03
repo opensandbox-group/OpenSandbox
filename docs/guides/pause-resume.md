@@ -69,6 +69,8 @@ Pod termination can continue after the controller reports `Paused`. A resume req
 - `Succeed`: snapshot is ready and can be used for the next resume
 - `Failed`: snapshot creation failed
 
+For `rootfs-v1` snapshots, `Succeed` is published only after the commit Job reports an image digest for every container. If that result is unavailable — for example, when the commit Pod was removed before the controller could read its termination message — the snapshot is marked `Failed` with `CommitResultUnavailable` or `CommitResultIncomplete`. The runtime Pods are kept, the sandbox reports `PauseFailed`, and the pause can be retried.
+
 ### What Is Preserved
 
 | | Preserved? |

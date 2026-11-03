@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -34,6 +35,10 @@ import (
 // CreateContext provisions a kernel-backed session and returns its ID.
 // Bash language uses Jupyter kernel like other languages; for pipe-based bash sessions use CreateBashSession (session API).
 func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
+	if c.baseURL == "" || len(c.jupyterTokens()) == 0 {
+		return "", errJupyterNotConfigured
+	}
+
 	var (
 		client  *jupyter.Client
 		session *jupytersession.Session
@@ -41,6 +46,9 @@ func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
 	)
 
 	err = retry.OnError(kernelWaitingBackoff, func(err error) bool {
+		if errors.Is(err, errJupyterNotConfigured) {
+			return false
+		}
 		log.Error("jupyter: create session failed, retrying: %v", err)
 		return err != nil
 	}, func() error {
@@ -108,10 +116,15 @@ func (c *Controller) DeleteLanguageContext(language Language) error {
 }
 
 func (c *Controller) deleteSessionAndCleanup(session string) error {
-	if c.getJupyterKernel(session) == nil {
+	kernel := c.getJupyterKernel(session)
+	if kernel == nil {
 		return ErrContextNotFound
 	}
-	if err := c.jupyterClient().DeleteSession(session); err != nil {
+	client := kernel.client
+	if client == nil {
+		client = c.jupyterClient()
+	}
+	if err := client.DeleteSession(session); err != nil {
 		return err
 	}
 	c.jupyterClientMap.Delete(session)
@@ -139,9 +152,12 @@ func (c *Controller) newIpynbPath(sessionID, cwd string) (string, error) {
 }
 
 // createDefaultLanguageJupyterContext prewarms a session for stateless execution.
-func (c *Controller) createDefaultLanguageJupyterContext(language Language) error {
+func (c *Controller) createDefaultLanguageJupyterContext(ctx context.Context, language Language) error {
 	if c.getDefaultLanguageSession(language) != "" {
 		return nil
+	}
+	if c.baseURL == "" || len(c.jupyterTokens()) == 0 {
+		return errJupyterNotConfigured
 	}
 
 	var (
@@ -150,9 +166,18 @@ func (c *Controller) createDefaultLanguageJupyterContext(language Language) erro
 		err     error
 	)
 	err = retry.OnError(kernelWaitingBackoff, func(err error) bool {
+		if ctx != nil && ctx.Err() != nil {
+			return false
+		}
+		if errors.Is(err, errJupyterNotConfigured) {
+			return false
+		}
 		log.Error("jupyter: create default context failed, retrying: %v", err)
 		return err != nil
 	}, func() error {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		client, session, err = c.createJupyterContext(CreateContextRequest{
 			Language: language,
 			Cwd:      "",
@@ -174,9 +199,24 @@ func (c *Controller) createDefaultLanguageJupyterContext(language Language) erro
 
 // createJupyterContext performs the actual context creation workflow.
 func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyter.Client, *jupytersession.Session, error) {
-	client := c.jupyterClient()
+	tokens := c.jupyterTokens()
+	if c.baseURL == "" || len(tokens) == 0 {
+		return nil, nil, errJupyterNotConfigured
+	}
 
-	kernel, err := c.searchKernel(client, request.Language)
+	var (
+		client *jupyter.Client
+		kernel string
+		err    error
+	)
+	for _, token := range tokens {
+		candidateClient := c.jupyterClientWithToken(token)
+		kernel, err = c.searchKernel(candidateClient, request.Language)
+		if err == nil {
+			client = candidateClient
+			break
+		}
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -216,15 +256,19 @@ func (c *Controller) storeJupyterKernel(sessionID string, kernel *jupyterKernel)
 }
 
 func (c *Controller) jupyterClient() *jupyter.Client {
+	return c.jupyterClientWithToken(c.jupyterToken())
+}
+
+func (c *Controller) jupyterClientWithToken(token string) *jupyter.Client {
 	httpClient := &http.Client{
 		Transport: &jupyter.AuthTransport{
-			Token: c.token,
+			Token: token,
 			Base:  http.DefaultTransport,
 		},
 	}
 
 	return jupyter.NewClient(c.baseURL,
-		jupyter.WithToken(c.token),
+		jupyter.WithToken(token),
 		jupyter.WithHTTPClient(httpClient))
 }
 

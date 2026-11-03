@@ -226,6 +226,7 @@ export default defineConfig({
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            { text: "OCI Templates", link: "/guides/oci-templates" },
             {
               text: "Auto-Pause & Wake-on-Access",
               link: "/guides/auto-pause-wake",

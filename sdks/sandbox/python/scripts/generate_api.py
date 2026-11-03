@@ -359,9 +359,10 @@ def redact_credential_reprs() -> None:
     """Keep write-only credential values out of generated-model reprs.
 
     attrs synthesizes ``__repr__`` over any class-level definition, so a
-    module-level override is appended instead: ``InlineCredentialSource.value``
-    is write-only material and must never surface in logs, exception messages
-    (pydantic/attrs reprs included), or debug output.
+    module-level override is appended instead: ``CredentialSource.value`` is
+    write-only material and must never surface in logs, exception messages
+    (pydantic/attrs reprs included), or debug output. ``endpoint`` is
+    configuration rather than secret material and stays visible.
     """
     redaction = (
         "\n\n"
@@ -369,14 +370,18 @@ def redact_credential_reprs() -> None:
         "# surface in logs, exception messages, or debug output. attrs would\n"
         "# overwrite a class-level __repr__, so the override is applied on the\n"
         "# class object after definition.\n"
-        "def _redacted_repr(self: InlineCredentialSource) -> str:\n"
-        '    return f"{type(self).__name__}(value=***)"\n'
+        "def _redacted_repr(self: CredentialSource) -> str:\n"
+        "    value = \"***\" if self.value is not UNSET else \"UNSET\"\n"
+        "    return (\n"
+        "        f\"{type(self).__name__}(type_={self.type_!r}, value={value},\"\n"
+        "        f\" endpoint={self.endpoint!r})\"\n"
+        "    )\n"
         "\n\n"
-        "InlineCredentialSource.__repr__ = _redacted_repr  # type: ignore[method-assign]\n"
+        "CredentialSource.__repr__ = _redacted_repr  # type: ignore[method-assign]\n"
     )
     for rel in (
-        "src/opensandbox/api/lifecycle/models/inline_credential_source.py",
-        "src/opensandbox/api/egress/models/inline_credential_source.py",
+        "src/opensandbox/api/lifecycle/models/credential_source.py",
+        "src/opensandbox/api/egress/models/credential_source.py",
     ):
         path = Path(rel)
         if not path.exists():

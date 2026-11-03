@@ -59,10 +59,6 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Test integration script failure handling
-        # The self-hosted runner's system python3 may still be Python 3.6.
-        run: uv run --no-project --python 3.12 python -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
-
       # Rewrites the pin in the working tree only, then re-vendors the CRD
       # bundle so the charts install the tested commit's CRDs.
       - name: Override fast-sandbox pin

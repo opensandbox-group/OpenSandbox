@@ -27,6 +27,17 @@ namespace OpenSandbox.Tests;
 public class SandboxEgressLifecycleTests
 {
     [Fact]
+    public async Task LegacyFilesystem_ShouldRejectUnsupportedDownloadMetadata()
+    {
+        ISandboxFiles files = new StubFiles();
+        Func<Task> bytes = () => files.ReadBytesDetailedAsync("/data.bin");
+        Func<Task> stream = () => files.ReadBytesStreamDetailedAsync("/data.bin");
+
+        await bytes.Should().ThrowAsync<NotSupportedException>().WithMessage("*download metadata*");
+        await stream.Should().ThrowAsync<NotSupportedException>().WithMessage("*download metadata*");
+    }
+
+    [Fact]
     public async Task CreateAsync_ShouldBuildEgressStackOnce_AndReuseItForOperations()
     {
         var sandboxes = new StubSandboxes();
