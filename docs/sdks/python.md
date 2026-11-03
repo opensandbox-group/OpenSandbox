@@ -562,10 +562,10 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 | `event_hooks`     | Additional httpx hooks for adapter clients | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry); custom transports must honor request timeouts  | SDK-created per instance     | -                      |
 | `retry_policy`    | Automatic retry policy; streaming requests only get its wake retry (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
- | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
+| `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `False` | - |
 
-The Python Code Interpreter inherits the sandbox's connection configuration. The SDK does not automatically attach the configured API key to code execution requests. This applies to both the asynchronous and synchronous APIs.
+The Python Code Interpreter inherits the sandbox's connection configuration. With the deprecated `use_server_proxy=True` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
 When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
 

@@ -70,7 +70,7 @@ func main() {
 
 `ConnectSandbox` and `ResumeSandbox` check health only when you pass the optional `ReadyOptions` argument (an empty `ReadyOptions{}` uses the default check). Omitting it resolves the endpoint without a health check. Pause is asynchronous: wait until sandbox info reports `Paused` before resuming.
 
-`ConnectionConfig.APIKey` authenticates lifecycle requests. The SDK removes the `OPEN-SANDBOX-API-KEY` header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
+`ConnectionConfig.APIKey` authenticates lifecycle requests. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when the deprecated `UseServerProxy` is true (maintenance mode); in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
 
 The following snippets go inside a function returning `error`, with the live `sandbox`, `config`, and `ctx` above. Add standard-library imports used by each snippet. Creation examples are alternatives; terminate sandboxes with `Kill` when done. `Close` currently does not terminate the sandbox.
 

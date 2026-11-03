@@ -535,7 +535,7 @@ var config2 = new ConnectionConfig(new ConnectionConfigOptions
 `Sandbox.CreateAsync` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfigOptions.DisableMetrics = true` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
 
-The C# Code Interpreter SDK inherits the sandbox's connection configuration. The SDK does not automatically attach the configured API key to code execution requests.
+The C# Code Interpreter SDK inherits the sandbox's connection configuration. With the deprecated `UseServerProxy = true` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not attach this key to code execution requests.
 
 ### 2. SDK Logging
 

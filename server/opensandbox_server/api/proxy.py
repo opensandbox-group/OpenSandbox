@@ -111,8 +111,10 @@ WEBSOCKET_HANDSHAKE_HEADERS = {
 
 router = APIRouter(tags=["Sandboxes"])
 
-# Deprecation marker attached to proxied responses (draft RFC "Deprecation" header).
-DEPRECATION_HEADER_VALUE = "true"
+# RFC 9745 Section 2.1: the Deprecation field is a Structured Field Date
+# (@<unix seconds>) recording when the deprecation took effect. The proxy data
+# path was declared deprecated on 2026-11-02T00:00:00Z.
+DEPRECATION_HEADER_VALUE = "@1793577600"
 
 _deprecation_warned = False
 
@@ -410,7 +412,11 @@ async def _proxy_http_request(
     internal: bool = False,
 ) -> StreamingResponse:
     resolve_internal = get_config().proxy.resolve_internal
-    _warn_proxy_deprecated()
+    if not internal:
+        # Only the external /proxy/{port} path is deprecated; internal callers
+        # such as network-policy and credential-vault routes are supported
+        # control-plane operations and must not consume the one-time warning.
+        _warn_proxy_deprecated()
     # get_endpoint does blocking Docker/Kubernetes I/O; keep it off the event loop.
     endpoint = await asyncio.to_thread(
         lifecycle.sandbox_service.get_endpoint,
@@ -474,7 +480,10 @@ async def _proxy_http_request(
                 for key, value in resp.headers.raw
                 if key.decode("latin-1").lower() not in response_header_exclusions
             ]
-            response_headers.append((b"deprecation", DEPRECATION_HEADER_VALUE.encode()))
+            if not internal:
+                response_headers.append(
+                    (b"deprecation", DEPRECATION_HEADER_VALUE.encode())
+                )
 
             return _ProxyStreamingResponse(
                 resp,
