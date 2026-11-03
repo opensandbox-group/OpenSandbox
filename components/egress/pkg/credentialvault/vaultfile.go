@@ -23,14 +23,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
-// VaultFileVersion is the only supported on-disk schema version. Anything
-// else — including a missing one — is rejected rather than misinterpreted;
-// the rejection is identifiable via ErrUnsupportedFileVersion so callers can
-// preserve files written by a newer consumer.
+// VaultFileVersion is the original write schema. This compatibility stage
+// keeps writing v1 while safely reading v2 as read-only state.
 const VaultFileVersion = 1
+
+const VaultFileVersion2 = 2
+
+type FileState string
+
+const (
+	FileStateActive  FileState = "active"
+	FileStateDeleted FileState = "deleted"
+	FileStateEmpty   FileState = "empty"
+)
 
 // MaxEncodedVaultFileBytes bounds one encoded vault file: a relay body up to
 // maxCredentialVaultBodyBytes plus the envelope (version, fence, revision,
@@ -48,11 +57,27 @@ var ErrUnsupportedFileVersion = errors.New("unsupported vault file version")
 // the SET_BINDING envelope; a registration under a different fence — a reset,
 // or a rebind that changed only the attachment — finds the file stale.
 type VaultFile struct {
-	Version      int             `json:"v"`
-	Incarnation  string          `json:"incarnation"`
-	AttachmentID string          `json:"attachmentId"`
-	Revision     int64           `json:"revision"`
-	Vault        json.RawMessage `json:"vault"`
+	Version          int             `json:"v"`
+	Incarnation      string          `json:"incarnation"`
+	AttachmentID     string          `json:"attachmentId"`
+	Revision         int64           `json:"revision"`
+	Vault            json.RawMessage `json:"vault"`
+	State            FileState       `json:"-"`
+	StateLineage     string          `json:"-"`
+	StateRevision    uint64          `json:"-"`
+	InitializationID string          `json:"-"`
+}
+
+type vaultFileV2 struct {
+	Version          int             `json:"v"`
+	Incarnation      string          `json:"incarnation"`
+	AttachmentID     string          `json:"attachmentId"`
+	Revision         int64           `json:"revision"`
+	State            FileState       `json:"state"`
+	StateLineage     string          `json:"stateLineage"`
+	StateRevision    uint64          `json:"stateRevision"`
+	InitializationID string          `json:"initializationId,omitempty"`
+	Vault            json.RawMessage `json:"vault"`
 }
 
 // VaultFileBody is the OSEP-0012 vault JSON carried in VaultFile.Vault —
@@ -95,29 +120,37 @@ func EncodeVaultFile(incarnation, attachmentID string, revision int64, body Vaul
 	return append(out, '\n'), nil
 }
 
-// DecodeVaultFile parses and validates file bytes. The version discriminator
-// is read FIRST with a tolerant view: a newer envelope carries unknown
-// fields, so the strict v1 schema must not reject (and the caller quarantine)
-// a file this reader should merely preserve. Only strictly newer versions
-// surface ErrUnsupportedFileVersion; a missing or invalid version is plain
-// corruption. The v1 schema then enforces exactly the known fields, non-blank
-// fence fields, a positive revision, and a decodable create-shaped body;
-// semantic validation (credential references, policy coverage, ambiguity) is
-// the store's job at load time.
+// DecodeVaultFile parses v1 and the read-only v2 envelope. Unknown versions
+// and v2 shapes this build cannot interpret are reported as unsupported so
+// callers preserve the original bytes rather than quarantine or rewrite them.
 func DecodeVaultFile(data []byte) (VaultFile, VaultFileBody, error) {
 	var body VaultFileBody
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
 		return VaultFile{}, body, fmt.Errorf("vault file is empty")
 	}
+	hintedVersion, hasHintedVersion, duplicateVersion := vaultFileVersionHint(trimmed)
 	var disc struct {
 		Version *int `json:"v"`
 	}
 	if err := json.Unmarshal(trimmed, &disc); err != nil {
+		if hasHintedVersion && hintedVersion >= VaultFileVersion2 {
+			return VaultFile{}, body, fmt.Errorf("%w %d (malformed v2+ envelope): %v", ErrUnsupportedFileVersion, hintedVersion, err)
+		}
 		return VaultFile{}, body, fmt.Errorf("decode vault file envelope: %w", err)
 	}
-	if disc.Version != nil && *disc.Version > VaultFileVersion {
-		return VaultFile{}, body, fmt.Errorf("%w %d (newer than supported %d)", ErrUnsupportedFileVersion, *disc.Version, VaultFileVersion)
+	if duplicateVersion && hasHintedVersion && hintedVersion >= VaultFileVersion2 {
+		return VaultFile{}, body, fmt.Errorf("%w %d (duplicate version fields are ambiguous)", ErrUnsupportedFileVersion, hintedVersion)
+	}
+	if disc.Version != nil && *disc.Version > VaultFileVersion2 {
+		return VaultFile{}, body, fmt.Errorf("%w %d (newer than supported %d)", ErrUnsupportedFileVersion, *disc.Version, VaultFileVersion2)
+	}
+	if disc.Version != nil && *disc.Version == VaultFileVersion2 {
+		vf, body, err := decodeVaultFileV2(trimmed)
+		if err != nil {
+			return VaultFile{}, VaultFileBody{}, fmt.Errorf("%w: v2 vault file cannot be interpreted safely: %v", ErrUnsupportedFileVersion, err)
+		}
+		return vf, body, nil
 	}
 	var vf VaultFile
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
@@ -146,4 +179,108 @@ func DecodeVaultFile(data []byte) (VaultFile, VaultFileBody, error) {
 		return VaultFile{}, body, fmt.Errorf("decode vault file body: %w", err)
 	}
 	return vf, body, nil
+}
+
+// vaultFileVersionHint scans top-level version fields even when a later field
+// is truncated. It records the highest numeric version and whether the field
+// was repeated, so an ambiguous envelope containing v2 cannot be decoded as
+// v1 just because the last duplicate happens to say v1.
+func vaultFileVersionHint(data []byte) (int, bool, bool) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return 0, false, false
+	}
+	version, found, duplicate := 0, false, false
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return version, found, duplicate
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return version, found, duplicate
+		}
+		if key == "v" {
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return version, found, duplicate
+			}
+			var parsed *int
+			if err := json.Unmarshal(raw, &parsed); err != nil || parsed == nil {
+				continue
+			}
+			if found {
+				duplicate = true
+			}
+			if *parsed > version {
+				version = *parsed
+			}
+			found = true
+			continue
+		}
+		var ignored json.RawMessage
+		if err := dec.Decode(&ignored); err != nil {
+			return version, found, duplicate
+		}
+	}
+	return version, found, duplicate
+}
+
+func decodeVaultFileV2(data []byte) (VaultFile, VaultFileBody, error) {
+	var wire vaultFileV2
+	if err := decodeSingleJSON(data, &wire); err != nil {
+		return VaultFile{}, VaultFileBody{}, err
+	}
+	if wire.Version != VaultFileVersion2 {
+		return VaultFile{}, VaultFileBody{}, fmt.Errorf("invalid vault file version %d", wire.Version)
+	}
+	if strings.TrimSpace(wire.Incarnation) == "" || strings.TrimSpace(wire.AttachmentID) == "" {
+		return VaultFile{}, VaultFileBody{}, errors.New("v2 vault file fence cannot be blank")
+	}
+	if strings.TrimSpace(wire.StateLineage) == "" || wire.StateRevision == 0 {
+		return VaultFile{}, VaultFileBody{}, errors.New("v2 vault file order token is incomplete")
+	}
+	var body VaultFileBody
+	if len(wire.Vault) == 0 || !json.Valid(wire.Vault) {
+		return VaultFile{}, VaultFileBody{}, errors.New("v2 vault file body is missing or invalid")
+	}
+	if err := decodeSingleJSON(wire.Vault, &body); err != nil {
+		return VaultFile{}, VaultFileBody{}, fmt.Errorf("decode v2 vault body: %w", err)
+	}
+	switch wire.State {
+	case FileStateActive:
+		if wire.Revision < 1 {
+			return VaultFile{}, VaultFileBody{}, errors.New("active v2 vault revision must be positive")
+		}
+	case FileStateDeleted, FileStateEmpty:
+		if wire.Revision != 0 || len(body.Credentials) != 0 || len(body.Bindings) != 0 {
+			return VaultFile{}, VaultFileBody{}, fmt.Errorf("%s v2 vault must have revision 0 and an empty body", wire.State)
+		}
+		if wire.State == FileStateEmpty && strings.TrimSpace(wire.InitializationID) == "" {
+			return VaultFile{}, VaultFileBody{}, errors.New("empty v2 vault requires an initialization ID")
+		}
+	default:
+		return VaultFile{}, VaultFileBody{}, fmt.Errorf("unsupported v2 vault state %q", wire.State)
+	}
+	return VaultFile{
+		Version: VaultFileVersion2, Incarnation: wire.Incarnation, AttachmentID: wire.AttachmentID,
+		Revision: wire.Revision, Vault: append(json.RawMessage(nil), wire.Vault...), State: wire.State,
+		StateLineage: wire.StateLineage, StateRevision: wire.StateRevision, InitializationID: wire.InitializationID,
+	}, body, nil
+}
+
+func decodeSingleJSON(data []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err == nil {
+		return errors.New("multiple JSON values")
+	} else if !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }

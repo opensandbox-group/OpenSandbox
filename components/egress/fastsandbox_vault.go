@@ -59,9 +59,21 @@ func validVaultSubjectID(uid string) bool {
 
 // handleVaultRelay serves /vault/{sandboxUid} for all four relay verbs.
 func (s *fastSandboxPolicyServer) handleVaultRelay(w http.ResponseWriter, r *http.Request) {
-	uid := strings.TrimPrefix(r.URL.Path, constants.VaultRelayPathPrefix)
+	prefix := constants.VaultRelayPathPrefix
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		prefix = constants.ActionsV2VaultRelayPathPrefix
+	}
+	uid := strings.TrimPrefix(r.URL.Path, prefix)
 	if !validVaultSubjectID(uid) {
 		http.Error(w, "missing or invalid sandbox uid in path", http.StatusBadRequest)
+		return
+	}
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		ownerLock := s.ownerLock(subject.FromSandboxUID(uid))
+		ownerLock.RLock()
+		defer ownerLock.RUnlock()
+	}
+	if !s.validateRelayOwner(w, r, uid) {
 		return
 	}
 	subj := subject.FromSandboxUID(uid)
@@ -161,6 +173,21 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		store := s.vaultForLocked(subj, fence)
 		if store == nil {
 			return func() { http.Error(w, "unknown subject", http.StatusNotFound) }
+		}
+		if s.vaultSealedLocked(subj) {
+			return func() {
+				http.Error(w, "subject vault is sealed (paused); the bundle copy is already taken", http.StatusConflict)
+			}
+		}
+		if entry, ok := s.vaults[subj]; ok {
+			if entry.vaultStateUnknown {
+				return func() { http.Error(w, "vault state is unknown; refusing mutation", http.StatusServiceUnavailable) }
+			}
+			if entry.fileMeta.version >= credentialvault.VaultFileVersion2 {
+				return func() {
+					http.Error(w, "v2 vault state is read-only until lineage-aware writes are supported", http.StatusConflict)
+				}
+			}
 		}
 		pol := effective
 
@@ -295,6 +322,12 @@ func (s *fastSandboxPolicyServer) readRelayVault(r *http.Request, subj subject.S
 	store := s.vaultForLocked(subj, fence)
 	if store == nil {
 		return credentialvault.FullRevision{}, http.StatusNotFound, "unknown subject", nil
+	}
+	if s.vaultSealedLocked(subj) {
+		return credentialvault.FullRevision{}, http.StatusConflict, "subject vault is sealed (paused); the bundle copy is already taken", nil
+	}
+	if entry := s.vaults[subj]; entry.vaultStateUnknown {
+		return credentialvault.FullRevision{}, http.StatusServiceUnavailable, "vault state is unknown; refusing to treat it as absent", nil
 	}
 	full, err := store.Full()
 	return full, 0, "", err

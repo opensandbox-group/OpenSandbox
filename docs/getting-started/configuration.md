@@ -64,6 +64,10 @@ If `server.api_key` is empty, the server runs without authentication. In non-int
 
 For the full configuration reference with all keys and defaults, see the [server configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
 
+## Host Bind Mounts
+
+`storage.allowed_host_paths` entries allow a host path and its descendants, with directory boundaries preserved. An explicit POSIX root entry (`/`) allows all POSIX host paths, while a Windows drive root such as `D:/` allows paths on that drive only. Prefer narrower directory prefixes for shared environments; an empty list rejects all host bind mounts.
+
 ## Sandbox Expiration
 
 `server.max_sandbox_timeout_seconds` limits the `timeout` supplied when creating a sandbox. If configured, it must be at least `60` seconds; omit it to disable the creation-time upper bound. It does not limit renewal requests or the total lifetime of a sandbox.

@@ -369,6 +369,8 @@ await sandbox.Files.DeleteDirectoriesAsync(new[] { "/tmp/demo" });
 
 For binary data, use `byte[]` or `Stream` in `WriteEntry.Data`, and download with `ReadBytesAsync()` or `ReadBytesStreamAsync()`. Read options support partial downloads.
 
+Use `ReadBytesDetailedAsync` or `ReadBytesStreamDetailedAsync` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `IsPartial` before appending a resumed download, and dispose a detailed stream body with `await using`. These extension methods are in `OpenSandbox`; custom adapters must implement `IDownloadSandboxFiles` or the methods throw `NotSupportedException`.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:
@@ -786,4 +788,4 @@ catch (SandboxException ex)
 
 ## License
 
-Apache License 2.0
+The C# SDK code is licensed under [Apache 2.0](https://github.com/opensandbox-group/OpenSandbox/blob/main/LICENSE).

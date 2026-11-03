@@ -26,7 +26,7 @@ from tomlkit.exceptions import ParseError
 from tomlkit.items import InlineTable, Table
 
 from opensandbox_cli.client import ClientContext
-from opensandbox_cli.config import init_config_file, resolve_config
+from opensandbox_cli.config import STRING_KEYS, init_config_file, resolve_config
 from opensandbox_cli.utils import handle_errors, output_option, prepare_output
 
 
@@ -166,7 +166,7 @@ def config_set(
     if not isinstance(table, (Table, InlineTable, OutOfOrderTableProxy)):
         raise click.ClickException(f"Cannot set {key}: '{section}' is not a TOML table.")
 
-    table[field] = _parse_toml_value(value)
+    table[field] = value if key in STRING_KEYS else _parse_toml_value(value)
     path.write_text(tomlkit.dumps(document), encoding="utf-8")
 
     obj.output.success(f"Set {key} = {value}")

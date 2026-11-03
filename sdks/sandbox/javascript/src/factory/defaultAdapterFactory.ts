@@ -103,9 +103,7 @@ function withRedirectGuard(
 ): typeof fetch {
   return createRedirectSafeFetch(baseUrl, baseFetch, {
     overallTimeoutMs:
-      overallTimeoutSeconds && overallTimeoutSeconds > 0
-        ? overallTimeoutSeconds * 1000
-        : undefined,
+      overallTimeoutSeconds === undefined ? undefined : overallTimeoutSeconds * 1000,
   });
 }
 

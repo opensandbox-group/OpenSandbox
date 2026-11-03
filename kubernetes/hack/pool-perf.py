@@ -15,7 +15,6 @@
 import asyncio
 import time
 import uuid
-import sys
 import argparse
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -129,7 +128,8 @@ class PoolPerformanceTester:
                     print("{0}, endpoint {1}".format(name, bsb.get("metadata", {}).get("annotations", {}).get("sandbox.opensandbox.io/endpoints", "")))
                     self.results[name]["allocated_time"] = time.time() - start_polling
                     break
-            except Exception as e:
+            except Exception:
+                # Keep polling through API/read failures until allocation succeeds or times out.
                 pass
             
             await asyncio.sleep(self.poll_interval)
@@ -179,12 +179,12 @@ class PoolPerformanceTester:
         for name in self.bsb_names:
             try:
                 self.custom_api.delete_namespaced_custom_object(GROUP, VERSION, NAMESPACE, BSB_PLURAL, name)
-            except Exception as e:
+            except Exception:
                 # Silently ignore deletion errors during cleanup
                 pass
         try:
             self.custom_api.delete_namespaced_custom_object(GROUP, VERSION, NAMESPACE, POOL_PLURAL, self.pool_name)
-        except Exception as e:
+        except Exception:
             # Silently ignore deletion errors during cleanup
             pass
 

@@ -123,6 +123,11 @@ class Handler(BaseHTTPRequestHandler):
                 "path": self.path,
                 "authorization": self.headers.get("Authorization", ""),
                 "private_token": self.headers.get("Private-Token", ""),
+                # OSEP-0025 exchange e2e: the T6 stub resolver injects these
+                # deterministic, non-secret markers; the test recomputes the
+                # signature to assert subject/credential/binding/authority/path.
+                "x_test_signature": self.headers.get("X-Test-Signature", ""),
+                "x_test_subject": self.headers.get("X-Test-Subject", ""),
             }
         ).encode()
         self.send_response(200)

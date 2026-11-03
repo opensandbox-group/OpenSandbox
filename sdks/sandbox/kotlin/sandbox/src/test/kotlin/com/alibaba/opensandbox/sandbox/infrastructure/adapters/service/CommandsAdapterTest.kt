@@ -503,6 +503,34 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
     }
 
     @Test
+    fun `run should not send a positive sub-millisecond timeout as zero`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"type":"init","text":"cmd-123","timestamp":1672531200000}""" + "\n"),
+        )
+
+        commandsAdapter.run(
+            RunCommandRequest.builder()
+                .command("sleep 10")
+                .timeout(Duration.ofNanos(500_000))
+                .build(),
+        )
+
+        val requestBodyJson = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(1L, requestBodyJson["timeout"]?.jsonPrimitive?.content?.toLong())
+    }
+
+    @Test
+    fun `command timeout conversion should round partial milliseconds up`() {
+        assertEquals(0L, Duration.ZERO.toCommandTimeoutMillis())
+        assertEquals(1L, Duration.ofNanos(1).toCommandTimeoutMillis())
+        assertEquals(1L, Duration.ofMillis(1).toCommandTimeoutMillis())
+        assertEquals(2L, Duration.ofNanos(1_000_001).toCommandTimeoutMillis())
+        assertEquals(5000L, Duration.ofSeconds(5).toCommandTimeoutMillis())
+    }
+
+    @Test
     fun `runInSession should infer non-zero exit code from command error event`() {
         val initEvent = """data: {"type":"init","text":"cmd-123","timestamp":1672531200000}"""
         val errorEvent =

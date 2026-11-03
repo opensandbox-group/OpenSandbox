@@ -92,13 +92,19 @@ type Execution struct {
 
 	// ExitCode is the process exit code. Nil if not available.
 	ExitCode *int
+
+	// codeExecution marks a language-backed code execution. Shell command
+	// modes keep line-based joining; code output is streamed as fragments.
+	codeExecution bool
 }
 
-// Text returns the combined stdout text.
+// Text returns the combined stdout text. For command output, a newline is
+// inserted between two events only when the first ends in neither LF nor CR.
+// For a code execution, the stdout fragments are concatenated unchanged.
 func (e *Execution) Text() string {
 	var b strings.Builder
 	for i, m := range e.Stdout {
-		if i > 0 {
+		if i > 0 && !e.codeExecution {
 			previous := e.Stdout[i-1].Text
 			if !strings.HasSuffix(previous, "\n") && !strings.HasSuffix(previous, "\r") {
 				b.WriteByte('\n')

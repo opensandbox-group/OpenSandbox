@@ -29,7 +29,7 @@ class CredentialMetadata:
     """
     Attributes:
         name (str):
-        source_type (str):
+        source_type (str): Credential source kind (`inline` or `exchange`).
         revision (int):
     """
 

@@ -35,6 +35,9 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
         IReadOnlyList<CredentialBinding> bindings,
         CancellationToken cancellationToken = default)
     {
+        CredentialVaultShapeGuard.ValidateCredentials(credentials);
+        CredentialVaultShapeGuard.ValidateBindings(bindings);
+
         var request = new CredentialVaultCreateRequest
         {
             Credentials = credentials,
@@ -62,6 +65,8 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
         {
             throw new ArgumentNullException(nameof(request));
         }
+
+        CredentialVaultShapeGuard.ValidatePatchRequest(request);
 
         return await _client.PatchAsync<CredentialVaultState>(
             "/credential-vault",

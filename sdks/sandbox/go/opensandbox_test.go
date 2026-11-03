@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1823,6 +1824,89 @@ func TestDownloadFile_Range(t *testing.T) {
 	}
 }
 
+func TestDownloadFileResponse_RangeIgnored(t *testing.T) {
+	fileContent := "hello from sandbox file"
+
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if rangeHeader := r.Header.Get("Range"); rangeHeader != "bytes=1024-" {
+			assert.Fail(t, fmt.Sprintf("Range = %q, want %q", rangeHeader, "bytes=1024-"))
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="output.txt"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(fileContent)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fileContent))
+	})
+
+	resp, err := client.DownloadFileResponse(context.Background(), "/sandbox/output.txt", "bytes=1024-")
+	require.NoErrorf(t, err, "DownloadFileResponse")
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, false, resp.IsPartial())
+	if resp.ContentRange != nil {
+		assert.Fail(t, fmt.Sprintf("ContentRange = %+v, want nil", resp.ContentRange))
+	}
+	require.Equal(t, int64(len(fileContent)), resp.ContentLength)
+	require.Equal(t, int64(len(fileContent)), resp.TotalSize)
+	require.Equal(t, "application/octet-stream", resp.ContentType)
+	require.Equal(t, `attachment; filename="output.txt"`, resp.ContentDisposition)
+	data, err := io.ReadAll(resp.Body)
+	require.NoErrorf(t, err, "ReadAll")
+	require.Equal(t, fileContent, string(data))
+}
+
+func TestDownloadFileResponse_Range(t *testing.T) {
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if rangeHeader := r.Header.Get("Range"); rangeHeader != "bytes=0-4" {
+			assert.Fail(t, fmt.Sprintf("Range = %q, want %q", rangeHeader, "bytes=0-4"))
+		}
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Range", "bytes 0-4/10")
+		w.Header().Set("Content-Length", "5")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resp, err := client.DownloadFileResponse(context.Background(), "/sandbox/big.bin", "bytes=0-4")
+	require.NoErrorf(t, err, "DownloadFileResponse range")
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	require.Equal(t, true, resp.IsPartial())
+	require.Equal(t, int64(5), resp.ContentLength)
+	require.Equal(t, int64(10), resp.TotalSize)
+	require.NotNil(t, resp.ContentRange)
+	require.Equal(t, ByteRange{Start: 0, End: 4, Total: 10, Raw: "bytes 0-4/10"}, *resp.ContentRange)
+}
+
+func TestDownloadFileResponse_UnknownTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want *ByteRange
+	}{
+		{name: "missing"},
+		{name: "malformed", raw: "garbage", want: &ByteRange{Start: -1, End: -1, Total: -1, Raw: "garbage"}},
+		{name: "unknown", raw: "bytes 5-9/*", want: &ByteRange{Start: 5, End: 9, Total: -1, Raw: "bytes 5-9/*"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Range", tc.raw)
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("hello"))
+			})
+			resp, err := client.DownloadFileResponse(context.Background(), "/sandbox/big.bin", "bytes=5-")
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			require.True(t, resp.IsPartial())
+			require.Equal(t, tc.want, resp.ContentRange)
+			require.Equal(t, int64(-1), resp.TotalSize)
+		})
+	}
+}
+
 func TestDownloadFile_WithCustomHeaders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Test-Header") != "download-ok" {
@@ -2970,5 +3054,23 @@ func TestCreateSession_SendsCwd(t *testing.T) {
 	}
 	if gotCwd != "/workspace" {
 		assert.Fail(t, fmt.Sprintf("cwd = %q, want /workspace (regression: request body was dropped)", gotCwd))
+	}
+}
+
+func TestDownloadFileResponse_LineReads(t *testing.T) {
+	for _, opts := range []DownloadFileOptions{{Offset: 2}, {Limit: 2}} {
+		t.Run(fmt.Sprintf("%+v", opts), func(t *testing.T) {
+			_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", "5")
+				_, _ = w.Write([]byte("hello"))
+			})
+			resp, err := client.DownloadFileResponse(context.Background(), "/data.txt", "", opts)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(t, false, resp.IsPartial())
+			require.Equal(t, int64(5), resp.ContentLength)
+			require.Equal(t, int64(-1), resp.TotalSize)
+		})
 	}
 }

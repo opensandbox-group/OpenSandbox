@@ -166,8 +166,3 @@ export interface PlatformSummary {
     sampleReasons?: string[];
   }>;
 }
-
-export interface ApiErrorBody {
-  code?: string;
-  message?: string;
-}

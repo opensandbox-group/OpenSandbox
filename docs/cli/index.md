@@ -185,13 +185,16 @@ osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
 Templates are golden-image builds; the build runs asynchronously, so poll `template get` until the status phase is `Succeeded`. Template management requires a Kubernetes-backed runtime.
 
 ```bash
-osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template create --image python:3.12 --publish s3://bucket/publish --format native -o json
+osb template create --image python:3.12 --publish oci://registry.example.com/sandbox/templates --format overlaybd -o json
 osb template get <template-id> -o json
 osb template list -o json
 osb template delete <template-id> -o json
 ```
 
 `template create` also accepts `--resource cpu=1 memory=512Mi disk=2Gi`, `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe`, and `--warmup-seconds`.
+
+OCI publishing requires a repository-only target without a tag or digest. The builder generates unique tags and returns an immutable `oci://...@sha256:...` in `status.manifestRef`. Use `overlaybd` (the default) for OCI and explicitly select `native` for S3. Configure the builder's Registry Secret and an OCI-enabled Fast Sandbox pool before building; see [OCI template setup](/guides/oci-templates).
 
 ### Manage snapshots
 

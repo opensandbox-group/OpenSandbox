@@ -252,6 +252,94 @@ def test_create_projects_crd_with_server_side_inputs(service, crs):
     assert "egressMitmCertificate" not in spec
 
 
+@pytest.mark.parametrize("secret", ["sandbox-registry-credentials", "custom-registry"])
+def test_create_oci_projects_registry_secret(service, crs, secret):
+    service._k8s_config.template_oci_publish_secret = secret
+    record = service.create_template(
+        _create_request(publish="oci://registry.example.com/team/templates", format="overlaybd")
+    )
+    output = crs.created[-1]["spec"]["output"]
+    assert output["publish"] == record.publish == "oci://registry.example.com/team/templates"
+    assert output["format"] == "overlaybd"
+    assert output["publishSecretRef"] == {"name": secret}
+
+
+@pytest.mark.parametrize("publish", [
+    "oci://registry.example.com/team/templates:latest",
+    "oci://registry.example.com/team/templates@sha256:" + "a" * 64,
+    "oci://registry.example.com/team/templates:",
+    "oci://registry.example.com/team/templates@",
+    "oci://registry.example.com/",
+    "oci://registry.example.com",
+    "oci://user:password@registry.example.com/team/templates",
+    "oci://registry.example.com/UPPER",
+    "oci://registry.example.com/team//templates",
+    "oci://registry.example.com/team/templates?x=1",
+    "oci://registry.example.com/team/templates#fragment",
+])
+def test_create_rejects_invalid_oci_destination_before_side_effects(service, crs, repo, publish):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(publish=publish, format="overlaybd"))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+    assert not crs.created
+    assert repo.list(FastSandboxTemplateListQuery(namespace="ns-1")).total_items == 0
+
+
+@pytest.mark.parametrize("publish", [
+    "oci://localhost:5000/team/templates",
+    "oci://[::1]:5000/team/templates",
+    "oci://registry.example.com/team/my__templates-v1",
+])
+def test_create_accepts_oci_repositories(overlaybd_service, crs, publish):
+    overlaybd_service.create_template(_create_request(publish=publish, format="overlaybd"))
+    assert crs.created[-1]["spec"]["output"]["publish"] == publish
+
+
+def test_create_rejects_native_oci_before_side_effects(service, crs):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(publish="oci://registry.example.com/team/templates"))
+    assert excinfo.value.status_code == 400
+    assert "S3-compatible" in excinfo.value.detail["message"]
+    assert not crs.created
+
+
+@pytest.mark.parametrize("manifest_ref", [
+    None,
+    "oci://registry.example.com/team/templates:latest",
+    "oci://registry.example.com/team/templates@sha256:bad",
+    "oci://registry.example.com/other/templates@sha256:" + "a" * 64,
+    "s3://bucket/manifest.json",
+])
+def test_resolve_oci_requires_immutable_manifest_in_publish_repository(
+    overlaybd_service, crs, manifest_ref
+):
+    service = overlaybd_service
+    record = service.create_template(
+        _create_request(publish="oci://registry.example.com/team/templates", format="overlaybd")
+    )
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": manifest_ref})
+    _converge(service, crs, "ns-1", record.crd_name)
+    with pytest.raises(HTTPException) as excinfo:
+        service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+
+
+def test_oci_builds_from_same_source_resolve_independently(overlaybd_service, crs):
+    service = overlaybd_service
+    records = [service.create_template(_create_request(
+        publish="oci://registry.example.com/team/templates", format="overlaybd",
+    )) for _ in range(2)]
+    manifests = []
+    for record, digit in zip(records, ["a", "b"]):
+        manifest_ref = record.publish + "@sha256:" + digit * 64
+        manifests.append(manifest_ref)
+        crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": manifest_ref})
+        _converge(service, crs, "ns-1", record.crd_name)
+    assert records[0].source_image == records[1].source_image
+    assert [service.resolve_template_artifact(record.template_id)[0] for record in records] == manifests
+
+
 def test_create_bakes_configured_mitm_ca(repo, crs, monkeypatch):
     monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
     with patch.object(K8sClient, "_load_config"):
@@ -311,6 +399,42 @@ def test_create_projects_env_to_crd(service, crs):
     assert "envs" not in crs.created[-1]["spec"]
 
 
+@pytest.fixture
+def execd_init_service(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    config = _config()
+    config.runtime.execd_run_as_init = True
+    svc = FastSandboxTemplateService(config, repository=repo, k8s_client=k8s)
+    yield svc
+    svc.close()
+
+
+def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
+    # A client-provided EXECD_INIT must not win over the server switch.
+    record = execd_init_service.create_template(
+        _create_request(env={"EXECD_INIT": "0", "LOG_LEVEL": "info"})
+    )
+    envs = {e["name"]: e["value"] for e in crs.created[-1]["spec"]["envs"]}
+    assert envs == {"EXECD_INIT": "1", "LOG_LEVEL": "info"}
+    # The stored row keeps the client env; injection is projection-only.
+    assert record.spec["env"] == {"EXECD_INIT": "0", "LOG_LEVEL": "info"}
+
+    execd_init_service.create_template(_create_request())
+    assert crs.created[-1]["spec"]["envs"] == [{"name": "EXECD_INIT", "value": "1"}]
+
+
+def test_create_does_not_inject_execd_init_by_default(service, crs):
+    service.create_template(_create_request(env={"LOG_LEVEL": "info"}))
+    envs = {e["name"]: e["value"] for e in crs.created[-1]["spec"]["envs"]}
+    assert envs == {"LOG_LEVEL": "info"}
+
+    service.create_template(_create_request())
+    assert "envs" not in crs.created[-1]["spec"]
+
+
 def test_create_rejects_invalid_env_names(service):
     from fastapi import HTTPException
 
@@ -319,6 +443,17 @@ def test_create_rejects_invalid_env_names(service):
             service.create_template(_create_request(env={name: "x"}))
         assert excinfo.value.status_code == 400
         assert "env names" in str(excinfo.value.detail).lower()
+
+
+@pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\t", " "])
+def test_create_rejects_env_names_with_trailing_whitespace(service, crs, whitespace):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(env={"LOG_LEVEL" + whitespace: "x"}))
+    assert excinfo.value.status_code == 400
+    assert "env names" in str(excinfo.value.detail).lower()
+    assert crs.created == []
 
 
 def test_create_rolls_back_row_on_crd_conflict(service, crs, repo):
@@ -520,7 +655,7 @@ def test_create_overlaybd_projects_oci_output(overlaybd_service, crs):
 
 def test_resolve_overlaybd_returns_manifest_ref(overlaybd_service, crs):
     record = overlaybd_service.create_template(_overlaybd_request(entrypoint=["sleep", "1"]))
-    manifest_ref = "oci://registry.example.com/sandbox/templates@sha256:abc123"
+    manifest_ref = "oci://registry.example.com/sandbox/templates@sha256:" + "a" * 64
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": manifest_ref})
     _converge(overlaybd_service, crs, "ns-1", record.crd_name)
     artifact_ref, entrypoint = overlaybd_service.resolve_template_artifact(record.template_id)
@@ -618,13 +753,20 @@ def client(service, monkeypatch):
         yield test_client
 
 
-def test_routes_template_lifecycle(client, crs, service):
+@pytest.mark.parametrize("oci", [False, True])
+def test_routes_template_lifecycle(client, crs, service, oci):
+    if oci:
+        service._k8s_config.template_oci_publish_secret = "registry-credentials"
+    publish = "oci://registry.example.com/team/templates" if oci else "s3://sandbox-images/publish"
+    manifest_ref = publish + "@sha256:" + "a" * 64 if oci else "s3://b/m"
+    # Omit format for OCI to exercise the public API's overlaybd default.
+    format_fields = {} if oci else {"format": "native"}
     response = client.post(
         "/v1/templates",
         json={
             "image": "alpine:3.19",
-            "publish": "s3://sandbox-images/publish",
-            "format": "native",
+            "publish": publish,
+            **format_fields,
             "env": {"LOG_LEVEL": "info"},
             "metadata": {"origin": "test"},
         },
@@ -632,19 +774,21 @@ def test_routes_template_lifecycle(client, crs, service):
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"]["phase"] == "Pending"
+    assert body["publish"] == publish
+    assert body["format"] == ("overlaybd" if oci else "native")
     assert body["env"] == {"LOG_LEVEL": "info"}
     template_id = body["templateId"]
 
-    crs.set_status("ns-1", template_id, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    crs.set_status("ns-1", template_id, {"phase": "Succeeded", "manifestRef": manifest_ref})
     _converge(service, crs, "ns-1", template_id)
 
     detail = client.get(f"/v1/templates/{template_id}")
     assert detail.status_code == 200
     assert detail.json()["status"]["phase"] == "Succeeded"
-    assert detail.json()["status"]["manifestRef"] == "s3://b/m"
+    assert detail.json()["status"]["manifestRef"] == manifest_ref
     assert detail.json()["env"] == {"LOG_LEVEL": "info"}
 
-    listing = client.get("/v1/templates", params={"metadata": "origin%3Dtest"})
+    listing = client.get("/v1/templates", params={"metadata": "origin=test"})
     assert listing.status_code == 200
     payload = listing.json()
     assert payload["pagination"]["totalItems"] == 1
@@ -653,6 +797,17 @@ def test_routes_template_lifecycle(client, crs, service):
     deleted = client.delete(f"/v1/templates/{template_id}")
     assert deleted.status_code == 204
     assert client.get(f"/v1/templates/{template_id}").status_code == 404
+
+
+def test_routes_list_filters_on_empty_metadata_value(client, service):
+    empty = service.create_template(_create_request(metadata={"env": ""}))
+    service.create_template(_create_request(metadata={"env": "prod"}))
+
+    listing = client.get("/v1/templates", params={"metadata": "env="})
+    assert listing.status_code == 200, listing.text
+    payload = listing.json()
+    assert payload["pagination"]["totalItems"] == 1
+    assert [item["templateId"] for item in payload["items"]] == [empty.template_id]
 
 
 def test_routes_reject_extra_fields(client):
@@ -726,13 +881,21 @@ class _StubFastPath:
         return None
 
 
-def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
+@pytest.mark.parametrize("oci", [False, True])
+def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
     import asyncio
 
     from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
-    record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
-    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    if oci:
+        service._k8s_config.template_oci_publish_secret = "registry-credentials"
+    publish = "oci://registry.example.com/team/templates" if oci else "s3://b/p"
+    manifest_ref = publish + "@sha256:" + "a" * 64 if oci else "s3://b/m"
+    record = service.create_template(_create_request(
+        entrypoint=["python", "app.py"], publish=publish,
+        format="overlaybd" if oci else "native",
+    ))
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": manifest_ref})
     _converge(service, crs, "ns-1", record.crd_name)
 
     with patch.object(K8sClient, "_load_config"):
@@ -749,7 +912,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
     finally:
         sandbox_service.close()
 
-    assert stub.last_create.image == record.template_id
+    assert stub.last_create.image == (manifest_ref if oci else record.template_id)
     assert list(stub.last_create.command) == ["python", "app.py"]
     assert stub.last_create.pool_ref == "default-pool"
     assert response.id.startswith("fsb-")

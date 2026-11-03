@@ -45,7 +45,7 @@ class FsbTemplate:
         Attributes:
             template_id (str): Server-generated template ID (`tpl_<uuid>`).
             image (str): Source OCI image reference.
-            publish (str): S3-compatible publish target.
+            publish (str): S3-compatible or repository-only OCI publish target.
             format_ (FsbTemplateFormat): Snapshot storage encoding.
             status (FsbTemplateStatus): Status of a fsb template build.
             created_at (datetime.datetime): Creation timestamp (RFC 3339 UTC).

@@ -31,12 +31,15 @@ var kernelWaitingBackoff = wait.Backoff{
 	Duration: 500 * time.Millisecond,
 	Factor:   1.5,
 	Jitter:   0.1,
+	Cap:      5 * time.Second,
 }
 
 // Controller manages code execution across runtimes.
 type Controller struct {
 	baseURL                 string
 	token                   string
+	jupyterRuntimeRoot      string
+	jupyterRuntimeUID       *int
 	mu                      sync.RWMutex
 	jupyterClientMap        sync.Map // map[sessionID]*jupyterKernel
 	defaultLanguageSessions sync.Map // map[Language]string

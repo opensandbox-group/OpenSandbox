@@ -1978,6 +1978,7 @@ export interface components {
         };
         CredentialMetadata: {
             name: string;
+            /** @description Credential source kind (`inline` or `exchange`). */
             sourceType: string;
             /**
              * @description Revision that last touched this record. Fsb stamps records with
@@ -1993,19 +1994,44 @@ export interface components {
             match?: components["schemas"]["CredentialMatch"];
             auth?: components["schemas"]["CredentialAuthMetadata"];
         };
-        /** @description Sanitized auth shape — type always, name for apiKey only. */
+        /** @description Sanitized auth shape — `type` (plus `name` for `apiKey`) for static kinds; `credential` only for the typeless exchange form. */
         CredentialAuthMetadata: {
-            type: string;
+            type?: string;
             name?: string;
+            credential?: string;
         };
         Credential: {
             name: string;
-            source: components["schemas"]["InlineCredentialSource"];
+            source: components["schemas"]["CredentialSource"];
         };
-        InlineCredentialSource: {
+        /**
+         * @description Where the credential material comes from. Exactly one kind, selected
+         *     by `type`:
+         *
+         *     - `inline`: the secret value travels in this request via `value`.
+         *       Inline values are write-only and never appear in reads.
+         *     - `exchange`: no local material. Egress resolves header sets per
+         *       request from a header-resolver service addressed by `endpoint`.
+         *       Supported endpoint forms are `unix:///absolute/path` (HTTP over a
+         *       Unix domain socket) and `https://host[:port]` (TLS); anything else
+         *       is rejected with 400.
+         *
+         *     Fields of the other kind must be absent; for example `value` together
+         *     with `type: exchange` is rejected with 400.
+         */
+        CredentialSource: {
             /** @enum {string} */
-            type: "inline";
-            value: string;
+            type: "inline" | "exchange";
+            /**
+             * @description Inline secret value. Required when `type` is `inline`; must be
+             *     absent otherwise.
+             */
+            value?: string;
+            /**
+             * @description Header-resolver endpoint. Required when `type` is `exchange`; must
+             *     be absent otherwise.
+             */
+            endpoint?: string;
         };
         CredentialBinding: {
             name: string;
@@ -2042,53 +2068,45 @@ export interface components {
              */
             paths: string[];
         };
-        CredentialAuth: components["schemas"]["BearerCredentialAuth"] | components["schemas"]["BasicCredentialAuth"] | components["schemas"]["ApiKeyCredentialAuth"] | components["schemas"]["CustomHeadersCredentialAuth"] | components["schemas"]["PassthroughCredentialAuth"];
-        BearerCredentialAuth: {
+        /**
+         * @description How a binding injects credential material. Exactly one auth kind:
+         *
+         *     - `bearer`: `type: bearer` plus `credential`.
+         *     - `basic`: `type: basic` plus `credential`.
+         *     - `apiKey`: `type: apiKey` plus `name` and `credential`.
+         *     - `customHeaders`: `type: customHeaders` plus `headers`.
+         *     - `passthrough`: `type: passthrough`, no credential reference.
+         *     - typeless exchange: `type` omitted with only `credential` set. The
+         *       referenced credential must be exchange-sourced; egress resolves the
+         *       header set per request from the credential's endpoint.
+         *
+         *     Static kinds must reference inline-sourced credentials, and the
+         *     typeless form must reference an exchange-sourced credential and must
+         *     not set `name`, `headers`, or `substitutions`. The five static kinds
+         *     accept optional `substitutions`. Violations are rejected with 400.
+         */
+        CredentialAuth: {
             /**
-             * @description discriminator enum property added by openapi-typescript
+             * @description Static auth kind. Omit entirely for the typeless exchange form.
              * @enum {string}
              */
-            type: "bearer";
-            /** @description Credential name whose value becomes the bearer token. */
-            credential: string;
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        BasicCredentialAuth: {
+            type?: "bearer" | "basic" | "apiKey" | "customHeaders" | "passthrough";
             /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
+             * @description Name of the sandbox-local credential whose value is injected. For
+             *     `bearer` the value becomes the bearer token; for `basic` it
+             *     contains pre-encoded base64(username:password). Required for
+             *     `bearer`, `basic`, `apiKey`, and the typeless exchange form; must
+             *     be absent otherwise.
              */
-            type: "basic";
-            /** @description Credential containing pre-encoded base64(username:password). */
-            credential: string;
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        ApiKeyCredentialAuth: {
+            credential?: string;
+            /** @description Request header name. Required for `apiKey`; must be absent otherwise. */
+            name?: string;
+            /** @description Static header set. Required for `customHeaders`; must be absent otherwise. */
+            headers?: components["schemas"]["CustomHeaderEntry"][];
             /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
+             * @description Optional placeholder replacement set. Accepted for the five static
+             *     kinds; must be absent for the typeless exchange form.
              */
-            type: "apiKey";
-            name: string;
-            /** @description Credential name whose value is the API key. */
-            credential: string;
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        CustomHeadersCredentialAuth: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "customHeaders";
-            headers: components["schemas"]["CustomHeaderEntry"][];
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        PassthroughCredentialAuth: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "passthrough";
             substitutions?: components["schemas"]["CredentialSubstitution"][];
         };
         CustomHeaderEntry: {
@@ -2287,8 +2305,10 @@ export interface components {
             };
             readiness?: components["schemas"]["FsbTemplateReadiness"];
             /**
-             * @description S3-compatible publish target for the built artifacts,
-             *     e.g. `s3://bucket/publish`.
+             * @description Publish destination: `s3://bucket/publish` for native artifacts or
+             *     `oci://registry/repository` for overlaybd artifacts. OCI targets
+             *     must not contain a tag or digest; the builder generates unique
+             *     tags per build. Registry credentials are configured on the server.
              */
             publish: string;
             /**
@@ -2306,8 +2326,8 @@ export interface components {
              */
             phase: "Pending" | "Building" | "Succeeded" | "Failed";
             /**
-             * @description S3 manifest reference of the published artifacts; present when
-             *     Succeeded.
+             * @description Published S3 manifest reference or immutable OCI reference
+             *     (`oci://registry/repository@sha256:...`); present when Succeeded.
              */
             manifestRef?: string;
             /** @description Failure reason when phase is Failed. */
@@ -2334,7 +2354,7 @@ export interface components {
                 [key: string]: string;
             };
             readiness?: components["schemas"]["FsbTemplateReadiness"];
-            /** @description S3-compatible publish target. */
+            /** @description S3-compatible or repository-only OCI publish target. */
             publish: string;
             /**
              * @description Snapshot storage encoding.

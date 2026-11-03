@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -307,6 +308,44 @@ func (p *vaultPersistence) isSealed(subj subject.Subject) bool {
 	return err == nil
 }
 
+// inspectLazyVaultStateLocked discovers only whether a lazy vault must stay
+// unavailable to the v1 relay path. Removal bindings have no policy against
+// which to reload legacy contents, so this deliberately does not import or
+// quarantine v1 files. Callers hold s.mu.
+func (s *fastSandboxPolicyServer) inspectLazyVaultStateLocked(subj subject.Subject, entry *vaultEntry) {
+	if s.vaultFiles == nil || entry.vaultStateProtected {
+		return
+	}
+	fileStore, err := s.vaultFiles.storeFor(subj)
+	if err != nil {
+		entry.degraded = fmt.Sprintf("vault file store unavailable: %v", err)
+		entry.vaultStateUnknown = true
+		return
+	}
+	snapshot, err := fileStore.Snapshot()
+	if err != nil {
+		entry.degraded = fmt.Sprintf("vault file unreadable: %v", err)
+		entry.vaultStateUnknown = true
+		return
+	}
+	entry.degraded = ""
+	entry.vaultStateUnknown = false
+	if !snapshot.Exists() {
+		return
+	}
+	vf, _, decodeErr := credentialvault.DecodeVaultFile(snapshot.Data())
+	if decodeErr == nil && vf.Version == credentialvault.VaultFileVersion {
+		return
+	}
+	entry.vaultStateProtected = true
+	entry.vaultStateUnknown = true
+	entry.degraded = "unreadable or non-v1 vault state requires a lineage-aware reload"
+	entry.fileMeta = vaultFileMetadata{
+		version: vf.Version, revision: vf.Revision, state: vf.State, lineage: vf.StateLineage,
+		stateRevision: vf.StateRevision, initializationID: vf.InitializationID,
+	}
+}
+
 // SetVaultFiles wires persistence under the relay handlers; nil (the default)
 // keeps the vault memory-only.
 func (s *fastSandboxPolicyServer) SetVaultFiles(vp *vaultPersistence) {
@@ -327,6 +366,55 @@ func (s *fastSandboxPolicyServer) purgeVaultFile(subj subject.Subject) error {
 		log.Errorf("subject %s: vault file purge failed (leftover stays fenced out): %v", subj, err)
 	}
 	return err
+}
+
+// vaultPurgeStatusLocked protects the remaining lifecycle writer: unlike
+// relay/snapshot handlers, terminal REMOVE and rebind cleanup delete the file.
+// Callers hold s.mu and the action/commit gate before invoking it.
+func (s *fastSandboxPolicyServer) vaultPurgeStatusLocked(subj subject.Subject) (int, error) {
+	if entry, ok := s.vaults[subj]; ok {
+		if entry.vaultStateUnknown {
+			return http.StatusServiceUnavailable, errors.New("vault state is unknown; refusing lifecycle purge")
+		}
+		if entry.fileMeta.version >= credentialvault.VaultFileVersion2 {
+			return http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware lifecycle writes are supported")
+		}
+	}
+	if s.vaultFiles == nil {
+		return 0, nil
+	}
+	fileStore, err := s.vaultFiles.storeFor(subj)
+	if err != nil {
+		return http.StatusServiceUnavailable, fmt.Errorf("vault purge state unavailable: %w", err)
+	}
+	snapshot, err := fileStore.Snapshot()
+	if err != nil {
+		return http.StatusServiceUnavailable, fmt.Errorf("vault purge snapshot unavailable: %w", err)
+	}
+	if !snapshot.Exists() {
+		return 0, nil
+	}
+	vf, _, decodeErr := credentialvault.DecodeVaultFile(snapshot.Data())
+	if errors.Is(decodeErr, credentialvault.ErrUnsupportedFileVersion) {
+		return http.StatusServiceUnavailable, errors.New("vault file schema is unknown; refusing lifecycle purge")
+	}
+	if decodeErr == nil && vf.Version >= credentialvault.VaultFileVersion2 {
+		return http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware lifecycle writes are supported")
+	}
+	// Corrupt v1 files retain the pre-existing terminal cleanup behavior. A
+	// recognized v2/unknown schema is never deleted through this v1 path.
+	return 0, nil
+}
+
+// vaultPurgeFailureStatusLocked preserves a specific v2/unknown refusal. If a
+// transient preflight snapshot error clears during this recheck, status 0 must
+// still become a valid retryable HTTP error for the failed preflight.
+func (s *fastSandboxPolicyServer) vaultPurgeFailureStatusLocked(subj subject.Subject) int {
+	status, _ := s.vaultPurgeStatusLocked(subj)
+	if status < 100 || status > 599 {
+		return http.StatusInternalServerError
+	}
+	return status
 }
 
 // persistVaultCandidateLocked runs the commit protocol; callers hold s.mu for
@@ -482,16 +570,26 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	protectedBefore := false
+	previousMeta := vaultFileMetadata{}
 	if e, live := s.vaults[subj]; live {
-		if e.fence == fence {
+		if e.fence == fence && !e.vaultStateUnknown {
 			return
+		}
+		if e.fence == fence {
+			protectedBefore = e.vaultStateProtected
+			previousMeta = e.fileMeta
 		}
 		delete(s.vaults, subj)
 	}
-	entry := vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence}
+	entry := vaultEntry{
+		store: credentialvault.NewSubjectStore(), fence: fence,
+		fileMeta: previousMeta, vaultStateProtected: protectedBefore,
+	}
 	fs, err := s.vaultFiles.storeFor(subj)
 	if err != nil {
 		entry.degraded = fmt.Sprintf("vault file store unavailable: %v", err)
+		entry.vaultStateUnknown = true
 		s.vaults[subj] = entry
 		log.Warnf("subject %s: %s", subj, entry.degraded)
 		return
@@ -500,15 +598,41 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 	switch {
 	case err != nil:
 		entry.degraded = fmt.Sprintf("vault file unreadable: %v", err)
+		entry.vaultStateUnknown = true
 		log.Warnf("subject %s: %s", subj, entry.degraded)
 	case !snap.Exists():
-		// Fresh subject: nothing persisted, nothing to recover.
+		if entry.vaultStateProtected {
+			// A previously observed v2/unsupported file disappearing is not
+			// evidence of a fresh v1 subject. Keep its provenance sticky for
+			// this fence so a relay write cannot replace it with v1.
+			entry.degraded = "previously protected vault state disappeared; refusing legacy fallback"
+			entry.vaultStateUnknown = true
+			log.Warnf("subject %s: %s", subj, entry.degraded)
+		}
+		// Otherwise a fresh subject has nothing persisted to recover.
 	default:
 		vf, body, decErr := credentialvault.DecodeVaultFile(snap.Data())
+		unsupported := errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion)
+		if vf.Version >= credentialvault.VaultFileVersion2 || unsupported {
+			entry.vaultStateProtected = true
+		}
+		legacyDowngrade := protectedBefore && vf.Version < credentialvault.VaultFileVersion2 && !unsupported
+		if !legacyDowngrade {
+			entry.fileMeta = vaultFileMetadata{
+				version: vf.Version, revision: vf.Revision, state: vf.State, lineage: vf.StateLineage,
+				stateRevision: vf.StateRevision, initializationID: vf.InitializationID,
+			}
+		}
 		switch {
+		case legacyDowngrade:
+			entry.degraded = "previously protected vault state was replaced by a legacy file; refusing downgrade"
+			entry.vaultStateUnknown = true
+			log.Warnf("subject %s: %s", subj, entry.degraded)
 		case decErr != nil && errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion):
-			// Written by a newer consumer — reject without destroying.
+			// A newer or unreadable v2 state must remain available for a
+			// compatible reader; never quarantine or expose it as absent.
 			entry.degraded = fmt.Sprintf("vault file version not readable by this egress: %v", decErr)
+			entry.vaultStateUnknown = true
 			log.Warnf("subject %s: %s (file preserved for the newer writer)", subj, entry.degraded)
 		case decErr != nil:
 			// Structurally corrupt: quarantine so the degradation cannot
@@ -523,6 +647,13 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			// WITHOUT quarantining the file — a policy/vault relay write
 			// heals the slice.
 			entry.degraded = "held degraded: the recorded policy is degraded at this restart"
+			entry.vaultStateUnknown = vf.Version >= credentialvault.VaultFileVersion2
+			log.Warnf("subject %s: %s (file kept)", subj, entry.degraded)
+		case vf.Version == credentialvault.VaultFileVersion2 && vf.State == credentialvault.FileStateEmpty:
+			// Empty is an explicit initialization decision, not a legacy
+			// absence. This stage cannot verify its mode/owner contract.
+			entry.degraded = "explicit empty vault state requires the strict mode protocol"
+			entry.vaultStateUnknown = true
 			log.Warnf("subject %s: %s (file kept)", subj, entry.degraded)
 		case (subject.Fencing{RuntimeInstanceID: vf.Incarnation, AttachmentID: vf.AttachmentID}).Matches(fence):
 			// Same-instance recovery: revalidate against the replayed binding
@@ -534,19 +665,33 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			// quarantining here would silently destroy persisted
 			// credentials. A policy/vault relay write heals the slice; a
 			// policy heal + restart revives it from the kept file.
-			if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
+			if vf.Version == credentialvault.VaultFileVersion2 && vf.State == credentialvault.FileStateDeleted {
+				// The persisted tombstone is known absence. Keep the store
+				// empty so the public GET remains 404, and keep the file as
+				// the source of truth until v2 writes are implemented.
+				log.Infof("subject %s: deleted v2 vault state reloaded (stateRevision %d)", subj, vf.StateRevision)
+			} else if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 				entry.degraded = fmt.Sprintf("vault file reload rejected: %v", err)
+				entry.vaultStateUnknown = vf.Version >= credentialvault.VaultFileVersion2
 				log.Warnf("subject %s: %s (file kept; a policy/vault relay write heals the slice)", subj, entry.degraded)
 			} else {
-				log.Infof("subject %s: vault reloaded from file (revision %d, incarnation %s)", subj, vf.Revision, vf.Incarnation)
+				log.Infof("subject %s: vault reloaded from file (version %d, revision %d, incarnation %s)", subj, vf.Version, vf.Revision, vf.Incarnation)
 			}
 		default:
-			// Stale: discard durably. A failed purge is harmless — the
-			// recorded fence mismatches every later registration regardless.
-			if _, delErr := fs.Delete(); delErr != nil {
-				log.Warnf("subject %s: stale vault file purge failed (stays fenced out): %v", subj, delErr)
+			if vf.Version >= credentialvault.VaultFileVersion2 {
+				// A v2 file belongs to an unknown lineage/owner here. Preserve
+				// it and block relay reads/writes; this stage cannot safely
+				// infer a transfer or purge authorization from the file alone.
+				entry.degraded = "v2 vault file owner does not match the current runtime fence"
+				entry.vaultStateUnknown = true
+				log.Warnf("subject %s: %s (file preserved)", subj, entry.degraded)
 			} else {
-				log.Infof("subject %s: stale vault file discarded (fence %s/%s ≠ %s/%s)", subj, vf.Incarnation, vf.AttachmentID, fence.RuntimeInstanceID, fence.AttachmentID)
+				// Legacy v1 stale cleanup retains its existing behavior.
+				if _, delErr := fs.Delete(); delErr != nil {
+					log.Warnf("subject %s: stale vault file purge failed (stays fenced out): %v", subj, delErr)
+				} else {
+					log.Infof("subject %s: stale vault file discarded (fence %s/%s ≠ %s/%s)", subj, vf.Incarnation, vf.AttachmentID, fence.RuntimeInstanceID, fence.AttachmentID)
+				}
 			}
 		}
 	}

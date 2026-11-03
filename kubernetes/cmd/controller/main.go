@@ -497,6 +497,7 @@ func main() {
 	}
 	if err := (&controller.SandboxSnapshotReconciler{
 		Client:                    mgr.GetClient(),
+		APIReader:                 mgr.GetAPIReader(),
 		Scheme:                    mgr.GetScheme(),
 		Recorder:                  mgr.GetEventRecorderFor("sandboxsnapshot-controller"),
 		ImageCommitterImage:       imageCommitterImage,

@@ -1,209 +1,44 @@
 # OpenSandbox Governance
 
-This document describes how OpenSandbox is governed today and how technical decisions are made in the project.
+The [Technical Charter](CHARTER.md) establishes the project's technical governance. This document records project-specific working practices and maintainer procedures under that Charter.
 
-It is intended to reflect the project's current open development practice. As OpenSandbox grows, this document may evolve to support a more formal governance model.
+## Governance Documents
 
-## Goals
-
-OpenSandbox governance is designed to keep the project:
-
-- open to contributors and users
-- pragmatic in day-to-day decision making
-- transparent in technical direction
-- safe for public API, runtime, and security-sensitive changes
-- sustainable across multiple components and maintainers
-
-## Scope
-
-This document applies to the OpenSandbox repository and its major public surfaces, including:
-
-- public APIs and specifications in `specs/`
-- the lifecycle server in `server/`
-- runtime components in `components/`
-- Kubernetes controller and related assets in `kubernetes/`
-- SDKs in `sdks/`
-- CLI, examples, and project documentation
-
-## Project Values
-
-OpenSandbox maintainers and contributors are expected to act consistently with these principles:
-
-- **Open development**: design discussion, issue tracking, and code review happen in public whenever possible.
-- **Compatibility awareness**: public APIs, SDKs, CLI behavior, and documented user workflows should not change casually.
-- **Security first**: changes affecting isolation, networking, credentials, or execution safety require extra scrutiny.
-- **Component ownership with cross-project accountability**: subsystem maintainers own their areas, while cross-cutting changes require broader review.
-- **Documentation and implementation alignment**: public contracts, code, SDKs, examples, and docs should stay consistent.
-
-## Roles
-
-### Contributors
-
-Contributors are anyone who participates in the project, including by:
-
-- opening issues or discussions
-- submitting pull requests
-- reviewing code
-- improving docs, tests, examples, or tooling
-
-Contributors are expected to follow:
-
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [SECURITY.md](SECURITY.md) for vulnerability reporting
-
-### Maintainers
-
-Maintainers are contributors entrusted with reviewing and guiding changes in one or more parts of the repository.
-
-Today, the public record of subsystem maintainership is the [`CODEOWNERS`](.github/CODEOWNERS) file. Code owners for a given path are the default maintainers for that area.
-
-Maintainer responsibilities include:
-
-- reviewing pull requests for owned areas
-- helping preserve code quality, compatibility, and security
-- requesting cross-component review when a change affects other surfaces
-- keeping specs, implementation, tests, docs, and examples aligned when needed
-- helping contributors land changes successfully
-
-### Project Maintainers
-
-Project Maintainers are the maintainers responsible for repository-wide direction and final technical decisions when a matter cannot be resolved within normal component review.
-
-Until a dedicated `MAINTAINERS.md` is added, the fallback `*` owners in [`CODEOWNERS`](.github/CODEOWNERS) are treated as the public list of current Project Maintainers.
-
-Project Maintainers are responsible for:
-
-- cross-cutting technical decisions
-- governance updates
-- maintainer onboarding and offboarding
-- resolving review deadlocks
-- ensuring major changes follow the appropriate design process
+- [CHARTER.md](CHARTER.md) defines the mission, TSC authority, formal voting rules, project policies, and amendment requirements.
+- [CONTRIBUTING.md](CONTRIBUTING.md#project-roles-and-technical-steering-committee) defines project roles and explains contribution workflows and communication channels.
+- [MAINTAINERS.md](MAINTAINERS.md) lists current maintainers; [CODEOWNERS](.github/CODEOWNERS) records path ownership and routes reviews.
+- Conduct and vulnerability reports follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and [SECURITY.md](SECURITY.md), respectively.
 
 ## Decision Making
 
-### Day-to-Day Changes
+### Reviews and Proposals
 
-Most changes are made through the normal pull request workflow described in [CONTRIBUTING.md](CONTRIBUTING.md):
+Day-to-day changes follow the [pull request process](CONTRIBUTING.md#pull-request-process). Component maintainers lead decisions in their areas; changes affecting multiple components should involve the materially affected maintainers.
 
-1. discuss the change in an issue when appropriate
-2. submit a pull request
-3. pass automated checks
-4. receive maintainer review for affected areas
-5. address feedback
-6. merge once approved
+Changes to public APIs, SDKs, CLI behavior, lifecycle semantics, runtime isolation, ingress/egress, authentication, release processes, or repository-wide tooling require wider review. Maintainers should seek explicit review from all materially affected areas.
 
-Normal changes are decided by maintainer review and rough consensus.
+Before merge:
 
-### Component-Level Decisions
+- Relevant CI checks should pass, or failures must be understood and accepted by maintainers.
+- At least one maintainer of the affected area should review the change.
+- Prefer additive, backward-compatible changes to public APIs, SDKs, CLI behavior, and documented configuration and deployment behavior. Call out breaking changes and provide migration guidance where needed.
+- Keep affected specifications, implementation, tests, documentation, examples, and release outputs aligned.
 
-For changes limited to one subsystem, the maintainers of that subsystem are the primary decision makers. Their review should carry the most weight for:
+Maintainers may decline changes that conflict with approved design, introduce unnecessary compatibility risk, weaken security without sufficient justification, or mix unrelated work.
 
-- implementation details
-- code structure
-- tests
-- operational behavior within that component
-
-If a change affects multiple subsystems, the relevant maintainers should be involved before merge.
-
-### Cross-Cutting and Sensitive Decisions
-
-Changes with broader impact require wider review. This includes changes to:
-
-- public APIs or schemas in `specs/`
-- SDK interfaces or generated outputs
-- CLI behavior
-- lifecycle semantics
-- runtime isolation or security guarantees
-- ingress, egress, or authentication behavior
-- release processes or repository-wide tooling
-
-For these changes, maintainers should seek explicit review from all materially affected areas, not just the first area touched by the patch.
-
-### Major Design Changes and OSEPs
-
-OpenSandbox uses the OpenSandbox Enhancement Proposal process (`OSEP`) for major changes.
-
-An OSEP is expected for changes that:
-
-- introduce major features or architectural changes
-- modify the core API or runtime behavior
-- affect the security model or isolation guarantees
-
-The public OSEP process is documented in:
-
-- [oseps/README.md](oseps/README.md)
-- [oseps/CONTRIBUTING.md](oseps/CONTRIBUTING.md)
-
-When an OSEP is required, implementation should follow the approved design direction rather than bypassing it through code review alone.
+Major features, architectural changes, core API or runtime behavior changes, and changes to the security model or isolation guarantees follow the [OSEP process](oseps/CONTRIBUTING.md). Implementation should follow the approved design.
 
 ### Consensus and Voting
 
-OpenSandbox prefers **lazy consensus** for most technical decisions:
+OpenSandbox prefers **lazy consensus** for day-to-day technical decisions. A change may proceed when affected maintainers agree; concerns should be addressed in the PR, issue, or OSEP discussion.
 
-- if affected maintainers agree, the change may proceed
-- if concerns are raised, they should be addressed in the PR, issue, or OSEP discussion
+If consensus cannot be reached in a reasonable time, Project Maintainers may hold a TSC vote under [Section 3 of the Technical Charter](CHARTER.md#3-tsc-voting). License exceptions and Charter amendments follow the special requirements in [Sections 7.c.](CHARTER.md#7-intellectual-property-policy) and [8.a.](CHARTER.md#8-amendments), respectively.
 
-If consensus cannot be reached in a reasonable time, Project Maintainers may use a simple majority vote of participating Project Maintainers.
-
-Voting rules:
-
-- each participating Project Maintainer has one vote
-- maintainers should recuse themselves in case of direct conflicts of interest
-- if a vote ties, the proposal does not pass and the status quo remains
-
-These general voting rules apply to technical disputes and design decisions. Maintainer nominations and promotions follow the dedicated electorate and approval thresholds specified in [Becoming a Maintainer](#becoming-a-maintainer).
-
-## Reviews and Merge Expectations
-
-The following expectations apply before merge:
-
-- relevant CI checks should pass, or failures must be understood and accepted by maintainers
-- at least one maintainer of the affected area should review the change
-- cross-cutting changes should be reviewed by all materially affected areas when practical
-- breaking changes should be clearly called out, with migration guidance where needed
-- docs and tests should be updated when behavior changes
-
-Maintainers may decline or defer a change if it:
-
-- conflicts with approved design direction
-- introduces unnecessary compatibility risk
-- weakens security or isolation without a strong justification
-- mixes unrelated work into a single change
-
-## Public Interfaces and Compatibility
-
-OpenSandbox treats several surfaces as public contracts:
-
-- API specifications in `specs/`
-- published SDKs
-- CLI behavior
-- documented configuration and deployment behavior
-
-Maintainers should prefer additive and backward-compatible changes when possible.
-
-When changing a public contract, maintainers should update or verify the affected implementation, SDKs, docs, examples, and release outputs in the same change when practical.
+Maintainers should recuse themselves in cases of direct conflicts of interest. Maintainer nominations and promotions follow the dedicated electorate and approval thresholds in [Becoming a Maintainer](#becoming-a-maintainer).
 
 ## Releases
 
-Releases are managed through the public workflows and scripts in this repository, including the GitHub Actions workflows under `.github/workflows/` and the release tooling documented in `docs/community/release-automation.md`.
-
-Maintainers responsible for a release target are expected to ensure that:
-
-- the target has appropriate validation
-- release notes accurately reflect user-visible changes
-- versioning and tags follow the documented release conventions
-
-## Communication Channels
-
-The project's public collaboration channels are:
-
-- GitHub Issues for bugs, feature requests, and implementation questions
-- GitHub Discussions for broader design discussion and community help
-- pull requests for concrete code and documentation review
-- OSEPs for major design work
-
-Security issues should follow the private reporting guidance in [SECURITY.md](SECURITY.md).
+Maintainers responsible for releases are expected to ensure appropriate validation, accurate release notes, and adherence to the documented versioning and tag conventions. Release procedures are maintained in [Release Automation](docs/community/release-automation.md).
 
 ## Becoming a Maintainer
 
@@ -230,7 +65,7 @@ In addition, candidates for **Project Maintainer** are expected to show:
 
 ### Nomination Process
 
-Advancement is proposed through a public pull request updating [`CODEOWNERS`](.github/CODEOWNERS):
+Advancement is proposed through a public pull request updating [`CODEOWNERS`](.github/CODEOWNERS) and [MAINTAINERS.md](MAINTAINERS.md):
 
 1. **Sponsorship**: Any existing Maintainer or Project Maintainer may sponsor a candidate by opening a nomination pull request against `CODEOWNERS` (adding the candidate to specific component paths for Maintainer, or to the fallback `*` list for Project Maintainer). Contributors interested in nomination may ask an existing Maintainer in a public issue or discussion.
 2. **Nomination PR Content**: The pull request description must specify the candidate's GitHub username, the target role and path scope, links to their contributions demonstrating readiness, the list of eligible voting Project Maintainers, and the required approval count.
@@ -245,14 +80,14 @@ Nominations are decided through public review and voting on the pull request:
 - **Approval Thresholds**:
   - **Maintainer (component scope)**: Requires affirmative approvals (pull request approval or explicit LGTM) from at least **one-third (1/3)** of the eligible Project Maintainers, rounded up to the nearest whole maintainer.
   - **Project Maintainer**: Requires affirmative approvals from at least **two-thirds (2/3)** of the eligible Project Maintainers, rounded up to the nearest whole maintainer.
-- **Voting Rules**: Approvals must be affirmative. Maintainers with direct conflicts of interest should recuse themselves. Abstentions, non-responses, or recusals do not count as approvals and do not lower the denominator. These nomination thresholds are separate from the simple majority of participating maintainers used for ordinary technical decisions.
+- **Voting Rules**: Approvals must be affirmative. Maintainers with direct conflicts of interest should recuse themselves. Abstentions, non-responses, or recusals do not count as approvals and do not lower the denominator. These nomination thresholds govern the role-specific advancement process; formal TSC votes follow [Consensus and Voting](#consensus-and-voting) and the Technical Charter.
 - **Public Objections**: Any objections or concerns should be discussed publicly in the pull request during the seven-day period. There is no unanimity requirement or individual veto beyond the specified vote.
 
 ### Decision and Onboarding
 
 - After the full seven calendar days have passed, a Project Maintainer verifies that the approval threshold has been met and that the candidate has explicitly accepted the nomination. The Project Maintainer then merges the pull request and coordinates the necessary scoped repository permissions.
 - If the threshold is not met, the pull request cannot be merged and is closed without promotion. There is no automatic promotion based solely on time or contribution counts.
-- [`CODEOWNERS`](.github/CODEOWNERS) remains the public record of maintainership.
+- Keep [MAINTAINERS.md](MAINTAINERS.md) and [`CODEOWNERS`](.github/CODEOWNERS) synchronized when recording the appointment.
 
 ## Maintainer Inactivity and Removal
 
@@ -271,3 +106,5 @@ Changes to this document should be made through a public pull request.
 Governance changes should receive review from Project Maintainers and should not be merged without giving maintainers and contributors a reasonable opportunity to comment.
 
 Substantial governance changes may be proposed through an OSEP or a dedicated governance discussion if maintainers believe broader review is warranted.
+
+Changes to the Technical Charter itself follow [Section 8 of the Charter](CHARTER.md#8-amendments). Review or merge of a pull request alone does not amend the Charter.

@@ -127,6 +127,25 @@ func TestFilesystemControllerSearchFiles(t *testing.T) {
 	require.Equal(t, "file", files[0].Type)
 }
 
+func TestFilesystemControllerSearchFilesHidesUploadStaging(t *testing.T) {
+	tmpDir := t.TempDir()
+	visible := filepath.Join(tmpDir, "visible.txt")
+	staging := filepath.Join(tmpDir, uploadTempPattern+"0123456789abcdef")
+	require.NoError(t, os.WriteFile(visible, []byte("visible"), 0o644))
+	require.NoError(t, os.WriteFile(staging, []byte("in flight"), 0o600))
+
+	rawURL := fmt.Sprintf("/files/search?path=%s&pattern=%s", url.QueryEscape(tmpDir), url.QueryEscape("**"))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.SearchFiles()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var files []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &files))
+	require.Len(t, files, 1)
+	require.Equal(t, visible, files[0].Path)
+}
+
 func TestFilesystemControllerListDirectoryDefaultDepth(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "alpha.txt")
@@ -153,6 +172,25 @@ func TestFilesystemControllerListDirectoryDefaultDepth(t *testing.T) {
 	require.Equal(t, "file", byPath[filePath].Type)
 	require.Equal(t, "directory", byPath[dirPath].Type)
 	require.NotContains(t, byPath, deepFile)
+}
+
+func TestFilesystemControllerListDirectoryHidesUploadStaging(t *testing.T) {
+	tmpDir := t.TempDir()
+	visible := filepath.Join(tmpDir, "visible.txt")
+	staging := filepath.Join(tmpDir, uploadTempPattern+"0123456789abcdef")
+	require.NoError(t, os.WriteFile(visible, []byte("visible"), 0o644))
+	require.NoError(t, os.WriteFile(staging, []byte("in flight"), 0o600))
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s", url.QueryEscape(tmpDir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	require.Len(t, entries, 1)
+	require.Equal(t, visible, entries[0].Path)
 }
 
 func TestFilesystemControllerListDirectoryDepth(t *testing.T) {
