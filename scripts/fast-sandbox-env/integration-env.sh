@@ -3223,22 +3223,13 @@ mitm_ca_chain_verify() {
 	wait_for "mitm-ca sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: exchange resolver verify (OSEP-0025: per-request dynamic headers) ----
-#
-# The full control-plane to data-plane chain for exchange credentials, the
-# leg no other fast-sandbox e2e carries end to end: server relay PUT
-# (exchange credential + typeless binding) -> fastlet relay -> egress store
-# -> per-request _resolve -> the T6 stub resolver -> injected headers
-# observed by the echo endpoint on a guest-originated request. The stub
-# rides INSIDE every pool pod's egress container over a UDS (R4 by
-# construction: microVM guests have no filesystem path to the socket;
-# kubectl cp delivers the stdlib-only resolver.py — the egress image ships
-# python3, the same assumption the MITM echo container makes).
-#
-# Kept in sync with verify/vault.sh (the split home) until the env.sh
-# split completes; differences are limited to the repo-root variable.
+# --- stage: exchange resolver verify (OSEP-0025) --------------------------------
+# Mirrors verify/vault.sh (the split home); only the repo-root variable and
+# the lib.sh-only prune call differ.
 
 EX_RESOLVER_SRC="$OSB_ROOT/components/egress/tests/resolver/resolver.py"
+# The T6 stub (stdlib-only) delivered via kubectl cp into every pool egress
+# container; the stub enforces the production 0710/0660 UDS layout itself.
 EX_RESOLVER_DIR="/tmp/osep25-resolver"
 EX_RESOLVER_SOCK="$EX_RESOLVER_DIR/resolver.sock"
 EX_RESOLVER_SCRIPT="/tmp/osep25-resolver.py"
@@ -3275,9 +3266,8 @@ exchange_resolver_stop_all() {
 	done
 }
 
-# Guest HTTPS GET to the echo endpoint, parameterized by path (the mitm-ca
-# helpers above hardcode /echo). Same --resolve SNI pinning; TLS verifies
-# against the template-baked CA (no -k anywhere).
+# Guest HTTPS GET to the echo, parameterized by path (the mitm-ca helpers
+# hardcode /echo); TLS verifies against the template-baked CA (no -k).
 exchange_guest_fetch() { # <path>
 	osb_api command run "$VERIFY_ID" -- \
 		curl -fsS -m 20 --resolve "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" \
@@ -3297,9 +3287,8 @@ EOF
 	return 1
 }
 
-# Buffered HTTP status for the fail-closed assertion (no -f: curl exits 0
-# on HTTP errors); --http1.1 so a fail-closed reply is a readable status
-# instead of a killed H2 stream.
+# Buffered status, --http1.1: a fail-closed reply is a readable code, not
+# a killed H2 stream.
 exchange_guest_status() { # <path>
 	osb_api command run "$VERIFY_ID" -- \
 		curl -s --http1.1 -o /dev/null -w '%{http_code}' -m 20 \
@@ -3338,8 +3327,8 @@ exchange_resolver_verify() {
 	wait_for "exchange subject registered on egress" 120 \
 		vault_log_contains "subject s-$sandbox_uid: data-plane-ready, policy active"
 
-	# 1) mixed vault over the SERVER relay: exchange + typeless on /vault/*,
-	#    static apiKey on /static/* — disjoint paths on the same host.
+	# 1) mixed vault over the server relay: typeless exchange on /vault/*,
+	#    static apiKey on /static/* (disjoint paths, same host).
 	static_secret="exchange-static-$(openssl rand -hex 8)"
 	vault_body="$(jq -n --arg domain "$MITM_ECHO_DOMAIN" --arg sock "unix://$EX_RESOLVER_SOCK" --arg v "$static_secret" \
 		'{credentials: [{name: "spi-signer", source: {type: "exchange", endpoint: $sock}},
@@ -3352,9 +3341,8 @@ exchange_resolver_verify() {
 	[[ "$rev" =~ ^[0-9]+$ ]] || fail "exchange verify: exchange vault ack carried no revision: $(printf '%s' "$ack" | head -c 200)"
 	pass "exchange vault created over the relay (revision $rev; typeless auth + mixed static binding)"
 
-	# Deterministic oracle: the wire subject is the CR name (D11), the
-	# authority carries the https port, and the path is the full request
-	# target including the query (the frozen resolver contract).
+	# Oracle: subject == CR name (D11); the authority carries the port; the
+	# path is the full request target, query included.
 	sig="$(printf '%s' "$VERIFY_ID|spi-signer|ex-api|$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT|/vault/echo?x=1" \
 		| openssl dgst -sha256 | awk '{print $NF}')"
 
@@ -3367,8 +3355,7 @@ exchange_resolver_verify() {
 		exchange_guest_header_is "authorization" "Bearer test-spi-signer" "/vault/echo?x=1"
 	pass "exchange happy path (subject == $VERIFY_ID, bound signature, fresh headers)"
 
-	# 3) off-scope path on the same host: the static credential flows and
-	#    the resolver is never engaged.
+	# 3) off-scope path on the same host: static credential only.
 	wait_for "off-scope static path injects the static credential" 120 \
 		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
 	local static_out
@@ -3378,25 +3365,24 @@ exchange_resolver_verify() {
 	fi
 	pass "off-scope path stays static (resolver engaged only on /vault/*)"
 
-	# 4) fail-closed: resolver down in every pod -> the exchange path reads
-	#    407 while the static binding keeps flowing.
+	# 4) fail-closed: resolver down in every pod -> 407 on the exchange
+	#    path while the static binding keeps flowing.
 	exchange_resolver_stop_all
 	wait_for "resolver outage fails closed with 407 on the exchange path" 60 exchange_vault_status_is_407
 	wait_for "static binding unaffected by the resolver outage" 120 \
 		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
 	pass "resolver outage fails closed (407) while the static binding flows"
 
-	# 5) recovery: the next resolve is fresh — a failed resolve never
-	#    poisons the following request.
+	# 5) recovery: the next resolve is fresh (a failure never poisons the
+	#    following request).
 	exchange_resolver_start_all
 	wait_for "resolver stub restarted in every pool pod" 60 exchange_resolver_ready_all
 	wait_for "post-outage resolve is fresh and correct again" 120 \
 		exchange_guest_header_is "x-test-signature" "$sig" "/vault/echo?x=1"
 	pass "no pollution after resolver recovery (same deterministic signature)"
 
-	# 6) pause/resume: the vault travels the checkpoint bundle as config
-	#    (R12 — resolution material never exists outside one request); the
-	#    relay revision is preserved and the restored sandbox resolves fresh.
+	# 6) pause/resume: the vault travels the bundle as config (R12 —
+	#    material never exists); revision preserved, restore resolves fresh.
 	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 || fail "exchange verify: pause failed"
 	wait_for "exchange sandbox Paused (checkpoint durable)" 240 sandbox_paused
 	osb_api sandbox resume "$VERIFY_ID" --skip-health-check >/dev/null 2>&1 || fail "exchange verify: resume failed"
