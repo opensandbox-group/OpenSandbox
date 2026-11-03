@@ -16,6 +16,7 @@ package utils
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -60,6 +61,49 @@ func LoadImageToKindClusterWithName(name string) error {
 	cmd := exec.Command("kind", kindOptions...)
 	_, err := Run(cmd)
 	return err
+}
+
+// LoadPulledImageToKindClusterWithName imports a pulled docker image into the
+// kind node via ctr, because "kind load" fails on single-platform pulls
+// (kubernetes-sigs/kind#4255).
+func LoadPulledImageToKindClusterWithName(name string) error {
+	if IsExternal() {
+		_, _ = fmt.Fprintf(GinkgoWriter, "skipping image import for %q (E2E_MODE=%s)\n", name, Mode())
+		return nil
+	}
+	cluster := "kind"
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
+		cluster = v
+	}
+	node := fmt.Sprintf("%s-control-plane", cluster)
+
+	saveCmd := exec.Command("docker", "save", name)
+	importCmd := exec.Command("docker", "exec", "--privileged", "-i", node,
+		"ctr", "--namespace=k8s.io", "images", "import", "--digests", "--snapshotter=overlayfs", "-")
+
+	pipeReader, pipeWriter := io.Pipe()
+	saveCmd.Stdout = pipeWriter
+	importCmd.Stdin = pipeReader
+
+	var importErr error
+	importDone := make(chan struct{})
+	go func() {
+		defer close(importDone)
+		output, err := importCmd.CombinedOutput()
+		if err != nil {
+			importErr = fmt.Errorf("%q failed with error %q: %w", strings.Join(importCmd.Args, " "), string(output), err)
+		}
+	}()
+
+	saveOutput, saveErr := saveCmd.CombinedOutput()
+	_ = pipeWriter.Close()
+	<-importDone
+	_ = pipeReader.Close()
+
+	if saveErr != nil {
+		return fmt.Errorf("%q failed with error %q: %w", strings.Join(saveCmd.Args, " "), string(saveOutput), saveErr)
+	}
+	return importErr
 }
 
 // GetNonEmptyLines converts given command output string into individual objects

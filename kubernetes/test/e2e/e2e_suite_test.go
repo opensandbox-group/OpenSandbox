@@ -105,7 +105,7 @@ var _ = BeforeSuite(func() {
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to pull registry image")
 
 		By("loading the registry image on Kind")
-		err = utils.LoadImageToKindClusterWithName(utils.RegistrySourceImage())
+		err = utils.LoadPulledImageToKindClusterWithName(utils.RegistrySourceImage())
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the registry image into Kind")
 
 		By("pulling the alpine image (required for commit jobs)")
@@ -114,7 +114,7 @@ var _ = BeforeSuite(func() {
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to pull alpine image")
 
 		By("loading the alpine image on Kind")
-		err = utils.LoadImageToKindClusterWithName(utils.AlpineImage())
+		err = utils.LoadPulledImageToKindClusterWithName(utils.AlpineImage())
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the alpine image into Kind")
 	}
 })
