@@ -24,7 +24,7 @@ from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import SandboxConnectionException
+from opensandbox.exceptions import InvalidArgumentException, SandboxConnectionException
 from opensandbox.models import ByteRange
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services import DownloadFilesystem
@@ -83,6 +83,29 @@ async def test_async_read_bytes_detailed_exposes_partial_metadata() -> None:
         (206, None, None, -1),
         (206, "garbage", ByteRange(-1, -1, -1, "garbage"), -1),
         (206, "bytes 5-9/*", ByteRange(5, 9, -1, "bytes 5-9/*"), -1),
+        (
+            206,
+            "bytes 0-1/9223372036854775807",
+            ByteRange(0, 1, 9223372036854775807, "bytes 0-1/9223372036854775807"),
+            9223372036854775807,
+        ),
+        (
+            206,
+            "bytes 0-1/9223372036854775808",
+            ByteRange(-1, -1, -1, "bytes 0-1/9223372036854775808"),
+            -1,
+        ),
+        (
+            206,
+            "bytes " + "9" * 5000 + "-" + "9" * 5000 + "/" + "9" * 5000,
+            ByteRange(
+                -1,
+                -1,
+                -1,
+                "bytes " + "9" * 5000 + "-" + "9" * 5000 + "/" + "9" * 5000,
+            ),
+            -1,
+        ),
     ],
 )
 async def test_async_read_bytes_detailed_handles_range_responses(
@@ -117,6 +140,37 @@ class _TrackingAsyncStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_async_stream_closes_response_when_metadata_mapping_fails(monkeypatch) -> None:
+    source = _TrackingAsyncStream()
+    response = httpx.Response(
+        206,
+        stream=source,
+        headers={"Content-Range": "bytes 0-4/10"},
+    )
+    adapter = FilesystemAdapter(
+        ConnectionConfig(
+            protocol="http", transport=httpx.MockTransport(lambda _: response)
+        ),
+        _endpoint(),
+    )
+
+    def fail_mapping(*args, **kwargs):
+        raise ValueError("invalid response metadata")
+
+    monkeypatch.setattr(
+        "opensandbox.adapters.filesystem_adapter.create_read_bytes_response",
+        fail_mapping,
+    )
+    try:
+        with pytest.raises(InvalidArgumentException, match="invalid response metadata"):
+            await adapter.read_bytes_stream_detailed("/data.bin")
+        assert response.is_closed
+        assert source.closed
+    finally:
+        await adapter._httpx_client.aclose()
 
 
 @pytest.mark.asyncio
