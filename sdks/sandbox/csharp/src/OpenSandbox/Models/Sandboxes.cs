@@ -196,9 +196,9 @@ public class CredentialSource
     /// </summary>
     public static CredentialSource Inline(string value)
     {
-        if (string.IsNullOrEmpty(value))
+        if (string.IsNullOrWhiteSpace(value))
         {
-            throw new ArgumentException("Credential source value cannot be empty.", nameof(value));
+            throw new ArgumentException("Credential source value cannot be blank.", nameof(value));
         }
 
         return new CredentialSource { Type = "inline", Value = value };
