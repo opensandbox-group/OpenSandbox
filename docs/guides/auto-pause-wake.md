@@ -66,7 +66,7 @@ Relevant flags and defaults:
 | `--wake-retry-interval` | `50ms` | First poll interval |
 | `--wake-retry-factor` | `1.3` | Poll backoff factor |
 | `--wake-retry-jitter` | `0.1` | Poll backoff jitter |
-| `--wake-max-flight-lifetime` | `5m` | Cap on one flight's establish+poll phase |
+| `--wake-max-flight-lifetime` | `5m` | Cap on one flight's establish+poll phase; must exceed `--wake-park-budget` |
 
 ## Step 3 — Opt in sandboxes via `lifecycle.idlePolicy`
 
