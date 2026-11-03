@@ -232,7 +232,7 @@ content-type: application/json
 Exchange credentials ship in OpenSandbox release **1.2.1**. The egress image, the server, and the Python/JavaScript/Go SDKs must all come from that release or newer; inline credentials behave identically on older releases.
 :::
 
-Static credentials are delivered once at vault creation and rendered at revision time. Some credentials cannot work that way: identity-derived tokens (STS or OAuth2 client-credentials grants, SPIFFE-style signed proofs) are short-lived and computed from request context — an audience derived from the destination, or a signature bound to the method, path, and headers of one specific request. Exchange credentials cover this case: the credential does not carry a value, it names a **header resolver**; when a bound request arrives, the egress asks that resolver for a fresh header set and injects the response. The sandbox process never sees or holds the material, exactly like the static path.
+Static credentials are delivered once at vault creation and rendered at revision time. Some credentials cannot work that way: identity-derived tokens (STS or OAuth2 client-credentials grants, SPIFFE-style signed proofs) are short-lived and computed from request context — an audience derived from the destination, or a signature bound to the method and path of one specific request. Exchange credentials cover this case: the credential does not carry a value, it names a **header resolver**; when a bound request arrives, the egress asks that resolver for a fresh header set and injects the response. The sandbox process never sees or holds the material, exactly like the static path.
 
 An exchange credential declares where to resolve; a typeless binding auth declares when:
 
@@ -282,12 +282,12 @@ The egress derives the caller identity from the connection — the sandbox id, n
 
 Resolution failure fails closed, never open: if the resolver is unreachable, slow beyond the timeout, returns an invalid or oversized response, or the bound credential is mutated mid-flight, the matched request is denied — a local `407` for buffered requests, a terminated stream for requests already streaming. The request is never forwarded without credentials, and a failed resolve never poisons the next one. Static bindings in the same vault keep flowing during a resolver outage.
 
-Per-request resolution is bounded by the limits below, so one slow resolver delays only its own matched requests — never other sandboxes, other bindings, or non-bound traffic.
+Per-request resolution is bounded: every resolve carries its own timeout, and all resolves share the process-wide concurrency limit below. A slow resolver never blocks non-bound traffic, but when the concurrency limit is saturated (for example several slow resolvers, or a deliberately low limit), resolves for **other** bindings and sandboxes queue behind it and fail closed on their own timeouts.
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
-| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT` | `2s` | Per-request resolver timeout, range 1s..120s. |
-| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY` | `32` | Maximum concurrent resolves per egress process, range 1..1024. |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT` | `2` | Per-request resolver timeout in **integer seconds** (`2`, not `2s` — the egress parses an integer in `1..120`; any other value fails the resolver gate closed). |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY` | `32` | Process-wide concurrent-resolve limit, integer `1..1024`, shared across all bindings and subjects in the egress process. |
 
 A vault that references an exchange credential is rejected at write time unless the egress was started with resolver configuration (fail closed; inline-only vaults are unaffected).
 
@@ -309,11 +309,11 @@ A resolver is any service that answers one route: `POST /resolve` with a JSON do
 { "headers": { "authorization": "Bearer ...", "x-signature": "..." } }
 ```
 
-`request.path` is the full request target including the query string, so a resolver can bind signatures to the complete target. The optional `redactions` field on the response is additive only — the egress redacts every returned header regardless.
+`request.path` is the full request target including the query string, so a resolver can bind signatures to the complete target. The `headers` field is reserved and currently always empty — request headers are not forwarded to the resolver, so proofs can only bind to the method, host, and path today. The optional `redactions` field on the response is additive only — the egress redacts every returned header regardless.
 
 Hard requirements on a resolver endpoint:
 
-- **Reachable only by the egress process.** A sandbox that could call the resolver directly could mint credentials and bypass the policy plane. Unix sockets are scoped by directory/socket permissions (for example `0710`/`0660`); for `https://` endpoints, scope reachability at the network layer to the egress (the same UID-scoped exclusions used for upstream proxies) and never add a resolver host to a sandbox's egress allow list. HTTPS caller authentication (egress-presented bearer tokens) is declared follow-up work and is not implemented yet — resolver trust currently rests on TLS plus network reachability.
+- **Reachable only by the egress process.** A sandbox that could call the resolver directly could mint credentials and bypass the policy plane. Unix sockets are structurally isolated by directory/socket permissions (for example `0710`/`0660`) — guests have no filesystem path to them. For `https://` endpoints there is **no structural isolation today**: the guarantee comes from the egress policy layer — deny-by-default plus the resolver host never appearing in any sandbox's egress allow list. In the sidecar profile, the UID-scoped exclusion that lets the egress dial the resolver is scoped to the MITM uid (transparently intercepted dials are re-originated by it, the same mechanism as upstream proxies), so that exclusion alone is **not** the trust boundary — a disallowed sandbox dial is denied by policy before any upstream connection, which is exactly why the resolver host must stay out of every allow list. HTTPS caller authentication (egress-presented bearer tokens) is declared follow-up work and is not implemented yet; until it lands, treat an `https://` resolver as reachable by anything that can route to it and protect it accordingly (network segmentation, dedicated resolver ports, no shared allow-list entries).
 - **Bounded responses.** The egress enforces an envelope — 64KiB total, at most 16 headers, 8KiB per value, 64 redaction entries — and denies the request when exceeded.
 - **Per-request semantics.** Input includes request context; caching and rotation are resolver-internal and invisible to the contract.
 
