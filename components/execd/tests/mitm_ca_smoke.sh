@@ -13,24 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# End-to-end smoke for the mitm CA race hardening and rotation watcher: it
-# runs the REAL bootstrap.sh entrypoint against a fake egress that replays a
-# real egress restart timeline on the shared volume — a stale export left by
-# a previous generation, a purge + fresh export (the issue #1370 race), then
-# a second purge + rotated export while the sandbox keeps running (the
-# independent-sidecar-restart case). Asserts that bootstrap:
-#   1. does NOT trust the stale pre-existing export: it must detect the
-#      purge and trust the fresh export within the stabilization window,
-#   2. builds the merged bundle from the fresh CA,
-#   3. the watcher reinstalls trust for the second rotation in the same
-#      sandbox lifetime without a bootstrap re-run.
-#
-# The host is fully shielded: sudo, java and keytool resolve to logging
-# stubs, JAVA_HOME points at a fixture JDK, and a fake certifi module
-# sources the merged bundle. Note for CI runners: trust_mitm_ca_jdk also
-# scans hardcoded paths like /usr/lib/jvm, where real runner JDKs may pick
-# up a junk "opensandbox-mitmproxy" alias — runner VMs are ephemeral, so
-# this is accepted here (test_mitm_ca_jdk.py covers JDK logic hermetically).
+# End-to-end smoke: run the REAL bootstrap.sh against a fake egress replaying
+# the incident timeline (stale export -> purge -> fresh export, then a second
+# purge + rotation while the sandbox keeps running). Asserts that bootstrap
+# trusts the fresh export after purge detection (never the stale one), and
+# that the watcher heals the second rotation without a bootstrap re-run. The
+# host is shielded via stub sudo/java/keytool, a fixture JDK, and a fake
+# certifi module; trust_mitm_ca_jdk may still scan /usr/lib/jvm on CI, where
+# ephemeral runner JDKs may pick up a junk alias (JDK logic itself is covered
+# hermetically by test_mitm_ca_jdk.py).
 
 set -euo pipefail
 
@@ -38,8 +29,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BOOTSTRAP="$ROOT_DIR/bootstrap.sh"
 TESTDIR="$(mktemp -d)"
 cleanup() {
-  # The rotation watcher outlives bootstrap (by design) as an orphaned
-  # subshell sharing bootstrap's argv; the stub execd outlives it too.
+  # The watcher (a pre-exec subshell sharing bootstrap's argv) and the stub
+  # execd outlive bootstrap by design.
   pkill -f "$BOOTSTRAP" 2>/dev/null || true
   pkill -f "$TESTDIR/stub-execd" 2>/dev/null || true
   [ -n "${FAKE_EGRESS_PID:-}" ] && kill "$FAKE_EGRESS_PID" 2>/dev/null || true
@@ -63,8 +54,7 @@ printf '%s\n' 'certificate-generation-stale' > "$CA_STALE"
 printf '%s\n' 'certificate-generation-fresh' > "$CA_FRESH"
 printf '%s\n' 'certificate-generation-rotated' > "$CA_ROTATED"
 
-# Hermetic merged-bundle source: a fake certifi module so trust_mitm_ca
-# never depends on host CA bundles.
+# Hermetic merged-bundle source: fake certifi module, never host CA bundles.
 FAKE_CERTIFI_PEM="$TESTDIR/certifi-bundle.pem"
 printf '%s\n' 'certifi-fake-root-bundle' > "$FAKE_CERTIFI_PEM"
 PYMODULE="$TESTDIR/pymod/certifi"
@@ -77,9 +67,7 @@ def where():
     return os.environ["FAKE_CERTIFI_PEM"]
 PYEOF
 
-# Shield the host: sudo logs and pretends success (so the system-install
-# branch is exercised without touching /usr/local/share/ca-certificates),
-# java resolves to nothing usable, keytool is a logging stub.
+# Shield the host: sudo pretends success, java/keytool are logging stubs.
 cat > "$SHIM/sudo" <<STUB
 #!/bin/sh
 echo "sudo \$1" >> "$SHIM/sudo.log"
@@ -96,26 +84,22 @@ exit 0
 STUB
 chmod +x "$SHIM/sudo" "$SHIM/java" "$SHIM/keytool"
 
-# Fixture JDK so the JDK trust branch runs against a sandboxed store.
+# Fixture JDK: keeps the JDK trust branch in a sandboxed store.
 FAKE_JDK="$TESTDIR/fake-jdk"
 mkdir -p "$FAKE_JDK/bin" "$FAKE_JDK/lib/security"
 cp "$SHIM/keytool" "$FAKE_JDK/bin/keytool"
 : > "$FAKE_JDK/lib/security/cacerts"
 
-# Stub daemon so bootstrap keeps supervising while the fake egress rotates
-# the CA, without needing a real execd.
+# Stub execd: keeps bootstrap supervising without a real daemon.
 cat > "$TESTDIR/stub-execd" <<'STUB'
 #!/bin/sh
 sleep 120
 STUB
 chmod +x "$TESTDIR/stub-execd"
 
-# Fake egress: replays the exact restart timeline from the incident —
-#   t=0    stale export still on the volume from the previous generation
-#   t=2    egress container starts: main() purges the stale export
-#   t=3.5  mitmdump generated the new CA; SyncRootCA exports it
-#   t=7.5  egress restarts again (independent of the sandbox): purge
-#   t=8.5  rotated CA exported; the watcher must self-heal
+# Fake egress: replays the incident timeline — stale export at t=0, purge at
+# t=2, fresh export at t=3.5, second purge at t=7.5 and rotated export at
+# t=8.5 (the watcher must heal the rotation in the same sandbox lifetime).
 cat > "$TESTDIR/fake-egress.sh" <<SCRIPT
 #!/bin/sh
 cp "$CA_STALE" "$MITM_CA"
@@ -158,8 +142,8 @@ fail() {
   exit 1
 }
 
-# 1) Mid-flight: bootstrap must trust the FRESH export after detecting the
-#    purge (t~3.5), not the stale one at t=0 and not via window expiry (6s).
+# 1) Mid-flight: the fresh export must be trusted via purge detection
+#    (not the stale one at t=0, not via window expiry).
 ready_seen=""
 for _ in $(seq 1 100); do
   if grep -q 'mitm CA ready at' "$LOG" 2>/dev/null; then
@@ -173,8 +157,7 @@ ready_line="$(grep -o 'mitm CA ready at .* after [0-9]*s' "$LOG" | tail -n 1)"
 ready_seconds="$(printf '%s' "$ready_line" | sed -e 's/.* after //' -e 's/s$//')"
 [ "$ready_seconds" -ge 2 ] || fail "bootstrap trusted the CA after ${ready_seconds}s — a stale pre-existing export would be trusted instantly by the old logic"
 [ "$ready_seconds" -le 6 ] || fail "bootstrap trusted the CA after ${ready_seconds}s — stale-CA purge was not detected before the stabilization window expired"
-# trust_mitm_ca runs just after the ready line and needs a moment (python3
-# certifi lookup) before the merged bundle lands on disk.
+# trust_mitm_ca lands the merged bundle just after the ready line.
 merged_seen=""
 for _ in $(seq 1 20); do
   if [ -f "$MERGED" ] && grep -q 'certificate-generation-fresh' "$MERGED" 2>/dev/null; then
@@ -186,8 +169,7 @@ done
 [ -n "$merged_seen" ] || fail "merged bundle does not contain the fresh CA bootstrap just trusted"
 grep -q 'certificate-generation-stale' "$MERGED" && fail "merged bundle contains the STALE pre-existing CA" || true
 
-# 2) Join bootstrap (it supervises for ~14s) and assert the watcher healed
-#    the second rotation without a bootstrap re-run.
+# 2) The watcher heals the second rotation without a bootstrap re-run.
 set +e
 wait "$BOOTSTRAP_PID"
 BOOTSTRAP_STATUS=$?
@@ -199,9 +181,8 @@ grep -q 'mitm CA changed' "$LOG" || fail "watcher missed the second rotation"
 grep -q 'certificate-generation-rotated' "$MERGED" || fail "watcher did not rebuild the merged bundle with the rotated CA"
 grep -q 'certificate-generation-stale' "$MERGED" && fail "merged bundle contains the STALE pre-existing CA" || true
 
-# 3) System-trust install ran once per trust pass when the platform provides
-#    update-ca-certificates (Linux CI: 2 = initial + watcher; macOS: the
-#    branch is skipped entirely, so 0).
+# 3) System-trust installs: 2 on Linux CI (initial + watcher), 0 where the
+#    update-ca-certificates branch is skipped.
 install_passes=0
 [ -f "$SHIM/sudo.log" ] && install_passes="$(grep -c '^sudo update-ca-certificates$' "$SHIM/sudo.log" || true)"
 case "$install_passes" in
@@ -209,7 +190,7 @@ case "$install_passes" in
 *) fail "expected 0 or 2 system-trust install passes, got $install_passes" ;;
 esac
 
-# 4) No export timeout: the whole point of the race fix.
+# 4) No export timeout.
 grep -q 'timed out' "$LOG" && fail "bootstrap timed out waiting for the mitm CA" || true
 
 echo "PASS: bootstrap trusted the fresh CA after purge detection (${ready_seconds}s), watcher healed the second rotation (${install_passes} trust installs)"

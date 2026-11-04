@@ -13,11 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Regression tests for the mitm CA rotation watcher: egress can restart
-# independently of the sandbox container (kubelet under restartPolicy Always)
-# and rotates the exported CA on every restart while bootstrap never re-runs.
-# The watcher must reinstall trust for every content change and must NOT
-# reinstall while the CA is unchanged.
+# Regression tests for the mitm CA rotation watcher: reinstall trust on every
+# content change, stay silent while unchanged.
 
 set -euo pipefail
 
@@ -47,9 +44,8 @@ fail() {
   exit 1
 }
 
-# Stub the production trust helpers: the watcher must call each of them on
-# every rotation. Defined before sourcing the extracted watcher so the
-# background job inherits the stubs instead of production code.
+# Stub the production trust helpers before sourcing the watcher, so the
+# background job calls the stubs instead of production code.
 TRUST_LOG="$TESTDIR/trust.log"
 : > "$TRUST_LOG"
 trust_mitm_ca() {
@@ -106,8 +102,7 @@ grep -q 'mitm CA changed' "$TESTDIR/watch.log" || fail "watcher did not log the 
 grep -q 'restart long-running processes' "$TESTDIR/watch.log" || fail "watcher did not tell users to restart processes with cached trust"
 grep -q 'watching mitm CA' "$TESTDIR/watch.log" || fail "watcher did not announce itself"
 
-# The reinstall path must also refresh the merged bundle via trust_mitm_ca:
-# verify the stub saw the live CA path on the LAST reinstall (post-rotation 2).
+# The last reinstall must target the live CA path.
 last_system="$(grep '^system ' "$TRUST_LOG" | tail -n 1)"
 [ "$last_system" = "system $live" ] || fail "unexpected reinstall target: $last_system"
 

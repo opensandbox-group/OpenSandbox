@@ -453,10 +453,8 @@ trust_mitm_ca_jdk() {
 	return 0
 }
 
-# Best-effort content fingerprint used to detect mitm CA rotation. Prefers
-# sha256sum, falls back to md5sum, then to POSIX cksum (present in busybox).
-# The || true guards keep a missing/unreadable file (or an inherited
-# `set -o pipefail`) from failing callers: an empty output means "unknown".
+# Content fingerprint for CA-rotation detection (sha256sum -> md5sum -> cksum).
+# Empty output on failure; never errors under inherited set -e/pipefail.
 _ca_fingerprint() {
 	if command -v sha256sum >/dev/null 2>&1; then
 		{ sha256sum "$1" 2>/dev/null || true; } | awk '{print $1}'
@@ -468,26 +466,15 @@ _ca_fingerprint() {
 	return 0
 }
 
-# Wait until the exported mitm CA is safe to trust.
-#
-# The egress sidecar purges the exported CA and re-exports the current
-# generation's certificate whenever its container restarts
-# (components/egress/pkg/mitmproxy/cacert_export.go, upstream issue #1370).
-# bootstrap and egress start in parallel, so a file that already exists when
-# polling begins may be stale from a previous egress generation — trusting it
-# would install a CA mitmproxy no longer signs with. Decision rules:
-#   - A file observed absent at least once is trusted the moment it appears:
-#     egress only ever removes (purge) or writes (export) this file, so
-#     anything that shows up mid-poll is this generation's export.
-#   - A file present from the start gets a stabilization window: if it is
-#     purged or replaced inside the window we trust the replacement, else we
-#     trust it as-is (it is either already fresh or egress never restarted).
-# Residual race: an egress container that starts more than
-# MITM_CA_STABILIZE_WINDOW seconds after bootstrap can still purge after we
-# trusted a stale file; the rotation watcher (watch_mitm_ca) self-heals that.
-# Tunables: MITM_CA_WAIT_TIMEOUT (s, default 300), MITM_CA_STABILIZE_WINDOW
-# (s, default 15), MITM_CA_POLL_INTERVAL (s, default 0.5). Sets
-# MITM_CA_WAIT_SECONDS on success; returns 1 on timeout.
+# Wait until the exported mitm CA is safe to trust. Egress purges and
+# re-exports this file on every restart (issue #1370), so a file present when
+# polling starts may be stale from a previous generation: it is trusted only
+# after an observed purge or content change, or after surviving a full
+# unchanged stabilization window. A file seen absent at least once is fresh on
+# (re)appearance and trusted immediately. An egress starting later than the
+# window can still win the race; watch_mitm_ca heals that. Tunables:
+# MITM_CA_WAIT_TIMEOUT (300s), MITM_CA_STABILIZE_WINDOW (15s),
+# MITM_CA_POLL_INTERVAL (0.5s). Sets MITM_CA_WAIT_SECONDS; 1 on timeout.
 wait_for_trustworthy_mitm_ca() {
 	ca="$1"
 	_wait_timeout="${MITM_CA_WAIT_TIMEOUT:-300}"
@@ -508,17 +495,17 @@ wait_for_trustworthy_mitm_ca() {
 			_fp="$(_ca_fingerprint "$ca")"
 			[ -n "$_fp" ] || _fp="<unfingerprintable>"
 			if [ -n "$_purge_seen" ]; then
-				# Reappeared after a purge: freshly exported this generation.
+				# (re)appearance after a purge: fresh export
 				break
 			elif [ -z "$_baseline_fp" ]; then
-				# First sighting; start the stabilization window.
+				# first sighting: start the stabilization window
 				_baseline_fp="$_fp"
 				_baseline_since="$_now"
 			elif [ "$_fp" != "$_baseline_fp" ]; then
-				# Replaced in place: treat as this generation's export.
+				# replaced in place: treat as fresh
 				break
 			elif [ $((_now - _baseline_since)) -ge "$_stabilize" ]; then
-				# Unchanged for the whole window: no purge happened, trust it.
+				# unchanged for the whole window: trust it
 				break
 			fi
 		else
@@ -531,17 +518,12 @@ wait_for_trustworthy_mitm_ca() {
 	return 0
 }
 
-# Self-heal for independent egress restarts: kubelet can recreate the egress
-# sidecar (pod restartPolicy Always, recycle=restart) without restarting the
-# sandbox container, and every egress restart rotates the exported CA while
-# bootstrap.sh never re-runs. Watch the exported CA for the sandbox lifetime
-# and reinstall trust (system store, merged bundle, NSS, JDK) whenever its
-# content changes. The env vars bootstrap exported (REQUESTS_CA_BUNDLE,
-# SSL_CERT_FILE, NODE_EXTRA_CA_CERTS) all point at file paths whose content
-# is refreshed in place, so newly spawned processes and per-connection
-# readers pick up the rotated CA without re-exec. Processes that cached the
-# old CA in memory at startup (e.g. JVM cacerts) still need a restart — the
-# change log line below says so. Interval: MITM_CA_WATCH_INTERVAL (default 30s).
+# Self-heal for independent egress restarts: the CA rotates while bootstrap
+# never re-runs. Reinstall system/merged/NSS/JDK trust whenever the exported
+# CA changes (MITM_CA_WATCH_INTERVAL, 30s). The env vars bootstrap exported
+# point at refreshed files, so new processes heal without re-exec; processes
+# with in-memory trust (e.g. JVM cacerts) still need a restart, which the
+# change log line calls out.
 watch_mitm_ca() {
 	ca="$1"
 	_interval="${MITM_CA_WATCH_INTERVAL:-30}"
@@ -551,7 +533,7 @@ watch_mitm_ca() {
 		sleep "$_interval" 2>/dev/null || sleep 1
 		_cur="$(_ca_fingerprint "$ca")"
 		if [ -z "$_cur" ]; then
-			# Purged by a restarting egress; keep waiting for the new export.
+			# purged by a restarting egress; wait for the new export
 			continue
 		fi
 		if [ "$_cur" != "$_prev" ]; then
@@ -591,7 +573,7 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 			export SSL_CERT_FILE="$MITM_CA"
 		fi
 
-		# Track egress CA rotation for the sandbox lifetime (see watch_mitm_ca).
+		# Track egress CA rotation for the sandbox lifetime.
 		watch_mitm_ca "$MITM_CA" &
 	fi
 fi

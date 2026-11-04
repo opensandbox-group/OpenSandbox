@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Regression tests for the mitm CA wait/race hardening: a CA file that exists
-# when bootstrap starts polling may be stale from a previous egress generation
-# (upstream issue #1370: a stale export lets bootstrap pass its readiness check
-# and install a CA mitmproxy no longer signs with). The wait must only trust
-# an export it saw appear, or one that survived a full stabilization window.
+# Regression tests for the mitm CA wait hardening: a pre-existing export may
+# be stale from a previous egress generation (issue #1370); only an export
+# seen appearing, or one that survives a full stabilization window, may be
+# trusted.
 
 set -euo pipefail
 
@@ -60,9 +59,8 @@ now_s() {
   date +%s
 }
 
-# run_wait <target> <stabilize> <timeout>: sets WAIT_STATUS and WAIT_ELAPSED.
-# Must be called in the current shell (not a command substitution) so the
-# globals propagate.
+# run_wait <target> <stabilize> <timeout>: sets WAIT_STATUS and WAIT_ELAPSED
+# in the current shell — do not call via command substitution.
 run_wait() {
   target="$1"
   stabilize="$2"
