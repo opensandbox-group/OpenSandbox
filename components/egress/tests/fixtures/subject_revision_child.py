@@ -94,6 +94,7 @@ def main():
                     identity=identity, sni=command.get("sni"),
                     ech_hidden=command.get("ech", False),
                     static_passthrough=(), view=view,
+                    destination_port=command.get("destinationPort", 443),
                 )
                 with lock:
                     dropped = state["dropped"]
