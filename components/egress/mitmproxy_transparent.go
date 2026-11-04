@@ -49,6 +49,7 @@ type mitmTransparent struct {
 	uid             uint32
 	dports          string           // iptables --dports list (e.g. "80,443" or "80,443,8080")
 	cfg             mitmproxy.Config // OnExit must NOT be set here; built per-Launch
+	subjectOwner    *fastSandboxSubjectLaunchOwner
 	revisionOwner   *revisionLaunchOwner
 	nextGen         uint64 // owned by mu; monotonic gen counter handed to each Launch
 	launchGen       uint64 // unpublished attempt; the launch caller owns its resources
@@ -67,7 +68,8 @@ func (m *mitmTransparent) publishRunning(
 ) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.stopping || (m.revisionOwner != nil && m.revisionOwner.server != nil) {
+	if m.stopping || (m.revisionOwner != nil && m.revisionOwner.server != nil) ||
+		(m.subjectOwner != nil && (m.launchExited || m.launchGen != gen)) {
 		return false
 	}
 	m.running = r
@@ -102,7 +104,9 @@ func (m *mitmTransparent) stopChild(running *mitmproxy.Running, timeout time.Dur
 	if running == nil {
 		return
 	}
-	if m.revisionOwner != nil && m.revisionOwner.stop != nil {
+	if m.subjectOwner != nil && m.subjectOwner.stop != nil {
+		m.subjectOwner.stop(running)
+	} else if m.revisionOwner != nil && m.revisionOwner.stop != nil {
 		m.revisionOwner.stop(running)
 	} else {
 		mitmproxy.GracefulShutdown(running, timeout)
@@ -113,6 +117,9 @@ func (m *mitmTransparent) shutdown(timeout time.Duration) {
 	running, session := m.claimForShutdown()
 	m.signalShutdown()
 	m.stopChild(running, timeout)
+	if err := m.subjectOwner.close(running); err != nil {
+		log.Errorf("[mitmproxy] subject session cleanup failed: %v", err)
+	}
 	if err := m.revisionOwner.closeSession(session); err != nil {
 		log.Errorf("[mitmproxy] revision session cleanup failed: %v", err)
 	}
@@ -144,11 +151,15 @@ func (m *mitmTransparent) closeRevisionSession(gen uint64) {
 		return
 	}
 	session := m.revisionSession
+	running := m.running
 	m.running, m.revisionSession = nil, nil
 	if server != nil {
 		server.mitmGate.SetReady(false)
 	}
 	m.mu.Unlock()
+	if err := m.subjectOwner.close(running); err != nil {
+		log.Errorf("[mitmproxy] subject session cleanup failed: %v", err)
+	}
 	// Keep the policy barrier until cleanup is known, excluding fresh bootstrap
 	// and publication. Never reacquire it while holding the lifecycle lock.
 	if session != nil {
@@ -263,7 +274,17 @@ func (m *mitmTransparent) launchTaggedWithRevision(
 	}
 	var result *revisionLaunchResult
 	var err error
-	if m.revisionOwner == nil {
+	if m.subjectOwner != nil {
+		if m.revisionOwner != nil {
+			err = revision.ErrInvalid
+		} else {
+			var running *mitmproxy.Running
+			running, err = m.subjectOwner.launch(ctx, cfg, launchProcess)
+			if err == nil {
+				result = &revisionLaunchResult{running: running}
+			}
+		}
+	} else if m.revisionOwner == nil {
 		var running *mitmproxy.Running
 		running, err = launchProcess(cfg)
 		if err == nil {
@@ -287,6 +308,9 @@ func (m *mitmTransparent) launchTaggedWithRevision(
 // published resources exclusively; this result was never attached to m.running.
 func (m *mitmTransparent) cleanupLaunch(result *revisionLaunchResult) {
 	m.stopChild(result.running, time.Second)
+	if err := m.subjectOwner.close(result.running); err != nil {
+		log.Errorf("[mitmproxy] subject session cleanup failed: %v", err)
+	}
 	if err := m.revisionOwner.closeSession(result.session); err != nil {
 		log.Errorf("[mitmproxy] revision session cleanup failed: %v", err)
 	}
@@ -469,7 +493,14 @@ func (m *mitmTransparent) restartWithBackoffUsing(ctx context.Context, gate *mit
 			if m.revisionOwner != nil && m.revisionOwner.server != nil {
 				err = publishRevisionReady(ctx, m, result)
 			} else if !m.publishRunning(result.running, result.session, result.generation) {
-				err = revision.ErrClosed
+				// A subject child can exit after readiness but before publication.
+				// Retry that attempt; only shutdown makes rejection terminal.
+				err = revision.ErrTransportUnavailable
+				m.mu.RLock()
+				if m.stopping {
+					err = revision.ErrClosed
+				}
+				m.mu.RUnlock()
 			} else {
 				gate.SetReady(true)
 			}
