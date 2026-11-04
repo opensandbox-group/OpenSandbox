@@ -16,6 +16,7 @@
 
 import asyncio
 import gc
+import sys
 
 import httpx
 import pytest
@@ -143,33 +144,49 @@ class _TrackingAsyncStream(httpx.AsyncByteStream):
 
 
 @pytest.mark.asyncio
-async def test_async_stream_closes_response_when_metadata_mapping_fails(monkeypatch) -> None:
+@pytest.mark.parametrize("isolated", [False, True])
+@pytest.mark.parametrize("failure", ["mapper", "content-length"])
+async def test_async_stream_closes_response_when_metadata_mapping_fails(
+    monkeypatch, isolated: bool, failure: str
+) -> None:
+    headers = {"Content-Range": "bytes 0-4/10"}
+    if failure == "content-length":
+        digit_limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        if digit_limit == 0:
+            pytest.skip("Python's integer string conversion limit is disabled")
+        headers["Content-Length"] = "9" * (digit_limit + 1)
+
     source = _TrackingAsyncStream()
     response = httpx.Response(
         206,
         stream=source,
-        headers={"Content-Range": "bytes 0-4/10"},
+        headers=headers,
     )
-    adapter = FilesystemAdapter(
-        ConnectionConfig(
-            protocol="http", transport=httpx.MockTransport(lambda _: response)
-        ),
-        _endpoint(),
+    config = ConnectionConfig(
+        protocol="http", transport=httpx.MockTransport(lambda _: response)
     )
+    if isolated:
+        adapter = IsolatedFilesystemAdapter(config, _endpoint(), _SESSION_ID)
+    else:
+        adapter = FilesystemAdapter(config, _endpoint())
 
     def fail_mapping(*args, **kwargs):
         raise ValueError("invalid response metadata")
 
-    monkeypatch.setattr(
-        "opensandbox.adapters.filesystem_adapter.create_read_bytes_response",
-        fail_mapping,
-    )
+    if failure == "mapper":
+        module = "isolated_filesystem_adapter" if isolated else "filesystem_adapter"
+        monkeypatch.setattr(
+            f"opensandbox.adapters.{module}.create_read_bytes_response",
+            fail_mapping,
+        )
     try:
-        with pytest.raises(InvalidArgumentException, match="invalid response metadata"):
+        with pytest.raises(InvalidArgumentException) as exc:
             await adapter.read_bytes_stream_detailed("/data.bin")
+        assert isinstance(exc.value.__cause__, ValueError)
         assert response.is_closed
         assert source.closed
     finally:
+        await response.aclose()
         await adapter._httpx_client.aclose()
 
 
