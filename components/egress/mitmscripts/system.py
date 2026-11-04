@@ -535,7 +535,7 @@ _TLS_ADMISSION_REASONS = {
     "decrypt": ("binding_host",),
     "passthrough": ("ech", "no_sni", "static_ignore", "no_binding_host"),
     "deny": ("unknown_identity", "invalid_sni", "snapshot_missing",
-             "generation_mismatch", "invalid_input", "registry_exhausted",
+             "generation_mismatch", "invalid_input", "non_canonical_port", "registry_exhausted",
              "admission_disabled", "ssl_insecure", "malformed_extensions"),
 }
 
