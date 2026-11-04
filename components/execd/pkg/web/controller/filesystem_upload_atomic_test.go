@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -259,6 +260,25 @@ func TestIsUploadStagingName(t *testing.T) {
 	require.True(t, isUploadStagingName(uploadTempPattern+"0123456789abcdef"))
 	require.False(t, isUploadStagingName(uploadTempPattern+"not-a-valid-name"))
 	require.False(t, isUploadStagingName("notes.md"))
+}
+
+// TestOrdinaryRoutesRejectIsolatedStagingNames covers the ordinary filesystem
+// routes reaching an isolated session's workspace or a bind source by host
+// path: they create no .osb-staging- files themselves, but they must not serve,
+// rename or delete one another route is still writing.
+func TestOrdinaryRoutesRejectIsolatedStagingNames(t *testing.T) {
+	dir := t.TempDir()
+	staging := filepath.Join(dir, ".osb-staging-0123456789abcdef")
+	require.NoError(t, os.WriteFile(staging, []byte("in flight"), 0o600))
+
+	require.True(t, isAnyStagingName(filepath.Base(staging)))
+	require.True(t, isAnyStagingName(uploadTempPattern+"0123456789abcdef"))
+	require.False(t, isAnyStagingName("notes.md"))
+
+	require.ErrorIs(t, rejectStagingPath(staging), fs.ErrNotExist)
+	require.ErrorIs(t, rejectStagingPath(staging+string(os.PathSeparator)+"."), fs.ErrNotExist)
+	require.ErrorIs(t, rejectStagingPath(filepath.Join(dir, uploadTempPattern+"0123456789abcdef")+string(os.PathSeparator)+"."), fs.ErrNotExist)
+	require.NoError(t, rejectStagingPath(filepath.Join(dir, "notes.md")))
 }
 
 func TestListIsolatedDirHidesUploadStaging(t *testing.T) {

@@ -73,6 +73,25 @@ func (m *MergedView) resolveLower(rel string) string {
 // refers to (bind destinations, the profile's private /tmp, etc.).
 // A LowerDir of "/" is the namespace root and contains every absolute path.
 func (m *MergedView) safePath(path string) (string, error) {
+	rel, err := m.resolveRel(path)
+	if err != nil {
+		return "", err
+	}
+	// The staging prefix is reserved for execd's own temp files, so every
+	// operation - read, stat, rename, remove - treats one as absent. A rename
+	// in particular would otherwise expose an in-flight upload under a
+	// user-visible name.
+	if err := denyStagingName(rel, path); err != nil {
+		return "", err
+	}
+	return rel, nil
+}
+
+// resolveRel validates path and returns it relative to the workspace without
+// the staging-name check. safePath layers that check on top for every public
+// operation; staged writes create their own temp name only after safePath has
+// resolved the destination.
+func (m *MergedView) resolveRel(path string) (string, error) {
 	cleaned := filepath.Clean(path)
 	if filepath.IsAbs(cleaned) {
 		if m.LowerDir != "/" &&
@@ -93,6 +112,18 @@ func (m *MergedView) safePath(path string) (string, error) {
 		return "", fmt.Errorf("path traversal denied: %s", path)
 	}
 	return cleaned, nil
+}
+
+// denyStagingName rejects a resolved relative path whose final component is a
+// staging file. The prefix is reserved, so no operation the session can invoke
+// reaches an in-flight or orphaned temp file - not a read, a stat, a rename that
+// would expose it under a user-visible name, nor a remove that would cut short a
+// concurrent upload.
+func denyStagingName(rel, path string) error {
+	if !isStagingName(filepath.Base(rel)) {
+		return nil
+	}
+	return &os.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 }
 
 func (m *MergedView) rejectSymlink(path string) error {
@@ -173,9 +204,14 @@ func (m *MergedView) ReadDir(path string) ([]os.DirEntry, error) {
 
 	entryMap := make(map[string]os.DirEntry)
 
-	// Lower first.
+	// Lower first. Both passes hide staging names: the prefix is reserved, and
+	// in rw mode LowerDir is UpperDir, so filtering only the upper pass would
+	// hand back the entries it just dropped.
 	lowerEntries, lowerErr := os.ReadDir(m.resolveLower(rel))
 	for _, e := range lowerEntries {
+		if isStagingName(e.Name()) {
+			continue
+		}
 		entryMap[e.Name()] = e
 	}
 
@@ -185,6 +221,9 @@ func (m *MergedView) ReadDir(path string) ([]os.DirEntry, error) {
 		var upperEntries []os.DirEntry
 		upperEntries, upperErr = os.ReadDir(m.resolveUpper(rel))
 		for _, e := range upperEntries {
+			if isStagingName(e.Name()) {
+				continue
+			}
 			if strings.HasPrefix(e.Name(), ".wh.") {
 				origName := strings.TrimPrefix(e.Name(), ".wh.")
 				delete(entryMap, origName)
@@ -275,10 +314,10 @@ func (m *MergedView) WriteFile(path string, data []byte, perm os.FileMode) error
 	if err := os.MkdirAll(filepath.Dir(upperPath), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(upperPath, data, perm); err != nil {
+	if err := writeFileStaged(upperPath, data, perm, false, newFileOwner(m.Uid, m.Gid)); err != nil {
 		return err
 	}
-	return os.Chown(upperPath, int(m.Uid), int(m.Gid))
+	return nil
 }
 
 // WriteFileReader writes from a reader to upper directory.
@@ -303,17 +342,7 @@ func (m *MergedView) WriteFileReader(path string, r io.Reader, perm os.FileMode)
 		return 0, err
 	}
 
-	f, err := os.OpenFile(upperPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	n, err := io.Copy(f, r)
-	if err != nil {
-		return n, err
-	}
-	return n, os.Chown(upperPath, int(m.Uid), int(m.Gid))
+	return writeReaderStaged(upperPath, r, perm, false, newFileOwner(m.Uid, m.Gid))
 }
 
 // Remove deletes a file. For overlay mode, creates a whiteout to hide
@@ -534,6 +563,9 @@ func (m *MergedView) Search(root, pattern string) ([]string, error) { //nolint:g
 			if d.IsDir() {
 				return nil
 			}
+			if isStagingName(d.Name()) {
+				return nil
+			}
 			rel, _ := filepath.Rel(m.LowerDir, p)
 			if whiteouts[rel] {
 				return nil
@@ -557,6 +589,9 @@ func (m *MergedView) Search(root, pattern string) ([]string, error) { //nolint:g
 				return nil
 			}
 			if strings.HasPrefix(d.Name(), ".wh.") {
+				return nil
+			}
+			if isStagingName(d.Name()) {
 				return nil
 			}
 			rel, _ := filepath.Rel(m.UpperDir, p)

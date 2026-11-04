@@ -53,6 +53,10 @@ func (c *FilesystemController) DownloadFile() {
 		)
 		return
 	}
+	if err := rejectStagingPath(resolvedFilePath); err != nil {
+		c.handleFileError(err)
+		return
+	}
 
 	rawOffset := c.ctx.Query("offset")
 	rawLimit := c.ctx.Query("limit")

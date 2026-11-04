@@ -424,6 +424,77 @@ func TestReplaceContentFailsUnknownFile(t *testing.T) {
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+func TestFilesystemDirectoryRoutesRejectStagingNames(t *testing.T) {
+	for _, stagingName := range []string{
+		".osb-staging-0123456789abcdef",
+		uploadTempPattern + "0123456789abcdef",
+	} {
+		t.Run(stagingName, func(t *testing.T) {
+			t.Run("make", func(t *testing.T) {
+				target := filepath.Join(t.TempDir(), stagingName)
+				payload, err := json.Marshal(map[string]model.Permission{
+					target + string(os.PathSeparator) + ".": {Mode: 0o755},
+				})
+				require.NoError(t, err)
+
+				ctrl, rec := newFilesystemController(t, http.MethodPost, "/directories", payload)
+				ctrl.MakeDirs()
+
+				require.Equal(t, http.StatusNotFound, rec.Code)
+				_, err = os.Stat(target)
+				require.ErrorIs(t, err, os.ErrNotExist)
+			})
+
+			t.Run("remove", func(t *testing.T) {
+				target := filepath.Join(t.TempDir(), stagingName)
+				require.NoError(t, os.WriteFile(target, []byte("in flight"), 0o600))
+
+				rawURL := fmt.Sprintf("/directories?path=%s", url.QueryEscape(target+string(os.PathSeparator)+"."))
+				ctrl, rec := newFilesystemController(t, http.MethodDelete, rawURL, nil)
+				ctrl.RemoveDirs()
+
+				require.Equal(t, http.StatusNotFound, rec.Code)
+				got, err := os.ReadFile(target)
+				require.NoError(t, err)
+				require.Equal(t, "in flight", string(got), "an in-flight staging file must not be removed through the directory API")
+			})
+		})
+	}
+}
+
+// ReplaceContent reads and truncates the target in place, so it must resolve a
+// trailing "/." the same way the filesystem helpers do before checking the
+// reserved staging names. Otherwise it can expose or corrupt an upload another
+// route is still staging.
+func TestReplaceContentRejectsStagingPath(t *testing.T) {
+	for _, stagingName := range []string{
+		".osb-staging-0123456789abcdef",
+		uploadTempPattern + "0123456789abcdef",
+	} {
+		t.Run(stagingName, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), stagingName)
+			require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o644))
+
+			requestPath := target + string(os.PathSeparator) + "."
+			body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+				requestPath: {
+					Old: "world",
+					New: "universe",
+				},
+			})
+			require.NoError(t, err)
+
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+			ctrl.ReplaceContent()
+
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, "hello world", string(got), "the in-flight staging file must not be rewritten")
+		})
+	}
+}
+
 func TestFormatContentDisposition(t *testing.T) {
 	tests := []struct {
 		name     string

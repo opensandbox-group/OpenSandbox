@@ -61,6 +61,21 @@ func NewBindView(source string, readOnly bool, uid, gid uint32) *BindView {
 }
 
 func (b *BindView) resolve(path string) (string, error) {
+	p, err := b.rawResolve(path)
+	if err != nil {
+		return "", err
+	}
+	// The staging prefix is reserved, so every operation treats one as absent:
+	// a rename would otherwise expose an in-flight upload under a user-visible
+	// name, and a remove would cut short a concurrent one.
+	if err := denyStagingName(filepath.Base(p), path); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// rawResolve is resolve without the staging-name check.
+func (b *BindView) rawResolve(path string) (string, error) {
 	cleaned := filepath.Clean(path)
 	// Strip the source prefix so absolute namespace paths (which may arrive
 	// with either the dest or the source prefix) resolve identically.
@@ -106,10 +121,7 @@ func (b *BindView) WriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(p, data, perm); err != nil {
-		return err
-	}
-	return os.Chown(p, int(b.Uid), int(b.Gid))
+	return writeFileStaged(p, data, perm, true, newFileOwner(b.Uid, b.Gid))
 }
 
 func (b *BindView) WriteFileReader(path string, r io.Reader, perm os.FileMode) (int64, error) {
@@ -123,16 +135,7 @@ func (b *BindView) WriteFileReader(path string, r io.Reader, perm os.FileMode) (
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return 0, err
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	n, err := io.Copy(f, r)
-	if err != nil {
-		return n, err
-	}
-	return n, os.Chown(p, int(b.Uid), int(b.Gid))
+	return writeReaderStaged(p, r, perm, true, newFileOwner(b.Uid, b.Gid))
 }
 
 func (b *BindView) Remove(path string) error {
@@ -205,7 +208,11 @@ func (b *BindView) ReadDir(path string) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadDir(p)
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		return nil, err
+	}
+	return hideStagingEntries(entries), nil
 }
 
 func (b *BindView) Open(path string) (*os.File, error) {
@@ -231,6 +238,9 @@ func (b *BindView) Search(root, pattern string) ([]string, error) {
 			return nil //nolint:nilerr // skip unreadable dirs
 		}
 		if d.IsDir() {
+			return nil
+		}
+		if isStagingName(d.Name()) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(b.Source, p)
