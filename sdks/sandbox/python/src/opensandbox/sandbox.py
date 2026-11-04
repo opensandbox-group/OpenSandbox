@@ -836,19 +836,20 @@ class Sandbox:
                 create_duration_ms=int((time.monotonic() - create_started) * 1000),
                 success=False,
             )
-            if sandbox_id and sandbox_service:
-                try:
-                    logger.warning(
-                        f"Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {sandbox_id}"
-                    )
-                    await sandbox_service.kill_sandbox(sandbox_id)
-                except Exception as cleanup_ex:
-                    logger.error(
-                        f"Failed to clean up sandbox {sandbox_id} after creation failure",
-                        exc_info=cleanup_ex,
-                    )
-
-            await config.close_transport_if_owned()
+            try:
+                if sandbox_id and sandbox_service:
+                    try:
+                        logger.warning(
+                            f"Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {sandbox_id}"
+                        )
+                        await sandbox_service.kill_sandbox(sandbox_id)
+                    except Exception as cleanup_ex:
+                        logger.error(
+                            f"Failed to clean up sandbox {sandbox_id} after creation failure",
+                            exc_info=cleanup_ex,
+                        )
+            finally:
+                await config.close_transport_if_owned()
             if isinstance(e, asyncio.CancelledError):
                 raise
             if isinstance(e, SandboxException):
