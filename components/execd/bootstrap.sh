@@ -242,7 +242,7 @@ _sudo() {
 OPENSANDBOX_MERGED_CA=""
 trust_mitm_ca() {
 	cert="$1"
-	merged="/opt/opensandbox/merged-ca-certificates.pem"
+	merged="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
 
 	# 1) Try to install into the system trust store (best-effort).
 	if command -v update-ca-certificates >/dev/null 2>&1; then
@@ -276,6 +276,7 @@ trust_mitm_ca() {
 		/etc/ssl/cert.pem \
 		/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
 		if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -s "$candidate" ]; then
+			mkdir -p "$(dirname "$merged")" 2>/dev/null || true
 			cat "$candidate" "$cert" > "$merged"
 			OPENSANDBOX_MERGED_CA="$merged"
 			return 0
@@ -452,23 +453,126 @@ trust_mitm_ca_jdk() {
 	return 0
 }
 
-MITM_CA="/opt/opensandbox/mitmproxy-ca-cert.pem"
-if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
-	i=0
-	while [ "$i" -lt 300 ]; do
-		if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
-			break
-		fi
-		sleep 1
-		i=$((i + 1))
-	done
-	if [ ! -f "$MITM_CA" ] || [ ! -s "$MITM_CA" ]; then
-		echo "warning: timed out after 300s waiting for $MITM_CA (egress mitm CA export); continuing without system CA trust" >&2
+# Best-effort content fingerprint used to detect mitm CA rotation. Prefers
+# sha256sum, falls back to md5sum, then to POSIX cksum (present in busybox).
+# The || true guards keep a missing/unreadable file (or an inherited
+# `set -o pipefail`) from failing callers: an empty output means "unknown".
+_ca_fingerprint() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		{ sha256sum "$1" 2>/dev/null || true; } | awk '{print $1}'
+	elif command -v md5sum >/dev/null 2>&1; then
+		{ md5sum "$1" 2>/dev/null || true; } | awk '{print $1}'
 	else
-		echo "mitm CA ready at $MITM_CA after ${i}s"
+		{ cksum "$1" 2>/dev/null || true; } | awk '{print $1 "-" $2}'
+	fi
+	return 0
+}
+
+# Wait until the exported mitm CA is safe to trust.
+#
+# The egress sidecar purges the exported CA and re-exports the current
+# generation's certificate whenever its container restarts
+# (components/egress/pkg/mitmproxy/cacert_export.go, upstream issue #1370).
+# bootstrap and egress start in parallel, so a file that already exists when
+# polling begins may be stale from a previous egress generation — trusting it
+# would install a CA mitmproxy no longer signs with. Decision rules:
+#   - A file observed absent at least once is trusted the moment it appears:
+#     egress only ever removes (purge) or writes (export) this file, so
+#     anything that shows up mid-poll is this generation's export.
+#   - A file present from the start gets a stabilization window: if it is
+#     purged or replaced inside the window we trust the replacement, else we
+#     trust it as-is (it is either already fresh or egress never restarted).
+# Residual race: an egress container that starts more than
+# MITM_CA_STABILIZE_WINDOW seconds after bootstrap can still purge after we
+# trusted a stale file; the rotation watcher (watch_mitm_ca) self-heals that.
+# Tunables: MITM_CA_WAIT_TIMEOUT (s, default 300), MITM_CA_STABILIZE_WINDOW
+# (s, default 15), MITM_CA_POLL_INTERVAL (s, default 0.5). Sets
+# MITM_CA_WAIT_SECONDS on success; returns 1 on timeout.
+wait_for_trustworthy_mitm_ca() {
+	ca="$1"
+	_wait_timeout="${MITM_CA_WAIT_TIMEOUT:-300}"
+	_stabilize="${MITM_CA_STABILIZE_WINDOW:-15}"
+	_poll="${MITM_CA_POLL_INTERVAL:-0.5}"
+	_start="$(date +%s)"
+	_deadline=$((_start + _wait_timeout))
+	MITM_CA_WAIT_SECONDS=0
+
+	_purge_seen=""
+	_baseline_fp=""
+	while :; do
+		_now="$(date +%s)"
+		if [ "$_now" -ge "$_deadline" ]; then
+			return 1
+		fi
+		if [ -f "$ca" ] && [ -s "$ca" ]; then
+			_fp="$(_ca_fingerprint "$ca")"
+			[ -n "$_fp" ] || _fp="<unfingerprintable>"
+			if [ -n "$_purge_seen" ]; then
+				# Reappeared after a purge: freshly exported this generation.
+				break
+			elif [ -z "$_baseline_fp" ]; then
+				# First sighting; start the stabilization window.
+				_baseline_fp="$_fp"
+				_baseline_since="$_now"
+			elif [ "$_fp" != "$_baseline_fp" ]; then
+				# Replaced in place: treat as this generation's export.
+				break
+			elif [ $((_now - _baseline_since)) -ge "$_stabilize" ]; then
+				# Unchanged for the whole window: no purge happened, trust it.
+				break
+			fi
+		else
+			_purge_seen=1
+			_baseline_fp=""
+		fi
+		sleep "$_poll" 2>/dev/null || sleep 1
+	done
+	MITM_CA_WAIT_SECONDS=$(( $(date +%s) - _start ))
+	return 0
+}
+
+# Self-heal for independent egress restarts: kubelet can recreate the egress
+# sidecar (pod restartPolicy Always, recycle=restart) without restarting the
+# sandbox container, and every egress restart rotates the exported CA while
+# bootstrap.sh never re-runs. Watch the exported CA for the sandbox lifetime
+# and reinstall trust (system store, merged bundle, NSS, JDK) whenever its
+# content changes. The env vars bootstrap exported (REQUESTS_CA_BUNDLE,
+# SSL_CERT_FILE, NODE_EXTRA_CA_CERTS) all point at file paths whose content
+# is refreshed in place, so newly spawned processes and per-connection
+# readers pick up the rotated CA without re-exec. Processes that cached the
+# old CA in memory at startup (e.g. JVM cacerts) still need a restart — the
+# change log line below says so. Interval: MITM_CA_WATCH_INTERVAL (default 30s).
+watch_mitm_ca() {
+	ca="$1"
+	_interval="${MITM_CA_WATCH_INTERVAL:-30}"
+	_prev="$(_ca_fingerprint "$ca")"
+	echo "watching mitm CA at $ca for rotation (interval ${_interval}s)" >&2
+	while :; do
+		sleep "$_interval" 2>/dev/null || sleep 1
+		_cur="$(_ca_fingerprint "$ca")"
+		if [ -z "$_cur" ]; then
+			# Purged by a restarting egress; keep waiting for the new export.
+			continue
+		fi
+		if [ "$_cur" != "$_prev" ]; then
+			_prev="$_cur"
+			echo "mitm CA changed (egress restarted?); reinstalling trust stores; restart long-running processes that cached the old CA" >&2
+			trust_mitm_ca "$ca" || true
+			trust_mitm_ca_nss "$ca" || true
+			trust_mitm_ca_jdk "$ca" || true
+		fi
+	done
+}
+
+MITM_CA="${OPENSANDBOX_MITM_CA:-/opt/opensandbox/mitmproxy-ca-cert.pem}"
+if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
+	if wait_for_trustworthy_mitm_ca "$MITM_CA"; then
+		echo "mitm CA ready at $MITM_CA after ${MITM_CA_WAIT_SECONDS}s"
 		if ! trust_mitm_ca "$MITM_CA"; then
 			echo "warning: failed to install mitm CA into system trust store; TLS interception may not work for system libraries" >&2
 		fi
+	else
+		echo "warning: timed out after ${MITM_CA_WAIT_TIMEOUT:-300}s waiting for $MITM_CA (egress mitm CA export); continuing without system CA trust" >&2
 	fi
 
 	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
@@ -486,6 +590,9 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 			export REQUESTS_CA_BUNDLE="$MITM_CA"
 			export SSL_CERT_FILE="$MITM_CA"
 		fi
+
+		# Track egress CA rotation for the sandbox lifetime (see watch_mitm_ca).
+		watch_mitm_ca "$MITM_CA" &
 	fi
 fi
 

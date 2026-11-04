@@ -187,6 +187,30 @@ jobs:
         working-directory: components/execd
         run: python3 tests/test_mitm_ca_jdk.py
 
+      - name: MITM CA race bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: |
+          chmod +x tests/mitm_ca_race.sh
+          bash tests/mitm_ca_race.sh
+
+      - name: MITM CA rotation watcher bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: |
+          chmod +x tests/mitm_ca_watch.sh
+          bash tests/mitm_ca_watch.sh
+
+      - name: MITM CA egress rotation smoke (full bootstrap)
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: |
+          chmod +x tests/mitm_ca_smoke.sh
+          bash tests/mitm_ca_smoke.sh
+
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
