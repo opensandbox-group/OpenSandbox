@@ -1,0 +1,64 @@
+name: E2E Image Save Debug
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Docker environment
+        run: |
+          docker version
+          docker info | grep -iE 'containerd image store|storage driver|driver' || true
+
+      - name: Pull alpine pinned (rm first)
+        run: |
+          docker image rm -f alpine:latest || true
+          docker pull --platform linux/amd64 alpine:latest
+          docker images --tree alpine:latest || true
+
+      - name: Inspect saved archive (alpine)
+        run: |
+          docker save alpine:latest -o /tmp/alpine.tar
+          tar -xOf /tmp/alpine.tar index.json | jq '{mediaType, entries: [.manifests[] | {mediaType, digest, platform, annotations}]}'
+          echo "--- does the missing CI digest appear? ---"
+          tar -xOf /tmp/alpine.tar index.json | jq -r '.. | .digest? // empty' | grep -n "6708ca119efec5c3fdcad5dc95d8a28a529aad8debc95872b7e12b3941882f55" || echo "NOT in index"
+          tar -tf /tmp/alpine.tar | grep -n "6708ca119efec5c3fdcad5dc95d8a28a529aad8debc95872b7e12b3941882f55" || echo "NOT a blob in tar"
+          tar -tvf /tmp/alpine.tar | head -30
+
+      - name: Inspect saved archive (registry:2)
+        run: |
+          docker image rm -f registry:2 || true
+          docker pull --platform linux/amd64 registry:2
+          docker images --tree registry:2 || true
+          docker save registry:2 -o /tmp/registry.tar
+          tar -xOf /tmp/registry.tar index.json | jq '{mediaType, entries: [.manifests[] | {mediaType, digest, platform, annotations}]}'
+
+      - name: Import experiments on containerd 1.5.8 node
+        run: |
+          docker run -d --privileged --name n122 --hostname n122 kindest/node:v1.22.4
+          for i in $(seq 1 30); do docker exec n122 bash -c 'ctr --namespace=k8s.io images ls >/dev/null 2>&1' && break; sleep 2; done
+
+          echo "=== [1] current PR command (multi-entry archive) ==="
+          docker exec -i n122 bash -c 'ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -' < /tmp/alpine.tar && echo PASS || echo "FAIL(expected)"
+
+          echo "=== [2] docker save --platform variant ==="
+          docker save --platform linux/amd64 alpine:latest -o /tmp/alpine-amd64.tar && echo SAVE_PLATFORM_OK || echo SAVE_PLATFORM_UNSUPPORTED
+          if [ -f /tmp/alpine-amd64.tar ]; then
+            tar -xOf /tmp/alpine-amd64.tar index.json | jq '{entries: [.manifests[] | {digest, platform}]}'
+            docker exec n122 bash -c 'ctr --namespace=k8s.io images rm $(ctr --namespace=k8s.io images ls -q)' || true
+            docker exec -i n122 bash -c 'ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -' < /tmp/alpine-amd64.tar && echo PASS || echo FAIL
+            docker exec n122 bash -c 'ctr --namespace=k8s.io images ls; ctr --namespace=k8s.io images check'
+          fi
+
+          echo "=== [3] no-unpack + retag + unpack variant (on original multi-entry archive) ==="
+          docker exec n122 bash -c 'ctr --namespace=k8s.io images rm $(ctr --namespace=k8s.io images ls -q)' || true
+          docker exec -i n122 bash -c 'ctr --namespace=k8s.io images import --digests --no-unpack --snapshotter=overlayfs -' < /tmp/alpine.tar && echo IMPORT_OK || echo IMPORT_FAIL
+          AMD64=$(docker buildx imagetools inspect alpine:latest --raw | jq -r '.manifests[] | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -1)
+          echo "amd64 manifest: $AMD64"
+          if [ -n "$AMD64" ]; then
+            docker exec n122 bash -c "ctr --namespace=k8s.io images tag --force docker.io/library/alpine@$AMD64 docker.io/library/alpine:latest"
+            docker exec n122 bash -c 'ctr --namespace=k8s.io images unpack --snapshotter=overlayfs docker.io/library/alpine:latest' && echo UNPACK_OK || echo UNPACK_FAIL
+            docker exec n122 bash -c 'ctr --namespace=k8s.io images ls; ctr --namespace=k8s.io images check'
+          fi
