@@ -131,11 +131,17 @@ func reconcileTick(
 	ownerID := cfg.OwnerID
 	lockTTL := cfg.PrimaryLockTTL
 
+	// A maintenance tick during creation backoff must neither extend the retry
+	// deadline on a store error nor clear it on a successful shrink.
+	maintenanceOnly := state.shouldBackoff()
+
 	// Step 1: Try to acquire the primary lock.
 	acquired, err := store.TryAcquirePrimaryLock(ctx, poolName, ownerID, lockTTL)
 	if err != nil {
 		logger.Warn("reconcile: lock acquire error", "pool_name", poolName, "error", err)
-		state.recordFailure(err)
+		if !maintenanceOnly {
+			state.recordFailure(err)
+		}
 		return
 	}
 	if !acquired {
@@ -196,7 +202,9 @@ func reconcileTick(
 			sandboxID, takeErr := store.TryTakeIdle(ctx, poolName)
 			if takeErr != nil {
 				logger.Warn("reconcile: TryTakeIdle error during shrink", "pool_name", poolName, "error", takeErr)
-				state.recordFailure(takeErr)
+				if !maintenanceOnly {
+					state.recordFailure(takeErr)
+				}
 				shrinkErr = true
 				break
 			}
@@ -206,7 +214,7 @@ func reconcileTick(
 			deleteFn(sandboxID)
 			removedCount++
 		}
-		if !shrinkErr && removedCount > 0 {
+		if !maintenanceOnly && !shrinkErr && removedCount > 0 {
 			state.recordSuccess()
 		}
 		return
@@ -217,7 +225,7 @@ func reconcileTick(
 	if deficit <= 0 {
 		return
 	}
-	if state.shouldBackoff() {
+	if maintenanceOnly {
 		logger.Debug("reconcile: backoff active, skipping replenish",
 			"pool_name", poolName,
 			"deficit", deficit)

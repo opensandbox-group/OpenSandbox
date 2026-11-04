@@ -80,9 +80,57 @@ func TestPool_ReconcileLoop_MaintainsIdleDuringBackoff(t *testing.T) {
 			if got := creates.Load(); got != 0 {
 				t.Errorf("create attempts = %d during backoff, want 0", got)
 			}
-			if nearExpiry && !state.shouldBackoff() {
-				t.Error("reaping cleared creation backoff")
+			if !state.shouldBackoff() {
+				t.Error("maintenance cleared creation backoff")
 			}
 		})
+	}
+}
+
+func TestReconciler_LockOutageDoesNotExtendActiveBackoff(t *testing.T) {
+	ctx := context.Background()
+	lockAttempts := 0
+	store := &mockLockStore{
+		InMemoryPoolStateStore: NewInMemoryPoolStateStore(),
+		acquireLockFn: func(context.Context, string, string, time.Duration) (bool, error) {
+			lockAttempts++
+			return false, errors.New("store unavailable")
+		},
+	}
+	cfg := defaultTestPoolConfig(store)
+	state := newReconcileState(cfg.DegradedThreshold)
+	if err := store.SetMaxIdle(ctx, cfg.PoolName, 1); err != nil {
+		t.Fatal(err)
+	}
+	var creates atomic.Int32
+	tick := func() {
+		reconcileTick(ctx, cfg, store, state, testLogger, func(context.Context, PooledSandboxCreateReason) (string, error) {
+			creates.Add(1)
+			return "replacement", nil
+		}, func(string) {})
+	}
+	for i := 0; i < cfg.DegradedThreshold; i++ {
+		tick()
+	}
+	deadline := state.backoffUntil
+	if !state.shouldBackoff() {
+		t.Fatal("expected creation backoff after lock failures")
+	}
+	for i := 0; i < 15; i++ {
+		tick()
+	}
+	if lockAttempts != cfg.DegradedThreshold+15 || state.backoffUntil != deadline {
+		t.Fatalf("lock attempts = %d, deadline moved by %v", lockAttempts, state.backoffUntil.Sub(deadline))
+	}
+
+	store.acquireLockFn = nil
+	tick()
+	if creates.Load() != 0 {
+		t.Fatal("warmup ran before the deadline")
+	}
+	state.backoffUntil = time.Now().Add(-time.Second)
+	tick()
+	if creates.Load() != 1 || state.backoffAttempts != 0 {
+		t.Fatal("expected warmup to resume and clear backoff after recovery")
 	}
 }
