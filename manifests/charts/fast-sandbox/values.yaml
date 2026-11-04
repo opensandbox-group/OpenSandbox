@@ -90,7 +90,7 @@ controller:
   # fastlet Pods. Defaults to the released companion image published by the
   # umbrella release (build-fast-sandbox.sh); override for clusters that
   # cannot pull from docker.io.
-  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.2.0
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.2.1-rc.1
   # -- Namespaces the controller informer cache watches; empty watches the
   # whole cluster (upstream "--namespaces" flag, introduced at the f44561a
   # pin). When set, the list must cover every namespace holding
