@@ -270,13 +270,7 @@ func dropEstablishedRequested(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
 	}
-	v := strings.TrimSpace(r.URL.Query().Get("dropEstablished"))
-	switch strings.ToLower(v) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return constants.IsTruthy(r.URL.Query().Get("dropEstablished"))
 }
 
 // dropEstablishedUnsupportedReason returns a non-empty message when the
@@ -695,7 +689,9 @@ func (s *policyServer) handlePost(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("credential vault policy validation: %v", err), http.StatusBadRequest)
 			return
 		}
-		ok, dropped := s.commitPolicy(r.Context(), w, def, "reset", dropEstablishedRequested(r))
+		// POST is not part of the documented dropEstablished surface (only
+		// PATCH and DELETE are), so it always takes the no-teardown path.
+		ok, dropped := s.commitPolicy(r.Context(), w, def, "reset", false)
 		if !ok {
 			return
 		}
@@ -727,7 +723,7 @@ func (s *policyServer) handlePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("credential vault policy validation: %v", err), http.StatusBadRequest)
 		return
 	}
-	ok, dropped := s.commitPolicy(r.Context(), w, pol, "post", dropEstablishedRequested(r))
+	ok, dropped := s.commitPolicy(r.Context(), w, pol, "post", false)
 	if !ok {
 		return
 	}
@@ -855,12 +851,22 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	if removed == 0 {
 		mode := modeFromPolicy(base)
-		writeJSON(w, http.StatusOK, policyStatusResponse{
+		resp := policyStatusResponse{
 			Status:          "ok",
 			Mode:            mode,
 			EnforcementMode: s.enforcementMode,
 			Reason:          "no matching targets found",
-		})
+		}
+		if dropEstablishedRequested(r) {
+			// Same 501 contract as an applied change, and an explicit 0 so
+			// callers can tell "zero matched" from "parameter ignored".
+			if !s.dropEstablishedSupported(w) {
+				return
+			}
+			zero := 0
+			resp.DroppedEstablished = &zero
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -904,23 +910,30 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 // commitPolicy applies one change under s.mu. The experimental branch holds
 // its process lease through disk → nft → exact receiver ACK → proxy/base.
 // The default-off legacy branch retains its existing disk/nft/proxy behavior.
+// dropEstablishedSupported writes a 501 and returns false when this sidecar
+// cannot honor dropEstablished. Caller holds s.mu.
+func (s *policyServer) dropEstablishedSupported(w http.ResponseWriter) bool {
+	if s.revisionRecovery != nil {
+		http.Error(w, "dropEstablished is not supported with the experimental revision runtime", http.StatusNotImplemented)
+		return false
+	}
+	if reason := s.dropEstablishedUnsupportedReason(); reason != "" {
+		http.Error(w, reason, http.StatusNotImplemented)
+		return false
+	}
+	if s.nft == nil {
+		// dns-only enforcement has no nft chain to install teardown rules
+		// in; answering 200 with droppedEstablished=0 would be
+		// indistinguishable from "matched zero flows".
+		http.Error(w, "dropEstablished requires dns+nft enforcement", http.StatusNotImplemented)
+		return false
+	}
+	return true
+}
+
 func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, pol *policy.NetworkPolicy, op string, dropEstablished bool) (ok bool, dropped *int) {
-	if dropEstablished {
-		if s.revisionRecovery != nil {
-			http.Error(w, "dropEstablished is not supported with the experimental revision runtime", http.StatusNotImplemented)
-			return false, nil
-		}
-		if reason := s.dropEstablishedUnsupportedReason(); reason != "" {
-			http.Error(w, reason, http.StatusNotImplemented)
-			return false, nil
-		}
-		if s.nft == nil {
-			// dns-only enforcement has no nft chain to install teardown rules
-			// in; answering 200 with droppedEstablished=0 would be
-			// indistinguishable from "matched zero flows".
-			http.Error(w, "dropEstablished requires dns+nft enforcement", http.StatusNotImplemented)
-			return false, nil
-		}
+	if dropEstablished && !s.dropEstablishedSupported(w) {
+		return false, nil
 	}
 	if s.revisionRecovery != nil {
 		m := s.revisionMitmLocked()

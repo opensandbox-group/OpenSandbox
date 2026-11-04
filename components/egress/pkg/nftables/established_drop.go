@@ -17,9 +17,15 @@ package nftables
 import (
 	"net/netip"
 	"sort"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
+
+// defaultEstablishedCarryTTL is the Linux default for
+// nf_conntrack_tcp_timeout_established (432000s), used when the sysctl cannot
+// be read.
+const defaultEstablishedCarryTTL = 5 * 24 * time.Hour
 
 // EstablishedPortDrop is a destination:port teardown (or keep) target for
 // TCP flows. Exactly one of Addr/Prefix is set for a scoped target; when both
@@ -643,6 +649,12 @@ func removedPrefixParts(newPol *policy.NetworkPolicy, oldPfx netip.Prefix) []net
 		return nil
 	}
 	oldPfx = oldPfx.Masked()
+	// Under a default-allow new policy only the explicit portless denies stop
+	// traffic, and those already land in the Deny bucket; nothing else in the
+	// old range belongs in the removed bucket.
+	if newPol != nil && newPol.DefaultAction == policy.ActionAllow {
+		return nil
+	}
 	if prefixFullyAllowedPortless(newPol, oldPfx) {
 		return nil
 	}

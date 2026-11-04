@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
@@ -55,7 +56,8 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 		for _, tok := range f[6:] {
 			if v, ok := strings.CutPrefix(tok, "mark="); ok {
 				// Marked proxy upstream flows are accepted ahead of teardown.
-				if n, err := strconv.ParseUint(v, 0, 32); err == nil && n&constants.MarkValue != 0 {
+				// The chain matches `meta mark 0x1` exactly, so mirror that.
+				if n, err := strconv.ParseUint(v, 0, 32); err == nil && n == constants.MarkValue {
 					marked = true
 				}
 				continue
@@ -77,4 +79,23 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 		}
 	}
 	return matched
+}
+
+// conntrackEstablishedTimeoutPath is the kernel's idle timeout for established
+// TCP conntrack entries; a var so tests can point it elsewhere.
+var conntrackEstablishedTimeoutPath = "/proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established"
+
+// establishedCarryTTL bounds how long a dropEstablished teardown set is
+// carried across later full applies: once the conntrack established timeout
+// has passed, any flow the drop targeted has been idle long enough to expire.
+func establishedCarryTTL() time.Duration {
+	data, err := os.ReadFile(conntrackEstablishedTimeoutPath)
+	if err != nil {
+		return defaultEstablishedCarryTTL
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || secs <= 0 {
+		return defaultEstablishedCarryTTL
+	}
+	return time.Duration(secs) * time.Second
 }

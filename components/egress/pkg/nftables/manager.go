@@ -85,6 +85,12 @@ type Manager struct {
 	// `delete table` and would otherwise reopen flows a dropEstablished commit
 	// closed (e.g. ones still retransmitting).
 	lastDrops EstablishedDrops
+	// lastDropsAt is when the dropEstablished commit behind lastDrops was
+	// applied. Carries keep the original timestamp and stop once the conntrack
+	// established timeout has passed, so a sandbox that tightens once does not
+	// hold (and re-emit) its teardown set forever.
+	lastDropsAt time.Time
+	now         func() time.Time
 }
 
 func NewManagerWithRunner(r runner) *Manager {
@@ -108,6 +114,7 @@ func newManager(r runner, opts Options) *Manager {
 		opts:    opts,
 		tracker: newConnectionTracker(),
 		domains: make(map[string]*resolvedDomain),
+		now:     time.Now,
 	}
 }
 
@@ -118,10 +125,10 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 		p = policy.DefaultDenyPolicy()
 	}
 	var carry EstablishedDrops
-	if !m.lastDrops.Empty() {
+	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
 		carry = m.lastDrops.stillRelevant(p, m.learnedAddrsLocked())
 	}
-	_, err := m.applyStaticDropEstablishedLocked(ctx, p, carry, 0)
+	_, err := m.applyStaticDropEstablishedLocked(ctx, p, carry, 0, m.lastDropsAt)
 	return err
 }
 
@@ -139,12 +146,17 @@ func (m *Manager) learnedAddrsLocked() []netip.Addr {
 	return out
 }
 
-// ApplyStaticDropEstablished applies p like ApplyStatic, and when drops is
+// applyStaticDropEstablished applies p like ApplyStatic, and when drops is
 // non-empty installs destination drops ahead of the established/related accept
 // so keep-alive flows to removed allows stop on the next packet. The returned
 // count is the number of matching TCP conntrack flows observed just before the
 // apply (best-effort; 0 when /proc/net/nf_conntrack is unavailable).
-func (m *Manager) ApplyStaticDropEstablished(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops) (int, error) {
+//
+// Test-only: drops is a caller-supplied snapshot counted and computed before
+// m.mu is taken, so a concurrent AddResolvedDomain can admit an address in
+// between. Production code must use ApplyStaticComputingEstablishedDrops,
+// which snapshots, computes and applies under one lock.
+func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops) (int, error) {
 	matched, countErr := countMatchingConntrackFlows(drops)
 	if countErr != nil {
 		log.Warnf("nftables: counting conntrack flows for established drops failed: %v", countErr)
@@ -153,7 +165,7 @@ func (m *Manager) ApplyStaticDropEstablished(ctx context.Context, p *policy.Netw
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.applyStaticDropEstablishedLocked(ctx, p, drops, matched)
+	return m.applyStaticDropEstablishedLocked(ctx, p, drops, matched, m.now())
 }
 
 // ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
@@ -178,10 +190,10 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 		log.Warnf("nftables: counting conntrack flows for established drops failed: %v", countErr)
 		matched = 0
 	}
-	return m.applyStaticDropEstablishedLocked(ctx, newPol, drops, matched)
+	return m.applyStaticDropEstablishedLocked(ctx, newPol, drops, matched, m.now())
 }
 
-func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops, matched int) (int, error) {
+func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops, matched int, committedAt time.Time) (int, error) {
 	if m.quiesced.Load() {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
 	}
@@ -206,7 +218,7 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 					m.tracker.clear()
 					m.domainPolicy = p
 					m.domains = make(map[string]*resolvedDomain)
-					m.lastDrops = drops
+					m.setLastDropsLocked(drops, committedAt)
 					telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 					telemetry.RecordNftablesUpdate()
 					return matched, nil
@@ -230,11 +242,20 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	m.tracker.clear()
 	m.domainPolicy = p
 	m.domains = make(map[string]*resolvedDomain)
-	m.lastDrops = drops
+	m.setLastDropsLocked(drops, committedAt)
 	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 	telemetry.RecordNftablesUpdate()
 	log.Infof("nftables: static policy applied successfully (established_drop_flows=%d)", matched)
 	return matched, nil
+}
+
+func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
+	m.lastDrops = drops
+	if drops.Empty() {
+		m.lastDropsAt = time.Time{}
+		return
+	}
+	m.lastDropsAt = committedAt
 }
 
 func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
@@ -302,7 +323,7 @@ func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 	m.tracker.clear()
 	m.domainPolicy = nil
 	m.domains = make(map[string]*resolvedDomain)
-	m.lastDrops = EstablishedDrops{}
+	m.setLastDropsLocked(EstablishedDrops{}, time.Time{})
 	return nil
 }
 
@@ -390,14 +411,17 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	if ep := opts.UpstreamProxy; ep != nil {
 		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
 	}
-	// DNS-learned allows bypass established teardown so a later resolve
+	// Explicit denies come before the DNS-learned accepts, mirroring the
+	// new-connection path: an allowed domain that re-resolves to an explicitly
+	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
+	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
+	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) is not pinned by a stale drop from a prior apply; the
 	// dyn sets are recreated empty on every full apply.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
-	// Explicit denies first, then still-allowed destinations (keeps and the
-	// static allow sets), then removed allows, then the blanket verdict.
-	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
+	// Then still-allowed destinations (keeps and the static allow sets), then
+	// removed allows, then the blanket verdict.
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, allowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, allowV6Set)

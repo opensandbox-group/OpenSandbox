@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
@@ -168,7 +169,7 @@ func TestApplyStaticDropEstablished_EmitsDropsBeforeEstablishedAccept(t *testing
 	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[]}`)
 	require.NoError(t, err)
 
-	matched, err := m.ApplyStaticDropEstablished(context.Background(), p, EstablishedDrops{
+	matched, err := m.applyStaticDropEstablished(context.Background(), p, EstablishedDrops{
 		Addrs:    []netip.Addr{netip.MustParseAddr("203.0.113.10")},
 		Prefixes: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
 	})
@@ -202,7 +203,7 @@ func TestApplyStaticDropEstablished_CatchAllEmitsDrop(t *testing.T) {
 	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"1.1.1.1"}]}`)
 	require.NoError(t, err)
 
-	_, err = m.ApplyStaticDropEstablished(context.Background(), p, EstablishedDrops{
+	_, err = m.applyStaticDropEstablished(context.Background(), p, EstablishedDrops{
 		CatchAll:  true,
 		KeepAddrs: []netip.Addr{netip.MustParseAddr("1.1.1.1")},
 	})
@@ -222,7 +223,7 @@ func TestApplyStaticDropEstablished_PortDropRule(t *testing.T) {
 	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[]}`)
 	require.NoError(t, err)
 
-	_, err = m.ApplyStaticDropEstablished(context.Background(), p, EstablishedDrops{
+	_, err = m.applyStaticDropEstablished(context.Background(), p, EstablishedDrops{
 		PortDrops: []EstablishedPortDrop{{
 			Addr:  netip.MustParseAddr("1.1.1.1"),
 			Ports: []int{443},
@@ -347,8 +348,10 @@ func TestBuildRuleset_InfraAcceptsPrecedeEstablishedTeardown(t *testing.T) {
 ipv4     2 tcp      6 431999 ESTABLISHED src=10.0.0.2 dst=8.8.8.8 sport=1 dport=443 src=8.8.8.8 dst=10.0.0.2 sport=443 dport=1 [ASSURED] mark=1 zone=0 use=2
 ipv4     2 tcp      6 431999 ESTABLISHED src=127.0.0.1 dst=127.0.0.1 sport=2 dport=15353 src=127.0.0.1 dst=127.0.0.1 sport=15353 dport=2 [ASSURED] mark=0 zone=0 use=2
 ipv4     2 tcp      6 431999 ESTABLISHED src=10.0.0.2 dst=8.8.4.4 sport=3 dport=443 src=8.8.4.4 dst=10.0.0.2 sport=443 dport=3 [ASSURED] mark=0 zone=0 use=2
+ipv4     2 tcp      6 431999 ESTABLISHED src=10.0.0.2 dst=8.8.4.4 sport=4 dport=443 src=8.8.4.4 dst=10.0.0.2 sport=443 dport=4 [ASSURED] mark=0x3 zone=0 use=2
 `)
-	require.Equal(t, 1, countMatchingConntrackFlowsData(data, drops))
+	// mark=0x3 is not exempt: the chain matches `meta mark 0x1` exactly.
+	require.Equal(t, 2, countMatchingConntrackFlowsData(data, drops))
 }
 
 func TestComputeEstablishedDrops_AllowDenyOverlapTearsDownDeny(t *testing.T) {
@@ -369,7 +372,8 @@ func TestComputeEstablishedDrops_AllowDenyOverlapTearsDownDeny(t *testing.T) {
 	require.NoError(t, err)
 	script := (*scripts)[len(*scripts)-1]
 	deny := ruleIndex(t, script, "ip daddr 1.2.3.4 ct state established,related drop")
-	require.Less(t, ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept"), deny)
+	require.Less(t, deny, ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept"),
+		"explicit deny teardown must precede the DNS-learned established accept")
 	require.Less(t, deny, ruleIndex(t, script, "ip daddr @allow_v4 ct state established,related accept"),
 		"deny teardown must precede the static allow established accept")
 }
@@ -551,4 +555,38 @@ func TestApplyStatic_ReemitsCatchAllUntilDefaultAllow(t *testing.T) {
 
 	require.NoError(t, m.ApplyStatic(context.Background(), oldPol))
 	require.NotContains(t, (*scripts)[len(*scripts)-1], blanketDrop)
+}
+
+func TestRemovedPrefixParts_DefaultAllowNewPolicyKeepsPermittedRange(t *testing.T) {
+	oldPol := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.0/8"}]}`)
+	newPol := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"10.0.0.0/24"}]}`)
+
+	drops := ComputeEstablishedDrops(oldPol, newPol, nil)
+	require.Empty(t, drops.Prefixes, "default-allow new policy must not tear down the still-permitted /8")
+	require.False(t, drops.Matches(netip.MustParseAddr("10.9.9.9")))
+	require.True(t, drops.Matches(netip.MustParseAddr("10.0.0.5")), "explicit deny still tears down")
+}
+
+func TestApplyStatic_CarryAgesOutAfterConntrackTimeout(t *testing.T) {
+	m, scripts := recordingManager()
+	now := time.Unix(1_000_000, 0)
+	m.now = func() time.Time { return now }
+	oldPol := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"203.0.113.10"}]}`)
+	newPol := mustPolicy(t, `{"defaultAction":"deny","egress":[]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), oldPol, newPol)
+	require.NoError(t, err)
+	require.False(t, m.lastDrops.Empty())
+	committed := m.lastDropsAt
+
+	const drop = "ip daddr 203.0.113.10 ct state established,related drop"
+	now = now.Add(time.Minute)
+	require.NoError(t, m.ApplyStatic(context.Background(), newPol))
+	require.Contains(t, (*scripts)[len(*scripts)-1], drop, "carry is re-emitted inside the window")
+	require.Equal(t, committed, m.lastDropsAt, "carry keeps the original commit time")
+
+	now = committed.Add(establishedCarryTTL() + time.Second)
+	require.NoError(t, m.ApplyStatic(context.Background(), newPol))
+	require.NotContains(t, (*scripts)[len(*scripts)-1], drop, "carry expires after the conntrack established timeout")
+	require.True(t, m.lastDrops.Empty())
+	require.True(t, m.lastDropsAt.IsZero())
 }

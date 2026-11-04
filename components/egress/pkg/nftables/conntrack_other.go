@@ -16,6 +16,12 @@
 
 package nftables
 
+import "time"
+
 func countMatchingConntrackFlows(EstablishedDrops) (int, error) {
 	return 0, nil
+}
+
+func establishedCarryTTL() time.Duration {
+	return defaultEstablishedCarryTTL
 }

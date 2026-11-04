@@ -84,6 +84,7 @@ func TestHandleDelete_WithoutDropEstablishedLeavesConntrackAlone(t *testing.T) {
 func TestDropEstablishedRequested(t *testing.T) {
 	require.True(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=true", nil)))
 	require.True(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=1", nil)))
+	require.True(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=y", nil)), "must match constants.IsTruthy")
 	require.False(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy", nil)))
 	require.False(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=false", nil)))
 }
@@ -144,4 +145,65 @@ func TestCommitPolicy_DropEstablishedUnsupportedWithoutNft(t *testing.T) {
 	require.Equal(t, http.StatusNotImplemented, w.Code, w.Body.String())
 	require.Contains(t, w.Body.String(), "dns+nft")
 	require.Same(t, initial, proxy.updated, "policy must not change on 501")
+}
+
+func TestHandleDelete_DropEstablishedNoMatchReportsZero(t *testing.T) {
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"deb.debian.org"}]}`)
+	require.NoError(t, err)
+	nft := &stubNft{}
+	srv := &policyServer{
+		proxy:           &stubProxy{updated: initial},
+		nft:             nft,
+		enforcementMode: "dns+nft",
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=true", strings.NewReader(`["absent.example.com"]`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, 0, nft.calls)
+
+	var resp policyStatusResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.NotNil(t, resp.DroppedEstablished, "field must be present whenever dropEstablished was set")
+	require.Equal(t, 0, *resp.DroppedEstablished)
+}
+
+func TestHandleDelete_DropEstablishedNoMatchStillHonors501(t *testing.T) {
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[]}`)
+	require.NoError(t, err)
+	srv := &policyServer{
+		proxy:           &stubProxy{updated: initial},
+		enforcementMode: "dns",
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=true", strings.NewReader(`["absent.example.com"]`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+	require.Equal(t, http.StatusNotImplemented, w.Code, w.Body.String())
+}
+
+func TestHandlePost_IgnoresDropEstablished(t *testing.T) {
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"deb.debian.org"}]}`)
+	require.NoError(t, err)
+	nft := &stubNft{
+		domains: map[string][]netip.Addr{
+			"deb.debian.org": {netip.MustParseAddr("203.0.113.10")},
+		},
+		dropMatched: 2,
+	}
+	srv := &policyServer{
+		proxy:           &stubProxy{updated: initial},
+		nft:             nft,
+		enforcementMode: "dns+nft",
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/policy?dropEstablished=true", strings.NewReader(`{"defaultAction":"deny","egress":[]}`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.True(t, nft.lastDrops.Empty(), "POST is outside the documented dropEstablished surface")
+
+	var resp policyStatusResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Nil(t, resp.DroppedEstablished)
 }

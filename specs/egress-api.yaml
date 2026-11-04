@@ -87,7 +87,10 @@ paths:
             keep-alive flows are dropped. Opt-in because tearing down long-lived
             connections can surprise callers that only meant to block new dials.
             The teardown rules stay installed across later policy applies until
-            the destination is allowed again.
+            the destination is allowed again or the kernel's established-flow
+            conntrack timeout (`nf_conntrack_tcp_timeout_established`, 5 days by
+            default) has passed since the change. `POST /policy` ignores this
+            parameter.
 
             Unsupported configurations return `501 Not Implemented` without
             changing the policy: `dns`-only enforcement (no nftables chain), the
@@ -175,7 +178,10 @@ paths:
             keep-alive flows are dropped. Opt-in because tearing down long-lived
             connections can surprise callers that only meant to block new dials.
             The teardown rules stay installed across later policy applies until
-            the destination is allowed again.
+            the destination is allowed again or the kernel's established-flow
+            conntrack timeout (`nf_conntrack_tcp_timeout_established`, 5 days by
+            default) has passed since the change. `POST /policy` ignores this
+            parameter.
 
             Unsupported configurations return `501 Not Implemented` without
             changing the policy: `dns`-only enforcement (no nftables chain), the
