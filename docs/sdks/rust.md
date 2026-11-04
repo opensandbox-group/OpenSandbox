@@ -40,7 +40,7 @@ Or depend on the repository directly:
 opensandbox = { git = "https://github.com/opensandbox-group/OpenSandbox", branch = "main" }
 ```
 
-The MSRV is Rust 1.75. Only an async runtime is required at compile time; the SDK builds its own `reqwest` clients and does not need a global runtime handle.
+The MSRV is Rust 1.88. The floor is set by the dependency tree rather than by the SDK itself: `reqwest`'s TLS stack pulls in `icu_*` crates that require 1.88. Only an async runtime is required at compile time; the SDK builds its own `reqwest` clients and does not need a global runtime handle.
 
 ## Quick Start
 
@@ -139,6 +139,10 @@ A `503` carrying `OpenSandbox-Wake: expired` is retried for every method, includ
 
 `Retry-After` from the server takes precedence over the computed backoff and is capped at 60 seconds. Use `RetryConfig::disabled()` to turn every retry off.
 
+Wake replays respect `wake_overall_deadline` as a hard budget: the pause before a replay is clamped to the time left, and once the budget is spent the request fails instead of sleeping past it. `Retry-After: 0` is honoured, because it means the sandbox is already awake.
+
+Streamed responses (`text/event-stream` and file downloads) have no total timeout, so the caller decides when reading ends. Their handshake is still bounded by `request_timeout`, which returns `Error::Timeout` when the server never answers.
+
 ```rust
 use opensandbox::{ConnectionConfig, RetryConfig};
 
@@ -204,6 +208,8 @@ let patch = BTreeMap::from([("team".to_string(), Some("runtime".to_string()))]);
 sandbox.patch_metadata(&patch).await?;
 ```
 
+`ListSandboxesQuery::metadata` is an exact-match filter. The SDK encodes it as a nested `key=value&…` query string (the lifecycle API parses the value with `parse_qsl(strict_parsing=True)`), so keys and values are escaped twice on the way out and never need manual encoding.
+
 ## Readiness and health
 
 `Sandbox::create` and `Sandbox::connect` wait for execd to answer `/ping`. Tune the budget and interval at connect time:
@@ -230,7 +236,9 @@ println!("healthy: {}", sandbox.is_healthy().await);
 sandbox.ping().await?;
 ```
 
-`Sandbox::connect` retries while the runtime reports `KUBERNETES::POD_IP_NOT_AVAILABLE`; other errors are returned immediately. Set `skip_health_check: true` to resolve the endpoint without probing execd, which helps when execd is deliberately slow to start.
+`Sandbox::connect` and `Sandbox::create` both retry while the runtime reports `KUBERNETES::POD_IP_NOT_AVAILABLE`; other errors are returned immediately. Set `skip_health_check: true` to resolve the endpoint without probing execd, which helps when execd is deliberately slow to start.
+
+The readiness probe itself is bounded by the same budget: a `ping` that never answers returns `Error::ReadyTimeout` once `timeout` is spent instead of blocking on the request timeout.
 
 ## Commands and streaming
 
@@ -241,7 +249,7 @@ use futures_util::StreamExt;
 use opensandbox::{ExecutionEvent, RunCommandRequest};
 
 let request = RunCommandRequest::shell("for i in 1 2 3; do echo line-$i; done")
-    .with_timeout_millis(30_000)
+    .with_timeout(Duration::from_secs(30))
     .with_cwd("/tmp");
 
 let mut stream = sandbox.execd().run_command(&request).await?;
@@ -271,14 +279,21 @@ let execution = sandbox.exec("ls -la /").await?;
 print!("{}", execution.text());
 eprint!("{}", execution.stderr_text());
 for result in &execution.results {
-    println!("{:?}", result.results); // MIME type -> payload
+    for (mime, payload) in &result.results {
+        println!("{mime}: {payload}"); // MIME type -> raw JSON payload
+    }
 }
+println!("exit {:?}, ok = {}", execution.exit_code, execution.success());
 
 let execution = sandbox
     .execd()
     .run_command_collect(&RunCommandRequest::argv(["python", "-V"]))
     .await?;
 ```
+
+`success()` is true only when the stream reported exit code `0` and no error. A stream that ends without a terminal event leaves `exit_code` as `None`, which is not treated as success.
+
+`text()` joins output messages according to `Execution::output_mode`. Command output is line-based (`OutputMode::Lines`, the default): a newline is inserted between messages that did not already end with one. Code execution streams fragments of a single document, so `execute_code_collect` selects `OutputMode::Fragments` and `text()` concatenates them verbatim. Pass the mode explicitly with `text_with(OutputMode::Fragments)` or `collect_with(OutputMode::Fragments)` when streaming yourself. `ExecutionResult::text()` returns the `text` payload (or the legacy `text/plain` key).
 
 Background commands end their stream at the startup acknowledgement; poll the real process state afterwards:
 
@@ -323,7 +338,7 @@ let session = sandbox
 let request = RunInSessionRequest {
     command: "pwd && echo $PATH".to_string(),
     cwd: None,
-    timeout: 0, // milliseconds; zero means no SDK-imposed timeout
+    timeout: Duration::ZERO, // zero means no SDK-imposed timeout
 };
 let _stream = sandbox
     .execd()
@@ -678,9 +693,9 @@ Resolved endpoints are cached per sandbox, port, and proxy mode for 10 minutes b
 | `with_protocol` | `http` or `https` | `http` | `OPEN_SANDBOX_PROTOCOL` |
 | `with_api_key` | Tenant API key | none | `OPEN_SANDBOX_API_KEY` |
 | `with_server_proxy` | Route data-plane traffic through the lifecycle server | `false` | - |
-| `with_request_timeout` | Per-request timeout | 30 seconds | - |
+| `with_request_timeout` | Per-request timeout; also bounds a streamed response's handshake | 30 seconds | - |
 | `with_header` | Extra header on every request | empty | - |
-| `with_auth_header` | Header that carries the API key | `OPEN-SANDBOX-API-KEY` | - |
+| `with_auth_header` | Header that carries the API key on lifecycle calls | `OPEN-SANDBOX-API-KEY` | - |
 | `with_retry` | Retry policy | `RetryConfig::default()` | - |
 | `with_endpoint_host_rewrite` | Rewrite a resolved endpoint host | none | - |
 | `with_endpoint_cache_ttl` | Endpoint cache lifetime | 600 seconds | - |
@@ -898,6 +913,7 @@ Every fallible call returns `opensandbox::Result<T>`, which is `std::result::Res
 | `Error::ReadyTimeout` | execd did not answer `/ping` in time |
 | `Error::TerminalState` | The sandbox reached `Terminated` or `Failed` during creation |
 | `Error::ExecdUnavailable` | execd could not be resolved or reached |
+| `Error::Timeout` | A streamed response's handshake did not complete within the request timeout |
 | `Error::Stream` | The event stream failed |
 
 `ApiError` carries the HTTP `status`, the server `code` and `message`, the optional `request_id`, the parsed `retry_after`, and `wake_expired`:
@@ -917,6 +933,23 @@ match sandbox.info().await {
 ```
 
 `Error::invalid_argument(field, message)` builds the local-validation variant, and `Error::api()` returns the `ApiError` when the failure came from the server.
+
+## Testing
+
+Unit and mock-server tests run with the SDK itself:
+
+```bash
+cd sdks/sandbox/rust
+cargo test --all-targets
+```
+
+Live-server E2E tests live in `tests/e2e_lifecycle.rs` and `tests/e2e_execd.rs`. They are gated by `OPENSANDBOX_E2E=1` so the default `cargo test` stays hermetic. Run them the same way CI does:
+
+```bash
+bash scripts/rust-e2e.sh
+```
+
+Set `RUN_CODE_INTERPRETER_E2E=true` to include the Jupyter code-execution suite.
 
 ## Scope and limitations
 

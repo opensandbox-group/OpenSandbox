@@ -35,7 +35,7 @@ You can also depend on the repository directly:
 opensandbox = { git = "https://github.com/opensandbox-group/OpenSandbox", branch = "main" }
 ```
 
-The MSRV is Rust 1.75. Only an async runtime is required at compile time; the SDK builds its own `reqwest` clients and does not need a global runtime handle.
+The MSRV is Rust 1.88, set by the `icu_*` crates in `reqwest`'s TLS stack rather than by the SDK itself. Only an async runtime is required at compile time; the SDK builds its own `reqwest` clients and does not need a global runtime handle.
 
 ## Quick Start
 
