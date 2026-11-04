@@ -1,7 +1,9 @@
 name: E2E Image Save Debug
 
 on:
-  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/e2e-image-debug.yml"
 
 jobs:
   debug:
