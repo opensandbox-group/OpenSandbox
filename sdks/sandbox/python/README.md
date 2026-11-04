@@ -253,6 +253,39 @@ manual = await Sandbox.create(
 )
 ```
 
+Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewal_policy` moves the expiration to `max(now + extend_seconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0.
+
+```python
+from opensandbox.models.sandboxes import RenewalPolicy, SandboxLifecycle
+
+sandbox = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        renewal_policy=RenewalPolicy(extend_seconds=3600),
+    ),
+)
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `lifecycle.idle_policy` pauses the sandbox after `idle_timeout_seconds` continuously idle seconds (30–86400, `on_idle="pause"` is the only action today). Incoming traffic then wakes it:
+
+```python
+from opensandbox.models.sandboxes import IdlePolicy, SandboxLifecycle
+
+sandbox = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        idle_policy=IdlePolicy(
+            idle_timeout_seconds=600,
+            on_idle="pause",
+        ),
+    ),
+)
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (default 5 attempts / 60 seconds overall, `RetryPolicy.wake_retry_enabled` / `wake_max_attempts` / `wake_overall_deadline`; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. The request that starts a stream wake-retries too; an established stream is never replayed.
+
 ### 2. Custom Health Check
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check.
@@ -523,6 +556,7 @@ The `Sandbox.create()` allows configuring the sandbox environment.
 | `env`           | Environment variables                    | Empty                           |
 | `metadata`      | Custom metadata tags                     | Empty                           |
 | `network_policy` | Optional outbound network policy (egress) | -                             |
+| `lifecycle`      | Pre-start and periodic hooks, `idle_policy` (OSEP-0024) and `renewal_policy` (OSEP-0009) | - |
 | `credential_proxy` | Optional Credential Vault proxy startup settings | -                     |
 | `ready_timeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
 
@@ -543,6 +577,19 @@ sandbox = await Sandbox.create(
     network_policy=NetworkPolicy(
         defaultAction="deny",
         egress=[NetworkRule(action="allow", target="pypi.org")],
+    ),
+)
+```
+
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected:
+
+```python
+sandbox = await Sandbox.create(
+    "python:3.11",
+    connection_config=config,
+    network_policy=NetworkPolicy(
+        defaultAction="deny",
+        egress=[NetworkRule(action="allow", ports=[443, 8443])],
     ),
 )
 ```

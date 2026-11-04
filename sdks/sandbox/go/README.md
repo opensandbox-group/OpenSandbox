@@ -72,6 +72,45 @@ func main() {
 }
 ```
 
+Renew on access instead of on a timer (OSEP-0009): `Lifecycle.RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0.
+
+```go
+sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+    Image: &opensandbox.ImageSpec{URI: "ubuntu"},
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        RenewalPolicy: &opensandbox.RenewalPolicy{ExtendSeconds: 3600},
+    },
+})
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `Lifecycle.IdlePolicy` pauses the sandbox after `IdleTimeoutSeconds` continuously idle seconds (30–86400; `OnIdle` only takes `"pause"` today). Incoming traffic then wakes it:
+
+```go
+idle := 600
+sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+    Image: &opensandbox.ImageSpec{URI: "ubuntu"},
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        IdlePolicy: &opensandbox.IdlePolicy{
+            IdleTimeoutSeconds: &idle,
+            OnIdle:              opensandbox.OnIdlePause,
+        },
+    },
+})
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`WakeRetryEnabled` / `WakeMaxAttempts` / `WakeOverallDeadline` on the retry policy; defaults `DefaultWakeMaxAttempts` / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutError`, and a returned `SandboxAPIError` reports `WakeExpired` for direct inspection. The request that starts a stream wake-retries too; an established stream is never replayed.
+
+A `NetworkRule` can scope by TCP destination ports instead of a target — `Ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `Target` entirely, and combining a domain `Target` with `Ports` is rejected:
+
+```go
+policy := &opensandbox.NetworkPolicy{
+    DefaultAction: "deny",
+    Egress: []opensandbox.NetworkRule{
+        {Action: "allow", Ports: []int{443, 8443}},
+    },
+}
+```
+
 ### Run a command with streaming output
 
 ```go

@@ -109,6 +109,32 @@ Sandbox manual = Sandbox.builder()
     .build();
 ```
 
+Renew on access instead of on a timer (OSEP-0009): `renewalPolicy` moves the expiration to `max(now + extendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0.
+
+```java
+Sandbox sandbox = Sandbox.builder()
+    .connectionConfig(config)
+    .image("ubuntu")
+    .lifecycle(lifecycle -> lifecycle.renewalPolicy(
+        renewal -> renewal.extendSeconds(3600)
+    ))
+    .build();
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `idlePolicy` pauses the sandbox after `idleTimeoutSeconds` continuously idle seconds (30–86400, `onIdle` only takes `OnIdleAction.PAUSE` today). Incoming traffic then wakes it:
+
+```java
+Sandbox sandbox = Sandbox.builder()
+    .connectionConfig(config)
+    .image("ubuntu")
+    .lifecycle(lifecycle -> lifecycle.idlePolicy(
+        idle -> idle.idleTimeoutSeconds(600).onIdle(OnIdleAction.PAUSE)
+    ))
+    .build();
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`wakeRetryEnabled` / `wakeMaxAttempts` / `wakeOverallDeadline` on `RetryPolicy`; defaults 5 attempts / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. Note: the request that starts a stream does not wake-retry in Kotlin today — a marked `503` on a stream start fails fast instead.
+
 ### 2. Custom Health Check
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check.
@@ -459,6 +485,26 @@ Sandbox sandbox = Sandbox.builder()
                 NetworkRule.builder()
                     .action(NetworkRule.Action.ALLOW)
                     .target("pypi.org")
+                    .build()
+            )
+            .build()
+    )
+    .build();
+```
+
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected:
+
+```java
+Sandbox sandbox = Sandbox.builder()
+    .connectionConfig(config)
+    .image("python:3.11")
+    .networkPolicy(
+        NetworkPolicy.builder()
+            .defaultAction(NetworkPolicy.DefaultAction.DENY)
+            .addEgress(
+                NetworkRule.builder()
+                    .action(NetworkRule.Action.ALLOW)
+                    .ports(List.of(443, 8443))
                     .build()
             )
             .build()

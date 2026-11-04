@@ -92,6 +92,40 @@ var manual = await Sandbox.CreateAsync(new SandboxCreateOptions
 
 Note: unlike the Python, JavaScript, and Kotlin SDKs, the C# SDK uses an explicit `ManualCleanup` flag instead of `TimeoutSeconds = null`. This is intentional: `int?` in the current options model cannot reliably distinguish "unset, use the default TTL" from "explicitly request manual cleanup" without making the default creation path ambiguous.
 
+Renew on access instead of on a timer (OSEP-0009): `RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0.
+
+```csharp
+var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "ubuntu",
+    Lifecycle = new SandboxLifecycle
+    {
+        RenewalPolicy = new RenewalPolicy { ExtendSeconds = 3600 },
+    },
+});
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `IdlePolicy` pauses the sandbox after `IdleTimeoutSeconds` continuously idle seconds (30–86400; `OnIdle` only takes `pause` today). Incoming traffic then wakes it:
+
+```csharp
+var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "ubuntu",
+    Lifecycle = new SandboxLifecycle
+    {
+        IdlePolicy = new IdlePolicy
+        {
+            IdleTimeoutSeconds = 600,
+            OnIdle = OnIdleAction.Pause,
+        },
+    },
+});
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`WakeRetryEnabled` / `WakeMaxAttempts` / `WakeOverallDeadlineSeconds` on the connection config; defaults 5 attempts / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. Note: the request that starts a stream does not wake-retry in C# today — a marked `503` on a stream start fails fast instead.
+
 ### Connect to an Existing Sandbox
 
 Use `ConnectAsync` when you already have a sandbox ID and need a new SDK instance bound to it.
@@ -434,6 +468,7 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 | `Env` | Environment variables | `{}` |
 | `Metadata` | Custom metadata tags | `{}` |
 | `NetworkPolicy` | Optional outbound network policy (egress) | - |
+| `Lifecycle` | Pre-start and periodic hooks, `IdlePolicy` (OSEP-0024) and `RenewalPolicy` (OSEP-0009) | - |
 | `CredentialProxy` | Optional Credential Vault proxy startup settings | - |
 | `Volumes` | Optional storage mounts (`Host` / `PVC`, supports `ReadOnly` and `SubPath`) | - |
 | `Extensions` | Extra server-defined fields | `{}` |
@@ -455,6 +490,23 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
         Egress = new List<NetworkRule>
         {
             new() { Action = NetworkRuleAction.Allow, Target = "pypi.org" }
+        }
+    },
+});
+
+// A rule can scope by TCP destination ports instead of a target — Ports
+// (each 1-65535, at most 256 per rule, no duplicates) may replace Target
+// entirely, and combining a domain Target with Ports is rejected.
+var byPorts = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "python:3.11",
+    NetworkPolicy = new NetworkPolicy
+    {
+        DefaultAction = NetworkRuleAction.Deny,
+        Egress = new List<NetworkRule>
+        {
+            new() { Action = NetworkRuleAction.Allow, Ports = new List<int> { 443, 8443 } }
         }
     },
     Volumes = new[]
