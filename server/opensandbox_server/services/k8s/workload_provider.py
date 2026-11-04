@@ -205,8 +205,10 @@ class WorkloadProvider(ABC):
         """
         Get a Failed status if the workload's pods can never be scheduled.
 
-        Unlike get_status this may call the API server, so only the create
-        wait loop uses it, at a limited rate.
+        Meant for a verdict that takes API server calls to reach. Only the
+        create wait loop calls it, off the event loop and at a limited rate
+        while the sandbox is Pending. A provider whose get_status already
+        reports the verdict keeps this default.
 
         Args:
             workload: Workload object

@@ -125,7 +125,8 @@ logger = logging.getLogger(__name__)
 _CLUSTER_LOOKUP_FORBIDDEN_BACKOFF_SECONDS = 600.0
 
 # How often the create wait loop asks the provider whether a Pending sandbox
-# can never be scheduled; the check may list pods.
+# can never be scheduled; the check may list pods. The first check waits one
+# interval too, since the controller has usually not created a pod yet.
 _UNSCHEDULABLE_PROBE_INTERVAL_SECONDS = 5.0
 
 
@@ -361,7 +362,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         start_time = time.monotonic()
         last_state = None
         last_message = None
-        next_unschedulable_probe_at = start_time
+        next_unschedulable_probe_at = start_time + _UNSCHEDULABLE_PROBE_INTERVAL_SECONDS
         pool_capacity_started_at: float | None = None
         pool_capacity_blocked_seconds = 0.0
         if pool_acquisition_timeout_seconds is None:
@@ -464,8 +465,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         await wait_for_change()
                         continue
 
+                    # Some providers list pods to report a status.
                     status_info = _normalize_create_status(
-                        self.workload_provider.get_status(workload)
+                        await asyncio.to_thread(self.workload_provider.get_status, workload)
                     )
                     if (
                         status_info["state"] == "Pending"
