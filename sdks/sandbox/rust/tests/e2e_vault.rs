@@ -353,11 +353,21 @@ async fn vault_substitutes_placeholders_in_query_path_and_body() {
         .expect("create credential vault");
     assert_eq!(state.revision, 1);
 
-    let query_response = vault_curl(&sandbox, "/query-substitution?v=__query_secret__", "").await;
+    let query_response =
+        vault_curl(&sandbox, "/query-substitution?api_key=__query_secret__", "").await;
     assert_eq!(query_response["ok"], true, "{query_response}");
 
-    let path_response = vault_curl(&sandbox, "/tenant/__path_secret__", "").await;
+    let path_response = vault_curl(
+        &sandbox,
+        "/tenant/__path_secret__/resource?tenant=__path_secret__",
+        "",
+    )
+    .await;
     assert_eq!(path_response["ok"], true, "{path_response}");
+    assert_eq!(
+        path_response["queryStillPlaceholder"], true,
+        "path substitution must not leak into the query string: {path_response}"
+    );
 
     let body_response = vault_curl(
         &sandbox,
