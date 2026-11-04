@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
@@ -64,9 +65,29 @@ func LoadImageToKindClusterWithName(name string) error {
 	return err
 }
 
+// LocalDockerPlatform returns the "linux/<arch>" platform string matching the
+// local docker daemon (and therefore the kind node architecture). It falls
+// back to the test binary architecture when the daemon cannot be queried.
+func LocalDockerPlatform() string {
+	out, err := exec.Command("docker", "version", "--format", "{{.Server.Arch}}").Output()
+	if err == nil {
+		if arch := strings.TrimSpace(string(out)); arch != "" {
+			return "linux/" + arch
+		}
+	}
+	return "linux/" + runtime.GOARCH
+}
+
 // LoadPulledImageToKindClusterWithName imports a pulled docker image into the
 // kind node via ctr, because "kind load" fails on single-platform pulls
 // (kubernetes-sigs/kind#4255).
+//
+// The image must have been pulled with an explicit --platform pin. Without
+// one, a docker daemon using the containerd image store keeps the full
+// multi-arch index locally, and "docker save" then exports an OCI index that
+// references platforms whose blobs were never pulled. containerd 1.x nodes
+// (kind v1.22/v1.28) create image records for every entry and fail unpacking
+// them with "content digest ...: not found".
 func LoadPulledImageToKindClusterWithName(name string) error {
 	if IsExternal() {
 		_, _ = fmt.Fprintf(GinkgoWriter, "skipping image import for %q (E2E_MODE=%s)\n", name, Mode())
