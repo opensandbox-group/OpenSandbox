@@ -139,35 +139,19 @@ opensandbox-node-agent:
     vmConsole: /var/lib/fast-sandbox/firecracker
 ```
 
-For the standalone chart, drop the `opensandbox-node-agent` prefix. Set
-`hostPaths.vmConsole` to the FC driver's StateRoot. The chart mounts it
-read-only and grants Sandbox CR list/watch access only when `vm-console` is
-enabled. For direct execution, set `NODEAGENT_SOURCES=container-logs,vm-console`
-and `NODEAGENT_VM_CONSOLE_ROOT` to that directory.
+For the standalone chart, drop the `opensandbox-node-agent` prefix. Set `hostPaths.vmConsole` to the FC driver's StateRoot. The chart mounts it read-only. VM console discovery does not watch Kubernetes Pods or Sandbox CRs and requires no Kubernetes RBAC when enabled alone. For direct execution, set `NODEAGENT_SOURCES=container-logs,vm-console` and `NODEAGENT_VM_CONSOLE_ROOT` to that directory.
 
-This collects `firecracker.log`, including guest console stdout/stderr, kernel
-and init messages. To capture command output, the guest process must write to
-`/dev/console`; output captured only by execd is outside this source. The VMM's
-separate `fc.log` is not collected.
+The FC driver must support the version-1 `fast-sandbox.json` contract introduced in [fast-sandbox #154](https://github.com/opensandbox-group/fast-sandbox/pull/154) (merged commit `1b8e1c5cccd4fed0c5700fe1b880875c49a4ba34`). Deploy a driver built with that change before enabling collection. Older VMs without metadata are not discovered; there is no CR-watch fallback or automatic backfill.
 
-Console records preserve raw bytes and land under
-`<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.log`.
-Each Sandbox UID has one stream and completeness marker across placement changes. FC driver
-owns input-file GC; the Agent never deletes those files. If the driver removes
-a file while the Agent is offline, the unavailable data is reported as a gap.
-Recently stopped or failed Sandboxes can be collected within 24 hours of the
-runtime's `lastTransitionTime`. Older terminal CRs, and terminal CRs without a
-valid transition timestamp, are not newly discovered. Already tracked streams
-still drain and finalize; their ended checkpoints expire after the retention window.
+The Agent scans `<StateRoot>/jails/firecracker/*/root/` and `<StateRoot>/sandboxes/*/` for metadata beside `firecracker.log`. Missing, partial, invalid or unsupported metadata is skipped and retried on subsequent scans. A permanently failed metadata publication leaves that VM uncollectable. The driver owns both files and their GC; teardown may remove entries between discovery and opening the log.
 
-Placement attempt changes do not split the stream or reset its read offset.
-The Agent can collect an existing console immediately on first discovery, even
-if the Sandbox has already been reassigned. File replacement is handled by
-draining the old descriptor before following the new file.
+This collects guest console stdout/stderr, kernel and init messages. To capture command output, the guest process must write to `/dev/console`; output captured only by execd is outside this source. The VMM's separate `fc.log` is not collected.
 
-The file sink currently does not automatically expire VM console output families.
-See [collection mechanics](/architecture/data-plane/node-agent#firecracker-vm-console)
-for identity and recovery details.
+Console records preserve raw bytes and land under `<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.log`. Each Sandbox UID has one stable stream across placement changes. Optional `placementAttempt` metadata selects the newest local directory; it does not split streams. VM records and markers have Sandbox and node identity; Kubernetes Pod/container identity fields are empty rather than fabricated.
+
+When a console path disappears, the Agent drains any open descriptor and waits 30 seconds before finalizing. A returning console within that window continues the same stream. Already finalized checkpoints are retained for 24 hours and pruned after the local VM metadata is gone. A file removed while the Agent is offline cannot be recovered and is reported as a source gap. The file sink currently does not automatically expire VM console output families.
+
+See [collection mechanics](/architecture/data-plane/node-agent#firecracker-vm-console) for identity and recovery details.
 
 ## Key values
 

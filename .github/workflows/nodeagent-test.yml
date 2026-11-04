@@ -70,7 +70,17 @@ jobs:
             | grep -q 'value: "container-logs,vm-console"'
           grep -q 'name: NODEAGENT_VM_CONSOLE_ROOT' /tmp/nodeagent-mixed-sources.yaml
           grep -q 'name: vm-console' /tmp/nodeagent-mixed-sources.yaml
-          grep -q 'sandbox.fast.io' /tmp/nodeagent-mixed-sources.yaml
+          if grep -q 'sandbox.fast.io' /tmp/nodeagent-mixed-sources.yaml; then
+            echo "VM console must not require Sandbox CR RBAC" >&2
+            exit 1
+          fi
+          grep -q '^kind: ClusterRole$' /tmp/nodeagent-mixed-sources.yaml
+          grep -q 'resources: \["pods"\]' /tmp/nodeagent-mixed-sources.yaml
+          helm template nodeagent manifests/charts/node-agent --set 'config.sources={vm-console}' > /tmp/nodeagent-vm-only.yaml
+          if grep -q '^kind: ClusterRole' /tmp/nodeagent-vm-only.yaml; then
+            echo "VM-only collection must not require Kubernetes RBAC" >&2
+            exit 1
+          fi
           helm template nodeagent manifests/charts/node-agent \
             --set 'config.sources={source-a,source-b}' \
             > /tmp/nodeagent-non-log-sources.yaml

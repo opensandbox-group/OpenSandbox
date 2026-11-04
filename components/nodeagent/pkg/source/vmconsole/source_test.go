@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/alibaba/opensandbox/nodeagent/pkg/registry"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,19 +26,12 @@ import (
 
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/config"
+	"github.com/alibaba/opensandbox/nodeagent/pkg/registry"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/cache"
 )
 
 func fixture(t *testing.T) (*source, *stream, string) {
 	t.Helper()
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("file identity requires Linux or Darwin")
-	}
 	root := t.TempDir()
 	db, err := state.Open(t.TempDir(), "test", 1<<20)
 	if err != nil {
@@ -51,15 +43,18 @@ func fixture(t *testing.T) (*source, *stream, string) {
 		t.Fatal(err)
 	}
 	s := &source{cfg: config.Config{VMConsoleRoot: root, PerSandboxQueueBytes: 1 << 20, NodeName: "node-a", ClusterID: "test"}, state: private, streams: make(map[string]*stream), wake: make(chan struct{}, 1)}
-	st := &stream{UID: "12345678-1234-1234-1234-123456789012", Sequence: 1, Started: time.Now().UTC().Truncate(time.Second), Resource: api.Resource{SandboxID: "sandbox-a", ClusterName: "test", Namespace: "ns", PodName: "fastlet", PodUID: "pod-a", NodeName: "node-a", Container: "fastlet"}}
+	st := &stream{UID: "12345678-1234-1234-1234-123456789012", Sequence: 1, Started: time.Now().UTC().Truncate(time.Second), Resource: api.Resource{SandboxID: "sandbox-a", ClusterName: "test", Namespace: "ns", NodeName: "node-a"}}
 	s.streams[st.UID] = st
 	filename := filepath.Join(root, "sandboxes", st.UID, "firecracker.log")
+	st.Path = filename
 	if err := os.MkdirAll(filepath.Dir(filename), 0750); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if st.file != nil {
-			_ = st.file.Close()
+		for _, current := range s.streams {
+			if current.file != nil {
+				_ = current.file.Close()
+			}
 		}
 	})
 	return s, st, filename
@@ -76,6 +71,7 @@ func acknowledge(t *testing.T, s *source, e *api.SourceEvent) {
 }
 
 func TestConsoleResumeAndDriverGC(t *testing.T) {
+	requireFileIdentity(t)
 	s, st, filename := fixture(t)
 	if err := os.WriteFile(filename, []byte("hello\r\n\x00guest"), 0640); err != nil {
 		t.Fatal(err)
@@ -135,6 +131,7 @@ func TestConsoleResumeAndDriverGC(t *testing.T) {
 }
 
 func TestConsoleMissingFileAndFinalizationRecovery(t *testing.T) {
+	requireFileIdentity(t)
 	s, st, _ := fixture(t)
 	e, err := s.read(st, true)
 	if err != nil {
@@ -157,6 +154,7 @@ func TestConsoleMissingFileAndFinalizationRecovery(t *testing.T) {
 }
 
 func TestConsoleReplacementAfterRestart(t *testing.T) {
+	requireFileIdentity(t)
 	s, st, filename := fixture(t)
 	if err := os.WriteFile(filename, []byte("same-prefix"), 0640); err != nil {
 		t.Fatal(err)
@@ -184,103 +182,200 @@ func TestConsoleReplacementAfterRestart(t *testing.T) {
 	}
 }
 
-func TestSandboxIdentityAndPlacement(t *testing.T) {
-	s, _, _ := fixture(t)
-	s.pods = cache.NewSharedIndexInformer(&cache.ListWatch{}, &corev1.Pod{}, 0, cache.Indexers{})
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "fastlet", Namespace: "ns", UID: types.UID("pod-a")}, Spec: corev1.PodSpec{NodeName: "node-a"}}
-	if err := s.pods.GetStore().Add(pod); err != nil {
-		t.Fatal(err)
-	}
-	cr := &unstructured.Unstructured{Object: map[string]interface{}{"metadata": map[string]interface{}{"name": "public-sandbox-id", "namespace": "ns", "uid": "vm-uid"}, "status": map[string]interface{}{"placement": map[string]interface{}{"fastletName": "fastlet", "fastletPodUID": "pod-a"}}}}
-	resource, ok := s.localSandbox(cr)
-	if !ok || resource.SandboxID != "public-sandbox-id" || resource.PodUID != "pod-a" {
-		t.Fatal("sandbox name must define its public ID")
-	}
-	_ = unstructured.SetNestedField(cr.Object, "stale-pod", "status", "placement", "fastletPodUID")
-	if _, ok := s.localSandbox(cr); ok {
-		t.Fatal("stale placement was accepted")
-	}
-	_ = unstructured.SetNestedField(cr.Object, "pod-a", "status", "placement", "fastletPodUID")
-	s.cfg.NodeName = "node-b"
-	if _, ok := s.localSandbox(cr); ok {
-		t.Fatal("another node's sandbox was accepted")
+func requireFileIdentity(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("file identity requires Linux or Darwin")
 	}
 }
 
-func discovery(t *testing.T, s *source, st *stream, attempt int64, phase string, changed time.Time) (*unstructured.Unstructured, <-chan api.SourceEvent) {
+func writeMetadata(t *testing.T, filename string, st *stream, attempt int64) {
 	t.Helper()
-	s.pods = cache.NewSharedIndexInformer(&cache.ListWatch{}, &corev1.Pod{}, 0, cache.Indexers{})
-	s.sandboxes = cache.NewSharedIndexInformer(&cache.ListWatch{}, &unstructured.Unstructured{}, 0, cache.Indexers{})
+	data, err := json.Marshal(vmMetadata{Version: 1, UID: st.UID, Namespace: st.Resource.Namespace, Name: st.Resource.SandboxID, PlacementAttempt: attempt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(filename), "fast-sandbox.json"), data, 0640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMetadataDiscoveryRetriesAndSelectsNewest(t *testing.T) {
+	s, st, direct := fixture(t)
+	jail := filepath.Join(s.cfg.VMConsoleRoot, "jails", "firecracker", st.UID[:32], "root", "firecracker.log")
+	if err := os.MkdirAll(filepath.Dir(jail), 0750); err != nil {
+		t.Fatal(err)
+	}
+	for _, filename := range []string{direct, jail} {
+		meta := filepath.Join(filepath.Dir(filename), "fast-sandbox.json")
+		for _, data := range []string{"", `{`, `{"version":2,"uid":"` + st.UID + `","namespace":"ns","name":"sandbox-a"}`} {
+			if err := os.WriteFile(meta, []byte(data), 0640); err != nil {
+				t.Fatal(err)
+			}
+			found, err := s.discover()
+			if err != nil || len(found) != 0 {
+				t.Fatalf("invalid publication discovered: %v, %v", found, err)
+			}
+		}
+		if err := os.Remove(meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMetadata(t, direct, st, 1)
+	writeMetadata(t, jail, st, 2)
+	found, err := s.discover()
+	if err != nil || len(found) != 1 || found[st.UID].path != jail {
+		t.Fatalf("newest local directory not selected: %v, %v", found, err)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(jail), "fast-sandbox.json")); err != nil {
+		t.Fatal(err)
+	}
+	found, err = s.discover()
+	if err != nil || found[st.UID].path != direct {
+		t.Fatal("metadata disappearance was fatal or blocked retry")
+	}
+}
+
+func TestLocalDiscoveryResumeGraceAndGC(t *testing.T) {
+	requireFileIdentity(t)
+	s, original, filename := fixture(t)
+	delete(s.streams, original.UID)
 	out := make(chan api.SourceEvent, 16)
 	s.out = out
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "fastlet", Namespace: "ns", UID: "pod-a"}, Spec: corev1.PodSpec{NodeName: "node-a"}}
-	if err := s.pods.GetStore().Add(pod); err != nil {
-		t.Fatal(err)
-	}
-	cr := &unstructured.Unstructured{Object: map[string]interface{}{
-		"metadata": map[string]interface{}{"name": "sandbox-a", "namespace": "ns", "uid": st.UID},
-		"status": map[string]interface{}{
-			"placement": map[string]interface{}{"fastletName": "fastlet", "fastletPodUID": "pod-a", "attempt": attempt},
-			"runtime":   map[string]interface{}{"state": phase, "lastTransitionTime": changed.Format(time.RFC3339Nano)},
-		}}}
-	if err := s.sandboxes.GetStore().Add(cr); err != nil {
-		t.Fatal(err)
-	}
-	return cr, out
-}
-
-func TestAttemptChangeKeepsConsoleStream(t *testing.T) {
-	s, st, filename := fixture(t)
+	writeMetadata(t, filename, original, 3)
 	if err := os.WriteFile(filename, []byte("first"), 0640); err != nil {
 		t.Fatal(err)
 	}
-	cr, out := discovery(t, s, st, 1, "Ready", time.Now())
 	if err := s.scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	first := <-out
+	if first.Delivery == nil || first.Delivery.Record.Resource.PodUID != "" {
+		t.Fatal("local discovery fabricated Pod identity")
+	}
 	acknowledge(t, s, &first)
-	_ = unstructured.SetNestedField(cr.Object, int64(2), "status", "placement", "attempt")
-	if err := s.sandboxes.GetStore().Update(cr); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0640)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = f.WriteString("second")
-	_ = f.Close()
-	if err != nil {
+	st := s.streams[original.UID]
+	if err := os.RemoveAll(filepath.Dir(filename)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	second := <-out
-	if len(s.streams) != 1 || second.Delivery == nil || string(second.Delivery.Record.Body) != "second" || second.Delivery.StreamRef != first.Delivery.StreamRef {
-		t.Fatal("attempt change split or replayed console stream")
+	if st.Finalizing || st.MissingSince.IsZero() {
+		t.Fatal("missing directory finalized without grace")
 	}
-	acknowledge(t, s, &second)
-	// First discovery at a later attempt also reads the existing console immediately.
-	s2, fresh, existing := fixture(t)
-	if err := os.WriteFile(existing, []byte("existing console"), 0640); err != nil {
+	// Recreate at a different supported layout inside grace; drain the old fd first.
+	jail := filepath.Join(s.cfg.VMConsoleRoot, "jails", "firecracker", st.UID[:32], "root", "firecracker.log")
+	if err := os.MkdirAll(filepath.Dir(jail), 0750); err != nil {
 		t.Fatal(err)
 	}
-	delete(s2.streams, fresh.UID)
-	_, events := discovery(t, s2, fresh, 3, "Ready", time.Now())
-	if err := s2.scan(context.Background()); err != nil {
+	writeMetadata(t, jail, st, 4)
+	if err := os.WriteFile(jail, []byte("resumed"), 0640); err != nil {
 		t.Fatal(err)
 	}
-	event := <-events
-	if event.Delivery == nil || string(event.Delivery.Record.Body) != "existing console" {
-		t.Fatal("first discovery waited for a handoff")
+	for range 2 {
+		if err := s.scan(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 	}
-	current := s2.streams[fresh.UID]
-	_ = current.file.Close()
-	current.file = nil
+	resumed := <-out
+	if resumed.Delivery == nil || string(resumed.Delivery.Record.Body) != "resumed" || resumed.Delivery.StreamRef != first.Delivery.StreamRef || len(s.streams) != 1 || !st.MissingSince.IsZero() {
+		t.Fatal("returning directory split or failed to resume stream")
+	}
+	acknowledge(t, s, &resumed)
+	if err := os.RemoveAll(filepath.Dir(jail)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st.MissingSince = time.Now().Add(-disappearanceGrace - time.Second)
+	if err := s.save(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	end := <-out
+	if end.End == nil {
+		t.Fatal("missing directory never finalized")
+	}
+	if err := s.AcknowledgeEnd(context.Background(), end.End.EndToken); err != nil {
+		t.Fatal(err)
+	}
+	st.EndedAt = time.Now().Add(-25 * time.Hour)
+	if err := s.save(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.streams) != 0 {
+		t.Fatal("ended state not reclaimed")
+	}
+	if err := s.state.View(func(r state.SourceStateReader) error {
+		_, exists, err := r.Get([]byte(st.UID))
+		if exists {
+			t.Error("ended checkpoint retained")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPendingMetadataKeepsReadableConsole(t *testing.T) {
+	requireFileIdentity(t)
+	s, st, filename := fixture(t)
+	if err := os.WriteFile(filename, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.read(st, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acknowledge(t, s, first)
+	next := filepath.Join(s.cfg.VMConsoleRoot, "jails", "firecracker", st.UID[:32], "root", "firecracker.log")
+	if err := os.MkdirAll(filepath.Dir(next), 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadata(t, next, st, 2)
+	st.MissingSince = time.Now().Add(-disappearanceGrace - time.Second)
+	out := make(chan api.SourceEvent, 2)
+	s.out = out
+	if err := s.scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st.Finalizing || !st.MissingSince.IsZero() || len(out) != 0 {
+		t.Fatal("pending console hid the readable old input")
+	}
+	// Also recover when the next file vanished after its path was selected.
+	_ = st.file.Close()
+	st.file, st.NextPath = nil, next
+	if err := os.WriteFile(filename, []byte("oldtail"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	tail, err := s.read(st, false)
+	if err != nil || tail == nil || tail.Delivery == nil || string(tail.Delivery.Record.Body) != "tail" {
+		t.Fatalf("old input was not reopened: %v", err)
+	}
+	acknowledge(t, s, tail)
+	if err := os.WriteFile(next, []byte("new"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.scan(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := <-out
+	if current.Delivery == nil || string(current.Delivery.Record.Body) != "new" || current.Delivery.StreamRef != first.Delivery.StreamRef {
+		t.Fatal("new input did not continue the same stream")
+	}
 }
 
 func TestReplacementDrainsBeforeSwitch(t *testing.T) {
+	requireFileIdentity(t)
 	for _, tc := range []struct {
 		name  string
 		ended bool
@@ -324,49 +419,6 @@ func TestReplacementDrainsBeforeSwitch(t *testing.T) {
 	}
 }
 
-func TestRetainedTerminalCatchupAndExpiry(t *testing.T) {
-	s, st, filename := fixture(t)
-	delete(s.streams, st.UID)
-	if err := os.WriteFile(filename, []byte("final bytes"), 0640); err != nil {
-		t.Fatal(err)
-	}
-	cr, _ := discovery(t, s, st, 1, "Stopped", time.Now())
-	if err := s.scan(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	caught := s.streams[st.UID]
-	if caught == nil || caught.pending == "" {
-		t.Fatal("recent terminal console not collected")
-	}
-	_ = caught.file.Close()
-	caught.file = nil
-	caught.Ended, caught.EndedAt = true, time.Now().Add(-25*time.Hour)
-	if err := s.save(caught); err != nil {
-		t.Fatal(err)
-	}
-	_ = unstructured.SetNestedField(cr.Object, time.Now().Add(-25*time.Hour).Format(time.RFC3339Nano), "status", "runtime", "lastTransitionTime")
-	if err := s.sandboxes.GetStore().Update(cr); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		if err := s.scan(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(s.streams) != 0 {
-		t.Fatal("expired terminal rediscovered")
-	}
-	if err := s.state.View(func(r state.SourceStateReader) error {
-		_, exists, err := r.Get([]byte(st.UID))
-		if exists {
-			t.Error("ended checkpoint not reclaimed")
-		}
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 type countingState struct {
 	registry.SourceState
 	writes int
@@ -378,6 +430,7 @@ func (c *countingState) Update(fn func(state.SourceStateWriter) error) error {
 }
 
 func TestIdleConsoleDoesNotWriteCheckpoint(t *testing.T) {
+	requireFileIdentity(t)
 	s, st, filename := fixture(t)
 	counter := &countingState{SourceState: s.state}
 	s.state = counter

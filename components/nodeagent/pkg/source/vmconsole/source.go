@@ -29,44 +29,38 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alibaba/opensandbox/nodeagent/internal/fileidentity"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/config"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/registry"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 )
 
-var sandboxGVR = schema.GroupVersionResource{Group: "sandbox.fast.io", Version: "v1alpha2", Resource: "sandboxes"}
+const disappearanceGrace = 30 * time.Second
 
 type stream struct {
-	Device      uint64
-	Inode       uint64
-	Finalizing  bool
-	EndedAt     time.Time
-	UID         string
-	Resource    api.Resource
-	Path        string
-	Offset      int64
-	Sequence    uint64
-	Prefix      string
-	PrefixBytes int
-	Started     time.Time
-	Outcome     api.SourceOutcome
-	Ended       bool
-	file        *os.File
-	pending     string
-	ending      bool
+	PlacementAttempt int64
+	NextPath         string
+	MissingSince     time.Time
+	Device           uint64
+	Inode            uint64
+	Finalizing       bool
+	EndedAt          time.Time
+	UID              string
+	Resource         api.Resource
+	Path             string
+	Offset           int64
+	Sequence         uint64
+	Prefix           string
+	PrefixBytes      int
+	Started          time.Time
+	Outcome          api.SourceOutcome
+	Ended            bool
+	file             *os.File
+	pending          string
+	ending           bool
 }
 
 type token struct {
@@ -76,37 +70,20 @@ type token struct {
 }
 
 type source struct {
-	cfg       config.Config
-	state     registry.SourceState
-	pods      cache.SharedIndexInformer
-	sandboxes cache.SharedIndexInformer
-	onError   func(error)
-	mu        sync.Mutex
-	streams   map[string]*stream
-	cancel    context.CancelFunc
-	done      chan struct{}
-	wake      chan struct{}
-	out       chan<- api.SourceEvent
+	cfg     config.Config
+	state   registry.SourceState
+	onError func(error)
+	mu      sync.Mutex
+	streams map[string]*stream
+	cancel  context.CancelFunc
+	done    chan struct{}
+	wake    chan struct{}
+	out     chan<- api.SourceEvent
 }
 
 func init() {
 	registry.RegisterSource(api.SourceNameVMConsole, func(d registry.SourceDependencies) (api.Source, error) {
-		if d.KubernetesConfig == nil {
-			return nil, errors.New("vm-console requires Kubernetes configuration")
-		}
-		client, err := kubernetes.NewForConfig(d.KubernetesConfig)
-		if err != nil {
-			return nil, err
-		}
-		dyn, err := dynamic.NewForConfig(d.KubernetesConfig)
-		if err != nil {
-			return nil, err
-		}
-		pods := informers.NewSharedInformerFactoryWithOptions(client, 0, informers.WithTweakListOptions(func(o *metav1.ListOptions) {
-			o.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", d.Config.NodeName).String()
-		})).Core().V1().Pods().Informer()
-		sandboxes := dynamicinformer.NewDynamicSharedInformerFactory(dyn, 0).ForResource(sandboxGVR).Informer()
-		return &source{cfg: d.Config, state: d.State, pods: pods, sandboxes: sandboxes, onError: d.OnError, streams: make(map[string]*stream), done: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
+		return &source{cfg: d.Config, state: d.State, onError: d.OnError, streams: make(map[string]*stream), done: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 	})
 }
 
@@ -129,8 +106,11 @@ func (s *source) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 			if !safeUID(st.UID) || string(key) != st.UID || st.Offset < 0 || st.Sequence == 0 || st.Started.IsZero() || st.PrefixBytes < 0 || st.PrefixBytes > 256 {
 				return errors.New("invalid VM console checkpoint")
 			}
-			if st.Path != "" {
-				relative, err := filepath.Rel(s.cfg.VMConsoleRoot, st.Path)
+			for _, input := range []string{st.Path, st.NextPath} {
+				if input == "" {
+					continue
+				}
+				relative, err := filepath.Rel(s.cfg.VMConsoleRoot, input)
 				if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 					return errors.New("VM console checkpoint belongs to a different input root")
 				}
@@ -143,15 +123,6 @@ func (s *source) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	s.cancel, s.out = cancel, out
-	go s.pods.Run(runCtx.Done())
-	go s.sandboxes.Run(runCtx.Done())
-	syncCtx, syncCancel := context.WithTimeout(runCtx, time.Minute)
-	defer syncCancel()
-	if !cache.WaitForCacheSync(syncCtx.Done(), s.pods.HasSynced, s.sandboxes.HasSynced) {
-		cancel()
-		s.cancel = nil
-		return errors.New("vm-console Kubernetes caches did not sync")
-	}
 	go s.run(runCtx)
 	return nil
 }
@@ -285,58 +256,79 @@ func (s *source) run(ctx context.Context) {
 	}
 }
 
-// A UID is taken from the CR, never inferred from a truncated jail name.
-func (s *source) localSandbox(cr *unstructured.Unstructured) (api.Resource, bool) {
-	name, _, _ := unstructured.NestedString(cr.Object, "status", "placement", "fastletName")
-	uid, _, _ := unstructured.NestedString(cr.Object, "status", "placement", "fastletPodUID")
-	obj, exists, err := s.pods.GetStore().GetByKey(cr.GetNamespace() + "/" + name)
-	if err != nil || !exists {
-		return api.Resource{}, false
-	}
-	pod := obj.(*corev1.Pod)
-	if pod.Spec.NodeName != s.cfg.NodeName || uid == "" || string(pod.UID) != uid {
-		return api.Resource{}, false
-	}
-	return api.Resource{SandboxID: cr.GetName(), Namespace: cr.GetNamespace(), ClusterName: s.cfg.ClusterID, NodeName: s.cfg.NodeName, PodName: pod.Name, PodUID: string(pod.UID), Container: "fastlet"}, true
+// vmMetadata follows the FC driver's write-once discovery contract.
+// placementAttempt chooses between stale local directories, never stream identity.
+type vmMetadata struct {
+	Version          int    `json:"version"`
+	UID              string `json:"uid"`
+	Namespace        string `json:"namespace"`
+	Name             string `json:"name"`
+	PlacementAttempt int64  `json:"placementAttempt"`
+	path             string
 }
 
 func safeUID(uid string) bool {
-	return uid != "" && uid != "." && uid != ".." && !strings.ContainsAny(uid, "/\\")
+	return uid != "" && uid != "." && uid != ".." && !strings.ContainsAny(uid, "/\\") && strings.IndexFunc(uid, func(r rune) bool { return r <= 32 || r == 127 }) < 0 && utf8.ValidString(uid)
 }
 
-// A retained terminal CR is discoverable only during its bounded catch-up window.
-// Without a transition timestamp, rediscovery cannot be distinguished from replay.
-func terminalExpired(cr *unstructured.Unstructured) bool {
-	phase, _, _ := unstructured.NestedString(cr.Object, "status", "runtime", "state")
-	if phase != "Stopped" && phase != "Failed" {
-		return false
+func (s *source) discover() (map[string]vmMetadata, error) {
+	found := make(map[string]vmMetadata)
+	for _, mode := range []string{"jails/firecracker", "sandboxes"} {
+		base := filepath.Join(s.cfg.VMConsoleRoot, filepath.FromSlash(mode))
+		directories, err := os.ReadDir(base)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, directory := range directories {
+			if !directory.IsDir() {
+				continue
+			}
+			root := filepath.Join(base, directory.Name())
+			if mode == "jails/firecracker" {
+				root = filepath.Join(root, "root")
+			}
+			file, err := os.Open(filepath.Join(root, "fast-sandbox.json"))
+			if err != nil {
+				continue
+			}
+			payload, err := io.ReadAll(io.LimitReader(file, 64<<10+1))
+			_ = file.Close()
+			var record vmMetadata
+			// Missing, partial and permanently failed publications are retried, not fatal.
+			if err != nil || len(payload) > 64<<10 || json.Unmarshal(payload, &record) != nil || record.Version != 1 || !safeUID(record.UID) || !safeUID(record.Namespace) || !safeUID(record.Name) || record.PlacementAttempt < 0 {
+				continue
+			}
+			expected := record.UID
+			if mode == "jails/firecracker" && len(expected) > 32 {
+				expected = expected[:32]
+			}
+			if directory.Name() != expected {
+				continue
+			}
+			record.path = filepath.Join(root, "firecracker.log")
+			previous, exists := found[record.UID]
+			if !exists || record.PlacementAttempt > previous.PlacementAttempt {
+				found[record.UID] = record
+			}
+		}
 	}
-	value, _, _ := unstructured.NestedString(cr.Object, "status", "runtime", "lastTransitionTime")
-	changed, err := time.Parse(time.RFC3339Nano, value)
-	return err != nil || time.Since(changed) >= 24*time.Hour
+	return found, nil
 }
 
 func (s *source) scan(ctx context.Context) error {
-	seen := make(map[string]*unstructured.Unstructured)
+	found, err := s.discover()
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
-	for _, obj := range s.sandboxes.GetStore().List() {
-		cr := obj.(*unstructured.Unstructured)
-		uid := string(cr.GetUID())
-		if !safeUID(uid) {
-			continue
-		}
-		seen[uid] = cr
-		if terminalExpired(cr) {
-			continue
-		}
+	for uid, record := range found {
 		if _, exists := s.streams[uid]; exists {
 			continue
 		}
-		resource, local := s.localSandbox(cr)
-		if !local {
-			continue
-		}
-		st := &stream{UID: uid, Resource: resource, Started: time.Now().UTC().Truncate(time.Second), Sequence: 1}
+		st := &stream{UID: uid, Path: record.path, PlacementAttempt: record.PlacementAttempt, Resource: api.Resource{SandboxID: record.Name, Namespace: record.Namespace, ClusterName: s.cfg.ClusterID, NodeName: s.cfg.NodeName}, Started: time.Now().UTC().Truncate(time.Second), Sequence: 1}
 		if err := s.save(st); err != nil {
 			s.mu.Unlock()
 			return err
@@ -351,9 +343,32 @@ func (s *source) scan(ctx context.Context) error {
 	for _, uid := range uids {
 		s.mu.Lock()
 		st := s.streams[uid]
-		cr := seen[st.UID]
+		before := *st
+		if record, exists := found[uid]; exists && record.Name == st.Resource.SandboxID && record.Namespace == st.Resource.Namespace && record.PlacementAttempt >= st.PlacementAttempt {
+			st.PlacementAttempt = record.PlacementAttempt
+			if record.path != st.Path {
+				st.NextPath = record.path
+			}
+		}
+		input := st.Path
+		if st.NextPath != "" {
+			if _, err := os.Stat(st.NextPath); errors.Is(err, os.ErrNotExist) {
+				st.NextPath = ""
+			} else if err != nil {
+				s.mu.Unlock()
+				return err
+			} else {
+				input = st.NextPath
+			}
+		}
+		_, statErr := os.Stat(input)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			s.mu.Unlock()
+			return statErr
+		}
+		missing := errors.Is(statErr, os.ErrNotExist)
 		if st.Ended {
-			if (cr == nil || terminalExpired(cr)) && time.Since(st.EndedAt) > 24*time.Hour {
+			if _, present := found[uid]; missing && !present && time.Since(st.EndedAt) > 24*time.Hour {
 				if err := s.state.Update(func(w state.SourceStateWriter) error { return w.Delete([]byte(uid)) }); err != nil {
 					s.mu.Unlock()
 					return err
@@ -363,11 +378,20 @@ func (s *source) scan(ctx context.Context) error {
 			s.mu.Unlock()
 			continue
 		}
-		phase := ""
-		if cr != nil {
-			phase, _, _ = unstructured.NestedString(cr.Object, "status", "runtime", "state")
+		if missing {
+			if st.MissingSince.IsZero() {
+				st.MissingSince = time.Now().UTC()
+			}
+		} else {
+			st.MissingSince = time.Time{}
 		}
-		ended := cr == nil || phase == "Stopped" || phase == "Failed"
+		if st.PlacementAttempt != before.PlacementAttempt || st.NextPath != before.NextPath || !st.MissingSince.Equal(before.MissingSince) {
+			if err := s.save(st); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+		}
+		ended := missing && time.Since(st.MissingSince) >= disappearanceGrace
 		event, err := s.read(st, ended)
 		s.mu.Unlock()
 		if err != nil {
@@ -385,13 +409,9 @@ func (s *source) scan(ctx context.Context) error {
 }
 
 func (s *source) open(st *stream) error {
-	uid32 := st.UID
-	if len(uid32) > 32 {
-		uid32 = uid32[:32]
-	}
-	candidates := []string{filepath.Join(s.cfg.VMConsoleRoot, "jails", "firecracker", uid32, "root", "firecracker.log"), filepath.Join(s.cfg.VMConsoleRoot, "sandboxes", st.UID, "firecracker.log")}
-	if st.Path != "" {
-		candidates = []string{st.Path}
+	candidates := []string{st.Path}
+	if st.NextPath != "" {
+		candidates = []string{st.NextPath, st.Path}
 	}
 	for _, name := range candidates {
 		file, err := os.Open(name)
@@ -421,7 +441,7 @@ func (s *source) open(st *stream) error {
 			gap(st, "vm-console-file-replaced")
 		}
 		st.Device, st.Inode = device, inode
-		st.file, st.Path = file, name
+		st.file, st.Path, st.NextPath = file, name, ""
 		return nil
 	}
 	return nil
@@ -451,17 +471,25 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 			return nil, err
 		}
 		// Keep the open descriptor after unlink so the final tail survives driver GC.
-		current, statErr := os.Stat(st.Path)
+		target := st.Path
+		if st.NextPath != "" {
+			target = st.NextPath
+		}
+		current, statErr := os.Stat(target)
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 			return nil, statErr
 		}
 		replaced := current != nil && !os.SameFile(info, current)
+		if current != nil && !replaced && st.NextPath != "" {
+			st.Path, st.NextPath = target, ""
+		}
 		// Drain the old descriptor before following a replacement pathname.
 		if replaced && info.Size() <= st.Offset {
 			_ = st.file.Close()
 			st.file = nil
 			st.Offset, st.PrefixBytes, st.Prefix = 0, 0, ""
 			st.Device, st.Inode = 0, 0
+			st.Path, st.NextPath = target, ""
 			st.Sequence++
 			gap(st, "vm-console-file-replaced")
 			if err := s.save(st); err != nil {
@@ -496,7 +524,7 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 			hash := sha256.Sum256(prefix[:n])
 			st.PrefixBytes, st.Prefix = n, hex.EncodeToString(hash[:])
 		}
-		if st.Path != before.Path || st.Device != before.Device || st.Inode != before.Inode || st.Sequence != before.Sequence || st.Prefix != before.Prefix || st.PrefixBytes != before.PrefixBytes || !st.Outcome.Equal(before.Outcome) {
+		if st.Path != before.Path || st.NextPath != before.NextPath || st.Device != before.Device || st.Inode != before.Inode || st.Sequence != before.Sequence || st.Prefix != before.Prefix || st.PrefixBytes != before.PrefixBytes || !st.Outcome.Equal(before.Outcome) {
 			if err := s.save(st); err != nil {
 				return nil, err
 			}

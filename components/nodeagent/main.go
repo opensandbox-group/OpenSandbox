@@ -132,16 +132,16 @@ func run() (exitCode int) {
 		return
 	}
 
-	restConfig, err := rest.InClusterConfig()
-	if err != nil {
-		readiness.Replace("kubernetes-config-unavailable")
-		log.Errorf("Kubernetes configuration unavailable: %v", err)
-		<-signalCtx.Done()
-		return
-	}
-	restConfig.UserAgent = "opensandbox-nodeagent/" + version.GitCommit
 	var identityStore *store.Store
 	if len(cfg.Sources) != 1 || cfg.Sources[0] != api.SourceNameVMConsole {
+		restConfig, err := rest.InClusterConfig()
+		if err != nil {
+			readiness.Replace("kubernetes-config-unavailable")
+			log.Errorf("Kubernetes configuration unavailable: %v", err)
+			<-signalCtx.Done()
+			return
+		}
+		restConfig.UserAgent = "opensandbox-nodeagent/" + version.GitCommit
 		client, err := kubernetes.NewForConfig(restConfig)
 		if err != nil {
 			readiness.Replace("kubernetes-client-unavailable")
@@ -196,7 +196,7 @@ func run() (exitCode int) {
 			<-signalCtx.Done()
 			return
 		}
-		implementation, buildErr := registry.BuildSource(sourceName, registry.SourceDependencies{Config: cfg, KubernetesConfig: restConfig, Store: sourceStore, State: sourceState, Logger: log, OnError: onRuntimeError})
+		implementation, buildErr := registry.BuildSource(sourceName, registry.SourceDependencies{Config: cfg, Store: sourceStore, State: sourceState, Logger: log, OnError: onRuntimeError})
 		if buildErr != nil {
 			readiness.Replace("source-unavailable")
 			log.Errorf("source factory failed: %v", buildErr)

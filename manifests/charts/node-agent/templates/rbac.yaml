@@ -1,4 +1,4 @@
-{{- if and .Values.enabled .Values.rbac.create }}
+{{- if and .Values.enabled .Values.rbac.create (without .Values.config.sources "vm-console") }}
 {{- if and (not .Values.serviceAccount.create) (empty .Values.serviceAccount.name) }}
 {{- fail "serviceAccount.name must be set when rbac.create=true and serviceAccount.create=false" }}
 {{- end }}
@@ -9,11 +9,6 @@ metadata:
   labels:
     {{- include "opensandbox-node-agent.labels" . | nindent 4 }}
 rules:
-  {{- if has "vm-console" .Values.config.sources }}
-  - apiGroups: ["sandbox.fast.io"]
-    resources: ["sandboxes"]
-    verbs: ["list", "watch"]
-  {{- end }}
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "watch"]

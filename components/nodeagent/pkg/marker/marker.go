@@ -26,6 +26,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -284,8 +285,14 @@ func validate(value Marker) error {
 		return errors.New("marker revision exceeds the safe JSON integer range")
 	}
 	resource := value.Resource
-	if resource.SandboxID == "" || resource.ClusterName == "" || resource.Namespace == "" || resource.PodName == "" || resource.PodUID == "" || resource.Container == "" || resource.NodeName == "" {
+	if resource.SandboxID == "" || resource.ClusterName == "" || resource.Namespace == "" || resource.NodeName == "" {
 		return errors.New("marker resource fields are required")
+	}
+	// VM consoles have Sandbox/node identity, not a Kubernetes container identity.
+	vmUID, vmStream := strings.CutPrefix(value.StreamRef, api.SourceNameVMConsole+"/")
+	vmStream = vmStream && vmUID != "" && !strings.ContainsAny(vmUID, "/\\")
+	if !vmStream && (resource.PodName == "" || resource.PodUID == "" || resource.Container == "") {
+		return errors.New("marker pod resource fields are required")
 	}
 	for _, text := range []string{value.TargetID, value.FinalizeID, value.StreamRef, resource.SandboxID, resource.ClusterName, resource.Namespace, resource.PodName, resource.PodUID, resource.Container, resource.NodeName, value.CoverageStartedAt, value.status, value.FinalizedAt} {
 		if !utf8.ValidString(text) {
