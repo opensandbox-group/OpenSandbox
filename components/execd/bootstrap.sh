@@ -245,7 +245,7 @@ trust_mitm_ca() {
 	merged="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
 	# A failed update invocation is transient (watch_mitm_ca retries it);
 	# missing tooling is a permanent image property and only warns.
-	_failed=""
+	_trust_failed=""
 
 	# 1) Try to install into the system trust store (best-effort).
 	if command -v update-ca-certificates >/dev/null 2>&1; then
@@ -253,14 +253,14 @@ trust_mitm_ca() {
 			&& _sudo cp "$cert" /usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt \
 			&& _sudo update-ca-certificates; }; then
 			echo "warning: update-ca-certificates failed; system trust store may not include mitm CA" >&2
-			_failed=1
+			_trust_failed=1
 		fi
 	elif command -v update-ca-trust >/dev/null 2>&1; then
 		if ! { _sudo mkdir -p /etc/pki/ca-trust/source/anchors \
 			&& _sudo cp "$cert" /etc/pki/ca-trust/source/anchors/opensandbox-mitmproxy-ca.pem \
 			&& { _sudo update-ca-trust extract || _sudo update-ca-trust; }; }; then
 			echo "warning: update-ca-trust failed; system trust store may not include mitm CA" >&2
-			_failed=1
+			_trust_failed=1
 		fi
 	else
 		echo "warning: no system trust-store tooling found (need update-ca-certificates or update-ca-trust)" >&2
@@ -284,20 +284,25 @@ trust_mitm_ca() {
 		/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
 		if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -s "$candidate" ]; then
 			mkdir -p "$(dirname "$merged")" 2>/dev/null || true
-			if cat "$candidate" "$cert" > "$merged"; then
+			# Atomic replace: clients read this path concurrently via
+			# REQUESTS_CA_BUNDLE/SSL_CERT_FILE and must never see a
+			# truncated bundle.
+			_merged_tmp="$merged.tmp.$$"
+			if cat "$candidate" "$cert" > "$_merged_tmp" && mv "$_merged_tmp" "$merged"; then
 				OPENSANDBOX_MERGED_CA="$merged"
-				if [ -n "$_failed" ]; then
+				if [ -n "$_trust_failed" ]; then
 					return 1
 				fi
 				return 0
 			fi
+			rm -f "$_merged_tmp" 2>/dev/null || true
 			echo "warning: failed to write merged CA bundle at $merged" >&2
-			_failed=1
+			_trust_failed=1
 		fi
 	done
 
 	echo "warning: could not locate any CA bundle to merge with mitm CA" >&2
-	if [ -n "$_failed" ]; then
+	if [ -n "$_trust_failed" ]; then
 		return 1
 	fi
 	return 0
@@ -557,11 +562,11 @@ watch_mitm_ca() {
 		fi
 		if [ "$_cur" != "$_prev" ]; then
 			echo "mitm CA changed (egress restarted?); reinstalling trust stores; restart long-running processes that cached the old CA" >&2
-			_failed=0
-			trust_mitm_ca "$ca" || _failed=1
+			_install_failed=0
+			trust_mitm_ca "$ca" || _install_failed=1
 			trust_mitm_ca_nss "$ca" || true
 			trust_mitm_ca_jdk "$ca" || true
-			if [ "$_failed" -eq 0 ]; then
+			if [ "$_install_failed" -eq 0 ]; then
 				_prev="$_cur"
 			else
 				echo "warning: mitm CA reinstall failed; retrying on the next poll" >&2
@@ -577,10 +582,13 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		echo "mitm CA ready at $MITM_CA after ${MITM_CA_WAIT_SECONDS}s"
 		# Baseline for the rotation watcher: what we are about to trust. If
 		# egress swaps the file during the install pass below, the watcher
-		# sees the drift and reinstalls.
+		# sees the drift and reinstalls. A failed install leaves the
+		# baseline empty, so the watcher installs (and retries) on its
+		# first poll.
 		_baseline_fp="$(_ca_fingerprint "$MITM_CA")"
 		if ! trust_mitm_ca "$MITM_CA"; then
 			echo "warning: failed to install mitm CA into system trust store; TLS interception may not work for system libraries" >&2
+			_baseline_fp=""
 		fi
 	else
 		echo "warning: timed out after ${MITM_CA_WAIT_TIMEOUT:-300}s waiting for $MITM_CA (egress mitm CA export); continuing without system CA trust" >&2
@@ -589,19 +597,16 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
 		trust_mitm_ca_nss "$MITM_CA" || true
 		trust_mitm_ca_jdk "$MITM_CA" || true
-		export NODE_EXTRA_CA_CERTS="$MITM_CA"  # additive — Node appends to built-in roots
-
-		# REQUESTS_CA_BUNDLE and SSL_CERT_FILE replace the default bundle,
-		# so use merged roots (certifi/system CA + mitm CA).
-		if [ -n "$OPENSANDBOX_MERGED_CA" ] && [ -f "$OPENSANDBOX_MERGED_CA" ]; then
-			export REQUESTS_CA_BUNDLE="$OPENSANDBOX_MERGED_CA"
-			export SSL_CERT_FILE="$OPENSANDBOX_MERGED_CA"
-		else
-			echo "warning: merged CA bundle not available; REQUESTS_CA_BUNDLE/SSL_CERT_FILE will only contain the mitm CA" >&2
-			export REQUESTS_CA_BUNDLE="$MITM_CA"
-			export SSL_CERT_FILE="$MITM_CA"
-		fi
 	fi
+
+	# Seed env paths unconditionally: they are stable across rotations, and
+	# clients started after the watcher (re)builds the files pick up the
+	# current CA even when the export was absent or purged at bootstrap
+	# time. (REQUESTS_CA_BUNDLE and SSL_CERT_FILE replace the default
+	# bundle, so they point at the merged roots, not the bare mitm CA.)
+	export NODE_EXTRA_CA_CERTS="$MITM_CA"
+	export REQUESTS_CA_BUNDLE="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+	export SSL_CERT_FILE="$REQUESTS_CA_BUNDLE"
 
 	# Arm regardless of the export's current presence: it covers a purge or
 	# re-export racing the trust pass above, and a first export after a
