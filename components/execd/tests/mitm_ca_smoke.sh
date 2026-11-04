@@ -216,4 +216,67 @@ esac
 # 4) No export timeout.
 grep -q 'timed out' "$LOG" && fail "bootstrap timed out waiting for the mitm CA" || true
 
-echo "PASS: bootstrap trusted the fresh CA after purge detection (${ready_seconds}s), watcher healed the second rotation (${install_passes} trust installs)"
+# ---- Phase 2: a wait timeout with a pre-existing CA must leave the watcher
+# baseline empty. Regression: the wait function's stabilization tracker once
+# leaked into the baseline global on the timeout path, seeding the watcher
+# with the untrusted CA so nothing was ever installed. Here the timeout fires
+# while the CA is present (timeout < stabilize window), and the watcher must
+# install that CA immediately (empty baseline) and then the rotation.
+VOL2="$TESTDIR/volume2"
+MITM_CA2="$VOL2/mitmproxy-ca-cert.pem"
+MERGED2="$VOL2/merged-ca-certificates.pem"
+LOG2="$TESTDIR/bootstrap-timeout.log"
+mkdir -p "$VOL2"
+printf '%s\n' 'certificate-timeout-gen1' > "$MITM_CA2" # pre-existing export
+
+PATH="$SHIM:$PATH" \
+HOME="$HOME_DIR" \
+JAVA_HOME="$FAKE_JDK" \
+PYTHONPATH="$TESTDIR/pymod" \
+FAKE_CERTIFI_PEM="$FAKE_CERTIFI_PEM" \
+OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=1 \
+OPENSANDBOX_MITM_CA="$MITM_CA2" \
+OPENSANDBOX_MERGED_CA_PATH="$MERGED2" \
+MITM_CA_WAIT_TIMEOUT=2 \
+MITM_CA_STABILIZE_WINDOW=20 \
+MITM_CA_POLL_INTERVAL=0.2 \
+MITM_CA_WATCH_INTERVAL=0.5 \
+EXECD="$TESTDIR/stub-execd" \
+BOOTSTRAP_CMD="sleep 10" \
+bash "$BOOTSTRAP" > "$LOG2" 2>&1 &
+BOOTSTRAP2_PID=$!
+
+sleep 3 # the timeout (t=2) has fired and the watcher is armed
+# Empty baseline must install the pre-existing CA on the first poll — under
+# the baseline leak this poll sees cur == prev and never installs.
+gen1_seen=""
+for _ in $(seq 1 15); do
+  if [ -f "$MERGED2" ] && grep -q 'certificate-timeout-gen1' "$MERGED2" 2>/dev/null; then
+    gen1_seen=1
+    break
+  fi
+  sleep 0.3
+done
+[ -n "$gen1_seen" ] || fail "phase 2: watcher never installed the pre-existing CA (baseline leak on the timeout path)"
+
+printf '%s\n' 'certificate-timeout-gen2' > "$MITM_CA2"
+
+set +e
+wait "$BOOTSTRAP2_PID"
+BOOTSTRAP2_STATUS=$?
+set -e
+[ "$BOOTSTRAP2_STATUS" -eq 0 ] || fail "phase 2: bootstrap exited with status $BOOTSTRAP2_STATUS"
+
+grep -q 'timed out after 2s' "$LOG2" || fail "phase 2: the wait did not time out as intended"
+grep -q 'mitm CA changed' "$LOG2" || fail "phase 2: watcher did not install after the post-timeout change"
+merged2_seen=""
+for _ in $(seq 1 20); do
+  if [ -f "$MERGED2" ] && grep -q 'certificate-timeout-gen2' "$MERGED2" 2>/dev/null; then
+    merged2_seen=1
+    break
+  fi
+  sleep 0.3
+done
+[ -n "$merged2_seen" ] || fail "phase 2: watcher did not rebuild the merged bundle with the post-timeout CA"
+
+echo "PASS: bootstrap trusted the fresh CA after purge detection (${ready_seconds}s), watcher healed the second rotation (${install_passes} trust installs), timeout path leaves an empty baseline"

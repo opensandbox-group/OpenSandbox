@@ -506,7 +506,7 @@ wait_for_trustworthy_mitm_ca() {
 	MITM_CA_WAIT_SECONDS=0
 
 	_purge_seen=""
-	_baseline_fp=""
+	_wait_baseline_fp=""
 	while :; do
 		_now="$(date +%s)"
 		if [ "$_now" -ge "$_deadline" ]; then
@@ -518,11 +518,11 @@ wait_for_trustworthy_mitm_ca() {
 			if [ -n "$_purge_seen" ]; then
 				# (re)appearance after a purge: fresh export
 				break
-			elif [ -z "$_baseline_fp" ]; then
+			elif [ -z "$_wait_baseline_fp" ]; then
 				# first sighting: start the stabilization window
-				_baseline_fp="$_fp"
+				_wait_baseline_fp="$_fp"
 				_baseline_since="$_now"
-			elif [ "$_fp" != "$_baseline_fp" ]; then
+			elif [ "$_fp" != "$_wait_baseline_fp" ]; then
 				# replaced in place: treat as fresh
 				break
 			elif [ $((_now - _baseline_since)) -ge "$_stabilize" ]; then
@@ -531,7 +531,7 @@ wait_for_trustworthy_mitm_ca() {
 			fi
 		else
 			_purge_seen=1
-			_baseline_fp=""
+			_wait_baseline_fp=""
 		fi
 		sleep "$_poll" 2>/dev/null || sleep 1
 	done
@@ -546,12 +546,15 @@ wait_for_trustworthy_mitm_ca() {
 # with in-memory trust (e.g. JVM cacerts) still need a restart, which the
 # change log line calls out. $2 is the fingerprint of the already-installed
 # generation (empty = nothing installed yet, so the first export installs);
-# a failed install pass is retried on the next poll.
+# a failed install pass is retried on the next poll, up to three attempts
+# per generation — permanent failures (e.g. read-only trust store on a
+# non-root image) stop the churn until the next rotation.
 watch_mitm_ca() {
 	ca="$1"
 	# Empty $2 means nothing trusted yet: the first export seen installs it.
 	_prev="${2:-}"
 	_interval="${MITM_CA_WATCH_INTERVAL:-30}"
+	_watch_attempts=0
 	echo "watching mitm CA at $ca for rotation (interval ${_interval}s)" >&2
 	while :; do
 		sleep "$_interval" 2>/dev/null || sleep 1
@@ -561,13 +564,21 @@ watch_mitm_ca() {
 			continue
 		fi
 		if [ "$_cur" != "$_prev" ]; then
-			echo "mitm CA changed (egress restarted?); reinstalling trust stores; restart long-running processes that cached the old CA" >&2
+			if [ "$_watch_attempts" -eq 0 ]; then
+				echo "mitm CA changed (egress restarted?); reinstalling trust stores; restart long-running processes that cached the old CA" >&2
+			fi
+			_watch_attempts=$((_watch_attempts + 1))
 			_install_failed=0
 			trust_mitm_ca "$ca" || _install_failed=1
 			trust_mitm_ca_nss "$ca" || true
 			trust_mitm_ca_jdk "$ca" || true
 			if [ "$_install_failed" -eq 0 ]; then
 				_prev="$_cur"
+				_watch_attempts=0
+			elif [ "$_watch_attempts" -ge 3 ]; then
+				echo "warning: mitm CA install failed 3 times; giving up until the next rotation" >&2
+				_prev="$_cur"
+				_watch_attempts=0
 			else
 				echo "warning: mitm CA reinstall failed; retrying on the next poll" >&2
 			fi
@@ -592,6 +603,9 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		fi
 	else
 		echo "warning: timed out after ${MITM_CA_WAIT_TIMEOUT:-300}s waiting for $MITM_CA (egress mitm CA export); continuing without system CA trust" >&2
+		# Nothing was trusted; the watcher must install the first export it
+		# sees, never seed from whatever state the wait left behind.
+		_baseline_fp=""
 	fi
 
 	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
