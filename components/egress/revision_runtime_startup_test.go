@@ -40,8 +40,8 @@ func TestRevisionRuntimeStartupConfiguration(t *testing.T) {
 		{"nonlive-extra", "", "", "8443", false},
 		{"nonlive-false-extra", "", "false", "8443", false},
 		{"nonlive-invalid-still-validated-by-launcher", "", "", "bad", false},
-		{"fast-live", constants.ProfileFastSandbox, "true", "", true},
-		{"fast-live-extra", constants.ProfileFastSandbox, "true", "8443", true},
+		{"fast-live", constants.ProfileFastSandbox, "true", "", false},
+		{"fast-live-extra", constants.ProfileFastSandbox, "true", "8443", false},
 		{"fast-nonlive-extra", constants.ProfileFastSandbox, "", "8443", false},
 	} {
 		t.Run(item.name, func(t *testing.T) {
@@ -74,20 +74,28 @@ func TestRevisionRuntimeStartupRejectsBeforeProfileOrNetwork(t *testing.T) {
 	}
 	for _, item := range []struct{ name, profile, extras, diagnostic string }{
 		{"sidecar-extra", "", "8443", constants.EnvMitmproxyExtraPorts},
-		{"fast-live", constants.ProfileFastSandbox, "", constants.ProfileFastSandbox},
+		{"fast-live", constants.ProfileFastSandbox, "", "fast-sandbox Actions protocol:"},
 	} {
 		t.Run(item.name, func(t *testing.T) {
 			t.Setenv(child, "1")
 			t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
 			t.Setenv(constants.EnvEgressProfile, item.profile)
 			t.Setenv(constants.EnvMitmproxyExtraPorts, item.extras)
+			if item.profile == constants.ProfileFastSandbox {
+				// Reach profile dispatch, but stop before any network setup.
+				t.Setenv(constants.EnvFastSandboxActionsAPIVersion, "invalid")
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRevisionRuntimeStartupRejectsBeforeProfileOrNetwork$")
 			output, err := cmd.CombinedOutput()
 			require.Error(t, err)
 			require.NoError(t, ctx.Err())
-			require.Contains(t, string(output), "invalid live revision runtime configuration")
+			if item.profile == constants.ProfileFastSandbox {
+				require.NotContains(t, string(output), "invalid live revision runtime configuration")
+			} else {
+				require.Contains(t, string(output), "invalid live revision runtime configuration")
+			}
 			require.Contains(t, string(output), item.diagnostic)
 		})
 	}

@@ -33,13 +33,17 @@ _clienthello_addresses = {}
 
 def tls_clienthello(data: tls.ClientHelloData) -> None:
     server = data.context.server
-    _clienthello_addresses[id(data)] = server.address
-    server.address = (server.address[0], 443)
+    address = server.address
+    if type(address) is not tuple or len(address) != 2:
+        return
+    _clienthello_addresses[id(data)] = address
+    server.address = (address[0], 443)
 
 
 class RestoreClientHelloDestination:
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
-        data.context.server.address = _clienthello_addresses.pop(id(data))
+        if id(data) in _clienthello_addresses:
+            data.context.server.address = _clienthello_addresses.pop(id(data))
 
 
 def running() -> None:

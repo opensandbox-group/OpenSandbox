@@ -232,11 +232,14 @@ func validateRevisionRuntimeStartup(profile string) error {
 		return nil
 	}
 	if profile == constants.ProfileFastSandbox {
-		return fmt.Errorf("%s does not support %s", constants.ProfileFastSandbox, constants.EnvExperimentalRevisionRuntime)
+		// Fast Sandbox has no live TLS admission yet; keep this flag a no-op.
+		// The _classify port gate is profile-independent and will also cover
+		// per-subject admission when B3 introduces it.
+		return nil
 	}
 	ports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
 	if err != nil {
-		return fmt.Errorf("invalid %s for live revision runtime", constants.EnvMitmproxyExtraPorts)
+		return fmt.Errorf("invalid %s for live revision runtime: %w", constants.EnvMitmproxyExtraPorts, err)
 	}
 	if ports != constants.MitmproxyBasePorts {
 		return fmt.Errorf("%s is not supported with %s", constants.EnvMitmproxyExtraPorts, constants.EnvExperimentalRevisionRuntime)
