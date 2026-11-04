@@ -296,6 +296,9 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
+                    description: |-
+                      CPU and Memory are runtime limits. ResourceAware Sandboxes may override
+                      them per request; otherwise they are the defaults.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   memory:
@@ -304,13 +307,38 @@ spec:
                     - type: string
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
+                  mode:
+                    enum:
+                    - LegacySlot
+                    - ResourceAware
+                    type: string
+                  overcommitRatio:
+                    description: |-
+                      OvercommitRatio derives commitment requests from runtime limits. It is
+                      required only in ResourceAware mode and remains separate for CPU and
+                      memory because the resources have different pressure policies.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
                   pids:
                     format: int64
                     minimum: 1
                     type: integer
                 required:
-                - cpu
-                - memory
                 - pids
                 type: object
               warmImages:
@@ -395,6 +423,27 @@ spec:
                 type: integer
               fastletRevision:
                 type: string
+              fastlets:
+                properties:
+                  busy:
+                    format: int32
+                    type: integer
+                  current:
+                    format: int32
+                    type: integer
+                  desired:
+                    format: int32
+                    type: integer
+                  draining:
+                    format: int32
+                    type: integer
+                  idle:
+                    format: int32
+                    type: integer
+                  ready:
+                    format: int32
+                    type: integer
+                type: object
               idleFastlets:
                 format: int32
                 type: integer
@@ -409,7 +458,104 @@ spec:
               readyPods:
                 format: int32
                 type: integer
+              resources:
+                description: |-
+                  SandboxPoolResourceSummary reports request-based commitment accounting.
+                  Free is schedulable commitment, not host OS idle CPU or memory.
+                properties:
+                  capacity:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                  committed:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                  free:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                required:
+                - capacity
+                - committed
+                - free
+                type: object
               runtimeRevision:
+                type: string
+              sandboxes:
+                properties:
+                  assigned:
+                    format: int32
+                    type: integer
+                  failed:
+                    format: int32
+                    type: integer
+                  paused:
+                    format: int32
+                    type: integer
+                  pending:
+                    format: int32
+                    type: integer
+                  running:
+                    format: int32
+                    type: integer
+                  terminating:
+                    format: int32
+                    type: integer
+                  total:
+                    format: int32
+                    type: integer
+                type: object
+              summaryObservedAt:
+                format: date-time
                 type: string
               warmImages:
                 items:
@@ -710,6 +856,35 @@ spec:
                   When Spec.ResetRevision > Status.Runtime.AcceptedResetRevision, the sandbox will be rescheduled.
                 format: date-time
                 type: string
+              resources:
+                description: |-
+                  Resources contains caller-owned per-Sandbox runtime limits. It is valid
+                  only for ResourceAware Pools and is immutable after creation. When it is
+                  omitted, the Pool's sandboxResources CPU and memory limits are used.
+                properties:
+                  limits:
+                    description: SandboxComputeResources is one CPU and memory resource
+                      vector.
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                required:
+                - limits
+                type: object
               state:
                 default: Running
                 description: |-

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -22,6 +23,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
+from opensandbox.exceptions import SandboxException
 from opensandbox.models.execd import Execution, RunCommandOpts
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
@@ -50,7 +52,9 @@ class ServerState:
     sandboxes: dict[str, Sandbox] = field(default_factory=dict)
     connection_config: ConnectionConfig = field(default_factory=ConnectionConfig)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    connecting: dict[str, asyncio.Task[Sandbox]] = field(default_factory=dict)
+    connecting: dict[str, asyncio.Task[Sandbox | Exception]] = field(
+        default_factory=dict
+    )
 
     async def add(self, sandbox: Sandbox) -> None:
         async with self.lock:
@@ -66,7 +70,7 @@ class ServerState:
 
 
 def _discard_connecting(
-    state: ServerState, sandbox_id: str, task: asyncio.Task[Sandbox]
+    state: ServerState, sandbox_id: str, task: asyncio.Task[Sandbox | Exception]
 ) -> None:
     # Only pop if this task is still the mapped entry (a stale callback
     # must not evict a newer connect).
@@ -121,9 +125,33 @@ def register_tools(
         def decorator(func):
             if name_prefix:
                 func.__name__ = f"{name_prefix}{func.__name__}"
-            return mcp.tool()(func)
+
+            # MCP 2.x reports any exception other than ToolError as a bare
+            # "Error executing tool"; SDK errors (not found, auth, ...) are
+            # expected outcomes the client needs to see.
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
+                try:
+                    return await func(*args, **kwargs)
+                except SandboxException as exc:
+                    raise ToolError(str(exc)) from exc
+
+            return mcp.tool()(wrapper)
 
         return decorator
+
+    async def _connect_and_register(sandbox_id: str) -> Sandbox | Exception:
+        # A failure is returned, not raised: once every caller is cancelled,
+        # asyncio.shield (Python 3.14+) reports a failed task to the loop
+        # exception handler, although nobody waits for it any more.
+        try:
+            sandbox = await Sandbox.connect(
+                sandbox_id, connection_config=_borrowed_config(state)
+            )
+        except Exception as exc:
+            return exc
+        await state.add(sandbox)
+        return sandbox
 
     async def _get_or_connect_sandbox(
         sandbox_id: str,
@@ -144,18 +172,17 @@ def register_tools(
                         "Sandbox not found in local registry. Call sandbox_connect or "
                         "set connect_if_missing=True with connection parameters."
                     )
-                task = asyncio.ensure_future(
-                    Sandbox.connect(
-                        sandbox_id, connection_config=_borrowed_config(state)
-                    )
-                )
+                task = asyncio.ensure_future(_connect_and_register(sandbox_id))
                 state.connecting[sandbox_id] = task
                 task.add_done_callback(
                     lambda t: _discard_connecting(state, sandbox_id, t)
                 )
-        sandbox = await task
-        await state.add(sandbox)
-        return sandbox
+        # Other tool calls may be waiting on the same task, so cancelling this
+        # call (e.g. the client cancelled the request) must not cancel it.
+        result = await asyncio.shield(task)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     @tool()
     async def sandbox_create(

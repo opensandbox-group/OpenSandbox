@@ -23,7 +23,7 @@ from functools import partial
 from typing import Callable, Any, Dict, List, Optional, Tuple
 
 from kubernetes import client, config
-from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api, V1APIResourceList
+from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api
 
 from opensandbox_server.config import KubernetesRuntimeConfig
 from opensandbox_server.services.k8s.informer import WorkloadInformer
@@ -287,22 +287,6 @@ class K8sClient:
             if e.status == 404 and ignore_not_found:
                 return []
             raise
-
-    def custom_resource_exists(self, group: str, version: str, plural: str) -> bool:
-        """Distinguish an uninstalled API from a failed namespaced list."""
-        if self._read_limiter:
-            self._read_limiter.acquire()
-        try:
-            resources = self.get_custom_objects_api().get_api_resources(
-                group, version, _request_timeout=(10, 30)
-            )
-        except ApiException as exc:
-            if exc.status == 404:
-                return False
-            raise
-        if not isinstance(resources, V1APIResourceList) or resources.resources is None:
-            raise TypeError("API discovery returned an invalid APIResourceList response")
-        return any(resource.name == plural for resource in resources.resources)
 
     def invalidate_custom_objects(
         self, group: str, version: str, plural: str, namespace: str

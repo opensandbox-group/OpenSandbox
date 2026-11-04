@@ -59,37 +59,58 @@ def _parse_response(
         return response_200
 
     if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+        try:
+            response_400 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_400
 
     if response.status_code == 401:
-        response_401 = ErrorResponse.from_dict(response.json())
+        try:
+            response_401 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_401
 
     if response.status_code == 403:
-        response_403 = ErrorResponse.from_dict(response.json())
+        try:
+            response_403 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_403
 
     if response.status_code == 404:
-        response_404 = ErrorResponse.from_dict(response.json())
+        try:
+            response_404 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_404
 
     if response.status_code == 409:
-        response_409 = ErrorResponse.from_dict(response.json())
+        try:
+            response_409 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_409
 
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        try:
+            response_500 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_500
 
     if response.status_code == 503:
-        response_503 = ErrorResponse.from_dict(response.json())
+        try:
+            response_503 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_503
 
@@ -119,9 +140,12 @@ def sync_detailed(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):
@@ -158,9 +182,12 @@ def sync(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):
@@ -192,9 +219,12 @@ async def asyncio_detailed(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):
@@ -229,9 +259,12 @@ async def asyncio(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):

@@ -72,6 +72,12 @@ const (
 	StateBusy ExecutionState = "busy"
 
 	StateStarting ExecutionState = "starting"
+
+	// StateRestarting and StateDead are sent by the Jupyter server, not the
+	// kernel, when the kernel died and is being restarted or could not be.
+	StateRestarting ExecutionState = "restarting"
+
+	StateDead ExecutionState = "dead"
 )
 
 type Header struct {

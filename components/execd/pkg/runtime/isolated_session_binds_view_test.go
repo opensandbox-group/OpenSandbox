@@ -476,3 +476,158 @@ type BindMountSpec struct {
 	source string
 	dest   string
 }
+
+// TestNewMergedView_TmpBindRouting covers the hosted private /tmp: the
+// strict profile binds a host directory under the session's upper-root
+// subtree as /tmp, and the files view must serve the same content run
+// writes there (issue #2413).
+func TestNewMergedView_TmpBindRouting(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsLower := filepath.Join(base, "ws")
+	wsUpper := filepath.Join(base, "upper-ws")
+	tmpHost := filepath.Join(base, "session-dir", "tmp")
+	for _, dir := range []string{wsLower, wsUpper, tmpHost} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmpHost, "seed.txt"), []byte("tmp-seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	persist := true
+	s := newBindsViewSession(t,
+		[]IsolatedOverlayOptions{{Path: wsLower, Mode: "overlay", Persist: &persist}},
+		map[int]string{0: wsUpper},
+		nil,
+	)
+	s.tmpDir = tmpHost
+	view := newMergedView(s)
+	if _, ok := view.(*isolation.MultiMergedView); !ok {
+		t.Fatalf("view type %T, want *isolation.MultiMergedView once /tmp is hosted", view)
+	}
+
+	t.Run("read_and_write_via_tmp_reach_host_dir", func(t *testing.T) {
+		data, err := view.ReadFile("/tmp/seed.txt")
+		if err != nil || string(data) != "tmp-seed" {
+			t.Fatalf("ReadFile /tmp/seed.txt = %q, %v", data, err)
+		}
+		if err := view.WriteFile("/tmp/api.txt", []byte("api"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(tmpHost, "api.txt"))
+		if err != nil || string(got) != "api" {
+			t.Fatalf("/tmp write did not reach the host backing dir: %v, %q", err, got)
+		}
+	})
+
+	t.Run("readdir_lists_tmp", func(t *testing.T) {
+		entries, err := view.ReadDir("/tmp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make(map[string]bool, len(entries))
+		for _, e := range entries {
+			names[e.Name()] = true
+		}
+		for _, want := range []string{"seed.txt", "api.txt"} {
+			if !names[want] {
+				t.Fatalf("ReadDir /tmp missing %q, got %v", want, names)
+			}
+		}
+	})
+
+	t.Run("workspace_routing_unaffected", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(wsLower, "seed.txt"), []byte("seed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := view.Stat(filepath.Join(wsLower, "seed.txt")); err != nil {
+			t.Fatalf("workspace Stat = %v", err)
+		}
+		if _, err := view.Stat("/etc/hostname"); !errors.Is(err, isolation.ErrPathOutsideOverlays) {
+			t.Fatalf("Stat /etc/hostname = %v, want ErrPathOutsideOverlays", err)
+		}
+	})
+}
+
+// TestNewMergedView_BindOnTmpShadowsTmpBind mirrors bwrap argv order: a
+// caller bind at dest /tmp is applied after the session's /tmp bind and
+// shadows it inside the namespace, so the files view must route /tmp to
+// the caller's bind source too.
+func TestNewMergedView_BindOnTmpShadowsTmpBind(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsLower := filepath.Join(base, "ws")
+	tmpHost := filepath.Join(base, "session-dir", "tmp")
+	bindSrc := filepath.Join(base, "bind-src")
+	for _, dir := range []string{wsLower, tmpHost, bindSrc} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmpHost, "marker.txt"), []byte("session-tmp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bindSrc, "marker.txt"), []byte("caller-bind"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newBindsViewSession(t,
+		[]IsolatedOverlayOptions{{Path: wsLower, Mode: "rw"}},
+		nil,
+		[]isolation.BindMount{{Source: bindSrc, Dest: "/tmp"}},
+	)
+	s.tmpDir = tmpHost
+	view := newMergedView(s)
+
+	data, err := view.ReadFile("/tmp/marker.txt")
+	if err != nil || string(data) != "caller-bind" {
+		t.Fatalf("ReadFile /tmp/marker.txt = %q, %v; want the caller bind to shadow the session /tmp bind", data, err)
+	}
+}
+
+// TestNewMergedView_TmpMountRootRemovalRejected: removing the /tmp mount
+// root would unlink the host backing dir under the live mount; the router
+// rejects it while child removal keeps working.
+func TestNewMergedView_TmpMountRootRemovalRejected(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsLower := filepath.Join(base, "ws")
+	tmpHost := filepath.Join(base, "session-dir", "tmp")
+	for _, dir := range []string{wsLower, tmpHost} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmpHost, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newBindsViewSession(t,
+		[]IsolatedOverlayOptions{{Path: wsLower, Mode: "rw"}},
+		nil,
+		nil,
+	)
+	s.tmpDir = tmpHost
+	view := newMergedView(s)
+
+	if err := view.Remove("/tmp"); err == nil || !strings.Contains(err.Error(), "mount root") {
+		t.Fatalf("Remove /tmp = %v, want mount-root rejection", err)
+	}
+	if err := view.RemoveAll("/tmp"); err == nil || !strings.Contains(err.Error(), "mount root") {
+		t.Fatalf("RemoveAll /tmp = %v, want mount-root rejection", err)
+	}
+	if _, err := os.Stat(tmpHost); err != nil {
+		t.Fatalf("backing dir must survive removal attempts: %v", err)
+	}
+	if err := view.Remove("/tmp/f.txt"); err != nil {
+		t.Fatalf("child removal = %v, want nil", err)
+	}
+}

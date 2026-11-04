@@ -916,6 +916,44 @@ class TestCreateSandboxRequestPoolMode:
             )
 
 
+class TestNetworkPolicy:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"egress": [{"action": "allow", "target": "10.0.0.0/8", "port": [443]}]},
+            {"egres": []},
+        ],
+    )
+    def test_rejects_unknown_fields(self, payload):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            NetworkPolicy.model_validate(payload)
+
+    @pytest.mark.parametrize("action", ["allow", "deny"])
+    def test_round_trips_valid_policy(self, action):
+        payload = {
+            "defaultAction": action,
+            "egress": [
+                {"action": action, "target": "*.example.com"},
+                {"action": action, "target": "10.0.0.0/8", "ports": [22, 443]},
+                {"action": action, "ports": [25]},
+            ],
+        }
+        policy = NetworkPolicy.model_validate(payload)
+        assert policy.model_dump(by_alias=True, exclude_none=True) == payload
+
+    def test_preserves_omitted_defaults(self):
+        policy = NetworkPolicy()
+        assert policy.default_action is None
+        assert policy.egress == []
+        assert policy.model_dump(by_alias=True, exclude_none=True) == {"egress": []}
+
+    def test_preserves_default_action_field_name(self):
+        policy = NetworkPolicy.model_validate({"default_action": "deny"})
+        assert policy.model_dump(by_alias=True, exclude_none=True) == {
+            "defaultAction": "deny", "egress": [],
+        }
+
+
 class TestNetworkRule:
     """NetworkRule.target became optional so a rule can be scoped by `ports`
     alone; these guard the target/ports combinations the API is meant to

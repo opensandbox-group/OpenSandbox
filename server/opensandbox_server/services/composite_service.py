@@ -73,7 +73,8 @@ class CompositeSandboxService(SandboxService, ExtensionService):
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
-            objects = self._kubernetes.list_sandbox_objects() + self._fsb.list_sandbox_objects()
+            metadata = request.filter.metadata if request.filter else None
+            objects = self._kubernetes.list_sandbox_objects(metadata=metadata) + self._fsb.list_sandbox_objects()
             objects.sort(key=lambda sandbox: sandbox.id)
             return _build_list_sandboxes_response(objects, request)
         except HTTPException:

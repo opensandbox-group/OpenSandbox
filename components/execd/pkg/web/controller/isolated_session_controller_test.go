@@ -46,6 +46,21 @@ func TestClassifyIsolatedCreateError_UidModeUnavailable(t *testing.T) {
 	}
 }
 
+func TestClassifyIsolatedCreateError_PrivateNetUnavailable(t *testing.T) {
+	status, code := classifyIsolatedCreateError(
+		fmt.Errorf(
+			"create session: %w: uid mode setpriv cannot create the private network namespace",
+			runtime.ErrSessionPrivateNetUnavailable,
+		),
+	)
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+	if code != model.ErrorCodeNotSupported {
+		t.Errorf("code = %q, want %q", code, model.ErrorCodeNotSupported)
+	}
+}
+
 func TestClassifyIsolatedCreateError_ServiceUnavailable(t *testing.T) {
 	for _, target := range []error{
 		runtime.ErrSessionNamespaceUnavailable,

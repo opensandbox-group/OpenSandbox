@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 from collections.abc import Callable
 from dataclasses import replace
@@ -247,6 +248,40 @@ class TestSyncWakeRetry:
 
 
 class TestAsyncWakeRetry:
+    @pytest.mark.asyncio
+    async def test_cancelled_exhaustion_body_read_closes_response(self) -> None:
+        started = asyncio.Event()
+
+        class PendingBody(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self):
+                started.set()
+                await asyncio.Event().wait()
+                yield b""
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        stream = PendingBody()
+        response = httpx.Response(
+            503, headers={"OpenSandbox-Wake": "expired"}, stream=stream
+        )
+        inner = _ScriptAsync([response])
+        transport = RetryAsyncTransport(inner, _wake_policy(wake_max_attempts=1))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://x"
+        ) as client:
+            task = asyncio.create_task(client.post("/", json={}))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert stream.closed
+        assert response.is_closed
+        assert inner.calls == 1
+
     @pytest.mark.asyncio
     async def test_post_retried_on_marked_503_then_success(self) -> None:
         inner = _ScriptAsync([_wake_503(), httpx.Response(200, text="ok")])

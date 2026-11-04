@@ -2967,11 +2967,19 @@ components:
         them, and absolute paths outside every overlay or bind are
         rejected instead of resolving against the workspace (unlike
         binds, extra_writable paths are not served by the files API
-        unless an overlay covers them).
+        unless an overlay covers them). The strict profile's private
+        `/tmp` is a session-owned bind under the upper root and is part
+        of that view; a caller bind or overlay on `/tmp` shadows it as
+        inside the namespace.
       properties:
         profile:
           type: string
           enum: ["strict", "balanced"]
+          description: >-
+            Isolation profile. `strict` (default) gives the session a private
+            `/tmp` backed by a host directory that the session files API also
+            serves; `balanced` shares the sandbox's own `/tmp`, which the
+            files API does not serve.
         workspace:
           $ref: "#/components/schemas/IsolatedWorkspaceSpec"
         overlays:
@@ -3341,7 +3349,10 @@ components:
           type: string
         message:
           type: string
-          description: Diagnostic message when isolation is unavailable
+          description: >-
+            Diagnostic message when isolation is unavailable or degraded (for
+            example, share_net=true sessions work but no uid mode can create
+            the private network namespace required by share_net=false)
         setpriv_available:
           type: boolean
           description: >-
@@ -3352,6 +3363,19 @@ components:
         userns_available:
           type: boolean
           description: Whether sessions using uid_mode userns can be created
+        setpriv_net_available:
+          type: boolean
+          description: >-
+            Whether sessions using uid_mode setpriv can also create the private
+            network namespace required by share_net=false (bwrap --unshare-net;
+            its loopback setup needs CAP_NET_ADMIN in the execd container).
+            Create rejects share_net=false requests with 503 NOT_SUPPORTED when
+            the requested mode's flag is false.
+        userns_net_available:
+          type: boolean
+          description: >-
+            Whether sessions using uid_mode userns can also create the private
+            network namespace required by share_net=false.
         commit_supported:
           type: boolean
         diff_supported:

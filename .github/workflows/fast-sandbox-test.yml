@@ -34,7 +34,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: kvm
-    # The verify matrix runs twice when OCI_STACK=1 (native + overlaybd).
     timeout-minutes: 240
     env:
       # Full-stack profile (single round while scenarios stabilize).
@@ -60,10 +59,6 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Test integration script failure handling
-        # The self-hosted runner's system python3 may still be Python 3.6.
-        run: uv run --no-project --python 3.12 python -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
-
       # Rewrites the pin in the working tree only, then re-vendors the CRD
       # bundle so the charts install the tested commit's CRDs.
       - name: Override fast-sandbox pin
@@ -77,11 +72,20 @@ jobs:
           sed -i "s/^commit:.*/commit: $FSB_COMMIT_OVERRIDE/" manifests/third-party/fast-sandbox.commit
           manifests/release/build-fast-sandbox.sh --no-build --sync-crds
 
-      - name: Run integration tests
+      - name: Run integration tests (environment init)
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
+      - name: Run native template verify
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Run overlaybd template verify
+        # Builds the overlaybd template first; no-op when OCI_STACK=0.
+        timeout-minutes: 90
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
       - name: Run base SDK e2e
-        # Runs once per template (native + overlaybd).
+        # Runs on the overlaybd template (native only under OCI_STACK=0).
         timeout-minutes: 60
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 

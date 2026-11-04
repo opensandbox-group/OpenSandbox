@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from enum import Enum
 from http import HTTPStatus
@@ -183,6 +183,18 @@ class RetryPolicy:
     def disabled(cls) -> RetryPolicy:
         """Never retry. Also suppresses fresh-connection recovery and wake retry."""
         return cls(max_retries=0, wake_retry_enabled=False)
+
+    def wake_only(self) -> RetryPolicy:
+        """
+        This policy with only the wake-timeout retry left.
+
+        Used for streaming (SSE) requests. They run commands, so they must
+        not be resent after a status code or a post-send failure, but a
+        marked wake timeout proves the gateway never forwarded the request.
+        """
+        return replace(
+            self, max_retries=0, per_attempt_timeout=None, overall_deadline=None
+        )
 
     def wraps_transport(self) -> bool:
         """

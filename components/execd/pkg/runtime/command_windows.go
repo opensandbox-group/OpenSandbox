@@ -145,6 +145,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
+		pipe.Close() // best-effort
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 

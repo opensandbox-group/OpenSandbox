@@ -729,3 +729,125 @@ func newTestUpperManager(t *testing.T) *UpperManager {
 	}
 	return mgr
 }
+
+func TestAllocateSessionDir(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, err := mgr.AllocateSessionDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validSessionID(id) {
+		t.Fatalf("AllocateSessionDir id = %q, want a valid session id", id)
+	}
+
+	tmpDir := mgr.TmpDir(id)
+	info, err := os.Stat(tmpDir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("tmp dir %s missing: %v", tmpDir, err)
+	}
+	sessionDir := filepath.Dir(tmpDir)
+	for _, name := range []string{"upper", "work"} {
+		if _, err := os.Stat(filepath.Join(sessionDir, name)); !os.IsNotExist(err) {
+			t.Errorf("pair-less session dir should not hold %q: %v", name, err)
+		}
+	}
+
+	// Remove tears down the whole session subtree and retires the record.
+	if err := mgr.Remove(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
+		t.Errorf("session dir survived Remove: %v", err)
+	}
+}
+
+func TestAllocateSessionDir_ReleasedEntryCollects(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, err := mgr.AllocateSessionDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.Release(id)
+
+	// A released pair-less entry still collects cleanly.
+	freed := mgr.Collect()
+	if len(freed) != 1 || freed[0] != id {
+		t.Fatalf("Collect freed = %v, want [%s]", freed, id)
+	}
+}
+
+func TestAllocateN_CreatesTmpDir(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, pairs, err := mgr.AllocateN(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(mgr.TmpDir(id))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("AllocateN session missing tmp dir: %v", err)
+	}
+	for _, pair := range pairs {
+		if pair.UpperDir == mgr.TmpDir(id) || pair.WorkDir == mgr.TmpDir(id) {
+			t.Fatal("tmp dir must not collide with upper/work pairs")
+		}
+	}
+}
+
+func TestAllocateTmpDirWorldWritableSticky(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	for _, tc := range []struct {
+		name  string
+		alloc func() (string, error)
+	}{
+		{"allocate_session_dir", func() (string, error) { return mgr.AllocateSessionDir() }},
+		{"allocate_n", func() (string, error) {
+			id, _, err := mgr.AllocateN(1)
+			return id, err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := tc.alloc()
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(mgr.TmpDir(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o777 {
+				t.Fatalf("tmp dir perm = %#o, want 777", perm)
+			}
+			if info.Mode()&os.ModeSticky == 0 {
+				t.Fatal("tmp dir must be sticky")
+			}
+		})
+	}
+}
+
+func TestUsageCountsTmpDir(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, err := mgr.AllocateSessionDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(mgr.TmpDir(id), "payload.bin")
+	if err := os.WriteFile(payload, make([]byte, 1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := mgr.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after-before < 1024 {
+		t.Fatalf("usage grew by %d bytes, want >= 1024 (tmp dir must count)", after-before)
+	}
+}

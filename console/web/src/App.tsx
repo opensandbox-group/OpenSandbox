@@ -27,6 +27,10 @@ import { SandboxCreatePage } from './pages/SandboxCreatePage';
 import { SandboxDetailPage } from './pages/SandboxDetailPage';
 import { SandboxListPage } from './pages/SandboxListPage';
 import { SnapshotsPage } from './pages/SnapshotsPage';
+import { ComponentHealthPage } from './pages/platform/ComponentHealthPage';
+import { K8sEventsPage } from './pages/platform/K8sEventsPage';
+import { K8sWorkloadsPage } from './pages/platform/K8sWorkloadsPage';
+import { VersionPage } from './pages/platform/VersionPage';
 
 const consoleTheme = {
   token: {
@@ -89,6 +93,10 @@ export default function App() {
                 }
               />
               <Route path="diagnostics" element={<DiagnosticsPage />} />
+              <Route path="platform/health" element={<ComponentHealthPage />} />
+              <Route path="platform/version" element={<VersionPage />} />
+              <Route path="platform/k8s/workloads" element={<K8sWorkloadsPage />} />
+              <Route path="platform/k8s/events" element={<K8sEventsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

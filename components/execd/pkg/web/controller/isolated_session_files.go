@@ -113,6 +113,9 @@ func (c *IsolatedSessionController) SearchFiles() {
 
 	files := make([]model.FileInfo, 0, len(results))
 	for _, rel := range results {
+		if isUploadStagingName(filepath.Base(rel)) {
+			continue
+		}
 		info, err := mv.Stat(rel)
 		if err != nil {
 			continue
@@ -537,6 +540,9 @@ func (c *IsolatedSessionController) listIsolatedDir(mv vfs.FS, root string, maxD
 			return err
 		}
 		for _, entry := range dirEntries {
+			if isUploadStagingName(entry.Name()) {
+				continue
+			}
 			entryPath := filepath.Join(dir, entry.Name())
 			info, err := entry.Info()
 			if err != nil {

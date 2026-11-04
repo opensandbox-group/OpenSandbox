@@ -24,9 +24,10 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 class ExecdEventSupportTest {
-    private val reported = mutableListOf<Pair<String, Exception>>()
+    private val reported = mutableListOf<Pair<String, Throwable>>()
 
     private fun decode(line: String): com.alibaba.opensandbox.sandbox.api.models.execd.EventNode? =
         ExecdEventSupport.decodeEventLine(line) { line, error -> reported.add(line to error) }
@@ -84,6 +85,26 @@ class ExecdEventSupportTest {
         assertEquals(1, reported.size)
         assertEquals("data: {not json", reported[0].first)
         assertTrue(reported[0].second is Exception)
+    }
+
+    @Test
+    fun `reports linkage errors through onError and rethrows them`() {
+        val boom = AbstractMethodError("missing typeParametersSerializers()")
+        val linkageReported = mutableListOf<Pair<String, Throwable>>()
+        val rawLine = """data: {"type":"error","timestamp":1}"""
+
+        val thrown =
+            assertThrows<AbstractMethodError> {
+                ExecdEventSupport.decodeEventLine(
+                    rawLine,
+                    decodePayload = { throw boom },
+                ) { line, error -> linkageReported.add(line to error) }
+            }
+
+        assertEquals(boom, thrown)
+        assertEquals(1, linkageReported.size)
+        assertEquals(rawLine, linkageReported[0].first)
+        assertEquals(boom, linkageReported[0].second)
     }
 
     @Test

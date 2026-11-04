@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import ImageSpec, Sandbox, SandboxStatus
+from opensandbox_server.services.sandbox_service import SandboxService
 
 
 def _make_sandbox(metadata: Optional[Dict[str, str]] = None) -> Sandbox:
@@ -36,6 +37,30 @@ def _make_sandbox(metadata: Optional[Dict[str, str]] = None) -> Sandbox:
 
 
 class TestPatchMetadataRoute:
+
+    def test_trailing_newline_rejected(self, client: TestClient, auth_headers: dict, monkeypatch) -> None:
+        class StubService:
+            @staticmethod
+            def patch_sandbox_metadata(sandbox_id: str, patch: dict) -> Sandbox:
+                metadata = SandboxService._apply_metadata_patch({}, patch)
+                return _make_sandbox(metadata)
+
+        monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+        resp = client.patch(
+            "/v1/sandboxes/sbx-001/metadata",
+            json={"app": "web\n"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {
+            "code": "SANDBOX::INVALID_METADATA_LABEL",
+            "message": (
+                "Metadata value 'web\n' is invalid: must be 63 characters or less, "
+                "start/end with an alphanumeric character, and contain only "
+                "alphanumeric, '-', '_', or '.' characters."
+            ),
+        }
 
     def test_add_keys(self, client: TestClient, auth_headers: dict, monkeypatch) -> None:
         sandbox = _make_sandbox({"team": "old"})

@@ -19,6 +19,15 @@ import { createDiagnosticClient, createLifecycleClient } from "../dist/internal.
 
 const context = { sandboxId: "sbx-1", backendType: "kubernetes", backendIdentifiers: { namespace: "tenant-ns" } };
 
+/**
+ * Normalize a transport call into a Request. The redirect-guarded lifecycle
+ * transport dispatches hops as `(url, init)` — valid per the fetch contract —
+ * while unguarded paths pass a Request, so these mocks must not assume either.
+ */
+function toRequest(input, init) {
+  return input instanceof Request ? input : new Request(input, init);
+}
+
 function mockConfig(handler, options = {}) {
   const config = new ConnectionConfig({
     domain: "localhost:8080", protocol: "http", apiKey: "key", headers: { "x-custom": "custom" },
@@ -32,8 +41,8 @@ function mockConfig(handler, options = {}) {
 test("manager diagnostics uses lifecycle transport and preserves descriptor metadata", async () => {
   const calls = [];
   const manager = SandboxManager.create({ connectionConfig: mockConfig(
-    async (input) => {
-      const req = input instanceof Request ? input : new Request(input);
+    async (input, init) => {
+      const req = toRequest(input, init);
       calls.push(req);
       assert.equal(req.headers.get("OPEN-SANDBOX-API-KEY"), "key");
       assert.equal(req.headers.get("x-custom"), "custom");
@@ -66,7 +75,8 @@ for (const source of ["config", "environment"]) {
     const previousKey = process.env.OPEN_SANDBOX_API_KEY;
     process.env.OPEN_SANDBOX_API_KEY = "environment-key";
     const calls = [];
-    const manager = SandboxManager.create({ connectionConfig: mockConfig(async (req) => {
+    const manager = SandboxManager.create({ connectionConfig: mockConfig(async (input, init) => {
+      const req = toRequest(input, init);
       calls.push(req);
       assert.equal(req.headers.get("OPEN-SANDBOX-API-KEY"), "explicit-header-key");
       if (new URL(req.url).pathname.endsWith("/context")) return Response.json(context);
@@ -118,7 +128,8 @@ test("diagnostic and lifecycle clients share environment and URL defaults", asyn
   const previousKey = process.env.OPEN_SANDBOX_API_KEY;
   process.env.OPEN_SANDBOX_API_KEY = "environment-key";
   const calls = [];
-  const fetch = async (req) => {
+  const fetch = async (input, init) => {
+    const req = toRequest(input, init);
     calls.push(req);
     assert.equal(req.headers.get("OPEN-SANDBOX-API-KEY"), "environment-key");
     return Response.json(context);
@@ -142,7 +153,8 @@ test("diagnostic and lifecycle clients share environment and URL defaults", asyn
 
 test("inline diagnostics preserves content without requiring an expiry", async () => {
   for (const expiry of [{}, { expiresAt: null }]) {
-    const manager = SandboxManager.create({ connectionConfig: mockConfig(async (req) => {
+    const manager = SandboxManager.create({ connectionConfig: mockConfig(async (input, init) => {
+      const req = toRequest(input, init);
       const kind = new URL(req.url).pathname.endsWith("/logs") ? "logs" : "events";
       return Response.json({
         sandboxId: "sbx-1", kind, scope: "all", delivery: "inline", contentType: "text/plain",

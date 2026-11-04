@@ -100,6 +100,16 @@ export interface InlineCredentialSource extends Record<string, unknown> {
    * requests and is never present in Credential Vault state responses.
    */
   value: string;
+  endpoint?: never;
+}
+
+export interface ExchangeCredentialSource extends Record<string, unknown> {
+  type: "exchange";
+  /**
+   * Header-resolver endpoint (`unix:///path` or `https://host[:port]`).
+   */
+  endpoint: string;
+  value?: never;
 }
 
 export interface Credential extends Record<string, unknown> {
@@ -108,9 +118,9 @@ export interface Credential extends Record<string, unknown> {
    */
   name: string;
   /**
-   * Write-only credential source.
+   * Write-only credential source (inline material or exchange endpoint).
    */
-  source: InlineCredentialSource;
+  source: InlineCredentialSource | ExchangeCredentialSource;
 }
 
 export type CredentialMatchScheme = "https" | "http";
@@ -193,7 +203,17 @@ export type CredentialAuth =
     } & CredentialAuthSubstitutions)
   | ({
       type: "passthrough";
-    } & CredentialAuthSubstitutions);
+    } & CredentialAuthSubstitutions)
+  /**
+   * Typeless exchange form: only a credential reference (exchange-sourced).
+   * Static-only fields are `never` so they stay compile errors here.
+   */
+  | ({ credential: string } & {
+      type?: never;
+      name?: never;
+      headers?: never;
+      substitutions?: never;
+    });
 
 export interface CredentialBinding extends Record<string, unknown> {
   /**
@@ -213,18 +233,25 @@ export interface CredentialBinding extends Record<string, unknown> {
 export interface CredentialMetadata {
   name: string;
   /**
-   * Source type only; plaintext source material is not returned.
+   * Source type only (`inline` or `exchange`); never source material.
    */
   sourceType: string;
   revision: number;
 }
 
 export interface CredentialAuthMetadata {
-  type: string;
+  /**
+   * Static auth kind; omitted for the typeless exchange form.
+   */
+  type?: string;
   /**
    * Public auth parameter name, such as an API key header name.
    */
   name?: string;
+  /**
+   * Exchange-sourced credential reference, typeless form only.
+   */
+  credential?: string;
 }
 
 export interface CredentialBindingMetadata {

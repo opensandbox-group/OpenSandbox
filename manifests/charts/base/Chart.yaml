@@ -15,7 +15,7 @@
 apiVersion: v2
 name: base
 description: Helm chart for deploying OpenSandbox cluster resources and CRDs
-version: 1.2.0-rc.2
+version: 1.2.0
 
 keywords:
   - sandbox

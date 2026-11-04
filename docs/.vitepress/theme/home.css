@@ -508,14 +508,20 @@
 .os-affiliation {
   min-width: 0;
   max-width: 100%;
+  margin-bottom: 22px;
+  padding: 6px 12px;
+  border: 1px solid #91bdff66;
+  border-radius: 999px;
+  background: #7186ff18;
+  font-size: 12px;
   line-height: 1.6;
-  color: #9da7c5;
+  color: #dbe4ff;
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
 .os-affiliation:hover {
-  color: #dbe4ff;
+  color: #fff;
 }
 
 .os-ecosystem {

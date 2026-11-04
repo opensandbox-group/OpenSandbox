@@ -99,7 +99,7 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 |-----|------|---------|-------------|
 | `type` | string | — | **`docker`** or **`kubernetes`**. |
 | `execd_image` | string | — | OCI image containing the **execd** binary (in-sandbox bootstrap). |
-| `execd_run_as_init` | boolean | `false` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 (child reaping, container lifecycle, hardening floor). |
+| `execd_run_as_init` | boolean | `false` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 (child reaping, container lifecycle, hardening floor). fsb template builds bake `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the fsb guest init, so reaping, signal forwarding, and the hardening floor still apply but the PID 1 signal shield does not. |
 
 ---
 
@@ -167,7 +167,7 @@ The kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side; these fi
 | `fastpath_wait_ready_seconds` | number | `30.0` | Bounded readiness wait for DataPlaneReady after Create. |
 | `fastpath_resource_pool` | string | `"default-pool"` | SandboxPool when `extensions.poolRef` is unset. |
 | `template_s3_publish_secret` | string | `"sandbox-oss-credentials"` | Object-store credentials secret for server-created SandboxTemplates (`format: native`). |
-| `template_oci_publish_secret` | string \| omitted | `null` | Name of a `kubernetes.io/dockerconfigjson` Secret in each template's namespace, used as `output.publishSecretRef` for `format: overlaybd` SandboxTemplate builds (fast-sandbox OCI publication). Required when creating overlaybd templates; native templates keep using `template_s3_publish_secret`. |
+| `template_oci_publish_secret` | string \| omitted | `null` | Name of a `kubernetes.io/dockerconfigjson` Secret in each template's namespace, used as `output.publishSecretRef` for `format: overlaybd` SandboxTemplate builds (fast-sandbox OCI publication). Required when creating overlaybd templates; native templates keep using `template_s3_publish_secret`. See [OCI templates](../docs/guides/oci-templates.md) for setup. |
 | `template_mitm_ca_secret` | string \| omitted | `null` | Secret holding the pinned cluster MITM CA certificate (OSEP-0022). When set, server-created SandboxTemplates bake `spec.egressMitmCertificate` from it (certificate entry only, never the private key); unset keeps templates CA-free. The Secret must exist in each template's namespace (ops-runbook distribution); a missed copy fails the build observably. |
 | `template_mitm_ca_secret_key` | string | `"ca.crt"` | Secret entry holding the CA certificate when `template_mitm_ca_secret` is set. |
 

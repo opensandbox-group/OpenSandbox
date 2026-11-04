@@ -20,6 +20,7 @@ import {
   FileSearchOutlined,
   LogoutOutlined,
   PlusOutlined,
+  SettingOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
 import { Layout, Menu, Typography } from 'antd';
@@ -54,6 +55,21 @@ export function AppLayout() {
     { key: '/snapshots', icon: <CameraOutlined />, label: '快照' },
     ...(isAdmin ? [{ key: '/pools', icon: <DatabaseOutlined />, label: 'Pool' }] : []),
     { key: '/diagnostics', icon: <FileSearchOutlined />, label: '诊断' },
+    {
+      key: 'platform',
+      icon: <SettingOutlined />,
+      label: '平台',
+      children: [
+        { key: '/platform/health', label: '组件健康' },
+        { key: '/platform/version', label: '版本' },
+        ...(isAdmin
+          ? [
+              { key: '/platform/k8s/workloads', label: 'K8s 工作负载' },
+              { key: '/platform/k8s/events', label: 'K8s 事件' },
+            ]
+          : []),
+      ],
+    },
   ];
 
   const selectedKey = menuKey(location.pathname, Boolean(isAdmin));
@@ -73,8 +89,11 @@ export function AppLayout() {
           theme="dark"
           mode="inline"
           selectedKeys={[selectedKey]}
+          defaultOpenKeys={['platform']}
           items={items}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) => {
+            if (key !== 'platform') navigate(key);
+          }}
         />
       </Sider>
       <Layout>

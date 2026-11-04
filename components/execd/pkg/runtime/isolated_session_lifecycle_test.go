@@ -165,7 +165,9 @@ func (*lifecycleHarnessIsolator) Capabilities() isolation.Capabilities {
 		Available:              true,
 		SetprivAvailable:       true,
 		SetprivSwitchAvailable: true,
+		SetprivNetAvailable:    true,
 		UsernsAvailable:        true,
+		UsernsNetAvailable:     true,
 	}
 }
 

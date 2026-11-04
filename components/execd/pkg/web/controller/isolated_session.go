@@ -125,7 +125,8 @@ func (c *IsolatedSessionController) Create() {
 }
 
 func classifyIsolatedCreateError(err error) (int, model.ErrorCode) {
-	if errors.Is(err, runtime.ErrUidModeUnavailable) {
+	if errors.Is(err, runtime.ErrUidModeUnavailable) ||
+		errors.Is(err, runtime.ErrSessionPrivateNetUnavailable) {
 		return http.StatusServiceUnavailable, model.ErrorCodeNotSupported
 	}
 	if errors.Is(err, runtime.ErrSessionNamespaceUnavailable) ||
@@ -522,21 +523,26 @@ func (c *IsolatedSessionController) Capabilities() {
 			resp.Message = isolatedProbeResult.Message
 			resp.SetprivAvailable = isolatedProbeResult.SetprivAvailable
 			resp.UsernsAvailable = isolatedProbeResult.UsernsAvailable
+			resp.SetprivNetAvailable = isolatedProbeResult.SetprivNetAvailable
+			resp.UsernsNetAvailable = isolatedProbeResult.UsernsNetAvailable
 		}
 		c.RespondSuccess(resp)
 		return
 	}
 	caps := isolatedRunner.Capabilities()
 	resp := model.CapabilitiesResponse{
-		Available:        caps.Available,
-		Isolator:         caps.Isolator,
-		Version:          caps.Version,
-		SetprivAvailable: caps.SetprivAvailable,
-		UsernsAvailable:  caps.UsernsAvailable,
-		CommitSupported:  caps.CommitSupported,
-		DiffSupported:    caps.DiffSupported,
-		Hardening:        hardening,
-		RuntimeInit:      runtimeInit,
+		Available:           caps.Available,
+		Isolator:            caps.Isolator,
+		Version:             caps.Version,
+		Message:             caps.Message,
+		SetprivAvailable:    caps.SetprivAvailable,
+		UsernsAvailable:     caps.UsernsAvailable,
+		SetprivNetAvailable: caps.SetprivNetAvailable,
+		UsernsNetAvailable:  caps.UsernsNetAvailable,
+		CommitSupported:     caps.CommitSupported,
+		DiffSupported:       caps.DiffSupported,
+		Hardening:           hardening,
+		RuntimeInit:         runtimeInit,
 	}
 	// Probe results indicate overlay capability, not diff/commit implementation.
 	// Diff and commit are Phase 2; do not advertise them as supported.

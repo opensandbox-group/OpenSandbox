@@ -71,9 +71,15 @@ func main() {
 
 `ConnectSandbox` and `ResumeSandbox` check health only when you pass the optional `ReadyOptions` argument (an empty `ReadyOptions{}` uses the default check). Omitting it resolves the endpoint without a health check. Pause is asynchronous: wait until sandbox info reports `Paused` before resuming.
 
+`ConnectionConfig.APIKey` authenticates lifecycle requests. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when `UseServerProxy` is true; in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
+
 The following snippets go inside a function returning `error`, with the live `sandbox`, `config`, and `ctx` above. Add standard-library imports used by each snippet. Creation examples are alternatives; terminate sandboxes with `Kill` when done. `Close` currently does not terminate the sandbox.
 
 ### Run a command with streaming output
+
+`Execution.Text()` combines stdout events while preserving their line-ending bytes and any unterminated final fragment. It inserts a newline between events only when the preceding event ends in neither `\n` nor `\r`, preserving ordinary legacy stripped-line output without appending a final terminator. A trailing `\r` is always treated as a line ending, including when an older producer retained it as content while stripping another terminator.
+
+For a language-backed code execution returned by `Sandbox.ExecuteCode`, `CodeInterpreter.Execute` or `CodeInterpreter.ExecuteInContext`, `Text()` concatenates stdout events without inserting any newline: `"Loading"` followed by `"...done\n"` produces `"Loading...done\n"`. CR, LF and trailing terminators are preserved, and the fragments stay unchanged in `Execution.Stdout`. Requests with no context, an empty language, or the `command` or `background-command` language use the command-output rule above. The SDK records the formatting mode in an unexported field; a plain struct copy keeps it, while an `Execution` constructed by hand or reconstructed into a fresh value from JSON uses the command-output rule.
 
 Use structured callbacks for normal command output:
 
@@ -268,6 +274,17 @@ if err := sandbox.DeleteFiles(ctx, []string{"/tmp/demo.txt"}); err != nil {
 
 The same upload/download methods support binary files. Pass a Range header such as `"bytes=0-1023"` to `DownloadFile` for a partial download.
 
+Use `DownloadFileResponse` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `IsPartial()` before appending a resumed download, and close `Body` after use:
+
+```go
+download, err := sandbox.DownloadFileResponse(ctx, "/tmp/data.bin", "bytes=5-")
+if err != nil {
+    return err
+}
+defer download.Body.Close()
+fmt.Println(download.IsPartial(), download.TotalSize, download.ContentRange)
+```
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:
@@ -282,6 +299,8 @@ if err != nil {
 The bound client exposes the usual file operations and shares the sandbox connection, authentication, and endpoint routing headers. The existing file client retains its default identity. Select the UID/GID separately for command execution.
 
 This requires Linux and an Execd version that supports filesystem execution identity. Unsupported servers return an error; requests never fall back to the default filesystem routes. Keep sandbox credentials and identity selection in the trusted backend. Linux filesystem permissions apply; this feature does not create a tenant isolation boundary. See [Execd](/architecture/data-plane/execd) for permission and workspace provisioning details.
+
+For download metadata on this client, check the optional capability with `downloads, ok := files.(opensandbox.DownloadFilesystem)`, then call `downloads.DownloadFileResponse` when `ok` is true.
 
 ### Pause and reconnect
 
@@ -319,6 +338,8 @@ if _, err := resumed.Renew(ctx, 30*time.Minute); err != nil {
     return err
 }
 ```
+
+During sandbox creation, `ReadyTimeout` bounds the wait for the lifecycle state to become `Running`, even when the caller context has a longer deadline. An earlier caller deadline or cancellation still takes precedence.
 
 Use `ConnectSandbox(ctx, config, id, opensandbox.ReadyOptions{})` to attach to an already running sandbox with a readiness check. See [Pause and Resume](/guides/pause-resume).
 
@@ -501,11 +522,11 @@ config.Retry = &opensandbox.RetryConfig{
 }
 ```
 
-SSE bootstraps do not use the generic retry loop, even when a write status code is opted in.
+SSE bootstraps do not use the generic retry loop, even when a write status code is opted in. The OSEP-0024 wake retry below still covers the request that starts the stream.
 
 ### Wake retry
 
-A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the client recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the client returns a `*SandboxWakeTimeoutError` (carrying `Attempts` and `Waited`) while the server-side resume continues in the background. Bare `503` responses follow the existing retry rules untouched. Wake retry is active whenever a `WithRetry` config is set (`WakeRetryEnabled` defaults to enabled even for hand-built configs; pass `WakeRetryDisabled()` to opt out); streaming connections bypass wake retry — a waking sandbox fails fast with the marked 503 instead of parking the connect — matching the other official SDKs, and established streams are never re-executed.
+A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the client recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the client returns a `*SandboxWakeTimeoutError` (carrying `Attempts` and `Waited`) while the server-side resume continues in the background. Bare `503` responses follow the existing retry rules untouched. Wake retry is active whenever a `WithRetry` config is set (`WakeRetryEnabled` defaults to enabled even for hand-built configs; pass `WakeRetryDisabled()` to opt out). It also covers the request that starts an SSE stream, so a command or code execution against an auto-paused sandbox wakes it like any other request; once a stream is established, its events are never re-executed.
 
 ## Fsb Template Management
 
@@ -521,6 +542,7 @@ defer cancel()
 template, err := manager.CreateTemplate(buildCtx, opensandbox.CreateTemplateRequest{
     Image:          "alpine:3.19",
     Publish:        "s3://bucket/publish",
+    Format:         opensandbox.TemplateFormatNative,
     ResourceLimits: opensandbox.ResourceLimits{"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
     Readiness:      &opensandbox.TemplateReadiness{Probe: "tcp://127.0.0.1:44772"},
     Metadata:       map[string]string{"team": "backend"},
@@ -643,6 +665,8 @@ if _, err := sandbox.PatchMetadata(ctx, opensandbox.MetadataPatch{
 
 Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 
+Successful `PauseSandbox`, `ResumeSandbox`, and `DeleteSandbox` requests remove cached endpoints for that sandbox from the client's endpoint cache, so subsequent lookups fetch current endpoint information. Failed requests leave cached entries intact; other sandboxes are unaffected.
+
 | Method | Description |
 |--------|-------------|
 | `CreateSandbox(ctx, req)` | Create a new sandbox from a container image |
@@ -711,6 +735,7 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `UploadFile(ctx, file, opts)` | Upload a file to the sandbox |
 | `UploadFiles(ctx, entries)` | Upload multiple files to the sandbox |
 | `DownloadFile(ctx, remotePath, rangeHeader)` | Download a file from the sandbox |
+| `DownloadFileResponse(ctx, remotePath, rangeHeader)` | Download a file with HTTP status and range metadata |
 
 **Directory Operations:**
 
@@ -744,6 +769,8 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 | `GetCredentialVaultBinding(ctx, name)` | Get sanitized metadata for one binding |
 
 ## SSE Streaming
+
+The stream parser accepts LF, CRLF, and CR line endings for both standard SSE and execd's legacy bare-JSON frames, including when a line ending is split across network reads.
 
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 
@@ -779,7 +806,7 @@ SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by d
 :::
 
 ::: tip SDK Telemetry
-`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
+`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Each best-effort background report has a five-second deadline, including when using a custom `HTTPClient`; a shorter client timeout still applies, and the caller-owned client is not modified. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
 
 ### Follow redirects
@@ -805,4 +832,4 @@ if err != nil {
 
 ## License
 
-Apache 2.0
+The Go SDK code is licensed under [Apache 2.0](https://github.com/opensandbox-group/OpenSandbox/blob/main/LICENSE).

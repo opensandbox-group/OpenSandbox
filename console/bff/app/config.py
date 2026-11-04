@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     bff_k8s_node_agent_label_selector: str = "app.kubernetes.io/component=node-agent"
     bff_k8s_node_agent_probe_port: int = 8080
 
+    # Optional: read durable sandbox logs written by node-agent (OSS sink)
+    bff_nodeagent_archive_enabled: bool = False
+    bff_nodeagent_cluster_id: str = "dev-cluster"
+    bff_nodeagent_oss_endpoint: str = ""
+    bff_nodeagent_oss_bucket: str = ""
+    bff_nodeagent_oss_key_prefix: str = "logs"
+    bff_nodeagent_oss_access_key_id: str = ""
+    bff_nodeagent_oss_access_key_secret: str = ""
+    bff_nodeagent_archive_max_bytes: int = 524_288
+
     @property
     def cors_origins_list(self) -> list[str]:
         origins = [origin.strip() for origin in self.bff_cors_origins.split(",") if origin.strip()]

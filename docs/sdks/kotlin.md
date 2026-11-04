@@ -391,6 +391,8 @@ files.forEach(f -> System.out.println("Found: " + f.getPath()));
 sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 ```
 
+Use `readByteArrayDetailed` or `readStreamDetailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `isPartial` before appending a resumed download, and close a detailed stream body with try-with-resources or Kotlin's `use`. Custom adapters that do not override these methods throw `UnsupportedOperationException`.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:
@@ -721,6 +723,7 @@ fsb (fast-sandbox microVM) golden-image templates are managed through `SandboxMa
 ```java
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFilter;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFormat;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateInfo;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplatePhase;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateReadiness;
@@ -728,6 +731,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateReadiness
 CreateTemplateRequest request = CreateTemplateRequest.builder()
     .image("alpine:3.19")
     .publish("s3://bucket/publish")
+    .format(TemplateFormat.NATIVE)
     .resourceLimits(Map.of("cpu", "1", "memory", "512Mi", "disk", "2Gi"))
     .readiness(TemplateReadiness.builder().probe("tcp://127.0.0.1:44772").build())
     .metadata(Map.of("team", "backend"))

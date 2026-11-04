@@ -2723,6 +2723,7 @@ components:
           type: string
         sourceType:
           type: string
+          description: Credential source kind (`inline` or `exchange`).
         revision:
           type: integer
           description: |
@@ -2747,13 +2748,14 @@ components:
       additionalProperties: false
     CredentialAuthMetadata:
       type: object
-      description: Sanitized auth shape — type always, name for apiKey only.
+      description: Sanitized auth shape — `type` (plus `name` for `apiKey`) for static kinds; `credential` only for the typeless exchange form.
       properties:
         type:
           type: string
         name:
           type: string
-      required: [type]
+        credential:
+          type: string
       additionalProperties: false
     Credential:
       type: object
@@ -2762,19 +2764,41 @@ components:
           type: string
           minLength: 1
         source:
-          $ref: '#/components/schemas/InlineCredentialSource'
+          $ref: '#/components/schemas/CredentialSource'
       required: [name, source]
       additionalProperties: false
-    InlineCredentialSource:
+    CredentialSource:
       type: object
+      required: [type]
+      description: |
+        Where the credential material comes from. Exactly one kind, selected
+        by `type`:
+
+        - `inline`: the secret value travels in this request via `value`.
+          Inline values are write-only and never appear in reads.
+        - `exchange`: no local material. Egress resolves header sets per
+          request from a header-resolver service addressed by `endpoint`.
+          Supported endpoint forms are `unix:///absolute/path` (HTTP over a
+          Unix domain socket) and `https://host[:port]` (TLS); anything else
+          is rejected with 400.
+
+        Fields of the other kind must be absent; for example `value` together
+        with `type: exchange` is rejected with 400.
       properties:
         type:
           type: string
-          enum: [inline]
+          enum: [inline, exchange]
         value:
           type: string
           writeOnly: true
-      required: [type, value]
+          description: |
+            Inline secret value. Required when `type` is `inline`; must be
+            absent otherwise.
+        endpoint:
+          type: string
+          description: |
+            Header-resolver endpoint. Required when `type` is `exchange`; must
+            be absent otherwise.
       additionalProperties: false
     CredentialBinding:
       type: object
@@ -2821,99 +2845,54 @@ components:
       required: [hosts]
       additionalProperties: false
     CredentialAuth:
-      oneOf:
-        - $ref: '#/components/schemas/BearerCredentialAuth'
-        - $ref: '#/components/schemas/BasicCredentialAuth'
-        - $ref: '#/components/schemas/ApiKeyCredentialAuth'
-        - $ref: '#/components/schemas/CustomHeadersCredentialAuth'
-        - $ref: '#/components/schemas/PassthroughCredentialAuth'
-      discriminator:
-        propertyName: type
-        mapping:
-          bearer: '#/components/schemas/BearerCredentialAuth'
-          basic: '#/components/schemas/BasicCredentialAuth'
-          apiKey: '#/components/schemas/ApiKeyCredentialAuth'
-          customHeaders: '#/components/schemas/CustomHeadersCredentialAuth'
-          passthrough: '#/components/schemas/PassthroughCredentialAuth'
-    BearerCredentialAuth:
       type: object
+      description: |
+        How a binding injects credential material. Exactly one auth kind:
+
+        - `bearer`: `type: bearer` plus `credential`.
+        - `basic`: `type: basic` plus `credential`.
+        - `apiKey`: `type: apiKey` plus `name` and `credential`.
+        - `customHeaders`: `type: customHeaders` plus `headers`.
+        - `passthrough`: `type: passthrough`, no credential reference.
+        - typeless exchange: `type` omitted with only `credential` set. The
+          referenced credential must be exchange-sourced; egress resolves the
+          header set per request from the credential's endpoint.
+
+        Static kinds must reference inline-sourced credentials, and the
+        typeless form must reference an exchange-sourced credential and must
+        not set `name`, `headers`, or `substitutions`. The five static kinds
+        accept optional `substitutions`. Violations are rejected with 400.
       properties:
         type:
           type: string
-          enum: [bearer]
+          enum: [bearer, basic, apiKey, customHeaders, passthrough]
+          description: Static auth kind. Omit entirely for the typeless exchange form.
         credential:
           type: string
           minLength: 1
-          description: Credential name whose value becomes the bearer token.
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, credential]
-      additionalProperties: false
-    BasicCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [basic]
-        credential:
-          type: string
-          minLength: 1
-          description: Credential containing pre-encoded base64(username:password).
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, credential]
-      additionalProperties: false
-    ApiKeyCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [apiKey]
+          description: |
+            Name of the sandbox-local credential whose value is injected. For
+            `bearer` the value becomes the bearer token; for `basic` it
+            contains pre-encoded base64(username:password). Required for
+            `bearer`, `basic`, `apiKey`, and the typeless exchange form; must
+            be absent otherwise.
         name:
           type: string
           pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
-        credential:
-          type: string
-          minLength: 1
-          description: Credential name whose value is the API key.
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, name, credential]
-      additionalProperties: false
-    CustomHeadersCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [customHeaders]
+          description: Request header name. Required for `apiKey`; must be absent otherwise.
         headers:
           type: array
           minItems: 1
           items:
             $ref: '#/components/schemas/CustomHeaderEntry'
+          description: Static header set. Required for `customHeaders`; must be absent otherwise.
         substitutions:
           type: array
           items:
             $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, headers]
-      additionalProperties: false
-    PassthroughCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [passthrough]
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type]
+          description: |
+            Optional placeholder replacement set. Accepted for the five static
+            kinds; must be absent for the typeless exchange form.
       additionalProperties: false
     CustomHeaderEntry:
       type: object
@@ -3184,8 +3163,10 @@ components:
           type: string
           minLength: 1
           description: |
-            S3-compatible publish target for the built artifacts,
-            e.g. `s3://bucket/publish`.
+            Publish destination: `s3://bucket/publish` for native artifacts or
+            `oci://registry/repository` for overlaybd artifacts. OCI targets
+            must not contain a tag or digest; the builder generates unique
+            tags per build. Registry credentials are configured on the server.
         format:
           type: string
           enum: [native, overlaybd]
@@ -3205,8 +3186,8 @@ components:
         manifestRef:
           type: string
           description: |
-            S3 manifest reference of the published artifacts; present when
-            Succeeded.
+            Published S3 manifest reference or immutable OCI reference
+            (`oci://registry/repository@sha256:...`); present when Succeeded.
         message:
           type: string
           description: Failure reason when phase is Failed.
@@ -3246,7 +3227,7 @@ components:
           $ref: '#/components/schemas/FsbTemplateReadiness'
         publish:
           type: string
-          description: S3-compatible publish target.
+          description: S3-compatible or repository-only OCI publish target.
         format:
           type: string
           enum: [native, overlaybd]

@@ -331,10 +331,11 @@ public sealed class ConnectionConfig
     {
         var handler = new HttpClientHandler
         {
+            AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(handler)
+        var client = new HttpClient(new ProtectedRedirectHandler(handler))
         {
             Timeout = TimeSpan.FromSeconds(RequestTimeoutSeconds)
         };
@@ -387,10 +388,11 @@ public sealed class ConnectionConfig
     {
         var handler = new HttpClientHandler
         {
+            AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(handler)
+        var client = new HttpClient(new ProtectedRedirectHandler(handler))
         {
             Timeout = Timeout.InfiniteTimeSpan
         };

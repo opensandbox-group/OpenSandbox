@@ -22,8 +22,10 @@ from app.config import get_settings
 from app.deps import get_session_payload, require_tenant_session
 from app.lifecycle import LifecycleClient
 from app.runtime import attach_runtime_summary
+from app.nodeagent_archive import fetch_archive_logs
+from app.query_params import parse_archive_max_bytes
 from app.routes.proxy_utils import passthrough_json
-from app.routes.session_keys import tenant_api_key
+from app.routes.session_keys import tenant_api_key, tenant_namespace_for_session
 
 router = APIRouter(prefix="/sandboxes", tags=["sandboxes"])
 
@@ -151,6 +153,27 @@ async def create_snapshot(
         json_body=body or {},
     )
     return await passthrough_json(resp)
+
+
+@router.get("/{sandbox_id}/logs/archive")
+async def get_sandbox_archive_logs(
+    sandbox_id: str,
+    request: Request,
+    payload: dict = Depends(get_session_payload),
+) -> Any:
+    require_tenant_session(payload)
+    namespace = tenant_namespace_for_session(payload)
+    settings = get_settings()
+    max_bytes = parse_archive_max_bytes(
+        request.query_params.get("maxBytes"),
+        cap=settings.bff_nodeagent_archive_max_bytes,
+    )
+    return await fetch_archive_logs(
+        settings,
+        namespace,
+        sandbox_id,
+        max_bytes=max_bytes,
+    )
 
 
 @router.get("/{sandbox_id}/diagnostics/logs")

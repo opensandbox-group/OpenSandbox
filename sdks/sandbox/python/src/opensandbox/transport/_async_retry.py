@@ -122,8 +122,19 @@ class RetryAsyncTransport(httpx.AsyncBaseTransport):
 
     @property
     def inner(self) -> httpx.AsyncBaseTransport:
-        """The wrapped raw transport, safe to hand to SSE clients."""
+        """The wrapped raw transport."""
         return self._inner
+
+    def for_streaming(self) -> httpx.AsyncBaseTransport:
+        """Transport for streaming (SSE) clients; see :meth:`RetryPolicy.wake_only`."""
+        if not self._policy.wake_retry_enabled:
+            return self._inner
+        return RetryAsyncTransport(
+            self._inner,
+            self._policy.wake_only(),
+            owns_inner=self._owns_inner,
+            rng=self._rng,
+        )
 
     async def handle_async_request(
         self, request: httpx.Request
@@ -241,17 +252,18 @@ class RetryAsyncTransport(httpx.AsyncBaseTransport):
                     try:
                         body = await response.aread()
                     except Exception:
-                        logger.debug(
-                            "failed to read wake-timeout body", exc_info=True
-                        )
+                        logger.debug("failed to read wake-timeout body", exc_info=True)
+                    finally:
+                        # The response never reaches AsyncClient on this path,
+                        # so close it even when the diagnostic read is cancelled.
+                        try:
+                            await response.aclose()
+                        except Exception:
+                            logger.debug(
+                                "failed to close wake-timeout response",
+                                exc_info=True,
+                            )
                     request_id = response.headers.get("X-Request-ID")
-                    try:
-                        await response.aclose()
-                    except Exception:
-                        logger.debug(
-                            "failed to close wake-timeout response",
-                            exc_info=True,
-                        )
                     raise SandboxWakeTimeoutException(
                         "sandbox wake timeout: restore did not complete "
                         f"within the wake retry budget "

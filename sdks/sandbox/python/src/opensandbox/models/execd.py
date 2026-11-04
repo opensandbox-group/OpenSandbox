@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class OutputMessage(BaseModel):
@@ -119,13 +119,21 @@ class ExecutionLogs(BaseModel):
         self.stderr.append(message)
 
 
-def _format_output_messages(messages: list[OutputMessage]) -> str:
-    """Format both legacy line events and events carrying their own line endings."""
+def _format_output_messages(
+    messages: list[OutputMessage], *, preserve_fragments: bool = False
+) -> str:
+    """Format command lines or code fragments, normalizing line endings for display."""
     parts: list[str] = []
     last_char = ""
     for message in messages:
         text = message.text
-        if text and last_char and last_char not in "\r\n" and text[0] not in "\r\n":
+        if (
+            not preserve_fragments
+            and text
+            and last_char
+            and last_char not in "\r\n"
+            and text[0] not in "\r\n"
+        ):
             parts.append("\n")
         parts.append(text)
         if text:
@@ -171,6 +179,8 @@ class Execution(BaseModel):
     for all execution-related data that is exposed to users.
     """
 
+    _is_code_execution: bool = PrivateAttr(default=False)
+
     id: str | None = Field(default=None, description="Unique execution identifier")
     execution_count: int | None = Field(
         default=None,
@@ -208,7 +218,9 @@ class Execution(BaseModel):
         """
         chunks: list[str] = []
 
-        stdout_text = _format_output_messages(self.logs.stdout)
+        stdout_text = _format_output_messages(
+            self.logs.stdout, preserve_fragments=self._is_code_execution
+        )
         if stdout_text:
             chunks.append(stdout_text)
 
@@ -226,7 +238,9 @@ class Execution(BaseModel):
             parts.append(self.text)
 
         if self.logs.stderr:
-            stderr_text = _format_output_messages(self.logs.stderr)
+            stderr_text = _format_output_messages(
+                self.logs.stderr, preserve_fragments=self._is_code_execution
+            )
             parts.append(f"[stderr]\n{stderr_text}")
 
         if self.error:

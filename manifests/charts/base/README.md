@@ -1,6 +1,6 @@
 # base
 
-![Version: 1.2.0-rc.2](https://img.shields.io/badge/Version-1.2.0--rc.2-informational?style=flat-square)
+![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-informational?style=flat-square)
 
 Helm chart for deploying OpenSandbox cluster resources and CRDs
 

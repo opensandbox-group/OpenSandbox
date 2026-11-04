@@ -469,6 +469,7 @@ Key flags (see `cmd/controller/main.go`):
 | `--leader-elect` | `false` | Enable leader election |
 | `--kube-client-qps` | `100` | K8s client QPS |
 | `--kube-client-burst` | `200` | K8s client burst |
+| `--namespaces` | — | Comma-separated namespaces scoping the informer cache; empty watches the whole cluster |
 | `--concurrency` | — | Per-controller concurrency, e.g. `batchsandbox=32;pool=128` |
 | `--enable-file-log` | `false` | Enable file log rotation |
 

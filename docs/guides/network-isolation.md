@@ -138,6 +138,8 @@ The request can still fail after DNS resolution if the Service ClusterIP falls i
 
 If global enforced isolation is not desired, or if specific sandboxes need more permissive access, you can explicitly deny internal network access at sandbox creation time via the `network_policy` parameter:
 
+At sandbox creation, rule `action` and policy `defaultAction` accept case and whitespace variants (for example, `" Allow "` and `"DENY"`) and are normalized to lowercase; blank actions retain the existing `deny` fallback. Unrecognized action names return HTTP 400. Unknown policy or rule fields, such as `port` instead of `ports`, return HTTP 422. Omitting `defaultAction` or `egress` keeps the existing defaults.
+
 ::: warning Pool mode limitation
 Per-request `networkPolicy` is not supported when the lifecycle API creates a sandbox from a pre-warmed Pool via `extensions.poolRef`. Pool pods already exist, so the server cannot inject the egress sidecar for an individual allocation and rejects requests that contain both fields. Configure the required network controls in the Pool pod template before its pods are created, or use a non-pooled sandbox when each request needs its own policy.
 :::

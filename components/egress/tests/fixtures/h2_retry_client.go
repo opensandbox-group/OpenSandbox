@@ -29,6 +29,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -37,6 +38,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -61,6 +63,80 @@ func (o *output) emit(event map[string]any) {
 	if o.writer.Encode(event) != nil {
 		o.once.Do(func() { close(o.failed) })
 	}
+}
+
+const maxH2DebugLine = 4096
+
+var goAwayReadLog = regexp.MustCompile(`^http2: Framer 0x[0-9a-fA-F]+: read GOAWAY len=([0-9]+) LastStreamID=([0-9]+) ErrCode=([A-Z0-9_]+) Debug=`)
+
+// filteredH2DebugWriter consumes Go 1.27.2 http2debug=2 diagnostics only in
+// the explicit observer mode. It never forwards raw logger lines: DATA,
+// headers, debug payloads and pointer identities are discarded in memory.
+type filteredH2DebugWriter struct {
+	mu       sync.Mutex
+	line     []byte
+	dropping bool
+	out      *output
+	started  time.Time
+	ordinal  uint64
+}
+
+func newFilteredH2DebugWriter(out *output) *filteredH2DebugWriter {
+	return &filteredH2DebugWriter{out: out, started: time.Now()}
+}
+
+func (w *filteredH2DebugWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, b := range data {
+		if b == '\n' {
+			if w.dropping {
+				w.out.emit(map[string]any{"event": "observer_log_line_overflow"})
+			} else if len(w.line) != 0 {
+				w.process(string(w.line))
+			}
+			clear(w.line)
+			w.line = w.line[:0]
+			w.dropping = false
+			continue
+		}
+		if w.dropping {
+			continue
+		}
+		if len(w.line) == maxH2DebugLine {
+			clear(w.line)
+			w.line = w.line[:0]
+			w.dropping = true
+			continue
+		}
+		w.line = append(w.line, b)
+	}
+	return len(data), nil
+}
+
+func (w *filteredH2DebugWriter) process(line string) {
+	if !strings.HasPrefix(line, "http2: Framer ") || !strings.Contains(line, ": read GOAWAY ") {
+		return
+	}
+	match := goAwayReadLog.FindStringSubmatch(line)
+	if match == nil {
+		w.out.emit(map[string]any{"event": "goaway_observer_invalid", "reason": "format"})
+		return
+	}
+	frameLength, lengthErr := strconv.ParseUint(match[1], 10, 24)
+	lastStreamID, lastErr := strconv.ParseUint(match[2], 10, 32)
+	if lengthErr != nil || lastErr != nil || frameLength < 8 ||
+		lastStreamID > 0x7fffffff || match[3] != "NO_ERROR" {
+		w.out.emit(map[string]any{"event": "goaway_observer_invalid", "reason": "fields"})
+		return
+	}
+	w.ordinal++
+	w.out.emit(map[string]any{
+		"event": "goaway_frame_parsed", "source": "go_http2debug_filtered_framer_read",
+		"frame_type": "GOAWAY", "stream_id": 0,
+		"last_stream_id": lastStreamID, "error_code": 0,
+		"framer_ordinal": w.ordinal, "monotonic_elapsed_ns": time.Since(w.started).Nanoseconds(),
+	})
 }
 
 // The TLS connection identities seen by GotConn are opaque sequential IDs.
@@ -331,6 +407,13 @@ func controls(ctx context.Context, commands chan<- string) {
 	}
 }
 
+func goAwayObserverModeAllowed(enabled bool, debugSetting string) bool {
+	if enabled {
+		return debugSetting == "http2debug=2"
+	}
+	return debugSetting == ""
+}
+
 func run() int {
 	out := &output{writer: json.NewEncoder(os.Stdout), failed: make(chan struct{})}
 	requiredVersion := ""
@@ -344,6 +427,7 @@ func run() int {
 	flags := flag.NewFlagSet("h2_retry_client", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&requiredVersion, "require-go-version", "", "required exact approved stable Go runtime version")
+	observeGoAway := flags.Bool("observe-goaway-parse", false, "filter exact Go 1.27.2 HTTP/2 parser logs into sanitized events")
 	socks := flags.String("socks-address", "", "IPv4 loopback SOCKS5 endpoint")
 	caFile := flags.String("ca-file", "", "combined synthetic CA PEM file")
 	timeout := flags.Duration("timeout", 25*time.Second, "overall deadline")
@@ -357,7 +441,17 @@ func run() int {
 	if runtime.Version() != requiredVersion {
 		return fail("unsupported_go_version")
 	}
-	if os.Getenv("GODEBUG") != "" {
+	debugSetting := os.Getenv("GODEBUG")
+	if !goAwayObserverModeAllowed(*observeGoAway, debugSetting) {
+		if *observeGoAway {
+			return fail("goaway_observer_requires_exact_godebug")
+		}
+		return fail("ambient_godebug_not_supported")
+	}
+	if *observeGoAway {
+		log.SetFlags(0)
+		log.SetOutput(newFilteredH2DebugWriter(out))
+	} else if debugSetting != "" {
 		return fail("ambient_godebug_not_supported")
 	}
 	host, port, err := net.SplitHostPort(*socks)
@@ -400,7 +494,8 @@ func run() int {
 		"event": "ready", "schema": 1, "go_version": runtime.Version(), "required_go_version": requiredVersion,
 		"transport": map[string]any{
 			"force_attempt_http2": true, "proxy_environment": false, "dial": "loopback_socks5_ipv4",
-			"origin": "127.0.0.1:443", "authority": targetHost, "tls_server_name": targetHost,
+			"goaway_observer_mode": map[bool]string{true: "filtered_go_http2debug_parser_event", false: "disabled"}[*observeGoAway],
+			"origin":               "127.0.0.1:443", "authority": targetHost, "tls_server_name": targetHost,
 			"insecure_skip_verify": false, "trust": "supplied_ca_only", "tls_min_version": "1.2",
 			"disable_compression": true, "redirects": false, "manual_retries": 0,
 			"max_idle_conns": 2, "max_idle_conns_per_host": 2, "max_conns_per_host": 0,

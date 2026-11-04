@@ -444,7 +444,7 @@ Ingress (flags, mirroring the `--renew-intent-*` family):
 --wake-retry-interval                 (default 50ms)
 --wake-retry-factor                   (default 1.3)
 --wake-retry-jitter                   (default 0.1)
---wake-max-flight-lifetime            (default 5m; caps one flight's establish+poll phase)
+--wake-max-flight-lifetime            (default 5m; caps one flight's establish+poll phase; must be > --wake-park-budget)
 ```
 
 Rules:
@@ -453,7 +453,7 @@ Rules:
 - Sandbox-level compatibility invariant: a sandbox without a declared `idlePolicy` is never auto-paused and never auto-woken, regardless of server/ingress flags — enabling the flags cannot change the behavior of sandboxes that predate them.
 - The activity key prefix `opensandbox:activity` is fixed in code on both sides (ingress producer and server reader); it is deliberately not exposed as a flag or a config key.
 - Ingress-path pause automation requires Redis reachable from both ingress and server. Wake requires only FastPath reachability the ingress already has.
-- Timeout budget: `--wake-park-budget` (Y) must exceed `--fastpath-wait-timeout-millis` plus one `GetSandbox` round trip so at least one full readiness check fits in the budget; the per-call RPC timeout stays the existing `--fastpath-wait-timeout-millis` (default 2 s, provider max 5 min). Pause timing = X + at most one `sweep_interval_seconds` of detection lag; `activity_ttl_seconds` must remain ≥ the largest accepted X, and the ingress `--activity-ttl-seconds` must be kept equal to the server value (both gate the same keys; a producer-side mismatch shortens key lifetime and at worst delays pauses via tombstones — it cannot corrupt decisions). Operators must also align everything in front of the ingress — LB/Envoy idle timeouts and client response-header timeouts — to exceed Y, otherwise middle layers will cut parked connections before this OSEP can answer `503 + Retry-After`.
+- Timeout budget: `--wake-park-budget` (Y) must exceed `--fastpath-wait-timeout-millis` plus one `GetSandbox` round trip so at least one full readiness check fits in the budget, and must stay below `--wake-max-flight-lifetime` so parked requests always give up before their flight does (startup rejects a budget at or above the lifetime); the per-call RPC timeout stays the existing `--fastpath-wait-timeout-millis` (default 2 s, provider max 5 min). Pause timing = X + at most one `sweep_interval_seconds` of detection lag; `activity_ttl_seconds` must remain ≥ the largest accepted X, and the ingress `--activity-ttl-seconds` must be kept equal to the server value (both gate the same keys; a producer-side mismatch shortens key lifetime and at worst delays pauses via tombstones — it cannot corrupt decisions). Operators must also align everything in front of the ingress — LB/Envoy idle timeouts and client response-header timeouts — to exceed Y, otherwise middle layers will cut parked connections before this OSEP can answer `503 + Retry-After`.
 - Docker direct access remains unsupported as an observation point (no reverse proxy hop), same as OSEP-0009.
 
 Create request example (pause + renew composed):

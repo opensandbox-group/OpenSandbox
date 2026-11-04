@@ -30,6 +30,7 @@
 #
 # Tokens rendered by integration-env.sh (pool stage, into $WORK/gen):
 #   "@FASTLET_IMAGE@"  "@EGRESS_IMAGE@"  "@POOL_MIN@"  "@POOL_MAX@"
+#   "@MITM_CA_SECRET@"  the pool-pinned MITM CA Secret (seed mount)
 #   # @WARM_IMAGES@  -> warmImages block when WARM_IMAGES=1
 #   # @OCI_FASTLET_ENV@ / # @OCI_FASTLET_MOUNTS@ / # @OCI_FASTLET_VOLUMES@
 #   -> the fastlet OCI env item + shared mounts/volumes when OCI_STACK=1
@@ -90,6 +91,15 @@ spec:
         # transfer. Lives on the same Pod-scoped volume as the vault files.
         - name: OPENSANDBOX_EGRESS_POLICY_DIR
           value: /var/lib/opensandbox-egress/policy
+        # MITM trust anchor (OSEP-0022): enable the shared mitmdump and pin
+        # it to the seed-mounted CA (below). The extra-CA file makes the
+        # upstream leg verify against the pinned CA as well.
+        - name: OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
+          value: "true"
+        - name: OPENSANDBOX_EGRESS_MITM_CA_SEED_DIR
+          value: /var/egress/mitm-ca-seed
+        - name: OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA
+          value: /var/egress/mitm-ca-seed/tls.crt
         volumeMounts:
         - name: egress-vault
           # Plaintext v1 posture: the vault volume joins the credential
@@ -101,6 +111,15 @@ spec:
         # same runtime-injected volume so the path resolves here.
         - name: firecracker-state
           mountPath: /var/lib/fast-sandbox/firecracker
+        # MITM trust anchor (OSEP-0022): the pool-pinned CA keypair rides a
+        # read-only seed mount; egress copies it idempotently into the
+        # mitmdump confdir and never generates a CA (missing/unloadable seed
+        # fails the MITM addon closed, surfaced on /healthz). The extra-CA
+        # env pins the mitmdump->upstream leg to the same CA (the echo
+        # upstream presents a certificate signed by it).
+        - name: mitm-ca-seed
+          mountPath: /var/egress/mitm-ca-seed
+          readOnly: true
         # Egress installs nft/iptables rules (DNS redirect + per-subject
         # sets) and marks sockets; NET_ADMIN covers nft/iptables/SO_MARK,
         # NET_RAW covers the raw sockets used for DNS response spoofing.
@@ -129,6 +148,20 @@ spec:
       - name: egress-vault
         emptyDir: {}
 # @OCI_FASTLET_VOLUMES@
+      # Pool-pinned MITM CA keypair (OSEP-0022, ops-runbook shape): the
+      # versioned Secret copy lives in the pool namespace with the keypair
+      # entries the seed mount expects (tls.crt + tls.key). In this env the
+      # template-build namespace coincides with the pool namespace, so the
+      # same Secret also carries the certificate-only entry (ca.crt) the
+      # server references for the template bake.
+      - name: mitm-ca-seed
+        secret:
+          secretName: "@MITM_CA_SECRET@"
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
       # P2P topology: spread the poolMin fastlets one per node so each

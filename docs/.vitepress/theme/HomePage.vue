@@ -201,6 +201,15 @@ onUnmounted(() => {
       </div>
       <div class="os-shell os-hero-grid">
         <div class="os-hero-copy">
+          <a
+            href="https://aaif.io/projects/opensandbox"
+            target="_blank"
+            rel="noreferrer"
+            class="os-affiliation"
+          >
+            <span>An Agentic AI Foundation (AAIF) Project</span>
+            <span aria-hidden="true">↗</span>
+          </a>
           <h1 id="hero-title">Your agents<br />Your sandbox</h1>
           <p class="os-hero-description">
             Run AI agents on your own infrastructure. Give them isolated
@@ -230,16 +239,6 @@ onUnmounted(() => {
               <span class="os-mini-cube" aria-hidden="true">◇</span> Open source
               <span class="os-dot-separator">·</span> Apache 2.0
             </span>
-            <a
-              href="https://aaif.io/projects/opensandbox"
-              target="_blank"
-              rel="noreferrer"
-              class="os-affiliation"
-            >
-              <span class="os-dot-separator" aria-hidden="true">·</span>
-              <span>Linux Foundation Project, contributed by Alibaba</span>
-              <span aria-hidden="true">↗</span>
-            </a>
           </div>
         </div>
         <div class="os-stage">

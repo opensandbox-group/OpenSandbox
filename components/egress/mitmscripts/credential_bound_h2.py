@@ -22,10 +22,12 @@ import h2.errors
 import h2.events
 import h2.exceptions
 import h2.stream
+from hyperframe.frame import GoAwayFrame
 from mitmproxy import http
 from mitmproxy.net.http import status_codes
 from mitmproxy.proxy import commands, events
 from mitmproxy.proxy.layers import http as layers
+from mitmproxy.proxy.layers.http._http_h2 import BufferedH2Connection
 from mitmproxy.proxy.layers.http._base import HttpEvent, ReceiveHttp
 from mitmproxy.proxy.layers.http._http1 import Http1Client
 from mitmproxy.proxy.layers.http._http2 import Http2Client, Http2Server
@@ -105,7 +107,10 @@ class BoundH2Server(Http2Server):
         self.failed = False
         self.close_started = False
         self.goaway_sent = False
+        self.retirement_notice_sent = False
         self._close_commands_sent = False
+        self._frozen_goaway_bound = None
+        self._minimum_serialized_goaway_bound = None
         self._pending: dict[int, RequestIdentity] = {}
         self._claimed: dict[int, RequestIdentity] = {}
         self._refused: dict[int, http.HTTPFlow] = {}
@@ -113,6 +118,86 @@ class BoundH2Server(Http2Server):
         self._wakeup = None
         self._reset_stream = None
         self._event_depth = 0
+        self._install_retirement_serializer()
+
+    def _install_retirement_serializer(self) -> None:
+        """Clamp GOAWAY frames on this fresh server connection only.
+
+        The pinned BufferedH2Connection continues to own parsing, HPACK,
+        CONTINUATION assembly, flow control, and output buffering. This
+        retirement-only wrapper observes frames immediately before the
+        dependency serializes them and never changes its state machine.
+        """
+        connection = self.h2_conn
+        if (
+            type(connection) is not BufferedH2Connection
+            or connection._data_to_send
+        ):
+            raise H2IdentityError(
+                "credential proxy: H2 serializer installed after connection start"
+            )
+        original_prepare = connection._prepare_for_sending
+
+        def prepare_for_sending(frames):
+            # The pinned h2 4.1.0 call sites pass re-iterable frame lists.
+            # Ordinary DATA/HEADERS/control batches do not consume retirement
+            # state, so keep them off the registry-wide lock and deadline scan.
+            if not any(isinstance(frame, GoAwayFrame) for frame in frames):
+                original_prepare(frames)
+                return
+
+            state = self.runtime.registry.drain_state(self.token)
+            if (
+                state is not None
+                and state.fenced
+                and state.frozen_last_stream_id is not None
+            ):
+                bound = state.frozen_last_stream_id
+                if self._frozen_goaway_bound is None:
+                    self._frozen_goaway_bound = bound
+                else:
+                    self._frozen_goaway_bound = min(
+                        self._frozen_goaway_bound, bound
+                    )
+
+            serialized_bound = self._minimum_serialized_goaway_bound
+            for frame in frames:
+                if not isinstance(frame, GoAwayFrame):
+                    continue
+                limits = [frame.last_stream_id]
+                if self._frozen_goaway_bound is not None:
+                    limits.append(self._frozen_goaway_bound)
+                if serialized_bound is not None:
+                    limits.append(serialized_bound)
+                frame.last_stream_id = min(limits)
+                serialized_bound = frame.last_stream_id
+
+            original_prepare(frames)
+            if serialized_bound is not None:
+                self._minimum_serialized_goaway_bound = serialized_bound
+
+        # An instance attribute shadows the inherited bound method without
+        # changing BufferedH2Connection or H2Connection for other connections.
+        connection._prepare_for_sending = prepare_for_sending
+
+    def _send_retirement_notice(self, last_stream_id: int):
+        """Queue one advisory NO_ERROR GOAWAY without closing h2's state machine."""
+        if self.retirement_notice_sent:
+            return
+        self.h2_conn._prepare_for_sending(
+            [
+                GoAwayFrame(
+                    stream_id=0,
+                    last_stream_id=last_stream_id,
+                    error_code=h2.errors.ErrorCodes.NO_ERROR,
+                    additional_data=b"",
+                )
+            ]
+        )
+        self.retirement_notice_sent = True
+        data = self.h2_conn.data_to_send()
+        if data:
+            yield commands.SendData(self.conn, data)
 
     def fail_closed(self) -> None:
         """Hook-safe flag; normal layer commands run on the next layer event."""
@@ -524,6 +609,12 @@ class BoundH2Server(Http2Server):
                 or (state.deadline is not None and time.monotonic() >= state.deadline)
                 or any(sid not in self._active for sid in self.h2_conn.stream_trailers)):
             return True
+        if (
+            state.fenced
+            and state.frozen_last_stream_id is not None
+            and not self.retirement_notice_sent
+        ):
+            return True
         try:
             for sid, record in self._active.items():
                 upstream_done, upstream_trailers = self._upstream_done(record, observe=False)
@@ -596,18 +687,31 @@ class BoundH2Server(Http2Server):
             return
         if self.close_started:
             return
-        if (
-            state.fenced
-            and state.frozen_last_stream_id is not None
-            and not self._active
+        drained = (
+            not self._active
             and not self._pending
             and not self._claimed
             and not self._refused
             and not self.http_layer.streams
             and not self.h2_conn.stream_buffers
             and not self.h2_conn.stream_trailers
+        )
+        if (
+            state.fenced
+            and state.frozen_last_stream_id is not None
+            and not drained
+            and not self.retirement_notice_sent
+        ):
+            yield from self._send_retirement_notice(
+                state.frozen_last_stream_id
+            )
+        if (
+            state.fenced
+            and state.frozen_last_stream_id is not None
+            and drained
         ):
             self.goaway_sent = True
+            self.retirement_notice_sent = True
             self.h2_conn.close_connection(
                 error_code=h2.errors.ErrorCodes.NO_ERROR,
                 last_stream_id=state.frozen_last_stream_id,

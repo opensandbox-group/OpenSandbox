@@ -230,6 +230,8 @@ const sandbox = await Sandbox.create({
 
 Execute commands and handle output streams in real-time.
 
+Command and code-interpreter event streams accept LF, CRLF, and CR line endings, including when a line ending is split across network chunks.
+
 ```ts
 import type { ExecutionHandlers } from "@alibaba-group/opensandbox";
 
@@ -338,6 +340,17 @@ await sandbox.files.deleteDirectories(["/tmp/demo"]);
 ```
 
 For binary files, pass a `Uint8Array` to `writeFiles()` and read with `readBytes()` or `readBytesStream()`. Read options support `offset` and `limit` for partial downloads.
+
+Use `readBytesDetailed` or `readBytesStreamDetailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Both methods are optional on `SandboxFiles`; check for support before calling them. Close a detailed stream body with `await download.body.close()` if it is not fully consumed.
+
+```ts
+if (sandbox.files.readBytesDetailed) {
+  const download = await sandbox.files.readBytesDetailed("/tmp/data.bin", { range: "bytes=5-" });
+  console.log(download.isPartial, download.totalSize, download.contentRange);
+}
+```
+
+Check `isPartial` before appending a resumed download: a `200` response means the server ignored Range and returned the whole file.
 
 #### File operations with an explicit identity
 
@@ -479,6 +492,7 @@ An explicit `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `apiKey` a
 
 ::: info Runtime Notes
 - In browsers, the SDK uses the global `fetch` implementation.
+- A caller-provided `AbortSignal` remains active while reading the response body, including SSE streams and download responses. Signal composition uses the standard `AbortSignal.any` API, which must be available in the runtime.
 - `requestTimeoutSeconds` bounds the wait for a response: it stops applying once the response headers arrive (streaming responses are not cut off). It never caps a healthy file upload body, which can legitimately take longer than the timeout; on Node.js a stalled upload, or an upload that gets no response headers within the timeout once the body has been sent, is aborted instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract).
 - In Node.js, every `Sandbox` and `SandboxManager` clones the base `ConnectionConfig` via `withTransportIfMissing()`, so each instance gets an isolated `undici` keep-alive pool. Call `sandbox.close()` or `manager.close()` when you are done so the SDK can release the associated agent.
 :::
@@ -512,6 +526,41 @@ const config2 = new ConnectionConfig({
   headers: { "X-Custom-Header": "value" },
 });
 ```
+
+#### Redirects and protected headers
+
+The SDK strips OpenSandbox credentials before following a cross-origin redirect.
+Same-origin redirects preserve request headers, while cross-origin redirects remove
+every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-`
+(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`. In
+addition, the standard credential headers `Authorization`, `Cookie`, and
+`Proxy-Authorization` are removed, matching native `fetch`. An origin is the
+combination of scheme, host, and port, so changing any of those values is
+cross-origin. Other custom headers are not stripped automatically. Requests that do
+not carry any protected header keep the runtime's default redirect behavior.
+
+When a guarded request is redirected, the request timeout applies as a single budget
+for the whole chain rather than per hop: the deadline starts with the first dispatch,
+and the caller's abort signal (plus any fetch options set on the `Request`) is carried
+across every hop.
+
+File uploads never follow redirects, because a streamed or in-memory multipart body
+cannot always be replayed. A redirect response from an upload is surfaced as a
+`SandboxApiException` with the original status code on Node.js; in browsers the
+opaque redirect reports status `0`.
+
+::: warning Browser limitation
+Browsers do not expose the target of a `redirect: "manual"` response, so the SDK
+cannot inspect it before following. For a request that carries protected headers, the
+SDK fails closed (throws a `SandboxApiException`) instead of risking a cross-origin
+credential replay. Node.js is unaffected.
+:::
+
+The JavaScript Code Interpreter SDK inherits the sandbox's connection
+configuration. With `useServerProxy: true`, context requests and streamed code
+execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server
+authentication. In direct mode, the SDK does not attach this key to code
+execution requests.
 
 ### 2. Sandbox Creation Configuration
 
@@ -611,6 +660,8 @@ See [Credential Vault](/guides/credential-vault) for auth types, binding guidanc
 Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
 
 ## Browser Notes
+
+Uploads copy each consumed byte chunk before requesting the next one, so producers can reuse a `Uint8Array` or Node.js `Buffer` between chunks. A `ReadableStream` producer must still keep a chunk unchanged while it is queued and has not yet been consumed.
 
 ::: warning
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.

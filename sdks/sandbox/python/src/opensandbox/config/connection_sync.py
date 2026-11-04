@@ -61,7 +61,7 @@ class ConnectionConfigSync(BaseModel):
         default=False, description="Enable debug logging for HTTP requests"
     )
     user_agent: str = Field(
-        default="OpenSandbox-Python-SDK/1.1.1", description="User agent string"
+        default="OpenSandbox-Python-SDK/1.2.0", description="User agent string"
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
@@ -94,8 +94,9 @@ class ConnectionConfigSync(BaseModel):
     retry_policy: RetryPolicy = Field(
         default_factory=RetryPolicy,
         description=(
-            "Retry policy applied to non-streaming requests going through "
-            "the shared transport. Pass RetryPolicy.disabled() for fast-fail."
+            "Retry policy applied to requests going through the shared "
+            "transport. Streaming (SSE) requests only get its wake-timeout "
+            "retry. Pass RetryPolicy.disabled() for fast-fail."
         ),
     )
     use_server_proxy: bool = Field(

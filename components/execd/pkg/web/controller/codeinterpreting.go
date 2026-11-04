@@ -45,7 +45,7 @@ type CodeInterpretingController struct {
 }
 
 type codeExecutionRunner interface {
-	CreateContext(req *runtime.CreateContextRequest) (string, error)
+	CreateContext(ctx context.Context, req *runtime.CreateContextRequest) (string, error)
 	Execute(request *runtime.ExecuteCodeRequest) error
 	GetContext(session string) (runtime.CodeContext, error)
 	GetCommandStatus(session string) (*runtime.CommandStatus, error)
@@ -81,7 +81,7 @@ func (c *CodeInterpretingController) CreateContext() {
 		return
 	}
 
-	session, err := codeRunner.CreateContext(&runtime.CreateContextRequest{
+	session, err := codeRunner.CreateContext(c.ctx.Request.Context(), &runtime.CreateContextRequest{
 		Language: runtime.Language(request.Language),
 		Cwd:      request.Cwd,
 	})
@@ -173,11 +173,7 @@ func (c *CodeInterpretingController) RunCode() {
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running codes %v", err),
-		)
+		c.respondRunError(runCodeRequest.Hooks, completeCh, fmt.Sprintf("error running codes %v", err))
 		return
 	}
 
@@ -415,11 +411,7 @@ func (c *CodeInterpretingController) RunInSession() {
 	err := codeRunner.RunInBashSession(ctx, runReq)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running in session. %v", err),
-		)
+		c.respondRunError(runReq.Hooks, completeCh, fmt.Sprintf("error running in session. %v", err))
 		return
 	}
 

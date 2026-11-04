@@ -21,6 +21,7 @@ from datetime import timedelta
 import httpx
 import pytest
 from opensandbox.config import ConnectionConfig
+from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,
@@ -33,6 +34,96 @@ from code_interpreter.adapters.converter.code_execution_converter import (
     CodeExecutionConverter,
 )
 from code_interpreter.models.code import CodeContext, SupportedLanguage
+from code_interpreter.sync.adapters.code_adapter import CodesAdapterSync
+
+
+@pytest.fixture(
+    params=[
+        pytest.param((["Loading", "...done\n"], "Loading...done"), id="partial-line"),
+        pytest.param(([".", ".", "."], "..."), id="progress-dots"),
+        pytest.param((["first\n", "second\n"], "first\nsecond"), id="terminated-lines"),
+        pytest.param((["first\n", "\n", "last\n"], "first\n\nlast"), id="blank-line"),
+        pytest.param((["\n"], ""), id="only-blank-line"),
+        pytest.param((["first\r", "last\r"], "first\nlast"), id="carriage-returns"),
+        pytest.param((["first\r\n", "last\r\n"], "first\nlast"), id="crlf-lines"),
+        pytest.param((["first\r", "\n", "last\r", "\n"], "first\nlast"), id="split-crlf"),
+        pytest.param((["first\n", "last"], "first\nlast"), id="unterminated-final-fragment"),
+        pytest.param((["", "Loading", "", "...done\n", ""], "Loading...done"), id="empty-fragments"),
+        pytest.param(([], ""), id="no-output"),
+    ]
+)
+def stream_fragments(request: pytest.FixtureRequest) -> tuple[list[str], str]:
+    return request.param
+
+
+def _fragment_response(
+    request: httpx.Request, stream: str, fragments: list[str]
+) -> httpx.Response:
+    """Replay synthetic stream events, without requiring execd or Jupyter."""
+    assert request.url.path == "/code"
+    events = [
+        {"type": "init", "text": "exec-fragments", "timestamp": 0},
+        *[
+            {"type": stream, "text": text, "timestamp": index}
+            for index, text in enumerate(fragments, start=1)
+        ],
+        {"type": "execution_complete", "timestamp": len(fragments) + 1},
+    ]
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        content="".join(f"data: {json.dumps(event)}\n\n" for event in events),
+        request=request,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+async def test_run_code_preserves_stream_fragments(
+    stream: str, stream_fragments: tuple[list[str], str]
+) -> None:
+    fragments, expected = stream_fragments
+    transport = httpx.MockTransport(
+        lambda request: _fragment_response(request, stream, fragments)
+    )
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    adapter = CodesAdapter(SandboxEndpoint(endpoint="localhost:44772"), cfg)
+
+    execution = await adapter.run("print('synthetic stream')")
+
+    assert execution.id == "exec-fragments"
+    assert execution.complete is not None
+    assert [message.text for message in getattr(execution.logs, stream)] == fragments
+    if stream == "stdout":
+        assert execution.text == expected
+        assert str(execution) == expected
+    else:
+        assert execution.text == ""
+        assert str(execution) == (f"[stderr]\n{expected}" if fragments else "")
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_sync_run_code_preserves_stream_fragments(
+    stream: str, stream_fragments: tuple[list[str], str]
+) -> None:
+    fragments, expected = stream_fragments
+    transport = httpx.MockTransport(
+        lambda request: _fragment_response(request, stream, fragments)
+    )
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    adapter = CodesAdapterSync(SandboxEndpoint(endpoint="localhost:44772"), cfg)
+
+    execution = adapter.run("print('synthetic stream')")
+
+    assert execution.id == "exec-fragments"
+    assert execution.complete is not None
+    assert [message.text for message in getattr(execution.logs, stream)] == fragments
+    if stream == "stdout":
+        assert execution.text == expected
+        assert str(execution) == expected
+    else:
+        assert execution.text == ""
+        assert str(execution) == (f"[stderr]\n{expected}" if fragments else "")
 
 
 class _SseTransport(httpx.AsyncBaseTransport):

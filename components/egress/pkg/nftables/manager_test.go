@@ -822,3 +822,45 @@ func TestApplyStatic_PortFloorRangesDenyBeforeAllows(t *testing.T) {
 	require.Less(t, strings.Index(rendered, floorRule), strings.Index(rendered, userAllow),
 		"the platform floor must be evaluated before any user port allow")
 }
+
+// Issue #2423: the MITM REDIRECT rewrites the intercepted dport to the
+// listener port before this chain runs, so the exemption must precede the
+// floor drop, user port rules, and the final default-deny drop.
+func TestApplyStatic_MitmRedirectExemptedBeforePortRules(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunnerAndOptions(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	}, Options{MitmRedirectPort: 18081})
+	// Default-deny policy allowing only 443, plus the port floor: neither
+	// covers the rewritten dport 18081.
+	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","ports":[443]}]}`)
+	require.NoError(t, err)
+	p = policy.MergeAlwaysOverlay(p, []policy.EgressRule{
+		policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}}),
+	}, nil)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+
+	exempt := "add rule inet opensandbox egress ip daddr 127.0.0.1 tcp dport 18081 accept"
+	expectContains(t, rendered, exempt)
+	for _, later := range []string{
+		"add rule inet opensandbox egress tcp dport { 1-79, 81-442, 444-65535 } drop",
+		"add rule inet opensandbox egress tcp dport { 443 } accept",
+		"add rule inet opensandbox egress drop",
+	} {
+		idx := strings.Index(rendered, later)
+		require.NotEqual(t, -1, idx, "expected rendered ruleset to contain %q", later)
+		require.Less(t, strings.Index(rendered, exempt), idx,
+			"the mitm redirect exemption must precede %q", later)
+	}
+}
+
+func TestApplyStatic_NoMitmRedirectExemptionWhenDisabled(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	require.NoError(t, m.ApplyStatic(context.Background(), policy.DefaultDenyPolicy()))
+	require.NotContains(t, rendered, "dport 18081", "no exemption without transparent MITM")
+}

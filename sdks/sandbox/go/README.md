@@ -16,7 +16,7 @@ go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 
 ## Retry Behavior
 
-Idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`) retry `429`, `502`, `503`, and `504` by default. `POST` and `PATCH` retry only dial, proxy-connect, and TLS-handshake failures that are provably pre-send; status-code retries for writes are opt-in because a replay can duplicate a sandbox, session, command, or file mutation. Set `RetryableStatusCodesNonIdempotent` only when the operation is idempotent at the application layer or duplicate execution is acceptable. SSE bootstraps are never retried.
+Idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`) retry `429`, `502`, `503`, and `504` by default. `POST` and `PATCH` retry only dial, proxy-connect, and TLS-handshake failures that are provably pre-send; status-code retries for writes are opt-in because a replay can duplicate a sandbox, session, command, or file mutation. Set `RetryableStatusCodesNonIdempotent` only when the operation is idempotent at the application layer or duplicate execution is acceptable. SSE bootstraps never use the generic retry loop; only the OSEP-0024 wake retry covers the request that starts a stream, because its marker proves the gateway never forwarded it.
 
 ## Quick Start
 
@@ -341,6 +341,7 @@ mgr := opensandbox.NewSandboxManager(config)
 tpl, err := mgr.CreateTemplate(ctx, opensandbox.CreateTemplateRequest{
     Image:   "python:3.11",
     Publish: "s3://bucket/templates/py311",
+    Format:  opensandbox.TemplateFormatNative,
     ResourceLimits: map[string]string{
         "cpu": "1", "memory": "512Mi", "disk": "2Gi",
     },
@@ -490,6 +491,7 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `UploadFile(ctx, file, opts)` | Upload a file to the sandbox |
 | `UploadFiles(ctx, entries)` | Upload multiple files to the sandbox |
 | `DownloadFile(ctx, remotePath, rangeHeader, opts...)` | Download a file from the sandbox (optional `DownloadFileOptions` reads by line) |
+| `DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)` | Download a file with HTTP status and range metadata |
 
 **Directory Operations:**
 | Method | Description |

@@ -60,7 +60,8 @@ export async function* parseJsonEventStream<T>(
     buf += decoder.decode(value, { stream: true });
     let idx: number;
 
-    while ((idx = buf.indexOf("\n")) >= 0) {
+    // SSE permits CRLF, LF, and CR. Empty lines from a split CRLF are skipped below.
+    while ((idx = buf.search(/[\r\n]/)) >= 0) {
       const rawLine = buf.slice(0, idx);
       buf = buf.slice(idx + 1);
 

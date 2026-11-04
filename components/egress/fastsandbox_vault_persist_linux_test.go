@@ -110,3 +110,38 @@ func TestVaultPersistenceRealFileEndToEnd(t *testing.T) {
 	_, err = os.Lstat(path)
 	assert.True(t, os.IsNotExist(err))
 }
+
+func TestVaultV2ReloadUsesRealFileAndNeverDowngrades(t *testing.T) {
+	for _, state := range []credentialvault.FileState{credentialvault.FileStateActive, credentialvault.FileStateDeleted} {
+		t.Run(string(state), func(t *testing.T) {
+			dir := t.TempDir()
+			uid := vaultTestUID
+			revision := int64(7)
+			body := bundleVaultBody(t)
+			if state == credentialvault.FileStateDeleted {
+				revision = 0
+				body = emptyVaultFileBody()
+			}
+			raw := encodeVaultV2Fixture(t, state, revision, 12, "", body)
+			path := filepath.Join(dir, uid+".json")
+			require.NoError(t, os.WriteFile(path, raw, 0o600))
+
+			srv, _ := newRealVaultTestServer(t, dir)
+			require.Equal(t, http.StatusOK, doAction(t, srv, bindBody(t, uid, vaultTestIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			require.Equal(t, http.StatusOK, doAction(t, srv, hookBody(t, uid, testFenceR, testFenceA, constants.HookRuntimeReady)).Code)
+			require.Equal(t, http.StatusOK, doAction(t, srv, hookBody(t, uid, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
+
+			get := doVault(t, srv, http.MethodGet, uid, "", "")
+			if state == credentialvault.FileStateActive {
+				require.Equal(t, http.StatusOK, get.Code)
+				assert.Contains(t, get.Body.String(), `"revision":7`)
+			} else {
+				require.Equal(t, http.StatusNotFound, get.Code)
+			}
+			assert.Equal(t, http.StatusConflict, doVault(t, srv, http.MethodPost, uid, vaultCredential(), "").Code)
+			got, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, raw, got, "real persisted v2 bytes survive reload and rejected mutation")
+		})
+	}
+}

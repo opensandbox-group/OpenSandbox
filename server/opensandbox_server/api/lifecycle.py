@@ -54,6 +54,7 @@ from opensandbox_server.services.constants import (
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 from opensandbox_server.services.snapshot_service import create_snapshot_service
+from opensandbox_server.services.validators import normalize_network_policy_actions
 
 router = APIRouter(tags=["Sandboxes"])
 
@@ -114,6 +115,7 @@ async def create_sandbox(
     """
     validate_extensions(request.extensions)
     validate_renew_policy_conflict(request.lifecycle, request.extensions)
+    normalize_network_policy_actions(request.network_policy)
     # Resolve snapshotId before backend routing: the owning backend recorded
     # on the snapshot row selects the fsb vs pod backend for restores.
     if not (request.template_id or "").strip():

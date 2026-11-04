@@ -258,14 +258,19 @@ type ListIsolatedSessionsResponse struct {
 // Capabilities
 
 type CapabilitiesResponse struct {
-	Available        bool               `json:"available"`
-	Isolator         string             `json:"isolator,omitempty"`
-	Version          string             `json:"version,omitempty"`
-	Message          string             `json:"message,omitempty"`
-	SetprivAvailable bool               `json:"setpriv_available"`
-	UsernsAvailable  bool               `json:"userns_available"`
-	CommitSupported  bool               `json:"commit_supported"`
-	DiffSupported    bool               `json:"diff_supported"`
-	Hardening        *HardeningStatus   `json:"hardening,omitempty"`
-	RuntimeInit      *RuntimeInitStatus `json:"runtimeInit,omitempty"`
+	Available        bool   `json:"available"`
+	Isolator         string `json:"isolator,omitempty"`
+	Version          string `json:"version,omitempty"`
+	Message          string `json:"message,omitempty"`
+	SetprivAvailable bool   `json:"setpriv_available"`
+	UsernsAvailable  bool   `json:"userns_available"`
+	// Per-mode private network namespace availability (share_net=false).
+	// execd rejects such create requests with a named error when the
+	// requested mode's flag is false.
+	SetprivNetAvailable bool               `json:"setpriv_net_available"`
+	UsernsNetAvailable  bool               `json:"userns_net_available"`
+	CommitSupported     bool               `json:"commit_supported"`
+	DiffSupported       bool               `json:"diff_supported"`
+	Hardening           *HardeningStatus   `json:"hardening,omitempty"`
+	RuntimeInit         *RuntimeInitStatus `json:"runtimeInit,omitempty"`
 }

@@ -14,6 +14,7 @@
 
 import { createExecdClient } from "../openapi/execdClient.js";
 import { IsolatedFilesystemAdapter } from "./isolatedFilesystemAdapter.js";
+import { throwOnFailedResponse } from "./openapiError.js";
 import { parseJsonEventStream } from "./sse.js";
 import type { components as ExecdComponents } from "../api/execd.js";
 import type { CommandExecution, ServerStreamEvent } from "../models/execd.js";
@@ -146,8 +147,7 @@ export class IsolatedSessionsAdapter implements IsolationService {
       body: body != null ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`${method} ${pathname} failed: ${res.status} ${text}`);
+      await throwOnFailedResponse(res, `${method} ${pathname} failed (status=${res.status})`);
     }
     if (res.status === 204) return undefined as T;
     const text = await res.text();
@@ -278,8 +278,7 @@ export class IsolatedSessionsAdapter implements IsolationService {
       body: JSON.stringify(body),
     });
     if (res.status !== 202) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`POST ${pathname} failed: ${res.status} ${text}`);
+      await throwOnFailedResponse(res, `POST ${pathname} failed (status=${res.status})`);
     }
     const raw = await res.text();
     return JSON.parse(raw) as IsolatedBackgroundRun;
@@ -321,8 +320,7 @@ export class IsolatedSessionsAdapter implements IsolationService {
       },
     });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`GET ${pathname} failed: ${res.status} ${text}`);
+      await throwOnFailedResponse(res, `GET ${pathname} failed (status=${res.status})`);
     }
 
     const text = await res.text();

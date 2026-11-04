@@ -14,6 +14,7 @@ spec:
       labels:
         app: opensandbox-console-bff
     spec:
+      serviceAccountName: opensandbox-console-bff
       containers:
         - name: bff
           image: YOUR_REGISTRY/opensandbox-console-bff:0.1.0
@@ -31,9 +32,9 @@ spec:
               value: "true"
             - name: BFF_CORS_ORIGINS
               value: "https://console.example.com"
-            # 平台探测和 ServiceAccount 不在本 PR；保持关闭，避免引用尚未提供的 RBAC。
+            # 探测 node-agent（需先应用 console-bff-rbac.example.yaml）
             - name: BFF_K8S_PROBE_ENABLED
-              value: "false"
+              value: "true"
             # 仅当 in-cluster apiserver TLS 与 SA CA 不匹配时启用（与 Server config.toml 无关）
             # - name: BFF_K8S_INSECURE_SKIP_TLS_VERIFY
             #   value: "true"
@@ -41,6 +42,17 @@ spec:
               value: "opensandbox-controller-manager"
             - name: BFF_K8S_INGRESS_DEPLOYMENT
               value: "opensandbox-ingress-gateway"
+            # 可选：从 OSS 读 node-agent 归档日志（与 node-agent sink.oss 同源，只读 AK）
+            # - name: BFF_NODEAGENT_ARCHIVE_ENABLED
+            #   value: "true"
+            # - name: BFF_NODEAGENT_CLUSTER_ID
+            #   value: "prod-cluster"
+            # - name: BFF_NODEAGENT_OSS_ENDPOINT
+            #   value: "https://oss-cn-xxx.aliyuncs.com"
+            # - name: BFF_NODEAGENT_OSS_BUCKET
+            #   value: "your-bucket"
+            # - name: BFF_NODEAGENT_OSS_KEY_PREFIX
+            #   value: "logs"
           envFrom:
             - secretRef:
                 name: opensandbox-console-bff

@@ -53,6 +53,8 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 
 **Expiration updates:** `renew-expiration` sets `expiresAt` to the supplied future timestamp, which may be earlier than, equal to, or later than the current expiration. The configured `server.max_sandbox_timeout_seconds` applies only to `timeout` on creation; it does not cap expiration updates. See [Sandbox expiration](/getting-started/configuration#sandbox-expiration).
 
+**Concurrent Docker lifecycle requests:** Recognized conflicts on the main container return `409 Conflict` when removal is already in progress or the container is no longer in the state required by pause or resume. A missing main container returns `404 Not Found` when reported by the operation or confirmed by the follow-up lookup. For resume, these mappings apply only after any required sidecar rollback succeeds. Pause/resume sidecar failures, failed rollbacks, and unrelated main-container or lookup failures retain their existing `500` responses.
+
 **Optional `Sandbox.allocation` response field:**
 - Returned only when the runtime confirms the sandbox's current concrete Pool allocation.
 - Omitted for unconfirmed allocations, non-Pool sandboxes, and allocations being released.

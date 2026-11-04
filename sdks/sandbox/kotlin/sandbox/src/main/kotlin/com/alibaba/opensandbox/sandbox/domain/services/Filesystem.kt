@@ -20,6 +20,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentRep
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceResult
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.MoveEntry
+import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ReadBytesResponse
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SearchEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SetPermissionEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry
@@ -116,6 +117,18 @@ interface Filesystem {
     }
 
     /**
+     * Reads a file as a byte array together with HTTP response metadata.
+     */
+    fun readByteArrayDetailed(
+        path: String,
+        range: String? = null,
+        offset: Int? = null,
+        limit: Int? = null,
+    ): ReadBytesResponse<ByteArray> {
+        throw UnsupportedOperationException("The filesystem adapter does not support download metadata")
+    }
+
+    /**
      * Opens a file for reading as an InputStream.
      *
      * @param path The absolute or relative path to the file to read
@@ -152,6 +165,18 @@ interface Filesystem {
      */
     fun readStream(path: String): InputStream {
         return readStream(path, null)
+    }
+
+    /**
+     * Opens a file stream together with HTTP response metadata.
+     */
+    fun readStreamDetailed(
+        path: String,
+        range: String? = null,
+        offset: Int? = null,
+        limit: Int? = null,
+    ): ReadBytesResponse<InputStream> {
+        throw UnsupportedOperationException("The filesystem adapter does not support download metadata")
     }
 
     /**

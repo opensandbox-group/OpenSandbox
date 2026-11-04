@@ -3,6 +3,10 @@
 
   <h1>OpenSandbox</h1>
 
+  <p align="center">
+    <a href="https://aaif.io/projects/opensandbox"><strong>An Agentic AI Foundation (AAIF) Project</strong></a>
+  </p>
+
 <p align="center">
   <a href="https://github.com/opensandbox-group/OpenSandbox"><img src="https://img.shields.io/github/stars/opensandbox-group/OpenSandbox?style=flat-square&logo=github&logoColor=white&label=Stars&color=181717" alt="Stars" /></a>
   <a href="https://www.bestpractices.dev/projects/12588"><img src="https://img.shields.io/badge/OpenSSF-Best-4C566A?style=flat-square" alt="OpenSSF Best Practices" /></a>
@@ -242,7 +246,7 @@ OpenSandbox release images are published under the same component name in three 
 - GitHub Container Registry: `ghcr.io/opensandbox-group/opensandbox/<component>`
 - Alibaba Cloud Container Registry: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/<component>`
 
-Tagged release images are signed keylessly with Cosign and include provenance attestations. Pin production images by digest and follow the [release verification guide](docs/community/release-verification.md) to verify the image against the OpenSandbox GitHub Actions identity before deployment.
+Pin production images by digest and check the [release verification guide](docs/community/release-verification.md) for signing coverage before deployment. Legacy per-component releases support Cosign signatures and provenance attestations; current umbrella releases have a [tracked signing and provenance gap](https://github.com/opensandbox-group/OpenSandbox/issues/2463) and must not be assumed to provide the same verification evidence.
 
 ## Documentation
 
@@ -267,6 +271,6 @@ Tagged release images are signed keylessly with Cosign and include provenance at
 
 ## About
 
-OpenSandbox is an [open source project under the Linux Foundation](https://aaif.io/projects/opensandbox), contributed by Alibaba.
+OpenSandbox is a project of the [Agentic AI Foundation (AAIF)](https://aaif.io/projects/opensandbox).
 
-Licensed under the [Apache 2.0 License](LICENSE).
+Code is licensed under the [Apache 2.0 License](LICENSE). See the [contribution guide](CONTRIBUTING.md#license) for documentation licensing and contribution terms.

@@ -214,6 +214,8 @@ Semantics and limits:
 
 Transparent mitmproxy does not automatically consume egress `NetworkPolicy`. Domain allow/deny behavior is still determined by DNS + (optional) nft rules. If L7 policy enforcement is needed, implement it in mitm scripts.
 
+Under the `dns+nft` sidecar profile, the REDIRECT rewrites an intercepted flow's destination to the mitmproxy listener port (default `18081`) before the nft egress chain evaluates it, so the chain accepts that rewritten destination (`127.0.0.1:<port>`) ahead of every port-scoped rule — the `reachable.ports.cap` floor, user `ports` rules, and the default-deny tail never blackhole interception itself, even when the original ports (80/443) are exactly what the policy allows. Enforcement is preserved end to end: mitmproxy's own re-originated connections are not exempt, so a port outside the cap or a denied destination still fails, surfaced as a proxy error rather than a silent timeout.
+
 ## Implementation Notes and Limits
 
 Startup flow (high level):

@@ -41,6 +41,10 @@ type Client struct {
 
 	handlers map[MessageType]func(*Message)
 
+	// onConnectionLost is called when the kernel connection fails while it is
+	// still in use, i.e. not after Disconnect.
+	onConnectionLost func(error)
+
 	session string
 
 	msgCounter int
@@ -220,6 +224,14 @@ func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, 
 	c.registerHandler(MsgStatus, func(msg *Message) {
 		c.handleExecutionStatus(msg, state, resultChan)
 	})
+	c.mu.Lock()
+	c.onConnectionLost = func(err error) {
+		c.failExecution(state, resultChan, ErrorOutput{
+			EName:  "KernelConnectionLost",
+			EValue: err.Error(),
+		})
+	}
+	c.mu.Unlock()
 }
 
 func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
@@ -301,7 +313,16 @@ func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState
 	if err := json.Unmarshal(msg.Content, &status); err != nil {
 		return
 	}
-	if status.ExecutionState != StateIdle {
+	switch status.ExecutionState {
+	case StateIdle:
+	case StateRestarting, StateDead:
+		// The kernel died, so this execution will never get a reply.
+		c.failExecution(state, resultChan, ErrorOutput{
+			EName:  "KernelDied",
+			EValue: "the kernel died while executing the code (kernel state: " + string(status.ExecutionState) + ")",
+		})
+		return
+	default:
 		return
 	}
 
@@ -312,6 +333,40 @@ func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState
 	}
 	state.executeDone = true
 	safego.Go(func() { c.finalizeExecution(state, resultChan) })
+}
+
+// failExecution ends an execution that lost its kernel or connection: it
+// reports errOutput and closes resultChan, or lets a running finalizeExecution
+// close it, since that stops waiting once an error is recorded. If the kernel
+// already replied, that outcome stands and the execution is finalized instead.
+// It runs on the receive goroutine, after every earlier message was handled.
+func (c *Client) failExecution(state *streamExecutionState, resultChan chan *ExecutionResult, errOutput ErrorOutput) {
+	state.resultMutex.Lock()
+	replied := state.result.ExecutionCount > 0 || state.result.Error != nil
+	state.resultMutex.Unlock()
+
+	state.executeMutex.Lock()
+	finalizing := state.executeDone
+	state.executeDone = true
+	state.executeMutex.Unlock()
+
+	if replied {
+		if !finalizing {
+			c.finalizeExecution(state, resultChan)
+		}
+		return
+	}
+
+	state.trySend(resultChan, &ExecutionResult{Error: &errOutput, Status: "error"})
+
+	state.resultMutex.Lock()
+	state.result.Status = "error"
+	state.result.Error = &errOutput
+	state.resultMutex.Unlock()
+
+	if !finalizing {
+		state.closeResultChan(resultChan)
+	}
 }
 
 func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan *ExecutionResult) {
@@ -461,6 +516,7 @@ func (c *Client) clearTemporaryHandlers() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.handlers = make(map[MessageType]func(*Message))
+	c.onConnectionLost = nil
 	c.registerDefaultHandlers()
 }
 
@@ -477,7 +533,17 @@ func (c *Client) receiveMessages() {
 		var msg Message
 		err := conn.ReadJSON(&msg)
 		if err != nil {
-			// connection may already be closed
+			// After Disconnect, or a new Connect, the connection was closed on
+			// purpose; otherwise tell the execution waiting on it.
+			c.mu.Lock()
+			var onConnectionLost func(error)
+			if c.conn == conn {
+				onConnectionLost = c.onConnectionLost
+			}
+			c.mu.Unlock()
+			if onConnectionLost != nil {
+				onConnectionLost(err)
+			}
 			break
 		}
 

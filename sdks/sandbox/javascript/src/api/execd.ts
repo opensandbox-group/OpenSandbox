@@ -1649,9 +1649,12 @@ export interface components {
              */
             message: string;
         };
-        /** @description Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are present `workspace` is prepended to `overlays`. The session files API serves exactly the overlay and bind mounts: paths under each mount resolve as the namespace sees them, and absolute paths outside every overlay or bind are rejected instead of resolving against the workspace (unlike binds, extra_writable paths are not served by the files API unless an overlay covers them). */
+        /** @description Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are present `workspace` is prepended to `overlays`. The session files API serves exactly the overlay and bind mounts: paths under each mount resolve as the namespace sees them, and absolute paths outside every overlay or bind are rejected instead of resolving against the workspace (unlike binds, extra_writable paths are not served by the files API unless an overlay covers them). The strict profile's private `/tmp` is a session-owned bind under the upper root and is part of that view; a caller bind or overlay on `/tmp` shadows it as inside the namespace. */
         CreateIsolatedSessionRequest: {
-            /** @enum {string} */
+            /**
+             * @description Isolation profile. `strict` (default) gives the session a private `/tmp` backed by a host directory that the session files API also serves; `balanced` shares the sandbox's own `/tmp`, which the files API does not serve.
+             * @enum {string}
+             */
             profile?: "strict" | "balanced";
             workspace?: components["schemas"]["IsolatedWorkspaceSpec"];
             /** @description Independent overlay mounts inside one namespace. Each entry gets its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a nested overlay (for example `/workspace` on top of a `/` root overlay) shadows its ancestors within its own subtree. Paths must be absolute, unique, and clean (no trailing slash, `.` or `..` segments); at most 16 mounts per session (including the legacy `workspace`). */
@@ -1853,12 +1856,16 @@ export interface components {
             available?: boolean;
             isolator?: string;
             version?: string;
-            /** @description Diagnostic message when isolation is unavailable */
+            /** @description Diagnostic message when isolation is unavailable or degraded (for example, share_net=true sessions work but no uid mode can create the private network namespace required by share_net=false) */
             message?: string;
             /** @description Whether sessions using uid_mode setpriv can be created with execd's default UID/GID. Requests that select different UID/GID values may still return 503 NOT_SUPPORTED when identity switching is unavailable. */
             setpriv_available?: boolean;
             /** @description Whether sessions using uid_mode userns can be created */
             userns_available?: boolean;
+            /** @description Whether sessions using uid_mode setpriv can also create the private network namespace required by share_net=false (bwrap --unshare-net; its loopback setup needs CAP_NET_ADMIN in the execd container). Create rejects share_net=false requests with 503 NOT_SUPPORTED when the requested mode's flag is false. */
+            setpriv_net_available?: boolean;
+            /** @description Whether sessions using uid_mode userns can also create the private network namespace required by share_net=false. */
+            userns_net_available?: boolean;
             commit_supported?: boolean;
             diff_supported?: boolean;
             /** @description execd init-mode and workload-hardening state (OSEP-0018): whether execd is the sandbox init and which of its controls are in effect. Not an isolation capability; reported here so operators see enforcement state in one place. */

@@ -18,6 +18,7 @@ import { useSearchParams } from 'react-router-dom';
 
 import { ApiError, adminApi, sandboxApi } from '../api/client';
 import type { DiagnosticContentResponse } from '../api/types';
+import { SandboxArchiveLogPanel } from '../components/SandboxArchiveLogPanel';
 import { SandboxLogPanel } from '../components/SandboxLogPanel';
 import { useAuth } from '../auth/AuthContext';
 import { DIAGNOSTIC_SCOPES } from '../utils/format';
@@ -135,10 +136,31 @@ export function DiagnosticsPage() {
             key: 'logs',
             label: '运行日志',
             children: sandboxId.trim() ? (
-              <SandboxLogPanel
-                sandboxId={sandboxId.trim()}
-                tenant={user?.role === 'admin' ? tenant.trim() : undefined}
-                autoLoad={user?.role === 'tenant' || Boolean(tenant.trim())}
+              <Tabs
+                items={[
+                  {
+                    key: 'live',
+                    label: '实时',
+                    children: (
+                      <SandboxLogPanel
+                        sandboxId={sandboxId.trim()}
+                        tenant={user?.role === 'admin' ? tenant.trim() : undefined}
+                        autoLoad={user?.role === 'tenant' || Boolean(tenant.trim())}
+                      />
+                    ),
+                  },
+                  {
+                    key: 'archive',
+                    label: '归档',
+                    children: (
+                      <SandboxArchiveLogPanel
+                        sandboxId={sandboxId.trim()}
+                        tenant={user?.role === 'admin' ? tenant.trim() : undefined}
+                        autoLoad={user?.role === 'tenant' || Boolean(tenant.trim())}
+                      />
+                    ),
+                  },
+                ]}
               />
             ) : (
               <Typography.Text type="secondary">请先填写 Sandbox ID</Typography.Text>

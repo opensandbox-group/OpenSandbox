@@ -16,6 +16,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -38,6 +39,74 @@ NFT_TESTS = [
     "TestNftStartFailurePreservesKernelAndRetry",
     "TestNftRealMissingTableFallback",
 ]
+NFT_IPTABLES_TESTS = [
+    "TestGatewayDNSRedirectKernelPrivateNS",
+]
+NFT_OWNER_TESTS = [
+    "TestRevisionNftEffectsRealFileAndKernel",
+    "TestTransitionRealNftChangedIPKernelRules",
+]
+WORKFLOW = (
+    Path(__file__).resolve().parents[3] / ".github" / "workflows" / "egress-test.yml"
+)
+
+
+def nft_package_tests_in_workflow(workflow, package):
+    """Return exact nft test argv for one package from the privileged step."""
+    lines = workflow.splitlines()
+    heading = "      - name: Run privileged nft regressions"
+    starts = [index for index, line in enumerate(lines) if line == heading]
+    if len(starts) != 1:
+        return None
+
+    start = starts[0]
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
+        len(lines),
+    )
+    step = lines[start:end]
+    if step.count("        working-directory: components/egress") != 1:
+        return None
+    run_headers = [index for index, line in enumerate(step) if line == "        run: |"]
+    if len(run_headers) != 1:
+        return None
+
+    run = []
+    for line in step[run_headers[0] + 1 :]:
+        if line.strip() and len(line) - len(line.lstrip()) < 10:
+            break
+        run.append(line)
+
+    command = f"          bash scripts/ci-nft-go-test.sh {package} " + chr(92)
+    calls = [index for index, line in enumerate(run) if line == command]
+    if len(calls) != 1:
+        return None
+
+    tests = []
+    cursor = calls[0] + 1
+    completed = False
+    while cursor < len(run) and run[cursor].startswith("            "):
+        arg = run[cursor][12:].strip()
+        continued = arg.endswith(chr(92))
+        if continued:
+            arg = arg[:-1].rstrip()
+        if re.fullmatch(r"Test[A-Za-z0-9_]+", arg) is None:
+            return None
+        tests.append(arg)
+        cursor += 1
+        if not continued:
+            completed = True
+            break
+    if not completed or not tests:
+        return None
+    return tests
+
+
+def nft_owner_tests_in_workflow(workflow):
+    """Return nft owner argv only from the privileged nft step's run block."""
+    return nft_package_tests_in_workflow(workflow, ".")
+
+
 OWNER_TESTS = [
     "TestRevisionAtomicPolicyDirectoryBindMount",
     "TestRevisionAtomicPolicySingleFileBindMountRejected",
@@ -239,7 +308,12 @@ class NftGoTestRunnerTests(PrivilegedGoTestRunnerTests):
     kind = "nft"
 
     def test_success_for_nft_and_owner_groups(self):
-        for package, tests in (("./pkg/nftables", NFT_TESTS), (".", ["TestRevisionNftEffectsRealFileAndKernel"])):
+        groups = (
+            ("./pkg/nftables", NFT_TESTS),
+            ("./pkg/iptables", NFT_IPTABLES_TESTS),
+            (".", NFT_OWNER_TESTS),
+        )
+        for package, tests in groups:
             with self.subTest(package=package):
                 result, events = self.run_script(package=package, tests=tests)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -247,6 +321,102 @@ class NftGoTestRunnerTests(PrivilegedGoTestRunnerTests):
                 self.assertEqual(events[-1]["opt_in"], "1")
                 self.assertEqual([event["command"] for event in events].count("sudo"), 1)
                 self.assertNotIn("unshare", [event["command"] for event in events])
+
+    def test_workflow_wires_nft_owner_tests_in_privileged_step(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(nft_owner_tests_in_workflow(workflow), NFT_OWNER_TESTS)
+
+        slash = chr(92)
+        newline = chr(10)
+        owner_call = (
+            f"          bash scripts/ci-nft-go-test.sh . {slash}{newline}"
+            f"            TestRevisionNftEffectsRealFileAndKernel {slash}{newline}"
+            "            TestTransitionRealNftChangedIPKernelRules" + newline
+        )
+        quarantine_command = f"          bash scripts/ci-nft-go-test.sh ./pkg/quarantine {slash}{newline}"
+        quarantine_step = "      - name: Run privileged quarantine packet regressions"
+        moved = workflow.replace(owner_call, "", 1).replace(
+            quarantine_command,
+            owner_call + quarantine_command,
+            1,
+        )
+        moved_to_anonymous_step = workflow.replace(owner_call, "", 1).replace(
+            quarantine_step,
+            "      - run: |" + newline + owner_call + quarantine_step,
+            1,
+        )
+        commented = workflow.replace(
+            "            TestTransitionRealNftChangedIPKernelRules" + newline,
+            "            # TestTransitionRealNftChangedIPKernelRules" + newline,
+            1,
+        )
+        wrong_package = workflow.replace(
+            f"          bash scripts/ci-nft-go-test.sh . {slash}",
+            f"          bash scripts/ci-nft-go-test.sh ./pkg/nftables {slash}",
+            1,
+        )
+        correct_step = (
+            "      - name: Run privileged nft regressions" + newline
+            + "        working-directory: components/egress" + newline
+        )
+        wrong_step = (
+            "      - name: Run privileged nft regressions" + newline
+            + "        working-directory: components/egress/scripts" + newline
+        )
+        wrong_working_directory = workflow.replace(correct_step, wrong_step, 1)
+        for name, mutant in (
+            ("moved to another named step", moved),
+            ("moved to an anonymous step", moved_to_anonymous_step),
+            ("commented out", commented),
+            ("wrong package", wrong_package),
+            ("wrong working directory", wrong_working_directory),
+        ):
+            with self.subTest(name=name):
+                self.assertNotEqual(nft_owner_tests_in_workflow(mutant), NFT_OWNER_TESTS)
+
+    def test_workflow_wires_gateway_dns_kernel_test_in_privileged_step(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(nft_package_tests_in_workflow(workflow, "./pkg/iptables"), NFT_IPTABLES_TESTS)
+
+        newline = chr(10)
+        slash = chr(92)
+        call = (
+            f"          bash scripts/ci-nft-go-test.sh ./pkg/iptables {slash}{newline}"
+            "            TestGatewayDNSRedirectKernelPrivateNS" + newline
+        )
+        quarantine_step = "      - name: Run privileged quarantine packet regressions"
+        moved = workflow.replace(call, "", 1).replace(
+            "            TestNftRealMissingTableFallback" + newline,
+            "            TestNftRealMissingTableFallback " + slash + newline
+            + "            TestGatewayDNSRedirectKernelPrivateNS" + newline,
+            1,
+        )
+        moved_to_anonymous_step = workflow.replace(call, "", 1).replace(
+            quarantine_step,
+            "      - run: |" + newline + call + quarantine_step,
+            1,
+        )
+        commented = workflow.replace(
+            "            TestGatewayDNSRedirectKernelPrivateNS" + newline,
+            "            # TestGatewayDNSRedirectKernelPrivateNS" + newline,
+            1,
+        )
+        wrong_package = workflow.replace(
+            "          bash scripts/ci-nft-go-test.sh ./pkg/iptables " + slash,
+            "          bash scripts/ci-nft-go-test.sh ./pkg/nftables " + slash,
+            1,
+        )
+        for name, mutant in (
+            ("moved to another command group", moved),
+            ("moved to an anonymous step", moved_to_anonymous_step),
+            ("commented out", commented),
+            ("wrong package", wrong_package),
+        ):
+            with self.subTest(name=name):
+                self.assertNotEqual(
+                    nft_package_tests_in_workflow(mutant, "./pkg/iptables"),
+                    NFT_IPTABLES_TESTS,
+                )
 
     def test_missing_nft_fails_before_compilation(self):
         (self.bin / "nft").unlink()

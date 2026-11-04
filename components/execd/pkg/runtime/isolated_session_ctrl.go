@@ -385,6 +385,13 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 		return "", err
 	}
 
+	// Reject private-network requests the environment cannot serve before any
+	// side effect (workspace directories, upper allocation, bwrap start), so
+	// callers see a named error instead of an opaque gate EOF.
+	if err := r.validateShareNetAvailable(opts); err != nil {
+		return "", err
+	}
+
 	// Normalize empty/omitted fields to the effective config execd will
 	// actually apply. GetIsolatedSession echoes s.opts on attach so a
 	// stateless client can rebuild a handle from just the sessionId;
@@ -409,30 +416,8 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	id := uuid.New().String()
 	session := newIsolatedSession(id, opts, r.isolator, r.namespacePinner)
 
-	// Persist overlays get host upper/work pairs; ephemeral overlays use
-	// the bwrap tmpfs upper and need no allocation.
-	persistCount := 0
-	for _, ov := range session.overlays {
-		if ov.mode == isolation.WorkspaceOverlay && ov.persist {
-			persistCount++
-		}
-	}
-	if persistCount > 0 {
-		upperID, pairs, err := r.upperMgr.AllocateN(persistCount)
-		if err != nil {
-			return "", fmt.Errorf("allocate upper: %w", err)
-		}
-		session.upperID = upperID
-		next := 0
-		for i := range session.overlays {
-			ov := &session.overlays[i]
-			if ov.mode != isolation.WorkspaceOverlay || !ov.persist {
-				continue
-			}
-			ov.upperDir = pairs[next].UpperDir
-			ov.workDir = pairs[next].WorkDir
-			next++
-		}
+	if err := r.allocateSessionUppers(session); err != nil {
+		return "", err
 	}
 
 	if err := session.start(); err != nil {
@@ -465,6 +450,79 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 		overlaySummary(session.overlays),
 	)
 	return id, nil
+}
+
+// sessionTmpBindHosted reports whether the session's namespace /tmp is the
+// session-private bind backed by its upper-root directory: strict profile
+// (the default) with no overlay covering /tmp. Only that shape hosts /tmp
+// on the host side, so only it can be served by the files view.
+func sessionTmpBindHosted(session *isolatedSession) bool {
+	return optsTmpBindHosted(session.opts, session.overlays)
+}
+
+// optsTmpBindHosted is the options-level form of sessionTmpBindHosted for
+// create-time validation, before the session exists.
+func optsTmpBindHosted(opts *IsolatedSessionOptions, overlays []sessionOverlay) bool {
+	switch isolation.Profile(opts.Profile) {
+	case isolation.ProfileStrict, "":
+	default:
+		return false
+	}
+	specs := make([]isolation.OverlaySpec, 0, len(overlays))
+	for _, ov := range overlays {
+		specs = append(specs, isolation.OverlaySpec{Path: ov.path, Mode: ov.mode})
+	}
+	return !isolation.OverlaysCoverPath(specs, "/tmp")
+}
+
+// allocateSessionUppers assigns host upper/work pairs to a session's
+// persistent overlays. Ephemeral overlays need no pairs, but every session
+// still gets an upper-root subtree: it holds the /tmp backing dir and the
+// durable cleanup record that makes teardown crash-safe.
+func (r *IsolatedRunner) allocateSessionUppers(session *isolatedSession) error {
+	persistCount := 0
+	for _, ov := range session.overlays {
+		if ov.mode == isolation.WorkspaceOverlay && ov.persist {
+			persistCount++
+		}
+	}
+
+	var (
+		upperID string
+		pairs   []isolation.UpperDirPair
+		err     error
+	)
+	switch {
+	case persistCount == 0 && !sessionTmpBindHosted(session):
+		// No pairs and no hosted /tmp: keep the historical no-allocation
+		// path so these sessions stay independent of the upper quota.
+		return nil
+	case persistCount == 0:
+		upperID, err = r.upperMgr.AllocateSessionDir()
+		if err == nil {
+			session.tmpDir = r.upperMgr.TmpDir(upperID)
+		}
+	default:
+		upperID, pairs, err = r.upperMgr.AllocateN(persistCount)
+		if err == nil && sessionTmpBindHosted(session) {
+			session.tmpDir = r.upperMgr.TmpDir(upperID)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("allocate upper: %w", err)
+	}
+	session.upperID = upperID
+	next := 0
+	for i := range session.overlays {
+		ov := &session.overlays[i]
+		if ov.mode != isolation.WorkspaceOverlay || !ov.persist {
+			continue
+		}
+		ov.upperDir = pairs[next].UpperDir
+		ov.workDir = pairs[next].WorkDir
+		next++
+	}
+	return nil
 }
 
 // overlaySummary renders resolved overlays for log lines.
@@ -674,6 +732,11 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	}
 	script.WriteString(fmt.Sprintf("echo %s $?\n", runMarker))
 
+	// runCtx is also cancelled when the script cannot be written, so the
+	// cancellation below interrupts whatever still holds stdout open.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
 	defer func() {
@@ -685,7 +748,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	go func() {
 		defer close(watcherDone)
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
 			// No-envs scripts queue their remaining statements in the shell
 			// after the interrupt; repeated SIGINT kills each as it starts
@@ -713,11 +776,25 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		}
 	}()
 
-	if _, err := io.WriteString(stdin, script.String()); err != nil {
-		return fmt.Errorf("write stdin: %w", err)
-	}
+	// The shell runs the script as it reads it, so write it while stdout is
+	// read: a command that fills the stdout pipe before the shell has read the
+	// rest of a large script would otherwise block both sides.
+	written := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(stdin, script.String())
+		if err != nil {
+			cancelRun()
+		}
+		written <- err
+	}()
 
-	exitCode, err := scanUntilMarker(ctx, stdout, runMarker, onStdout)
+	exitCode, err := scanUntilMarker(runCtx, stdout, runMarker, onStdout)
+	// Scanning stops at the marker, which the shell reads last, when the shell
+	// exits, or after a failed write, so the write has returned by then and
+	// cannot spill into the next run.
+	if writeErr := <-written; writeErr != nil && ctx.Err() == nil {
+		return fmt.Errorf("write stdin: %w", writeErr)
+	}
 	if err != nil {
 		return err
 	}
@@ -1000,14 +1077,28 @@ func newMergedView(s *isolatedSession) vfs.FS {
 	}
 
 	// Without binds, preserve the historical view shapes (a bare MergedView
-	// for the single-overlay session).
-	if len(s.opts.Binds) == 0 {
+	// for the single-overlay session). A hosted /tmp counts as a second
+	// mount and falls through to the router.
+	if s.tmpDir == "" && len(s.opts.Binds) == 0 {
 		switch len(views) {
 		case 0:
 			return isolation.NewMultiMergedView(nil)
 		case 1:
 			return overlayView(s.overlays[0])
 		}
+	}
+
+	// The hosted /tmp view is appended last, which is safe: no overlay
+	// shares the /tmp destination, deeper prefixes win by length, and binds
+	// registered earlier keep the equal-prefix tie — mirroring bwrap's argv
+	// shadow order. The view is root-confined (os.Root): /tmp is attacker-
+	// controlled, so planted symlinks must not redirect files-API writes.
+	if s.tmpDir != "" {
+		views = append(views, isolation.OverlayView{
+			Path: "/tmp",
+			Root: s.tmpDir,
+			FS:   isolation.NewConfinedView(s.tmpDir, uid, gid),
+		})
 	}
 
 	// RelativeBase indexing below requires at least one overlay; Create
@@ -1062,6 +1153,48 @@ func setprivIdentitySwitchRequired(opts *IsolatedSessionOptions, currentUID, cur
 		}
 	}
 	return targetUID != currentUID || targetGID != currentGID
+}
+
+// validateShareNetAvailable rejects share_net=false requests whose uid mode
+// cannot create the private network namespace. The probe runs the exact
+// --unshare-net smoke per mode: in setpriv mode bwrap's loopback setup needs
+// CAP_NET_ADMIN in the execd container, and without this gate such requests
+// died inside bwrap with an opaque "workload gate EOF" after upper-directory
+// allocation had already run. share_net=true and omitted share_net (legacy
+// shared default) are not affected.
+func (r *IsolatedRunner) validateShareNetAvailable(opts *IsolatedSessionOptions) error {
+	if opts == nil || opts.ShareNet == nil || *opts.ShareNet {
+		return nil
+	}
+
+	mode := isolation.UidModeSetpriv
+	if opts.UidMode != "" {
+		mode = isolation.UidMode(opts.UidMode)
+	}
+
+	var available bool
+	switch mode {
+	case isolation.UidModeSetpriv:
+		available = r.isolator.Capabilities().SetprivNetAvailable
+	case isolation.UidModeUserns:
+		available = r.isolator.Capabilities().UsernsNetAvailable
+	default:
+		// Unknown modes keep start()'s existing rejection path.
+		return nil
+	}
+	if available {
+		return nil
+	}
+
+	err := fmt.Errorf(
+		"%w: uid mode %s cannot create the private network namespace required by share_net=false",
+		ErrSessionPrivateNetUnavailable,
+		mode,
+	)
+	if message := r.isolator.Capabilities().Message; message != "" {
+		err = fmt.Errorf("%w: %s", err, message)
+	}
+	return err
 }
 
 func (r *IsolatedRunner) lookup(id string) *isolatedSession {
@@ -1169,11 +1302,37 @@ func validateNormalizedCreate(opts *IsolatedSessionOptions) error {
 	if len(opts.Overlays) == 0 {
 		return fmt.Errorf("at least one overlay is required")
 	}
+	overlays := resolveSessionOverlays(opts)
 	// Keep the files view and the namespace in agreement: a bind whose
 	// destination shadows (or is shadowed by) another caller mount would be
 	// served by different host directories through session.run and
 	// session.files, so reject the overlap up front.
-	return validateBindMountStack(opts.Overlays, opts.ExtraWritable, opts.Binds)
+	if err := validateBindMountStack(opts.Overlays, opts.ExtraWritable, opts.Binds); err != nil {
+		return err
+	}
+	// A hosted /tmp is mounted before extra_writable binds, which are not
+	// files views, so an extra_writable at or under /tmp would make run and
+	// files see different directories. validateExtraWritable has already
+	// rewritten paths to symlink-resolved form, so /tmp's resolved prefix
+	// is matched too (darwin's /tmp -> /private/tmp).
+	if optsTmpBindHosted(opts, overlays) {
+		tmpPrefixes := []string{"/tmp"}
+		if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil && resolved != "/tmp" {
+			tmpPrefixes = append(tmpPrefixes, resolved)
+		}
+		for _, p := range opts.ExtraWritable {
+			cleaned := filepath.Clean(p)
+			for _, prefix := range tmpPrefixes {
+				if cleaned == prefix || strings.HasPrefix(cleaned, prefix+"/") {
+					return fmt.Errorf(
+						"extra_writable %q shadows the session's private /tmp mount; use binds to serve it through the files API too",
+						p,
+					)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // validateBindMountStack rejects bind destinations whose mount-stack

@@ -90,7 +90,9 @@ func newStubIsolator() *stubIsolator {
 			Isolator:               "stub",
 			SetprivAvailable:       true,
 			SetprivSwitchAvailable: true,
+			SetprivNetAvailable:    true,
 			UsernsAvailable:        true,
+			UsernsNetAvailable:     true,
 			CommitSupported:        false,
 			DiffSupported:          false,
 		},
@@ -674,6 +676,63 @@ func TestRunInIsolatedSession_MultiLine(t *testing.T) {
 		if lines[i] != want {
 			t.Errorf("line[%d] = %q, want %q", i, lines[i], want)
 		}
+	}
+}
+
+// The shell runs the script while it reads it, so a script larger than the
+// stdin pipe whose early commands print more than the stdout pipe holds must
+// still complete.
+func TestRunInIsolatedSession_LargeScriptWithEarlyOutput(t *testing.T) {
+	runner := newTestRunner(t)
+
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var lines int
+	code := "seq 1 100000\n#" + strings.Repeat("x", 150*1024) + "\necho done"
+	err = runner.RunInIsolatedSession(ctx, id, code, nil, func(string) { lines++ })
+	if err != nil {
+		t.Fatalf("RunInIsolatedSession: %v", err)
+	}
+	if lines != 100001 {
+		t.Fatalf("got %d output lines, want 100001", lines)
+	}
+}
+
+// A run whose script stops the shell from reading its stdin, while another
+// process keeps stdout open, must report the failed write instead of waiting
+// for an end marker that never comes.
+func TestRunInIsolatedSession_ReportsFailedScriptWrite(t *testing.T) {
+	runner := newTestRunner(t)
+
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	code := "exec sleep 300 </dev/null\n#" + strings.Repeat("x", 150*1024)
+	err = runner.RunInIsolatedSession(ctx, id, code, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "write stdin") {
+		t.Fatalf("RunInIsolatedSession error = %v, want a write stdin error", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("run waited for its deadline instead of reporting the failed write")
 	}
 }
 

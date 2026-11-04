@@ -77,7 +77,7 @@ Compatibility reflects current upstream `main` only:
 | Docker (`runc`) | Supported | Requires `[docker] network_mode = "bridge"`; use `ca_cert_path` only when a private CA is required. |
 | Kubernetes (`runc`) | Supported | Non-pooled AgentSandbox and BatchSandbox workloads; use `ca_secret_name` only when a private CA is required. |
 | Kubernetes (`Kata`) | Supported | Accepted by egress validation; validate the selected RuntimeClass, CNI, and kernel in your deployment. |
-| gVisor (`secure_runtime.type = "gvisor"`) | Rejected | Sandbox creation returns HTTP 400 because gVisor netstack lacks the required iptables nat redirect. |
+| gVisor (`secure_runtime.type = "gvisor"`) | Rejected | Sandbox creation returns HTTP 400 because gVisor does not support the nftables interface the egress sidecar uses for its redirect and policy rules. |
 | Kubernetes Pool Mode | Unsupported | Rejects per-request `networkPolicy`; cannot attach per-allocation egress sidecars. |
 | Fast Sandbox | Unsupported | Current fast-sandbox profile rejects `networkPolicy` when `upstream_proxy` is set. |
 

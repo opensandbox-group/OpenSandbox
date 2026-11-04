@@ -209,6 +209,9 @@ func (m *MultiMergedView) Remove(path string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectMountRootRemoval(rt, path); err != nil {
+		return err
+	}
 	return rt.fs.Remove(p)
 }
 
@@ -217,7 +220,20 @@ func (m *MultiMergedView) RemoveAll(path string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectMountRootRemoval(rt, path); err != nil {
+		return err
+	}
 	return rt.fs.RemoveAll(p)
+}
+
+// rejectMountRootRemoval mirrors mountpoint semantics: a bind-style mount
+// root (caller bind, hosted /tmp) must not be unlinked under a live mount.
+// Overlay views keep their historical behavior.
+func rejectMountRootRemoval(rt *overlayRoute, path string) error {
+	if rt.root != "" && rt.root != rt.prefix && filepath.Clean(path) == rt.prefix {
+		return fmt.Errorf("cannot remove mount root %q", rt.prefix)
+	}
+	return nil
 }
 
 func (m *MultiMergedView) MkdirAll(path string, perm os.FileMode) error {

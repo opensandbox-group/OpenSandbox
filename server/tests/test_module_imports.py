@@ -23,6 +23,10 @@ import sys
 
 import pytest
 
+# Like conftest.py, keep the Docker service that lifecycle builds at import off
+# a real daemon, which CI hosts such as the Windows runners do not have.
+_NO_DOCKER = "import docker; from unittest.mock import MagicMock; docker.from_env = MagicMock; "
+
 
 @pytest.mark.parametrize(
     "module",
@@ -36,7 +40,7 @@ import pytest
 )
 def test_module_imports_in_a_fresh_interpreter(module: str) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", f"import {module}"],
+        [sys.executable, "-c", f"{_NO_DOCKER}import {module}"],
         capture_output=True,
         text=True,
         timeout=60,

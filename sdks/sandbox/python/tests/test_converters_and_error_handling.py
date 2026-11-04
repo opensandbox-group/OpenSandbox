@@ -21,6 +21,10 @@ import pytest
 from httpx import HTTPStatusError, Request, Response
 from pydantic import ValidationError
 
+from opensandbox.adapters.converter.command_execution import (
+    build_run_in_session_request_body,
+    resolve_run_in_session_timeout,
+)
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
     parse_sandbox_error,
@@ -527,6 +531,82 @@ def test_execution_converter_to_api_run_command_request() -> None:
         literal_argv, RunCommandOpts()
     ).to_dict()
     assert literal_request == {"argv": literal_argv}
+
+
+@pytest.mark.parametrize(
+    ("microseconds", "expected"),
+    [
+        (None, None),
+        (0, 0),
+        (1, 1),
+        (500, 1),
+        (900, 1),
+        (999, 1),
+        (1000, 1),
+        (1001, 2),
+        (1200, 2),
+        (1_001_000, 1001),
+        (2_007_000, 2007),
+        (60_000_000, 60_000),
+    ],
+)
+def test_execution_converter_rounds_timeout_up_to_milliseconds(
+    microseconds: int | None, expected: int | None
+) -> None:
+    timeout = timedelta(microseconds=microseconds) if microseconds is not None else None
+    request = ExecutionConverter.to_api_run_command_request(
+        "sleep 10", RunCommandOpts(timeout=timeout)
+    ).to_dict()
+
+    if expected is None:
+        assert "timeout" not in request
+    else:
+        assert request["timeout"] == expected
+
+
+@pytest.mark.parametrize(
+    ("microseconds", "expected"),
+    [
+        (None, None),
+        (0, 0),
+        (1, 1),
+        (500, 1),
+        (900, 1),
+        (999, 1),
+        (1000, 1),
+        (1001, 2),
+        (1200, 2),
+        (1_001_000, 1001),
+        (2_007_000, 2007),
+        (60_000_000, 60_000),
+    ],
+)
+def test_run_in_session_converter_rounds_timeout_up_to_milliseconds(
+    microseconds: int | None, expected: int | None
+) -> None:
+    timeout = timedelta(microseconds=microseconds) if microseconds is not None else None
+    timeout_ms = resolve_run_in_session_timeout(timeout)
+    assert timeout_ms == expected
+    request = build_run_in_session_request_body("sleep 10", None, timeout_ms).to_dict()
+
+    if expected is None:
+        assert "timeout" not in request
+    else:
+        assert request["timeout"] == expected
+
+
+@pytest.mark.parametrize("microseconds", [-1, -999, -1000])
+def test_execution_converter_rejects_negative_timeout(microseconds: int) -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must be positive"):
+        ExecutionConverter.to_api_run_command_request(
+            "sleep 10", RunCommandOpts(timeout=timedelta(microseconds=microseconds))
+        )
+
+
+@pytest.mark.parametrize("microseconds", [-1, -999, -1000])
+def test_run_in_session_converter_rejects_negative_timeout(microseconds: int) -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must not be negative"):
+        resolve_run_in_session_timeout(timedelta(microseconds=microseconds))
 
 
 def test_run_command_opts_validates_gid_requires_uid() -> None:

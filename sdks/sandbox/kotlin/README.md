@@ -547,4 +547,32 @@ sandbox.credentialVault().create(
 );
 ```
 
+Exchange-sourced credentials (OSEP-0025) carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form.
+
+```java
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ExchangeCredentialSource;
+
+sandbox.credentialVault().create(
+    CredentialVaultCreateRequest.builder()
+        .credentials(
+            List.of(
+                Credential.builder()
+                    .name("spi-signer")
+                    .exchangeSource("unix:///run/spi/spi.sock")
+                    .build()
+            )
+        )
+        .bindings(
+            List.of(
+                CredentialBinding.builder()
+                    .name("internal-api")
+                    .match(CredentialMatch.builder().hosts("*.internal.example.com").build())
+                    .auth(CredentialAuth.exchange("spi-signer"))
+                    .build()
+            )
+        )
+        .build()
+);
+```
+
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.

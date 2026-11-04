@@ -36,6 +36,10 @@ from opensandbox.adapters.converter.response_handler import (
     extract_request_id,
     handle_api_error,
 )
+from opensandbox.adapters.download_response import (
+    create_read_bytes_response,
+    iter_response_bytes,
+)
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
@@ -44,6 +48,8 @@ from opensandbox.models.filesystem import (
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
+    ReadBytesStream,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -126,6 +132,18 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> bytes:
+        return self.read_bytes_detailed(
+            path, range_header=range_header, offset=offset, limit=limit
+        ).body
+
+    def read_bytes_detailed(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[bytes]:
         try:
             url = self._get_url(self.DOWNLOAD_PATH)
             params: dict[str, str] = {"path": path}
@@ -139,7 +157,11 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
 
             response = self._httpx_client.get(url, headers=headers, params=params)
             response.raise_for_status()
-            return response.content
+            return create_read_bytes_response(
+                response,
+                response.content,
+                line_based=offset is not None or limit is not None,
+            )
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -152,39 +174,57 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> Iterator[bytes]:
-        url = self._get_url(self.DOWNLOAD_PATH)
-        params: dict[str, str] = {"path": path}
-        headers: dict[str, str] = {}
-        if range_header:
-            headers["Range"] = range_header
-        if offset is not None:
-            params["offset"] = str(offset)
-        if limit is not None:
-            params["limit"] = str(limit)
+        return self.read_bytes_stream_detailed(
+            path,
+            chunk_size=chunk_size,
+            range_header=range_header,
+            offset=offset,
+            limit=limit,
+        ).body
 
-        request = self._httpx_client.build_request(
-            "GET", url, headers=headers, params=params
-        )
-        response = self._httpx_client.send(request, stream=True)
+    def read_bytes_stream_detailed(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[ReadBytesStream]:
+        try:
+            url = self._get_url(self.DOWNLOAD_PATH)
+            params: dict[str, str] = {"path": path}
+            headers: dict[str, str] = {}
+            if range_header:
+                headers["Range"] = range_header
+            if offset is not None:
+                params["offset"] = str(offset)
+            if limit is not None:
+                params["limit"] = str(limit)
 
-        if response.status_code >= 300:
-            try:
-                response.read()
-            finally:
-                response.close()
-            raise SandboxApiException(
-                f"Failed to stream file {path}: {response.status_code}",
-                status_code=response.status_code,
-                request_id=extract_request_id(response.headers),
+            request = self._httpx_client.build_request(
+                "GET", url, headers=headers, params=params
             )
+            response = self._httpx_client.send(request, stream=True)
 
-        def _iter() -> Iterator[bytes]:
-            try:
-                yield from response.iter_bytes(chunk_size=chunk_size)
-            finally:
-                response.close()
+            if response.status_code >= 300:
+                try:
+                    response.read()
+                finally:
+                    response.close()
+                raise SandboxApiException(
+                    f"Failed to stream file {path}: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
 
-        return _iter()
+            return create_read_bytes_response(
+                response,
+                iter_response_bytes(response, chunk_size),
+                line_based=offset is not None or limit is not None,
+            )
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def write_files(self, entries: list[WriteEntry]) -> None:
         if not entries:

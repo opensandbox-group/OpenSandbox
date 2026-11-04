@@ -108,11 +108,7 @@ func (c *CodeInterpretingController) RunCommand() {
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running commands %v", err),
-		)
+		c.respondRunError(runCodeRequest.Hooks, completeCh, fmt.Sprintf("error running commands %v", err))
 		return
 	}
 

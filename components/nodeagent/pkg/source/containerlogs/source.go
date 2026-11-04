@@ -799,12 +799,12 @@ func (s *containerLogSource) resumeMonitoring(runtime *streamRuntime, leafWatche
 		if !leafWatched {
 			return nil
 		}
-		hadPriorProgress := len(runtime.files) > 0 || next.Revision > 1 || next.AcknowledgedRevision > 0 || next.FinalizingRevision > 0 || len(next.Drops) > 0 || len(next.Gaps) > 0
-		if hadPriorProgress {
+		if hasProgressLocked(runtime) {
 			return api.Permanent(fmt.Errorf("source stream %q has progress without a coverage boundary", next.StreamRef))
 		}
 		next.CoverageStartedAt = canonicalCoverageBoundary(time.Now())
 		next.MonitoringEpoch = s.epochID
+		next.UnadoptedDeadline = nil
 		changed = true
 	} else if next.MonitoringEpoch != s.epochID {
 		reason := "monitor-interrupted"
@@ -1161,13 +1161,46 @@ func (s *containerLogSource) scanAll(ctx context.Context, watcher *fsnotify.Watc
 	return nil
 }
 
+// hasProgressLocked reports whether runtime has read, dropped or finalized
+// anything. The caller holds runtime.mu.
+func hasProgressLocked(runtime *streamRuntime) bool {
+	persisted := runtime.persisted
+	return len(runtime.files) > 0 || persisted.Revision > 1 || persisted.AcknowledgedRevision > 0 || persisted.FinalizingRevision > 0 || len(persisted.Drops) > 0 || len(persisted.Gaps) > 0
+}
+
+// unadoptedExpiredLocked reports whether runtime belongs to a Pod that ended
+// before kubelet created its log directory, and the directory has had the
+// same window to appear that late data gets after an end. Such a stream was
+// never adopted, so it can never end; nothing was observed, so nothing is
+// finalized. The deadline is persisted the first time the stream is seen this
+// way, so restarts do not extend the window. The caller holds runtime.mu.
+func (s *containerLogSource) unadoptedExpiredLocked(runtime *streamRuntime, now time.Time) (bool, error) {
+	if runtime.ended || !runtime.resource.Terminated || !runtime.persisted.CoverageStartedAt.IsZero() || hasProgressLocked(runtime) {
+		return false, nil
+	}
+	if runtime.persisted.UnadoptedDeadline == nil {
+		next := runtime.persisted
+		deadline := now.UTC().Add(s.cfg.EndedStateRetention)
+		next.UnadoptedDeadline = &deadline
+		if err := s.state.PutSourceStream(next); err != nil {
+			return false, err
+		}
+		runtime.persisted = next
+	}
+	return !now.Before(*runtime.persisted.UnadoptedDeadline), nil
+}
+
 func (s *containerLogSource) pruneEndedRuntime(streamRef api.StreamRef, runtime *streamRuntime, now time.Time) (bool, error) {
 	runtime.mu.Lock()
-	eligible := runtime.ended && runtime.endAcked && runtime.persisted.RepairDeadline != nil && !now.Before(*runtime.persisted.RepairDeadline)
+	endedExpired := runtime.ended && runtime.endAcked && runtime.persisted.RepairDeadline != nil && !now.Before(*runtime.persisted.RepairDeadline)
+	unadoptedExpired, err := s.unadoptedExpiredLocked(runtime, now)
 	logDirectory := runtime.resource.LogDirectory
 	podUID := runtime.resource.PodUID
 	runtime.mu.Unlock()
-	if !eligible {
+	if err != nil {
+		return false, err
+	}
+	if !endedExpired && !unadoptedExpired {
 		return false, nil
 	}
 	if _, err := os.Stat(logDirectory); err == nil {
@@ -1176,16 +1209,13 @@ func (s *containerLogSource) pruneEndedRuntime(streamRef api.StreamRef, runtime 
 		return false, err
 	}
 	s.store.Forget(podUID)
-	if !s.cfg.PruneEndedState {
-		s.mu.Lock()
-		if s.streams[streamRef.ID] == runtime {
-			delete(s.streams, streamRef.ID)
+	// A durable-file sink keeps an ended stream's state until it collects the
+	// stream's files. A never-adopted stream sent nothing, so there is nothing
+	// to collect and its state goes now.
+	if s.cfg.PruneEndedState || unadoptedExpired {
+		if err := s.state.DeleteStream(streamRef.ID); err != nil {
+			return false, err
 		}
-		s.mu.Unlock()
-		return true, nil
-	}
-	if err := s.state.DeleteStream(streamRef.ID); err != nil {
-		return false, err
 	}
 	s.mu.Lock()
 	if s.streams[streamRef.ID] == runtime {

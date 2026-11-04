@@ -256,6 +256,8 @@ try {
 
 ### Go
 
+When a Go `Start(ctx)` restart or concurrent `Shutdown(ctx, ...)` waits for an earlier shutdown to finish, cancelling its context stops only that wait and returns the context error. It does not interrupt or mark the earlier cleanup complete.
+
 Inside a function returning `error`, with `ctx` and the usual `context`, `fmt`, `time`, and `opensandbox` imports:
 
 ```go
@@ -399,7 +401,7 @@ log.Printf("retired %s: drained=%d killed=%d",
     result.PoolName, result.DrainedIdleCount, result.KilledIdleCount)
 ```
 
-`PoolDestroyOptions` mirrors the other SDKs. `Strategy` selects the algorithm and only `PoolDestroyForce` is implemented. `DrainTimeout` and `TombstoneTTL` are `*time.Duration`: leave them nil for the defaults (30s and 7 days), or set an explicit zero to drain without a deadline and to write a tombstone that never expires.
+`PoolDestroyOptions` mirrors the other SDKs. `Strategy` selects the algorithm and only `PoolDestroyForce` is implemented. `DrainTimeout` and `TombstoneTTL` are `*time.Duration`: leave them nil for the defaults (30s and 7 days), or set an explicit zero to drain without a deadline and to write a tombstone that never expires. The drain deadline also bounds context-aware state-store reads; a timed-out drain leaves the namespace `DESTROYING` so it can be retried.
 
 The fence is what makes retirement safe without stopping every writer first, and it is enforced on two levels. The state store refuses `PutIdle`, `SetMaxIdle` and `SetIdleEntryTTL` with a `*PoolDestroyedError` and hands out no primary lock, which stops replenishment. The pool itself also checks the fence when it starts, before every acquire, again once an acquire holds a live sandbox, and on each reconcile tick: a surviving peer stops outright on its next tick, an in-flight acquire fails rather than minting a fresh sandbox into the retired namespace through the direct-create fallthrough, and a sandbox obtained just before the fence landed is killed instead of handed out. The post-acquire check matters because the idle take is deliberately left unfenced so `destroy` can drain: once an ID has been taken, `destroy` can no longer reach it, so the acquire has to dispose of it itself. Starting a fresh pool against a tombstoned `PoolName` fails for the same reason, so rebinding the name requires either waiting out the tombstone TTL or rotating to a new `PoolName`.
 

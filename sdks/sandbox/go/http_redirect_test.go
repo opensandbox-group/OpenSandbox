@@ -218,9 +218,9 @@ func TestRedirectRequestPaths(t *testing.T) {
 				case "execd":
 					require.NoError(t, NewExecdClient(source.URL, "execd-token", opts...).Ping(ctx))
 				case "proxy-execd":
-					// ConnectionConfig applies the lifecycle auth override even to
-					// execd, whose endpoint headers still use its intrinsic token name.
-					cfg := ConnectionConfig{AuthHeader: "X-API-Key", Headers: map[string]string{
+					// Proxy-mode data-plane requests retain the tenant key while
+					// ConnectionConfig applies the lifecycle auth override to execd.
+					cfg := ConnectionConfig{UseServerProxy: true, AuthHeader: "X-API-Key", Headers: map[string]string{
 						"X-API-Key": "tenant", "X-Custom": "keep",
 					}}
 					client := cfg.execdClient(source.URL, map[string]string{

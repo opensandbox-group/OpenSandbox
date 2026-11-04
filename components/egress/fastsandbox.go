@@ -67,6 +67,13 @@ import (
 // on the shared dnsproxy.
 func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.UpstreamProxySpec) {
 	log.Infof("egress profile: fast-sandbox (multi-sandbox control plane)")
+	actionsAPIVersion, err := constants.ParseFastSandboxActionsAPIVersion(os.Getenv(constants.EnvFastSandboxActionsAPIVersion))
+	if err != nil {
+		log.Fatalf("fast-sandbox Actions protocol: %v", err)
+	}
+	if err := validateOwnerDomain(os.Getenv(constants.EnvEgressPolicyDir), actionsAPIVersion); err != nil {
+		log.Fatalf("fast-sandbox Actions domain: %v", err)
+	}
 
 	otelShutdown, err := telemetry.Init(ctx)
 	if err != nil {
@@ -115,6 +122,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
+	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
 
 	// Register the configured state-directory basenames BEFORE either
 	// constructor runs: the volume-root restriction must recognize the

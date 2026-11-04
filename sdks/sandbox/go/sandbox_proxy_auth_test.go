@@ -158,6 +158,84 @@ func TestResolveExecdDirectModeCarriesNoTenantKey(t *testing.T) {
 	require.Equal(t, "", headers.Get("X-EXECD-ACCESS-TOKEN"))
 }
 
+// TestResolveExecdDirectModeStripsConfigProxyKey covers a caller that puts the
+// tenant key in ConnectionConfig.Headers. That map is applied to every client,
+// but direct data-plane requests terminate inside the untrusted sandbox.
+func TestResolveExecdDirectModeStripsConfigProxyKey(t *testing.T) {
+	var directHeaders capturedHeaders
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directHeaders.record(r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer direct.Close()
+
+	sb := serverProxyFixture(t, direct.URL, nil, false)
+	sb.config.Headers = map[string]string{
+		"Open-Sandbox-Api-Key": "tenant-key-1",
+		"X-Custom":             "keep",
+	}
+
+	require.NoErrorf(t, sb.resolveExecd(context.Background()), "resolveExecd")
+	require.NoErrorf(t, sb.execd.Ping(context.Background()), "Ping")
+
+	headers := directHeaders.first(t)
+	require.Equal(t, "", headers.Get("OPEN-SANDBOX-API-KEY"),
+		"direct-mode requests must not receive the tenant key from ConnectionConfig.Headers")
+	require.Equal(t, "keep", headers.Get("X-Custom"))
+}
+
+// TestResolveExecdDirectModeStripsEndpointProxyKey applies the same policy to
+// endpoint metadata while preserving the endpoint's actual execd credential.
+func TestResolveExecdDirectModeStripsEndpointProxyKey(t *testing.T) {
+	var directHeaders capturedHeaders
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directHeaders.record(r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer direct.Close()
+
+	sb := serverProxyFixture(t, direct.URL, map[string]string{
+		"Open-Sandbox-Api-Key": "endpoint-key",
+		"X-EXECD-ACCESS-TOKEN": "endpoint-token",
+		"X-Custom":             "keep",
+	}, false)
+
+	require.NoErrorf(t, sb.resolveExecd(context.Background()), "resolveExecd")
+	require.NoErrorf(t, sb.execd.Ping(context.Background()), "Ping")
+
+	headers := directHeaders.first(t)
+	require.Equal(t, "", headers.Get("OPEN-SANDBOX-API-KEY"),
+		"direct-mode requests must not receive the tenant key from endpoint headers")
+	require.Equal(t, "endpoint-token", headers.Get("X-EXECD-ACCESS-TOKEN"))
+	require.Equal(t, "keep", headers.Get("X-Custom"))
+}
+
+// TestResolveEgressDirectModeStripsConfigProxyKey is the egress twin of the
+// config-header regression above.
+func TestResolveEgressDirectModeStripsConfigProxyKey(t *testing.T) {
+	var directHeaders capturedHeaders
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directHeaders.record(r)
+		jsonResponse(w, http.StatusOK, PolicyStatusResponse{Status: "ok"})
+	}))
+	defer direct.Close()
+
+	sb := serverProxyFixture(t, direct.URL, nil, false)
+	sb.config.Headers = map[string]string{
+		"open-sandbox-api-key": "tenant-key-1",
+		"X-Custom":             "keep",
+	}
+
+	require.NoErrorf(t, sb.resolveEgress(context.Background()), "resolveEgress")
+	_, err := sb.egress.GetPolicy(context.Background())
+	require.NoErrorf(t, err, "GetPolicy")
+
+	headers := directHeaders.first(t)
+	require.Equal(t, "", headers.Get("OPEN-SANDBOX-API-KEY"),
+		"direct-mode requests must not receive the tenant key from ConnectionConfig.Headers")
+	require.Equal(t, "keep", headers.Get("X-Custom"))
+}
+
 // TestResolveEgressProxyModeAuthenticatesWithServerHeader covers the egress
 // sidecar path, which had the same wrong-header fallback as execd.
 func TestResolveEgressProxyModeAuthenticatesWithServerHeader(t *testing.T) {
@@ -312,5 +390,63 @@ func TestResolveEgressProxyModeKeepsConfigProxyKey(t *testing.T) {
 			require.Equal(t, "config-key", proxyHeaders.first(t).Get(serverProxyAuthHeader),
 				"the caller's configured proxy key must not be replaced by the tenant key")
 		})
+	}
+}
+
+// Endpoint headers must take precedence using HTTP's case-insensitive names.
+func TestDataPlaneHeadersEndpointPrecedenceIgnoresCase(t *testing.T) {
+	for _, proxy := range []bool{false, true} {
+		config := ConnectionConfig{
+			UseServerProxy: proxy,
+			Headers: map[string]string{
+				"x-routing-hint": "stale",
+				"X-ROUTING-HINT": "also-stale",
+				"X-Custom":       "preserved",
+			},
+		}
+		endpoint := map[string]string{"X-Routing-Hint": "resolved"}
+		headers := config.dataPlaneHeaders(endpoint)
+		if got := countHeaderFold(headers, "X-Routing-Hint"); got != 1 {
+			t.Fatalf("proxy=%v: got %d routing header entries, want 1", proxy, got)
+		}
+		if headers["X-Routing-Hint"] != "resolved" || headers["X-Custom"] != "preserved" {
+			t.Fatalf("proxy=%v: unexpected merged headers: %v", proxy, headers)
+		}
+		if len(config.Headers) != 3 || config.Headers["x-routing-hint"] != "stale" || len(endpoint) != 1 {
+			t.Fatal("merging mutated input headers")
+		}
+	}
+}
+
+func TestDataPlaneClientsUseEndpointHeaderWithDifferentCase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Routing-Hint"); got != "resolved" {
+			t.Errorf("%s: routing header = %q, want resolved", r.URL.Path, got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	config := ConnectionConfig{Headers: map[string]string{"x-routing-hint": "stale"}}
+	endpoint := map[string]string{"X-Routing-Hint": "resolved"}
+	if err := config.execdClient(server.URL, endpoint).Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.egressClient(server.URL, endpoint).GetPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDataPlaneEndpointProxyKeyPrecedenceAndDirectStripping(t *testing.T) {
+	for _, proxy := range []bool{false, true} {
+		config := ConnectionConfig{UseServerProxy: proxy, Headers: map[string]string{"open-sandbox-api-key": "configured"}}
+		headers := config.dataPlaneHeaders(map[string]string{"OPEN-SANDBOX-API-KEY": "endpoint"})
+		if proxy {
+			if countHeaderFold(headers, serverProxyAuthHeader) != 1 || headers[serverProxyAuthHeader] != "endpoint" {
+				t.Fatalf("proxy headers = %v", headers)
+			}
+		} else if countHeaderFold(headers, serverProxyAuthHeader) != 0 {
+			t.Fatal("direct mode retained tenant key")
+		}
 	}
 }

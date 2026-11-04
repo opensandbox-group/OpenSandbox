@@ -413,8 +413,7 @@ func TestRelayPutRacingRebindNeverActivatesPredecessorPolicy(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	hnft := &hookNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, hnft)
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
-	srv.dnsRedirectRemove = func() error { return nil }
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 	pp, err := newPolicyPersistence(t.TempDir())
 	require.NoError(t, err)
 	files := make(map[string]*fakeVaultFile)

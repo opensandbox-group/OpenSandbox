@@ -192,11 +192,25 @@ class FastSandboxSnapshotRuntime:
                     reason=SNAPSHOT_CREATE_CONFLICT_REASON,
                     message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
                 )
-            return SnapshotRuntimeStatus(
-                state=SnapshotState.FAILED,
-                reason="snapshot_runtime_create_failed",
-                message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
-            )
+            # The request is durable and idempotent by request_id, so it may
+            # have been persisted before the error (e.g. a lost reply). Unless
+            # FastPath confirms it is absent, report it as submitted whatever
+            # its phase: a failed status would leave it without a record, and
+            # convergence records its terminal state, or its absence, once the
+            # row exists.
+            try:
+                self._fastpath.get_sandbox_snapshot(ns, snapshot_name)
+            except FastPathNotFound:
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.FAILED,
+                    reason="snapshot_runtime_create_failed",
+                    message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
+                )
+            except FastPathError as probe_exc:
+                logger.warning(
+                    f"Could not check fsb snapshot {snapshot_name} after a failed create "
+                    f"({exc}): {probe_exc}"
+                )
         return SnapshotRuntimeStatus(
             state=SnapshotState.CREATING,
             reason="snapshot_runtime_submitted",

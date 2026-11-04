@@ -64,10 +64,10 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Templat
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.TemplateModelConverter.toApiCreateTemplateSandboxRequest
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.TemplateModelConverter.toPagedTemplateInfos
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.TemplateModelConverter.toTemplateInfo
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.decodeResponseBody
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import com.alibaba.opensandbox.sandbox.transport.RequestDeadline
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -276,7 +276,11 @@ internal class SandboxesAdapter(
         provider.authenticatedClient.newCall(request).execute().use { response ->
             val responseBody = response.body?.string().orEmpty()
             if (response.isSuccessful) {
-                return Serializer.kotlinxSerializationJson.decodeFromString<ApiSandbox>(responseBody)
+                return Serializer.kotlinxSerializationJson.decodeResponseBody(
+                    ApiSandbox.serializer(),
+                    responseBody,
+                    "patch sandbox metadata",
+                )
             }
             throw response.toSandboxApiException(responseBody) { statusCode, body ->
                 "Failed to patch sandbox metadata. Status code: $statusCode, Body: $body"
