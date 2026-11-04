@@ -72,7 +72,7 @@ kind delete cluster --name sandbox-k8s-test-e2e
 
 **Cause**: The image was pulled without an explicit `--platform` pin. A docker daemon using the containerd image store keeps the full multi-arch index locally, so `docker save` exports an OCI index that references platforms whose blobs were never pulled. containerd 1.x nodes (older Kind versions such as v1.22/v1.28) import an image record for every entry and fail unpacking the ones with missing blobs. containerd 2.x nodes skip missing platforms, which is why only some K8s matrix jobs fail.
 
-**Fix**: Always pull with `--platform $(docker version --format '{{.Server.Arch}}')` (see `utils.LocalDockerPlatform`) so the saved archive contains a single platform. References: kubernetes-sigs/kind#3795, kubernetes-sigs/kind#4255.
+**Fix**: Remove any existing image with the same tag first, then pull with an explicit `--platform $(docker version --format '{{.Server.Arch}}')` pin (see `utils.PullImageWithPlatform`). The removal is required because `docker pull --platform` is a no-op when the tag already exists locally (e.g. pre-cached on GitHub runners), keeping the full multi-arch record. References: kubernetes-sigs/kind#3795, kubernetes-sigs/kind#4255.
 
 ### Controller Pod Not Ready
 

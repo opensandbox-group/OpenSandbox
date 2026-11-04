@@ -78,6 +78,20 @@ func LocalDockerPlatform() string {
 	return "linux/" + runtime.GOARCH
 }
 
+// PullImageWithPlatform pulls <name> pinned to the local daemon platform
+// after removing any existing image with the same tag. The removal matters:
+// when the tag already exists locally (e.g. pre-cached on GitHub runners),
+// "docker pull --platform" is a no-op that keeps the existing multi-arch
+// image record, and "docker save" then exports an OCI index referencing
+// platforms whose blobs were never pulled (see
+// LoadPulledImageToKindClusterWithName).
+func PullImageWithPlatform(name string) error {
+	_ = exec.Command("docker", "image", "rm", "-f", name).Run()
+	cmd := exec.Command("docker", "pull", "--platform", LocalDockerPlatform(), name)
+	_, err := Run(cmd)
+	return err
+}
+
 // LoadPulledImageToKindClusterWithName imports a pulled docker image into the
 // kind node via ctr, because "kind load" fails on single-platform pulls
 // (kubernetes-sigs/kind#4255).
