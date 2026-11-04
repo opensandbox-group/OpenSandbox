@@ -70,9 +70,9 @@ kind delete cluster --name sandbox-k8s-test-e2e
 
 **Symptom**: The suite fails in BeforeSuite while loading a pulled image (registry or alpine) into Kind, with `ctr: content digest sha256:...: not found`.
 
-**Cause**: The image was pulled without an explicit `--platform` pin. A docker daemon using the containerd image store keeps the full multi-arch index locally, so `docker save` exports an OCI index that references platforms whose blobs were never pulled. containerd 1.x nodes (older Kind versions such as v1.22/v1.28) import an image record for every entry and fail unpacking the ones with missing blobs. containerd 2.x nodes skip missing platforms, which is why only some K8s matrix jobs fail.
+**Cause**: `docker save` of an image pulled from a multi-arch tag (with a containerd-image-store daemon) exports an OCI archive whose index nests the full manifest list, referencing platforms whose blobs were never pulled. containerd 1.x nodes (older Kind versions such as v1.22/v1.28) fetch every manifest reachable from that nested index while unpacking and fail on the missing platforms; containerd 2.x nodes filter platforms correctly, which is why only some K8s matrix jobs fail.
 
-**Fix**: Remove any existing image with the same tag first, then pull with an explicit `--platform $(docker version --format '{{.Server.Arch}}')` pin (see `utils.PullImageWithPlatform`). The removal is required because `docker pull --platform` is a no-op when the tag already exists locally (e.g. pre-cached on GitHub runners), keeping the full multi-arch record. References: kubernetes-sigs/kind#3795, kubernetes-sigs/kind#4255.
+**Fix**: Use `utils.LoadPulledImageToKindClusterWithName`, which saves with `docker save --platform <daemon-arch>` (flattens the archive) and imports without `--digests` (skips docker's unnamed attestation manifests, whose `application/vnd.in-toto+json` layers containerd 1.x cannot unpack). References: kubernetes-sigs/kind#3795, kubernetes-sigs/kind#4255.
 
 ### Controller Pod Not Ready
 

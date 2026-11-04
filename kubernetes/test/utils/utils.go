@@ -78,15 +78,9 @@ func LocalDockerPlatform() string {
 	return "linux/" + runtime.GOARCH
 }
 
-// PullImageWithPlatform pulls <name> pinned to the local daemon platform
-// after removing any existing image with the same tag. The removal matters:
-// when the tag already exists locally (e.g. pre-cached on GitHub runners),
-// "docker pull --platform" is a no-op that keeps the existing multi-arch
-// image record, and "docker save" then exports an OCI index referencing
-// platforms whose blobs were never pulled (see
-// LoadPulledImageToKindClusterWithName).
+// PullImageWithPlatform pulls <name> pinned to the local daemon platform so
+// only the architecture the kind node runs on is downloaded.
 func PullImageWithPlatform(name string) error {
-	_ = exec.Command("docker", "image", "rm", "-f", name).Run()
 	cmd := exec.Command("docker", "pull", "--platform", LocalDockerPlatform(), name)
 	_, err := Run(cmd)
 	return err
@@ -96,12 +90,17 @@ func PullImageWithPlatform(name string) error {
 // kind node via ctr, because "kind load" fails on single-platform pulls
 // (kubernetes-sigs/kind#4255).
 //
-// The image must have been pulled with an explicit --platform pin. Without
-// one, a docker daemon using the containerd image store keeps the full
-// multi-arch index locally, and "docker save" then exports an OCI index that
-// references platforms whose blobs were never pulled. containerd 1.x nodes
-// (kind v1.22/v1.28) create image records for every entry and fail unpacking
-// them with "content digest ...: not found".
+// The archive must be saved with "docker save --platform": a plain
+// "docker save" of an image pulled from a multi-arch tag exports an OCI
+// archive whose index nests the full manifest list, referencing platforms
+// whose blobs were never pulled. containerd 1.x kind nodes (v1.22/v1.28)
+// fetch every manifest reachable from that nested index while unpacking and
+// fail with "content digest ...: not found"; containerd 2.x nodes filter
+// platforms correctly, which is why only some K8s matrix jobs failed.
+// --digests is intentionally omitted: docker's attestation manifests have no
+// name annotation and unpacking them fails on containerd 1.x with "no
+// processor for media-type application/vnd.in-toto+json", so without
+// --digests ctr simply skips creating records for them.
 func LoadPulledImageToKindClusterWithName(name string) error {
 	if IsExternal() {
 		_, _ = fmt.Fprintf(GinkgoWriter, "skipping image import for %q (E2E_MODE=%s)\n", name, Mode())
@@ -113,36 +112,51 @@ func LoadPulledImageToKindClusterWithName(name string) error {
 	}
 	node := fmt.Sprintf("%s-control-plane", cluster)
 
-	saveCmd := exec.Command("docker", "save", name)
-	importCmd := exec.Command("docker", "exec", "--privileged", "-i", node,
-		"ctr", "--namespace=k8s.io", "images", "import", "--digests", "--snapshotter=overlayfs", "-")
+	// runImport streams the saved archive into the node's containerd and
+	// returns an error describing which side failed.
+	runImport := func(saveArgs []string) error {
+		importCmd := exec.Command("docker", "exec", "--privileged", "-i", node,
+			"ctr", "--namespace=k8s.io", "images", "import", "--snapshotter=overlayfs", "-")
+		importErrBuf := &bytes.Buffer{}
+		importCmd.Stderr = importErrBuf
 
-	pipeReader, pipeWriter := io.Pipe()
-	var saveErrBuf, importErrBuf bytes.Buffer
-	saveCmd.Stdout = pipeWriter
-	saveCmd.Stderr = &saveErrBuf
-	importCmd.Stdin = pipeReader
-	importCmd.Stderr = &importErrBuf
+		saveCmd := exec.Command("docker", saveArgs...)
+		saveErrBuf := &bytes.Buffer{}
+		saveCmd.Stderr = saveErrBuf
 
-	var importErr error
-	importDone := make(chan struct{})
-	go func() {
-		defer close(importDone)
-		importErr = importCmd.Run()
-	}()
+		pipeReader, pipeWriter := io.Pipe()
+		saveCmd.Stdout = pipeWriter
+		importCmd.Stdin = pipeReader
 
-	saveErr := saveCmd.Run()
-	_ = pipeWriter.Close()
-	<-importDone
-	_ = pipeReader.Close()
+		var importErr error
+		importDone := make(chan struct{})
+		go func() {
+			defer close(importDone)
+			importErr = importCmd.Run()
+		}()
 
-	if saveErr != nil {
-		return fmt.Errorf("%q failed with error %q: %w", strings.Join(saveCmd.Args, " "), strings.TrimSpace(saveErrBuf.String()), saveErr)
+		saveErr := saveCmd.Run()
+		_ = pipeWriter.Close()
+		<-importDone
+		_ = pipeReader.Close()
+
+		if saveErr != nil {
+			return fmt.Errorf("%q failed with error %q: %w", strings.Join(saveArgs, " "), strings.TrimSpace(saveErrBuf.String()), saveErr)
+		}
+		if importErr != nil {
+			return fmt.Errorf("%q failed with error %q: %w", strings.Join(importCmd.Args, " "), strings.TrimSpace(importErrBuf.String()), importErr)
+		}
+		return nil
 	}
-	if importErr != nil {
-		return fmt.Errorf("%q failed with error %q: %w", strings.Join(importCmd.Args, " "), strings.TrimSpace(importErrBuf.String()), importErr)
+
+	// Flatten the archive to a single platform so containerd 1.x nodes can
+	// import it. Fall back to a full save on docker versions without
+	// "save --platform" (< 27.5).
+	err := runImport([]string{"save", "--platform", LocalDockerPlatform(), name})
+	if err != nil && strings.Contains(err.Error(), "unknown flag") {
+		err = runImport([]string{"save", name})
 	}
-	return nil
+	return err
 }
 
 // GetNonEmptyLines converts given command output string into individual objects
