@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -504,4 +505,47 @@ func intToStr(n int) string {
 		digits[i], digits[j] = digits[j], digits[i]
 	}
 	return string(digits)
+}
+
+func TestInMemoryStore_RemoveThenReinsertPreservesFIFO(t *testing.T) {
+	for _, withMinTTL := range []bool{false, true} {
+		t.Run(fmt.Sprintf("withMinTTL=%t", withMinTTL), func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			pool := "reinsert-pool"
+			mustPutIdle(t, store, pool, "sb-1")
+			mustPutIdle(t, store, pool, "sb-2")
+			for i := 0; i < 2; i++ {
+				if err := store.RemoveIdle(ctx, pool, "sb-1"); err != nil {
+					t.Fatal(err)
+				}
+				mustPutIdle(t, store, pool, "sb-1")
+			}
+			entries, err := store.SnapshotIdleEntries(ctx, pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 2 || entries[0].SandboxID != "sb-2" || entries[1].SandboxID != "sb-1" {
+				t.Errorf("snapshot must contain each live ID once in insertion order, got %+v", entries)
+			}
+			for _, want := range []string{"sb-2", "sb-1", ""} {
+				var got string
+				if withMinTTL {
+					result, err := store.TryTakeIdleWithMinTTL(ctx, pool, time.Millisecond)
+					if err != nil {
+						t.Fatal(err)
+					}
+					got = result.SandboxID
+				} else {
+					got, err = store.TryTakeIdle(ctx, pool)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if got != want {
+					t.Errorf("take idle = %q, want %q", got, want)
+				}
+			}
+		})
+	}
 }
