@@ -15,18 +15,22 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 	"github.com/stretchr/testify/require"
@@ -129,25 +133,59 @@ func TestVaultWriterRestartAndMissingFile(t *testing.T) {
 	require.Equal(t, 503, doActionsV2Relay(t, restarted, "GET", vaultStatePrefix+"a", owner, "").Code)
 }
 func TestVaultWriterPartialInitializationAndMutationFailure(t *testing.T) {
-	for _, state := range []policy.FileMutationState{policy.FileUnchanged, policy.FileUnknown} {
-		t.Run(string(rune('a'+int(state))), func(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		vaultState, rollbackState policy.FileMutationState
+		hadEntry                  bool
+	}{
+		{"rollback-restores-entry", policy.FileUnchanged, policy.FileCommitted, true},
+		{"rollback-restores-absence", policy.FileUnchanged, policy.FileCommitted, false},
+		{"rollback-unchanged", policy.FileUnchanged, policy.FileUnchanged, true},
+		{"rollback-uncertain", policy.FileUnchanged, policy.FileUnknown, true},
+		{"vault-uncertain-no-rollback", policy.FileUnknown, policy.FileCommitted, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			srv, owner := writerTestServer(t)
+			subj := subject.FromSandboxUID("a")
+			if !tc.hadEntry {
+				delete(srv.vaults, subj)
+			}
+			beforeEntry := srv.vaults[subj]
+			beforeOwner, err := os.ReadFile(filepath.Join(srv.policyFiles.dir, "a.json.owner"))
+			require.NoError(t, err)
+			ownerFile := newFakeVaultFile("owner")
+			ownerFile.exists, ownerFile.data = true, beforeOwner
+			srv.policyFiles.newFile = func(string) (vaultFileStore, error) { return ownerFile, nil }
 			f := newFakeVaultFile("vault")
-			f.saveErr = errors.New("injected")
-			f.saveState = state
-			srv.vaultFiles.files[subject.FromSandboxUID("a")] = f
+			f.saveErr, f.saveState = errors.New("injected Vault failure"), tc.vaultState
+			f.onSave = func() {
+				if tc.rollbackState != policy.FileCommitted {
+					ownerFile.saveErr, ownerFile.saveState = errors.New("injected rollback failure"), tc.rollbackState
+				}
+			}
+			srv.vaultFiles.files[subj] = f
 			require.Equal(t, 503, writerInit(t, srv, owner, true))
-			f.saveErr = nil
-			f.saveState = policy.FileCommitted
-			// The owner contract exists, but no committed initial file: never fresh.
-			if state == policy.FileUnchanged {
+			if tc.vaultState == policy.FileUnknown {
+				require.Equal(t, 1, ownerFile.saveCalls, "uncertain publication must not roll back authority")
+			} else {
+				require.Equal(t, 2, ownerFile.saveCalls)
+			}
+			require.Equal(t, tc.vaultState == policy.FileUnknown || tc.rollbackState == policy.FileUnknown, srv.vaultRecoveryActive())
+			if tc.vaultState == policy.FileUnchanged && tc.rollbackState == policy.FileCommitted {
+				require.Equal(t, beforeOwner, ownerFile.data)
+				entry, exists := srv.vaults[subj]
+				require.Equal(t, tc.hadEntry, exists)
+				require.Same(t, beforeEntry.store, entry.store)
+				f.saveErr, f.saveState, f.onSave = nil, policy.FileCommitted, nil
+				require.Equal(t, 200, writerInit(t, srv, owner, true))
+			} else if tc.rollbackState == policy.FileUnchanged {
+				require.Contains(t, srv.vaults[subj].degraded, "rollback not published")
 				require.Equal(t, 409, writerInit(t, srv, owner, true))
 				require.Equal(t, 503, writerInit(t, srv, owner, false))
-			} else {
-				require.True(t, srv.vaultRecoveryActive())
 			}
 		})
 	}
+
 	srv, owner := writerTestServer(t)
 	f := newFakeVaultFile("vault")
 	srv.vaultFiles.files[subject.FromSandboxUID("a")] = f
@@ -309,4 +347,105 @@ func TestVaultWriterInitializationPinsHandlerIncarnation(t *testing.T) {
 	require.Nil(t, record.VaultContract)
 	require.Equal(t, 200, writerInit(t, srv, owner, true))
 	require.Equal(t, srv.instanceID, writerState(t, srv, owner).HandlerInstanceID)
+}
+
+func TestVaultWriterExchangeResolverMatchesSubject(t *testing.T) {
+	for _, timeout := range []string{"", "5", "invalid"} {
+		t.Run("timeout="+timeout, func(t *testing.T) {
+			t.Setenv(constants.EnvCredentialResolverTimeout, timeout)
+			srv, owner := writerTestServer(t)
+			require.Equal(t, 200, writerInit(t, srv, owner, true))
+			body := strings.ReplaceAll(exchangeVaultJSON(), "api.internal.example.com", "api.example.com")
+			var create credentialvault.CreateRequest
+			require.NoError(t, json.Unmarshal([]byte(body), &create))
+			legacy := credentialvault.NewSubjectStore()
+			_, legacyErr := legacy.Create(create, srv.vaultValidationPolicy(subject.FromSandboxUID("a")))
+			status := writerMutation(t, srv, owner, "POST", writerState(t, srv, owner), body)
+			if timeout == "invalid" {
+				require.Error(t, legacyErr)
+				require.Equal(t, 400, status)
+				return
+			}
+			require.NoError(t, legacyErr)
+			require.Equal(t, 201, status)
+			require.Equal(t, 200, writerInit(t, srv, owner, false))
+			require.NotNil(t, writerState(t, srv, owner).Vault)
+			// Reload must enforce the same gate as admission, including on a
+			// file previously admitted under a valid configuration.
+			t.Setenv(constants.EnvCredentialResolverTimeout, "invalid")
+			require.Equal(t, 503, writerInit(t, srv, owner, false))
+			require.Error(t, credentialvault.NewSubjectStore().Reload(1, create, srv.vaultValidationPolicy(subject.FromSandboxUID("a"))))
+		})
+	}
+}
+
+type writerBlockedResponse struct {
+	*httptest.ResponseRecorder
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (w *writerBlockedResponse) WriteHeader(status int) {
+	w.once.Do(func() { close(w.entered); <-w.release })
+	w.ResponseRecorder.WriteHeader(status)
+}
+func (w *writerBlockedResponse) Write(body []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	return w.ResponseRecorder.Write(body)
+}
+func TestVaultWriterBlockedResponseReleasesGlobalLocks(t *testing.T) {
+	for _, operation := range []string{"fresh", "verify", "fresh-conflict", "state", "mutation", "state-precondition"} {
+		t.Run(operation, func(t *testing.T) {
+			srv, owner := writerTestServer(t)
+			other := actionsV2Owner("b", "runtime-b", "attachment-b", 1)
+			require.Equal(t, 200, doActionsV2(t, srv, actionsV2Body(t, actionhandler.OperationSetBinding, other, vaultAllowPolicy())).Code)
+			require.Equal(t, 200, doActionsV2(t, srv, actionsV2Body(t, actionhandler.OperationLifecycleHook, other, nil)).Code)
+			require.Equal(t, 200, writerInit(t, srv, other, true))
+			method, path, body := "POST", vaultInitializationPrefix+"a", ""
+			if operation != "fresh" {
+				require.Equal(t, 200, writerInit(t, srv, owner, true))
+			}
+			if strings.HasPrefix(operation, "state") || operation == "mutation" {
+				method, path = "GET", vaultStatePrefix+"a"
+				if operation != "state" {
+					token := writerState(t, srv, owner).Token
+					if operation == "state-precondition" {
+						token.Sequence++
+					}
+					data, err := json.Marshal(map[string]any{"expectedState": token, "vault": json.RawMessage(vaultCredential())})
+					require.NoError(t, err)
+					method, body = "POST", string(data)
+				}
+			} else {
+				data, err := json.Marshal(map[string]any{"contract": strictVaultContract{vaultWriterVersion, "init-a", "lineage-a"}, "mode": "legacy", "fresh": operation != "verify", "handlerInstanceId": srv.instanceID})
+				require.NoError(t, err)
+				body = string(data)
+			}
+			req := httptest.NewRequest(method, path, strings.NewReader(body))
+			encoded, err := json.Marshal(owner)
+			require.NoError(t, err)
+			req.Header.Set(constants.EgressActionsOwnerHeader, base64.RawURLEncoding.EncodeToString(encoded))
+			req.Header.Set(constants.EgressActionsSandboxUIDHeader, owner.SandboxUID)
+			w := &writerBlockedResponse{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
+			done := make(chan struct{})
+			go func() { defer close(done); srv.Handler().ServeHTTP(w, req) }()
+			defer func() { close(w.release); <-done }()
+			select {
+			case <-w.entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("response did not reach writer")
+			}
+			probe := make(chan [2]int, 1)
+			go func() {
+				state := doActionsV2Relay(t, srv, "GET", vaultStatePrefix+"b", other, "").Code
+				probe <- [2]int{state, writerInit(t, srv, other, false)}
+			}()
+			select {
+			case codes := <-probe:
+				require.Equal(t, [2]int{200, 200}, codes)
+			case <-time.After(2 * time.Second):
+				t.Fatal("blocked response held a global lock")
+			}
+		})
+	}
 }

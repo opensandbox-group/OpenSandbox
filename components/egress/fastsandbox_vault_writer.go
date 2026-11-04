@@ -113,7 +113,7 @@ func (s *fastSandboxPolicyServer) readWriterOwner(w http.ResponseWriter, r *http
 		if found && current.Matches(owner) && exists && entry.fence == expected && s.fenceMatchesLocked(subj, expected) && entry.v2Verified {
 			entry.v2Verified = false
 			entry.vaultStateUnknown = true
-			entry.store = credentialvault.NewStore(nil, func() bool { return true })
+			entry.store = credentialvault.NewSubjectStore()
 			s.vaults[subj] = entry
 		}
 		s.mu.Unlock()
@@ -130,7 +130,8 @@ func (s *fastSandboxPolicyServer) readWriterOwner(w http.ResponseWriter, r *http
 
 // Only the trusted manager may call this endpoint. Fresh is a transient CAS
 // grant from the paired control plane, not a persisted replay permission.
-// A pre-existing contract always refuses fresh, including after partial init.
+// A pre-existing contract always refuses fresh, including after a crash between
+// the owner and Vault writes. Only a confirmed in-request rollback permits retry.
 func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", 405)
@@ -163,100 +164,111 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 	if record == nil {
 		return
 	}
-	s.policyCommitMu.Lock()
-	defer s.policyCommitMu.Unlock()
-	pol := s.vaultValidationPolicy(subj)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.vaultRecoveryActive() || s.vaultFiles == nil || s.subjectRebindingLocked(subj) || s.vaultSealedLocked(subj) {
-		http.Error(w, "Vault initialization unavailable", 503)
-		return
-	}
-	// Registry's published mirror is checked without adopting a new owner.
-	expected := subject.Fencing{RuntimeInstanceID: record.Owner.RuntimeInstanceID, AttachmentID: record.Owner.AttachmentID}
-	if !s.fenceMatchesLocked(subj, expected) {
-		http.Error(w, "owner not registered", 412)
-		return
-	}
-	if req.Fresh {
-		if record.VaultContract != nil {
-			http.Error(w, "initialization grant already consumed; verify instead", 409)
-			return
-		}
-		fs, openErr := s.vaultFiles.storeFor(subj)
-		if openErr != nil {
-			http.Error(w, "Vault persistence unavailable", 503)
-			return
-		}
-		snap, snapErr := fs.Snapshot()
-		if snapErr != nil || snap.Exists() {
-			http.Error(w, "fresh requires a confirmed empty source", 409)
-			return
-		}
-		if entry, ok := s.vaults[subj]; ok {
-			_, fullErr := entry.store.Full()
-			if !errors.Is(fullErr, credentialvault.ErrNotFound) || entry.vaultStateUnknown || entry.vaultStateProtected {
-				http.Error(w, "fresh cannot replace existing state", 409)
-				return
-			}
-		}
-		// Persist identity before publishing empty. Any gap remains unavailable.
-		record.VaultContract = &req.Contract
-		data, marshalErr := json.Marshal(record)
-		if marshalErr != nil {
-			http.Error(w, "invalid owner record", 500)
-			return
-		}
-		// ownerFile takes s.mu; release only while the exclusive owner stripe and
-		// policy commit gate prevent competing management operations.
-		s.mu.Unlock()
-		ownerFile, ownerErr := s.ownerFile(subj)
+	respond := func() func() {
+		s.policyCommitMu.Lock()
+		defer s.policyCommitMu.Unlock()
+		pol := s.vaultValidationPolicy(subj)
 		s.mu.Lock()
-		if ownerErr != nil {
-			http.Error(w, "owner persistence unavailable", 503)
-			return
+		defer s.mu.Unlock()
+		if s.vaultRecoveryActive() || s.vaultFiles == nil || s.subjectRebindingLocked(subj) || s.vaultSealedLocked(subj) {
+			return func() { http.Error(w, "Vault initialization unavailable", 503) }
 		}
-		state, saveErr := ownerFile.SaveRaw(data)
-		if saveErr != nil || state != policy.FileCommitted {
-			if state != policy.FileUnchanged {
-				s.requireVaultRecoveryLocked("initialization owner persistence uncertain")
+		// Registry's published mirror is checked without adopting a new owner.
+		expected := subject.Fencing{RuntimeInstanceID: record.Owner.RuntimeInstanceID, AttachmentID: record.Owner.AttachmentID}
+		if !s.fenceMatchesLocked(subj, expected) {
+			return func() { http.Error(w, "owner not registered", 412) }
+		}
+		if req.Fresh {
+			if record.VaultContract != nil {
+				return func() { http.Error(w, "initialization grant already consumed; verify instead", 409) }
 			}
-			http.Error(w, "initialization owner persistence not confirmed", 503)
-			return
-		}
-		s.vaults[subj] = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
-		payload, encodeErr := credentialvault.EncodeVaultFileV2(credentialvault.VaultFile{Incarnation: expected.RuntimeInstanceID, AttachmentID: expected.AttachmentID, State: credentialvault.FileStateEmpty, StateLineage: req.Contract.Lineage, StateRevision: 1, InitializationID: req.Contract.InitializationID}, credentialvault.VaultFileBody{})
-		if encodeErr != nil {
-			http.Error(w, "invalid initial state", 500)
-			return
-		}
-		state, saveErr = fs.SaveRaw(payload)
-		if saveErr != nil || state != policy.FileCommitted {
-			if state != policy.FileUnchanged {
-				s.requireVaultRecoveryLocked("initial Vault persistence uncertain")
+			fs, openErr := s.vaultFiles.storeFor(subj)
+			if openErr != nil {
+				return func() { http.Error(w, "Vault persistence unavailable", 503) }
 			}
-			http.Error(w, "initial Vault persistence not confirmed; verify required", 503)
-			return
+			snap, snapErr := fs.Snapshot()
+			if snapErr != nil || snap.Exists() {
+				return func() { http.Error(w, "fresh requires a confirmed empty source", 409) }
+			}
+			if entry, ok := s.vaults[subj]; ok {
+				_, fullErr := entry.store.Full()
+				if !errors.Is(fullErr, credentialvault.ErrNotFound) || entry.vaultStateUnknown || entry.vaultStateProtected {
+					return func() { http.Error(w, "fresh cannot replace existing state", 409) }
+				}
+			}
+			// Capture the pre-contract image; disk absence alone cannot prove that
+			// initialization never published credentials after a process crash.
+			beforeOwner, marshalErr := json.Marshal(record)
+			if marshalErr != nil {
+				return func() { http.Error(w, "invalid owner record", 500) }
+			}
+			beforeEntry, hadEntry := s.vaults[subj]
+			// Persist identity before publishing empty. Any gap remains unavailable.
+			record.VaultContract = &req.Contract
+			data, marshalErr := json.Marshal(record)
+			if marshalErr != nil {
+				return func() { http.Error(w, "invalid owner record", 500) }
+			}
+			// ownerFile takes s.mu; release only while the exclusive owner stripe and
+			// policy commit gate prevent competing management operations.
+			s.mu.Unlock()
+			ownerFile, ownerErr := s.ownerFile(subj)
+			s.mu.Lock()
+			if ownerErr != nil {
+				return func() { http.Error(w, "owner persistence unavailable", 503) }
+			}
+			state, saveErr := ownerFile.SaveRaw(data)
+			if saveErr != nil || state != policy.FileCommitted {
+				if state != policy.FileUnchanged {
+					s.requireVaultRecoveryLocked("initialization owner persistence uncertain")
+				}
+				return func() { http.Error(w, "initialization owner persistence not confirmed", 503) }
+			}
+			s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
+			payload, encodeErr := credentialvault.EncodeVaultFileV2(credentialvault.VaultFile{Incarnation: expected.RuntimeInstanceID, AttachmentID: expected.AttachmentID, State: credentialvault.FileStateEmpty, StateLineage: req.Contract.Lineage, StateRevision: 1, InitializationID: req.Contract.InitializationID}, credentialvault.VaultFileBody{})
+			if encodeErr != nil {
+				return func() { http.Error(w, "invalid initial state", 500) }
+			}
+			state, saveErr = fs.SaveRaw(payload)
+			if saveErr != nil || state != policy.FileCommitted {
+				if state == policy.FileUnchanged {
+					rollbackState, rollbackErr := ownerFile.SaveRaw(beforeOwner)
+					switch {
+					case rollbackErr == nil && rollbackState == policy.FileCommitted:
+						if hadEntry {
+							s.vaults[subj] = beforeEntry
+						} else {
+							delete(s.vaults, subj)
+						}
+					case rollbackState == policy.FileUnchanged:
+						s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true, degraded: "initialization owner rollback not published; teardown required"}
+					default:
+						s.requireVaultRecoveryLocked("initialization owner rollback uncertain")
+					}
+				} else {
+					s.requireVaultRecoveryLocked("initial Vault persistence uncertain")
+				}
+				return func() { http.Error(w, "initial Vault persistence not confirmed", 503) }
+			}
+		} else if record.VaultContract == nil || *record.VaultContract != req.Contract {
+			return func() { http.Error(w, "initialization contract mismatch", 412) }
 		}
-	} else if record.VaultContract == nil || *record.VaultContract != req.Contract {
-		http.Error(w, "initialization contract mismatch", 412)
-		return
-	}
-	s.vaults[subj] = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
-	vf, body, err := s.writerFile(subj, record)
-	if err != nil {
-		http.Error(w, "Vault verification requires recovery", 503)
-		return
-	}
-	store := credentialvault.NewStore(nil, func() bool { return true })
-	if vf.State == credentialvault.FileStateActive {
-		if err := store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
-			http.Error(w, "Vault verification rejected", 503)
-			return
+		s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
+		vf, body, err := s.writerFile(subj, record)
+		if err != nil {
+			return func() { http.Error(w, "Vault verification requires recovery", 503) }
 		}
-	}
-	s.vaults[subj] = vaultEntry{store: store, fence: expected, fileMeta: metadataForWriter(vf), vaultStateProtected: true, v2Verified: true}
-	writeJSON(w, 200, s.writerReply(record, vf, nil))
+		store := credentialvault.NewSubjectStore()
+		if vf.State == credentialvault.FileStateActive {
+			if err := store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
+				return func() { http.Error(w, "Vault verification rejected", 503) }
+			}
+		}
+		s.vaults[subj] = vaultEntry{store: store, fence: expected, fileMeta: metadataForWriter(vf), vaultStateProtected: true, v2Verified: true}
+		reply := s.writerReply(record, vf, nil)
+		return func() { writeJSON(w, 200, reply) }
+	}()
+	respond()
 }
 
 func metadataForWriter(v credentialvault.VaultFile) vaultFileMetadata {
@@ -301,100 +313,105 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 		http.Error(w, "Vault writer not selected", 404)
 		return
 	}
-	s.policyCommitMu.Lock()
-	defer s.policyCommitMu.Unlock()
-	pol := s.vaultValidationPolicy(subj)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.vaults[subj]
-	if !ok || !entry.v2Verified || entry.vaultStateUnknown || entry.sealed || s.vaultRecoveryActive() || s.subjectRebindingLocked(subj) {
-		http.Error(w, "Vault verification required", 503)
-		return
-	}
-	vf, _, err := s.writerFile(subj, record)
-	if err != nil || metadataForWriter(vf) != entry.fileMeta {
-		entry.v2Verified = false
-		entry.vaultStateUnknown = true
-		entry.store = credentialvault.NewStore(nil, func() bool { return true })
-		s.vaults[subj] = entry
-		http.Error(w, "Vault persistent state requires recovery", 503)
-		return
-	}
-	if r.Method == http.MethodGet {
-		var full *credentialvault.FullRevision
-		if vf.State == credentialvault.FileStateActive {
-			v, err := entry.store.Full()
-			if err != nil {
-				writeVaultRelayError(w, err)
-				return
-			}
-			full = &v
+	respond := func() func() {
+		s.policyCommitMu.Lock()
+		defer s.policyCommitMu.Unlock()
+		pol := s.vaultValidationPolicy(subj)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		entry, ok := s.vaults[subj]
+		if !ok || !entry.v2Verified || entry.vaultStateUnknown || entry.sealed || s.vaultRecoveryActive() || s.subjectRebindingLocked(subj) {
+			return func() { http.Error(w, "Vault verification required", 503) }
 		}
-		writeJSON(w, 200, s.writerReply(record, vf, full))
-		return
-	}
-	if req.ExpectedState != (vaultStateToken{vf.StateLineage, vf.StateRevision}) {
-		http.Error(w, "private state precondition mismatch", 412)
-		return
-	}
-	if vf.StateRevision == math.MaxUint64 || r.Method == http.MethodPut && vf.Revision == math.MaxInt64 {
-		http.Error(w, "Vault sequence exhausted", 409)
-		return
-	}
-	var candidate *credentialvault.MutationCandidate
-	switch r.Method {
-	case http.MethodPost:
-		candidate, err = entry.store.PrepareCreate(req.Vault.CreateRequest, pol)
-	case http.MethodPut:
-		candidate, err = entry.store.PrepareReplace(req.Vault, pol)
-	case http.MethodDelete:
-		candidate, err = entry.store.PrepareDelete()
-	}
-	if err != nil {
-		writeVaultRelayError(w, err)
-		return
-	}
-	defer candidate.Discard()
-	if candidate.Exists() {
-		if _, err = candidate.ActiveSnapshot(r.Context()); err != nil {
-			http.Error(w, "candidate cannot be rendered", 400)
-			return
-		}
-	}
-	vf.StateRevision++
-	vf.State = credentialvault.FileStateDeleted
-	vf.Revision = 0
-	body := credentialvault.VaultFileBody{}
-	if candidate.Exists() {
-		full, err := candidate.Full()
-		if err != nil {
-			writeVaultRelayError(w, err)
-			return
-		}
-		vf.State = credentialvault.FileStateActive
-		vf.Revision = full.Revision
-		body = credentialvault.VaultFileBody{Credentials: full.Credentials, Bindings: full.Bindings}
-	}
-	payload, err := credentialvault.EncodeVaultFileV2(vf, body)
-	if err != nil {
-		http.Error(w, "invalid Vault state", 500)
-		return
-	}
-	var state credentialvault.State
-	err = s.persistVaultCandidateLocked(subj, func(f vaultFileStore) (policy.FileMutationState, error) { return f.SaveRaw(payload) }, func() error {
-		var commitErr error
-		state, commitErr = entry.store.CommitCandidate(candidate)
-		if commitErr == nil {
-			entry.fileMeta = metadataForWriter(vf)
+		vf, _, err := s.writerFile(subj, record)
+		if err != nil || metadataForWriter(vf) != entry.fileMeta {
+			entry.v2Verified = false
+			entry.vaultStateUnknown = true
+			entry.store = credentialvault.NewSubjectStore()
 			s.vaults[subj] = entry
+			return func() { http.Error(w, "Vault persistent state requires recovery", 503) }
 		}
-		return commitErr
-	})
-	if err != nil {
-		http.Error(w, "Vault persistence not confirmed", 503)
-		return
-	}
-	writeVaultRelayWriteResponse(w, r, state, candidate.Created())
+		if r.Method == http.MethodGet {
+			var full *credentialvault.FullRevision
+			if vf.State == credentialvault.FileStateActive {
+				v, err := entry.store.Full()
+				if err != nil {
+					return vaultWriterErrorResponse(w, err)
+				}
+				full = &v
+			}
+			reply := s.writerReply(record, vf, full)
+			return func() { writeJSON(w, 200, reply) }
+		}
+		if req.ExpectedState != (vaultStateToken{vf.StateLineage, vf.StateRevision}) {
+			return func() { http.Error(w, "private state precondition mismatch", 412) }
+		}
+		if vf.StateRevision == math.MaxUint64 || r.Method == http.MethodPut && vf.Revision == math.MaxInt64 {
+			return func() { http.Error(w, "Vault sequence exhausted", 409) }
+		}
+		var candidate *credentialvault.MutationCandidate
+		switch r.Method {
+		case http.MethodPost:
+			candidate, err = entry.store.PrepareCreate(req.Vault.CreateRequest, pol)
+		case http.MethodPut:
+			candidate, err = entry.store.PrepareReplace(req.Vault, pol)
+		case http.MethodDelete:
+			candidate, err = entry.store.PrepareDelete()
+		}
+		if err != nil {
+			return vaultWriterErrorResponse(w, err)
+		}
+		defer candidate.Discard()
+		if candidate.Exists() {
+			if _, err = candidate.ActiveSnapshot(r.Context()); err != nil {
+				return func() { http.Error(w, "candidate cannot be rendered", 400) }
+			}
+		}
+		vf.StateRevision++
+		vf.State = credentialvault.FileStateDeleted
+		vf.Revision = 0
+		body := credentialvault.VaultFileBody{}
+		if candidate.Exists() {
+			full, err := candidate.Full()
+			if err != nil {
+				return vaultWriterErrorResponse(w, err)
+			}
+			vf.State = credentialvault.FileStateActive
+			vf.Revision = full.Revision
+			body = credentialvault.VaultFileBody{Credentials: full.Credentials, Bindings: full.Bindings}
+		}
+		payload, err := credentialvault.EncodeVaultFileV2(vf, body)
+		if err != nil {
+			return func() { http.Error(w, "invalid Vault state", 500) }
+		}
+		var state credentialvault.State
+		err = s.persistVaultCandidateLocked(subj, func(f vaultFileStore) (policy.FileMutationState, error) { return f.SaveRaw(payload) }, func() error {
+			var commitErr error
+			state, commitErr = entry.store.CommitCandidate(candidate)
+			if commitErr == nil {
+				entry.fileMeta = metadataForWriter(vf)
+				s.vaults[subj] = entry
+			}
+			return commitErr
+		})
+		if err != nil {
+			return func() { http.Error(w, "Vault persistence not confirmed", 503) }
+		}
+		status := http.StatusNoContent
+		if r.Method == http.MethodPost || r.Method == http.MethodPut && candidate.Created() {
+			status = http.StatusCreated
+		} else if r.Method == http.MethodPut {
+			status = http.StatusOK
+		}
+		return func() {
+			if status == http.StatusNoContent {
+				w.WriteHeader(status)
+			} else {
+				writeJSON(w, status, state)
+			}
+		}
+	}()
+	respond()
 }
 
 // Called under the exclusive owner stripe after durable phase=retiring.
@@ -428,4 +445,19 @@ func (s *fastSandboxPolicyServer) retireWriterVault(subj subject.Subject, record
 	}
 	delete(s.vaults, subj)
 	return nil
+}
+
+// Capture only the error text and status while the commit locks are held.
+func vaultWriterErrorResponse(w http.ResponseWriter, err error) func() {
+	status := http.StatusBadRequest
+	switch {
+	case errors.Is(err, credentialvault.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, credentialvault.ErrExists):
+		status = http.StatusConflict
+	case errors.Is(err, credentialvault.ErrRevisionConflict):
+		status = http.StatusPreconditionFailed
+	}
+	message := err.Error()
+	return func() { http.Error(w, message, status) }
 }

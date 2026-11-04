@@ -572,11 +572,20 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 	// Its separate verify operation must re-establish the in-process ACK.
 	if s.actionsAPIVersion == "sandbox.fast.io/actions/v2" {
 		record, err := s.readOwnerRecord(subj)
-		if err != nil || record != nil && record.VaultContract != nil {
+		if err != nil {
+			s.mu.Lock()
+			entry, live := s.vaults[subj]
+			if !live || entry.fence != fence {
+				s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, degraded: "strict owner authority unavailable"}
+			}
+			s.mu.Unlock()
+			return
+		}
+		if record != nil && record.VaultContract != nil {
 			s.mu.Lock()
 			entry, live := s.vaults[subj]
 			if !live || entry.fence != fence || !entry.v2Verified {
-				s.vaults[subj] = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence, vaultStateUnknown: true, vaultStateProtected: true, degraded: "Vault initialization verification required"}
+				s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, vaultStateProtected: true, degraded: "Vault initialization verification required"}
 			}
 			s.mu.Unlock()
 			return

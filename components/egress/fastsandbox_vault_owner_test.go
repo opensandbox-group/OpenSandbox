@@ -205,3 +205,64 @@ func TestVaultWriterRetiringOwnerPreservesPendingDelete(t *testing.T) {
 	require.Equal(t, 412, doActionsV2Relay(t, srv, "GET", vaultStatePrefix+"a", owner, "").Code)
 	require.Equal(t, 304, writerActive(srv, tag).Code)
 }
+
+func TestVaultWriterRehydrateTransientOwnerRead(t *testing.T) {
+	for _, kind := range []string{"legacy-live", "legacy-cold", "writer-live", "writer-cold", "protected-unknown"} {
+		t.Run(kind, func(t *testing.T) {
+			srv, owner := writerTestServer(t)
+			subj := subject.FromSandboxUID("a")
+			if strings.HasPrefix(kind, "writer") || kind == "protected-unknown" {
+				require.Equal(t, 200, writerInit(t, srv, owner, true))
+				require.Equal(t, 201, writerMutation(t, srv, owner, "POST", writerState(t, srv, owner), vaultCredential()))
+			} else {
+				require.Equal(t, 201, doActionsV2Relay(t, srv, "POST", constants.ActionsV2VaultRelayPathPrefix+"a", owner, vaultCredential()).Code)
+			}
+			before := srv.vaults[subj]
+			if strings.HasSuffix(kind, "cold") {
+				delete(srv.vaults, subj)
+			}
+			if kind == "protected-unknown" {
+				before.v2Verified, before.vaultStateUnknown = false, true
+				srv.vaults[subj] = before
+			}
+			factory := srv.policyFiles.newFile
+			srv.policyFiles.newFile = func(string) (vaultFileStore, error) { return nil, errors.New("transient owner read") }
+			pol := srv.vaultValidationPolicy(subj)
+			srv.rehydrateVaultReload(subj, before.fence, pol, false)
+			entry := srv.vaults[subj]
+			if strings.HasSuffix(kind, "cold") {
+				require.True(t, entry.vaultStateUnknown)
+				require.False(t, entry.vaultStateProtected, "unreadable authority does not prove writer selection")
+				require.Equal(t, "strict owner authority unavailable", entry.degraded)
+			} else {
+				require.Equal(t, before.vaultStateProtected, entry.vaultStateProtected)
+				require.Equal(t, before.v2Verified, entry.v2Verified)
+				require.Same(t, before.store, entry.store)
+			}
+			srv.policyFiles.newFile = factory
+			if kind == "legacy-cold" {
+				require.Equal(t, 503, doActionsV2Relay(t, srv, "PUT", constants.ActionsV2VaultRelayPathPrefix+"a", owner, vaultCredential()).Code)
+			} else if kind == "writer-cold" || kind == "protected-unknown" {
+				// A known writer contract rejects the v1 route before live state.
+				require.Equal(t, 428, doActionsV2Relay(t, srv, "PUT", constants.ActionsV2VaultRelayPathPrefix+"a", owner, vaultCredential()).Code)
+				require.Equal(t, 503, doActionsV2Relay(t, srv, "GET", vaultStatePrefix+"a", owner, "").Code)
+			}
+			srv.rehydrateVaultReload(subj, before.fence, pol, false)
+			entry = srv.vaults[subj]
+			if strings.HasPrefix(kind, "legacy") {
+				require.False(t, entry.vaultStateUnknown)
+				require.False(t, entry.vaultStateProtected)
+				require.Empty(t, entry.degraded)
+				_, err := entry.store.Full()
+				require.NoError(t, err)
+				require.Equal(t, 200, doActionsV2Relay(t, srv, "PUT", constants.ActionsV2VaultRelayPathPrefix+"a", owner, vaultCredential()).Code)
+			} else {
+				require.True(t, entry.vaultStateProtected)
+				if kind != "writer-live" {
+					require.True(t, entry.vaultStateUnknown)
+				}
+				require.Equal(t, 200, writerInit(t, srv, owner, false))
+			}
+		})
+	}
+}
