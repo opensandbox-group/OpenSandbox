@@ -51,6 +51,7 @@ DEFAULT_CONFIG_TEMPLATE = """\
 # domain = "localhost:8080"
 # protocol = "http"
 # request_timeout = 30
+# use_server_proxy is deprecated (maintenance mode); prefer the ingress gateway for data-plane traffic.
 # use_server_proxy = false
 
 [output]
@@ -118,7 +119,7 @@ def resolve_config(
     declared type.
 
     Keys returned:
-      - api_key, domain, protocol, request_timeout (int seconds), use_server_proxy (bool)
+      - api_key, domain, protocol, request_timeout (int seconds), use_server_proxy (bool; deprecated)
       - default_image, default_timeout (str like "10m")
     """
     file_cfg = load_config_file(config_path)

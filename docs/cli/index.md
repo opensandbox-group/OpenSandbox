@@ -501,7 +501,6 @@ api_key = "your-api-key"
 domain = "localhost:8080"
 protocol = "http"
 request_timeout = 30
-use_server_proxy = false
 
 [output]
 color = true

@@ -46,6 +46,10 @@ class ConnectionConfig private constructor(
      * Use sandbox server as proxy for process execd requests.
      * Useful when the client SDK cannot access the created sandbox directly.
      */
+    @Deprecated(
+        "The server-proxied data path is in maintenance mode (security and bug fixes only). " +
+            "Route data-plane traffic through the ingress gateway instead.",
+    )
     val useServerProxy: Boolean = false,
     /** TTL for cached endpoint entries. Default: 10 minutes. */
     val endpointCacheTtl: Duration = Duration.ofSeconds(600),
@@ -307,6 +311,10 @@ class ConnectionConfig private constructor(
          * Use sandbox server as proxy for process execd requests.
          * Useful when the client SDK cannot access the created sandbox directly.
          */
+        @Deprecated(
+            "The server-proxied data path is in maintenance mode (security and bug fixes only). " +
+                "Route data-plane traffic through the ingress gateway instead.",
+        )
         fun useServerProxy(useServerProxy: Boolean): Builder {
             this.useServerProxy = useServerProxy
             return this

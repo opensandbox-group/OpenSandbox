@@ -14,6 +14,11 @@
 
 """
 HTTP and WebSocket proxy routes for reaching services inside sandboxes via the lifecycle API.
+
+DEPRECATED — maintenance mode. The server-proxied data path couples data-plane
+traffic to the control-plane server; it receives no new features and is maintained
+for security fixes and bug fixes only. Deploy the ingress gateway and route
+data-plane traffic through it instead.
 """
 
 import asyncio
@@ -105,6 +110,25 @@ WEBSOCKET_HANDSHAKE_HEADERS = {
 }
 
 router = APIRouter(tags=["Sandboxes"])
+
+# RFC 9745 Section 2.1: the Deprecation field is a Structured Field Date
+# (@<unix seconds>) recording when the deprecation took effect. The proxy data
+# path was declared deprecated on 2026-11-02T00:00:00Z.
+DEPRECATION_HEADER_VALUE = "@1793577600"
+
+_deprecation_warned = False
+
+
+def _warn_proxy_deprecated() -> None:
+    """Log the maintenance-mode notice once per process."""
+    global _deprecation_warned
+    if not _deprecation_warned:
+        _deprecation_warned = True
+        logger.warning(
+            "The sandbox server proxy (/sandboxes/{id}/proxy/{port}) is deprecated and in "
+            "maintenance mode: no new features, security and bug fixes only. Route "
+            "data-plane traffic through the ingress gateway instead."
+        )
 
 
 def _build_proxy_target_url(
@@ -388,6 +412,11 @@ async def _proxy_http_request(
     internal: bool = False,
 ) -> StreamingResponse:
     resolve_internal = get_config().proxy.resolve_internal
+    if not internal:
+        # Only the external /proxy/{port} path is deprecated; internal callers
+        # such as network-policy and credential-vault routes are supported
+        # control-plane operations and must not consume the one-time warning.
+        _warn_proxy_deprecated()
     # get_endpoint does blocking Docker/Kubernetes I/O; keep it off the event loop.
     endpoint = await asyncio.to_thread(
         lifecycle.sandbox_service.get_endpoint,
@@ -451,6 +480,10 @@ async def _proxy_http_request(
                 for key, value in resp.headers.raw
                 if key.decode("latin-1").lower() not in response_header_exclusions
             ]
+            if not internal:
+                response_headers.append(
+                    (b"deprecation", DEPRECATION_HEADER_VALUE.encode())
+                )
 
             return _ProxyStreamingResponse(
                 resp,
@@ -610,6 +643,8 @@ async def _proxy_websocket_request(
     if not await _authenticate_websocket_tenant(websocket):
         return
 
+    _warn_proxy_deprecated()
+
     try:
         resolve_internal = get_config().proxy.resolve_internal
         endpoint = await asyncio.to_thread(
@@ -758,6 +793,7 @@ for _method in _PROXY_HTTP_METHODS:
         methods=[_method],
         response_class=StreamingResponse,
         openapi_extra=_PROXY_OPENAPI_EXTRA,
+        deprecated=True,
     )
 
 router.add_api_route(
@@ -774,6 +810,7 @@ for _method in _PROXY_HTTP_METHODS:
         methods=[_method],
         response_class=StreamingResponse,
         openapi_extra=_PROXY_OPENAPI_EXTRA,
+        deprecated=True,
     )
 
 

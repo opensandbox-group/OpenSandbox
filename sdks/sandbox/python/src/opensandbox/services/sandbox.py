@@ -190,7 +190,7 @@ class Sandboxes(Protocol):
         Args:
             sandbox_id: Sandbox ID
             port: Endpoint port number
-            use_server_proxy: Whether to use server proxy for endpoint
+            use_server_proxy: Deprecated: the server proxy data path is in maintenance mode (security and bug fixes only); prefer the ingress gateway.
 
         Returns:
             Target sandbox endpoint
@@ -211,7 +211,7 @@ class Sandboxes(Protocol):
             sandbox_id: Sandbox ID
             port: Endpoint port number
             expires: Unix epoch seconds for the signed route token expiry
-            use_server_proxy: Whether to use server proxy for endpoint
+            use_server_proxy: Deprecated: the server proxy data path is in maintenance mode (security and bug fixes only); prefer the ingress gateway.
 
         Returns:
             Target sandbox endpoint

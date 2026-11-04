@@ -304,7 +304,7 @@ import { AcquirePolicy, SandboxPool } from "@alibaba-group/opensandbox";
 const pool = SandboxPool.create({
   poolName: "demo-pool",
   maxIdle: 2,
-  connectionConfig: { domain: "localhost:8080", useServerProxy: true },
+  connectionConfig: { domain: "localhost:8080" },
   creationSpec: { image: "python:3.12" },
   warmupCreateQps: 10,
   warmupConcurrency: 128,

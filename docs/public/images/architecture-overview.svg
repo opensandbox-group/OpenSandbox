@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1288" viewBox="0 0 1600 1288" role="img" aria-labelledby="title desc">
 <title id="title">OpenSandbox architecture</title>
-<desc id="desc">Applications use SDKs, CLI and MCP tools. Lifecycle requests go to the FastAPI server, backed by Docker or Kubernetes. Kubernetes composes container workload providers with a FastSandbox adapter for the external FastPath microVM platform. Execution traffic uses direct endpoints, the server proxy, or ingress to reach workload ports and execd; execd connects to optional Jupyter kernels. Optional outbound enforcement uses container sidecars or a shared Fastlet profile. Metadata stores snapshot and template records. API contracts are specifications, not deployed services.</desc>
+<desc id="desc">Applications use SDKs, CLI and MCP tools. Lifecycle requests go to the FastAPI server, backed by Docker or Kubernetes. Kubernetes composes container workload providers with a FastSandbox adapter for the external FastPath microVM platform. Execution traffic uses direct endpoints or ingress to reach workload ports and execd; execd connects to optional Jupyter kernels. Optional outbound enforcement uses container sidecars or a shared Fastlet profile. Metadata stores snapshot and template records. API contracts are specifications, not deployed services.</desc>
 <defs>
 <marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
 <marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>

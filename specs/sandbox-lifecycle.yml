@@ -1257,7 +1257,12 @@ paths:
             maximum: 65535
         - name: use_server_proxy
           in: query
-          description: Whether to return a server-proxied URL. Cannot be combined with `expires`.
+          deprecated: true
+          description: |
+            Deprecated: the server-proxied data path is in maintenance mode and only
+            receives security fixes and bug fixes; data-plane traffic should be served by
+            the ingress gateway. When true, returns a server-proxied URL. Cannot be
+            combined with `expires`.
           schema:
             type: boolean
             default: false

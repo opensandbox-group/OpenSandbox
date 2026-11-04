@@ -409,6 +409,10 @@ func (c *LifecycleClient) RenewExpiration(ctx context.Context, id string, expire
 // on the specified port inside the sandbox. Results are cached with LRU+TTL
 // and deduplicated via singleflight. If useServerProxy is non-nil,
 // the server proxy query parameter is included.
+//
+// The useServerProxy option is deprecated: the server-proxied data path is in
+// maintenance mode and only receives security fixes and bug fixes. Route
+// data-plane traffic through the ingress gateway instead.
 func (c *LifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*Endpoint, error) {
 	if c.cache == nil {
 		return c.getEndpointFromServer(ctx, sandboxID, port, useServerProxy)

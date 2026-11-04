@@ -38,6 +38,10 @@ type ConnectionConfig struct {
 
 	// UseServerProxy routes execd/egress requests through the sandbox server
 	// instead of connecting directly to the sandbox endpoint.
+	//
+	// Deprecated: the server-proxied data path is in maintenance mode and only
+	// receives security fixes and bug fixes. Route data-plane traffic through
+	// the ingress gateway instead.
 	UseServerProxy bool
 
 	// RequestTimeout is the timeout for non-streaming HTTP requests.
