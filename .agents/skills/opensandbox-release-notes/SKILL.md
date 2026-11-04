@@ -139,7 +139,7 @@ Fast Sandbox is vendored from `opensandbox-group/fast-sandbox` via a pin file; t
 
 The same rule applies to any other pinned third-party source under `manifests/third-party/`.
 
-**Writing rule for pin bumps:** the note carries the upstream project's real behavior changes, not the pin mechanics. Never write "bump the pinned fast-sandbox source from `<old>` to `<new>`", upstream PR numbers, or CRD-bundle sync/verification details in the note — those are provenance for this step, not user-facing content. Instead, read the real substance (upstream commit bodies are often empty — prefer the docs/diff changes the commits touch, e.g. `git -C .fast-sandbox/src diff <old>..<new> -- docs/`), group them into one bullet per distinct story (problem → behavior change → why it matters), and cite the OpenSandbox pin-bump PR on each bullet as the carrier.
+**Writing rule for pin bumps:** the note carries the upstream project's real behavior changes, not the pin mechanics — never lead a bullet with "pin bump to `<sha>`"; write the fsb feature/behavior as the story and treat the bump as provenance. Never write the pin SHA walk ("bump the pinned fast-sandbox source from `<old>` to `<new>`") or CRD-bundle sync/verification details. Read the real substance (upstream commit bodies are often empty — prefer the docs/diff changes the commits touch, e.g. `git -C .fast-sandbox/src diff <old>..<new> -- docs/`), group it into one bullet per distinct story (problem → behavior change → why it matters), and on each bullet cite the OpenSandbox pin-bump PR as carrier **plus a link to the corresponding upstream PR**, e.g. `([#2546](…/OpenSandbox/pull/2546) [fast-sandbox#158](https://github.com/opensandbox-group/fast-sandbox/pull/158))`. Map stories to upstream PRs via the merge commits (`git -C .fast-sandbox/src log --merges --oneline <old>..<new>`) and attribute each commit to the **earliest** upstream merge that contains it — stacked PRs contain each other's commits, so ancestry alone over-attributes (`git merge-base --is-ancestor <commit> <merge_sha>` per candidate). Pull OpenSandbox-side fsb PRs (template/init wiring, integration env, e2e defaults) into this section too — the section is "everything fsb", not only the pin deltas.
 
 ### Step 5: Draft the note
 
@@ -170,6 +170,8 @@ Deduplicate authors across the NEW PRs only (not the SHIPPED ones in the same fi
 ```bash
 jq -r --argjson keep "[$NUMS]" '[.[] | select(.number as $n | $keep | index($n)) | .author.login] | unique | .[]' /tmp/prs-<version>.json
 ```
+
+Also include the authors of every upstream PR linked in the note (e.g. fast-sandbox pin-bump carriers: `gh pr view <N> --repo opensandbox-group/fast-sandbox --json author`), deduplicated into the same list; these upstream authors usually also appear as OpenSandbox contributors, so additions are rare — add only the genuinely new logins.
 
 Write one bullet per contributor as a GitHub mention, matching the format of previous releases:
 
