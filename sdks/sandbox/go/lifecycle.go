@@ -420,11 +420,12 @@ func (c *LifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, por
 		useServerProxy: useServerProxy != nil && *useServerProxy,
 	}
 
-	// The shared fetch uses a background context so one caller's deadline
-	// doesn't cancel the request for all waiters. Each caller's ctx is
-	// respected via DoChan select in GetOrFetch.
-	return c.cache.GetOrFetch(ctx, key, func() (*Endpoint, error) {
-		return c.getEndpointFromServer(context.Background(), sandboxID, port, useServerProxy)
+	// The shared fetch uses the cache's flight context rather than ctx so one
+	// caller's deadline doesn't cancel the request for all waiters. It is
+	// cancelled once every waiter has left. Each caller's ctx is respected via
+	// DoChan select in GetOrFetch.
+	return c.cache.GetOrFetch(ctx, key, func(fetchCtx context.Context) (*Endpoint, error) {
+		return c.getEndpointFromServer(fetchCtx, sandboxID, port, useServerProxy)
 	})
 }
 

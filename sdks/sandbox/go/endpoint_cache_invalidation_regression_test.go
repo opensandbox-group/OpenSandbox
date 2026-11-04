@@ -31,7 +31,7 @@ func blockEndpointFetch(t *testing.T, c *EndpointCache, key endpointCacheKey, en
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, err := c.GetOrFetch(context.Background(), key, func() (*Endpoint, error) {
+		_, err := c.GetOrFetch(context.Background(), key, func(context.Context) (*Endpoint, error) {
 			close(started)
 			<-release
 			return &Endpoint{Endpoint: endpoint}, nil
@@ -62,7 +62,7 @@ func TestEndpointCache_InvalidateDoesNotRepopulateFromInflightFetch(t *testing.T
 		t.Fatalf("invalidated fetch repopulated cache with %q", ep.Endpoint)
 	}
 	calls := 0
-	ep, err := c.GetOrFetch(context.Background(), key, func() (*Endpoint, error) {
+	ep, err := c.GetOrFetch(context.Background(), key, func(context.Context) (*Endpoint, error) {
 		calls++
 		return &Endpoint{Endpoint: "new"}, nil
 	})
@@ -82,7 +82,7 @@ func TestEndpointCache_InvalidateSeparatesNewCallersFromInflightFetch(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	calls := 0
-	ep, err := c.GetOrFetch(ctx, key, func() (*Endpoint, error) {
+	ep, err := c.GetOrFetch(ctx, key, func(context.Context) (*Endpoint, error) {
 		calls++
 		return &Endpoint{Endpoint: "new"}, nil
 	})
@@ -106,11 +106,11 @@ func TestEndpointCache_InvalidatePreservesOtherSandboxEntriesAndInflightFetches(
 	release := blockEndpointFetch(t, c, inflightKey, "other-fetched")
 
 	c.mu.Lock()
-	otherFetch := c.inflight[inflightKey]
+	otherFetch := c.flights[inflightKey]
 	c.mu.Unlock()
 	c.Invalidate("sb-1")
 	c.mu.Lock()
-	preserved := c.inflight[inflightKey] == otherFetch && otherFetch != nil
+	preserved := c.flights[inflightKey] == otherFetch && otherFetch != nil
 	c.mu.Unlock()
 	if !preserved {
 		t.Fatal("invalidation removed another sandbox's inflight generation")
@@ -132,7 +132,7 @@ func TestEndpointCache_CompletedFetchDoesNotRetainInflightGeneration(t *testing.
 		t.Run(fmt.Sprintf("error=%v", fail), func(t *testing.T) {
 			c := NewEndpointCache(10, time.Minute)
 			key := endpointCacheKey{sandboxID: "sb-1", port: 8080}
-			_, err := c.GetOrFetch(context.Background(), key, func() (*Endpoint, error) {
+			_, err := c.GetOrFetch(context.Background(), key, func(context.Context) (*Endpoint, error) {
 				if fail {
 					return nil, fmt.Errorf("fetch failed")
 				}
@@ -142,7 +142,7 @@ func TestEndpointCache_CompletedFetchDoesNotRetainInflightGeneration(t *testing.
 				t.Fatalf("unexpected fetch error: %v", err)
 			}
 			c.mu.Lock()
-			retained := len(c.inflight)
+			retained := len(c.flights)
 			c.mu.Unlock()
 			if retained != 0 {
 				t.Fatalf("completed fetch retained %d inflight generations", retained)
