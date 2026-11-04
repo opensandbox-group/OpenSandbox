@@ -179,6 +179,17 @@ pub enum Error {
     /// The execd endpoint is unknown for this sandbox.
     #[error("execd endpoint is not resolved for sandbox `{0}`")]
     ExecdUnavailable(String),
+    /// The transport gave up waiting for the server to answer.
+    ///
+    /// Streamed responses have no total timeout, so only their handshake can
+    /// fail this way.
+    #[error("{operation} timed out after {timeout:?}")]
+    Timeout {
+        /// Request that timed out, for example `POST /command`.
+        operation: String,
+        /// How long the SDK waited.
+        timeout: Duration,
+    },
     /// A streamed response was malformed.
     #[error("stream error: {0}")]
     Stream(String),

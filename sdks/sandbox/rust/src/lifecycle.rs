@@ -22,7 +22,7 @@ use reqwest::header::HeaderMap;
 use reqwest::Method;
 use url::form_urlencoded;
 
-use crate::config::{ConnectionConfig, API_KEY_HEADER, SANDBOX_ORIGIN_HEADER};
+use crate::config::{ConnectionConfig, SANDBOX_ORIGIN_HEADER};
 use crate::endpoint_cache::EndpointCache;
 use crate::error::Result;
 use crate::models::{
@@ -52,8 +52,14 @@ impl ListSandboxesQuery {
             serializer.append_pair("state", state_name(state));
         }
         if let Some(metadata) = &self.metadata {
-            if let Ok(json) = serde_json::to_string(metadata) {
-                serializer.append_pair("metadata", &json);
+            // The lifecycle API expects an inner URL-encoded query string, not
+            // JSON: the server parses this parameter with strict `parse_qsl`.
+            if !metadata.is_empty() {
+                let mut inner = form_urlencoded::Serializer::new(String::new());
+                for (key, value) in metadata {
+                    inner.append_pair(key, value);
+                }
+                serializer.append_pair("metadata", &inner.finish());
             }
         }
         if let Some(page) = self.page {
@@ -125,7 +131,7 @@ impl LifecycleClient {
     /// Builds a client for the configured control plane.
     pub fn new(config: &ConnectionConfig) -> Result<Self> {
         let base = config.lifecycle_url();
-        let http = Http::from_config(config, &base, API_KEY_HEADER)?;
+        let http = Http::from_config(config, &base, config.auth_header())?;
         Ok(Self {
             http,
             cache: cache_from(config),

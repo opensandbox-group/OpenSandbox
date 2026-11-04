@@ -16,11 +16,13 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use common::{MockServer, Reply};
 use opensandbox::{
-    ConnectionConfig, CreateOptions, HostMount, LifecycleClient, NetworkPolicy, RetryConfig, Volume,
+    ConnectionConfig, CreateOptions, HostMount, LifecycleClient, ListSandboxesQuery, NetworkPolicy,
+    RetryConfig, SandboxState, Volume,
 };
 
 fn config(server: &MockServer) -> ConnectionConfig {
@@ -281,5 +283,60 @@ async fn pause_resume_and_renew_use_the_documented_paths() {
             "/v1/sandboxes/sbx-1/metadata",
             "/v1/sandboxes/sbx-1",
         ]
+    );
+}
+
+/// Regression: the server parses the `metadata` filter with `parse_qsl(...,
+/// strict_parsing=True)`, so the value must be a nested form-urlencoded string
+/// rather than JSON.
+#[tokio::test]
+async fn metadata_filter_is_a_nested_query_string() {
+    let (server, mut requests) = MockServer::start(vec![Reply::ok_json(r#"{"items":[]}"#)]).await;
+    let client = LifecycleClient::new(&config(&server)).unwrap();
+
+    let mut metadata = BTreeMap::new();
+    metadata.insert("owner".to_string(), "a&b=c".to_string());
+    metadata.insert("team".to_string(), "data science".to_string());
+    client
+        .list_sandboxes(&ListSandboxesQuery {
+            states: vec![SandboxState::Running],
+            metadata: Some(metadata),
+            ..ListSandboxesQuery::default()
+        })
+        .await
+        .unwrap();
+
+    let recorded = requests.recv().await.unwrap();
+    let (path, query) = recorded.path.split_once('?').expect("query string");
+    assert_eq!(path, "/v1/sandboxes");
+
+    // One decode yields the inner query string the server re-parses.
+    let params: BTreeMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    assert_eq!(params["state"], "Running");
+
+    let inner: BTreeMap<String, String> =
+        url::form_urlencoded::parse(params["metadata"].as_bytes())
+            .into_owned()
+            .collect();
+    assert_eq!(inner["owner"], "a&b=c");
+    assert_eq!(inner["team"], "data science");
+}
+
+#[tokio::test]
+async fn auth_header_override_applies_to_lifecycle_calls() {
+    let (server, mut requests) = MockServer::start(vec![Reply::ok_json(
+        r#"{"id":"sbx-6","status":{"state":"Running"}}"#,
+    )])
+    .await;
+    let client = LifecycleClient::new(&config(&server).with_auth_header("X-Tenant-Token")).unwrap();
+    client.get_sandbox("sbx-6").await.unwrap();
+
+    let recorded = requests.recv().await.unwrap();
+    assert_eq!(recorded.header("x-tenant-token"), Some("test-key"));
+    assert!(
+        recorded.header("open-sandbox-api-key").is_none(),
+        "the configured auth header replaces the default one"
     );
 }

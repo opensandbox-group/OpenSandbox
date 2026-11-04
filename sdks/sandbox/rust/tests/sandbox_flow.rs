@@ -262,6 +262,82 @@ async fn connect_rejects_an_empty_sandbox_id() {
     assert!(matches!(err, Error::InvalidArgument { .. }));
 }
 
+/// Regression: creation used to resolve the endpoint exactly once, so a pod
+/// whose IP was not assigned yet failed the whole create.
+#[tokio::test]
+async fn create_retries_while_the_pod_has_no_ip() {
+    let (server, mut requests) = MockServer::start_with(|server| {
+        vec![
+            Reply::ok_json(r#"{"id":"sbx-7","status":{"state":"Running"}}"#),
+            Reply::ok_json(r#"{"id":"sbx-7","status":{"state":"Running"}}"#),
+            Reply::json(
+                404,
+                r#"{"code":"KUBERNETES::POD_IP_NOT_AVAILABLE","message":"waiting for pod ip"}"#,
+            ),
+            endpoint_reply_for(server),
+            Reply::empty(200),
+        ]
+    })
+    .await;
+
+    let sandbox = Sandbox::create(
+        config(&server),
+        CreateOptions::from_image("python:3.12")
+            .with_poll_interval(Duration::from_millis(5))
+            .with_ready_timeout(Duration::from_secs(5)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(sandbox.id(), "sbx-7");
+    let mut paths = Vec::new();
+    for _ in 0..5 {
+        paths.push(requests.recv().await.expect("recorded request").path);
+    }
+    assert_eq!(paths[0], "/v1/sandboxes");
+    assert_eq!(paths[1], "/v1/sandboxes/sbx-7");
+    assert_eq!(
+        paths[2], paths[3],
+        "endpoint resolution must be retried, not given up"
+    );
+    assert_eq!(paths[4], "/ping");
+}
+
+/// Regression: a single readiness probe used to ignore the budget, so a silent
+/// execd could block far past it.
+#[tokio::test]
+async fn ready_probe_honours_the_budget() {
+    let (server, _requests) = MockServer::start_with(|server| {
+        vec![
+            Reply::ok_json(format!(
+                r#"{{"endpoint":"{server}","headers":{{"X-EXECD-ACCESS-TOKEN":"tok"}}}}"#
+            )),
+            Reply::Hang,
+        ]
+    })
+    .await;
+
+    let started = std::time::Instant::now();
+    let err = Sandbox::connect_with(
+        config(&server),
+        "sbx-8",
+        ReadyOptions {
+            timeout: Duration::from_millis(120),
+            polling_interval: Duration::from_millis(10),
+            skip_health_check: false,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(err, Error::ReadyTimeout { .. }), "got {err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the probe must honour the readiness budget, took {:?}",
+        started.elapsed()
+    );
+}
+
 /// The sharing contract other SDKs also rely on: handles move into spawned
 /// tasks and can be cloned per task, while streams stay cheap to poll.
 #[test]

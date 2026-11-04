@@ -17,12 +17,13 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use common::{MockServer, Reply};
 use futures_util::StreamExt;
 use opensandbox::{
-    ConnectionConfig, Error, ExecdClient, ExecutionEvent, FileMetadata, RunCommandRequest,
-    UploadEntry,
+    ConnectionConfig, Error, ExecdClient, ExecutionEvent, FileMetadata, RunCodeRequest,
+    RunCommandRequest, UploadEntry,
 };
 
 fn config() -> ConnectionConfig {
@@ -290,4 +291,56 @@ async fn execd_errors_are_mapped_to_api_errors() {
     let api = err.api().expect("api error");
     assert_eq!(api.status, 404);
     assert_eq!(api.code, "EXECUTION_NOT_FOUND");
+}
+
+/// Regression: the streaming client has no total timeout so the caller can read
+/// a long response, but the handshake must still be bounded.
+#[tokio::test]
+async fn stream_handshake_is_bounded_by_the_request_timeout() {
+    let (server, _requests) = MockServer::start(vec![Reply::Hang]).await;
+    let client = ExecdClient::new(
+        &server.base_url(),
+        &BTreeMap::new(),
+        &ConnectionConfig::new().with_request_timeout(Duration::from_millis(80)),
+    )
+    .unwrap();
+
+    let err = client
+        .run_command(&RunCommandRequest::shell("sleep 1"))
+        .await
+        .unwrap_err();
+    match err {
+        Error::Timeout {
+            operation, timeout, ..
+        } => {
+            assert_eq!(operation, "POST /command");
+            assert_eq!(timeout, Duration::from_millis(80));
+        }
+        other => panic!("expected a handshake timeout, got {other:?}"),
+    }
+}
+
+/// Regression: code execution streams fragments of one document, so `text()`
+/// must not insert newlines between them.
+#[tokio::test]
+async fn code_execution_joins_fragments_verbatim() {
+    let (server, mut requests) = MockServer::start(vec![Reply::sse([
+        "{\"type\":\"stdout\",\"text\":\"hel\",\"timestamp\":1}\n\n",
+        "{\"type\":\"stdout\",\"text\":\"lo\",\"timestamp\":2}\n\n",
+        "{\"type\":\"execution_complete\",\"exit_code\":0,\"timestamp\":3}\n\n",
+    ])])
+    .await;
+
+    let execution = execd(&server)
+        .execute_code_collect(&RunCodeRequest {
+            code: "print('hello')".into(),
+            ..RunCodeRequest::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(execution.text(), "hello");
+    assert_eq!(execution.stderr_text(), "");
+    assert!(execution.success());
+    assert_eq!(requests.recv().await.unwrap().path, "/code");
 }

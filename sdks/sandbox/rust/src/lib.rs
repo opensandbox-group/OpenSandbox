@@ -82,7 +82,7 @@ pub use config::{
 pub use egress::EgressClient;
 pub use error::{ApiError, Error, Result};
 pub use execd::{ExecdClient, UploadEntry};
-pub use execution::{Execution, ExecutionEvent, ExecutionStream};
+pub use execution::{Execution, ExecutionEvent, ExecutionStream, OutputMode};
 pub use lifecycle::{LifecycleClient, ListSandboxesQuery, ListSnapshotsQuery};
 pub use models::*;
 pub use sandbox::{

@@ -28,7 +28,7 @@ use url::form_urlencoded;
 
 use crate::config::{ConnectionConfig, EXECD_TOKEN_HEADER};
 use crate::error::{Error, Result};
-use crate::execution::{self, Execution, ExecutionStream};
+use crate::execution::{self, Execution, ExecutionStream, OutputMode};
 use crate::models::{
     CodeContext, CommandLogsResponse, CommandStatusResponse, CreateContextRequest,
     CreateSessionRequest, FileInfo, FileMetadata, Metrics, MoveItem, Permission, ReplaceItem,
@@ -285,8 +285,14 @@ impl ExecdClient {
     }
 
     /// Executes code and drains the resulting events.
+    ///
+    /// Code execution streams arbitrary fragments of one document, so output
+    /// is joined verbatim rather than line by line.
     pub async fn execute_code_collect(&self, request: &RunCodeRequest) -> Result<Execution> {
-        self.execute_code(request).await?.collect().await
+        self.execute_code(request)
+            .await?
+            .collect_with(OutputMode::Fragments)
+            .await
     }
 
     /// Interrupts a running code execution.

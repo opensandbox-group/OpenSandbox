@@ -116,6 +116,12 @@ pub fn parse(event: &SseEvent) -> ExecutionEvent {
             event: "ping".into(),
             data: event.data.clone(),
         },
+        // `status` is a control event: execd emits `{"type":"status","text":"error"}`
+        // around a failed execution. It must never be accumulated as program output.
+        "status" => ExecutionEvent::Other {
+            event: "status".into(),
+            data: event.data.clone(),
+        },
         other => {
             // Unknown types with a `text` member are surfaced as stdout, which
             // matches the fallback used by the other SDKs.
@@ -137,16 +143,17 @@ fn parse_result(value: &Value, timestamp: i64) -> ExecutionResult {
     let mut results = std::collections::BTreeMap::new();
     match value.get("results") {
         Some(Value::Object(map)) => {
+            // Structured payloads such as `application/json` carry objects or
+            // arrays, so every value is preserved verbatim instead of being
+            // dropped when it is not a string.
             for (mime, payload) in map {
-                if let Some(text) = payload.as_str() {
-                    results.insert(mime.clone(), text.to_string());
-                }
+                results.insert(mime.clone(), payload.clone());
             }
         }
         // Legacy shape: a bare `text` field means text/plain.
         _ => {
-            if let Some(text) = value.get("text").and_then(Value::as_str) {
-                results.insert("text/plain".into(), text.to_string());
+            if let Some(text) = value.get("text") {
+                results.insert("text/plain".into(), text.clone());
             }
         }
     }
@@ -213,6 +220,50 @@ pub struct Execution {
     pub complete: Option<ExecutionComplete>,
     /// Process exit code. `None` when it could not be determined.
     pub exit_code: Option<i32>,
+    /// How [`Execution::text`] and [`Execution::stderr_text`] join output.
+    ///
+    /// [`ExecutionStream::collect_with`] selects the mode the endpoint needs;
+    /// a hand-built accumulator defaults to [`OutputMode::Lines`].
+    pub output_mode: OutputMode,
+}
+
+/// How accumulated output messages are joined into a single string.
+///
+/// execd streams command output one line per message but streams code
+/// execution as arbitrary fragments of one document, so the two need
+/// different joins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Insert a newline between messages that did not already end with one.
+    /// This is the default and matches command output.
+    #[default]
+    Lines,
+    /// Concatenate messages verbatim, preserving the exact byte sequence.
+    /// Use this for code execution, where inserted newlines would corrupt the
+    /// program output.
+    Fragments,
+}
+
+fn join(messages: &[OutputMessage], mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Fragments => messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect(),
+        OutputMode::Lines => {
+            let mut out = String::new();
+            for (index, message) in messages.iter().enumerate() {
+                if index > 0 {
+                    let previous = &messages[index - 1].text;
+                    if !previous.ends_with('\n') && !previous.ends_with('\r') {
+                        out.push('\n');
+                    }
+                }
+                out.push_str(&message.text);
+            }
+            out
+        }
+    }
 }
 
 impl Execution {
@@ -221,40 +272,33 @@ impl Execution {
         Self::default()
     }
 
-    /// Whether the execution completed with exit code 0 and no error.
+    /// Whether the execution finished with exit code 0 and reported no error.
+    ///
+    /// An execution that never reported a terminal event has no exit code and
+    /// is therefore not a success: an unknown exit code must never be read as
+    /// `0`.
     pub fn success(&self) -> bool {
-        self.error.is_none() && self.exit_code.unwrap_or_default() == 0
+        self.error.is_none() && self.exit_code == Some(0)
     }
 
-    /// Joins stdout lines, inserting a newline between lines that did not
-    /// already end with one (matching the other SDKs).
+    /// Joins stdout using [`Execution::output_mode`].
     pub fn text(&self) -> String {
-        let mut out = String::new();
-        for (index, message) in self.stdout.iter().enumerate() {
-            if index > 0 {
-                let previous = &self.stdout[index - 1].text;
-                if !previous.ends_with('\n') && !previous.ends_with('\r') {
-                    out.push('\n');
-                }
-            }
-            out.push_str(&message.text);
-        }
-        out
+        self.text_with(self.output_mode)
+    }
+
+    /// Joins stdout using `mode`.
+    pub fn text_with(&self, mode: OutputMode) -> String {
+        join(&self.stdout, mode)
     }
 
     /// Stderr joined the same way as [`Execution::text`].
     pub fn stderr_text(&self) -> String {
-        let mut out = String::new();
-        for (index, message) in self.stderr.iter().enumerate() {
-            if index > 0 {
-                let previous = &self.stderr[index - 1].text;
-                if !previous.ends_with('\n') && !previous.ends_with('\r') {
-                    out.push('\n');
-                }
-            }
-            out.push_str(&message.text);
-        }
-        out
+        self.stderr_text_with(self.output_mode)
+    }
+
+    /// Joins stderr using `mode`.
+    pub fn stderr_text_with(&self, mode: OutputMode) -> String {
+        join(&self.stderr, mode)
     }
 
     /// Applies one event to the accumulator.
@@ -310,8 +354,15 @@ impl ExecutionStream {
     }
 
     /// Drains the stream into an [`Execution`], stopping at the terminal event.
-    pub async fn collect(mut self) -> Result<Execution> {
+    pub async fn collect(self) -> Result<Execution> {
+        self.collect_with(OutputMode::Lines).await
+    }
+
+    /// Drains the stream into an [`Execution`] whose output is joined using
+    /// `mode`.
+    pub async fn collect_with(mut self, mode: OutputMode) -> Result<Execution> {
         let mut execution = Execution::new();
+        execution.output_mode = mode;
         while let Some(event) = self.next_event().await {
             let event = event?;
             let complete = matches!(event, ExecutionEvent::Complete(_));
@@ -437,5 +488,66 @@ mod tests {
             panic!("expected stdout");
         };
         assert_eq!(message.text, "plain text");
+    }
+
+    #[test]
+    fn status_events_never_become_program_output() {
+        // execd brackets a failed execution with a `status` control event that
+        // also carries `text`, so the generic "unknown event with text" fallback
+        // must not turn it into a stdout line.
+        let body = concat!(
+            "{\"type\":\"status\",\"text\":\"error\",\"timestamp\":1}\n\n",
+            "{\"type\":\"execution_complete\",\"exit_code\":1,\"timestamp\":2}\n\n",
+        );
+        let mut execution = Execution::new();
+        for event in events(body) {
+            execution.apply(&event);
+        }
+        assert!(execution.stdout.is_empty(), "status is a control event");
+        assert_eq!(execution.exit_code, Some(1));
+    }
+
+    #[test]
+    fn structured_result_payloads_are_preserved() {
+        let body = "{\"type\":\"result\",\"results\":{\"application/json\":{\"total\":4},\
+                    \"text\":\"4\"},\"timestamp\":1}\n\n";
+        let events = events(body);
+        let ExecutionEvent::Result(result) = &events[0] else {
+            panic!("expected result");
+        };
+        assert_eq!(result.text(), Some("4"));
+        assert_eq!(
+            result.results["application/json"],
+            serde_json::json!({ "total": 4 }),
+            "non-string payloads must not be dropped"
+        );
+    }
+
+    #[test]
+    fn success_requires_a_reported_exit_code() {
+        // A stream that ends without a terminal event leaves the exit code
+        // unknown, which must not be read as success.
+        let body = "{\"type\":\"stdout\",\"text\":\"partial\",\"timestamp\":1}\n\n";
+        let mut execution = Execution::new();
+        for event in events(body) {
+            execution.apply(&event);
+        }
+        assert_eq!(execution.exit_code, None);
+        assert!(!execution.success());
+    }
+
+    #[test]
+    fn fragments_mode_keeps_code_output_verbatim() {
+        let body = concat!(
+            "{\"type\":\"stdout\",\"text\":\"hel\",\"timestamp\":1}\n\n",
+            "{\"type\":\"stdout\",\"text\":\"lo\",\"timestamp\":2}\n\n",
+        );
+        let mut execution = Execution::new();
+        for event in events(body) {
+            execution.apply(&event);
+        }
+        // Line mode is correct for command output but corrupts fragments.
+        assert_eq!(execution.text(), "hel\nlo");
+        assert_eq!(execution.text_with(OutputMode::Fragments), "hello");
     }
 }

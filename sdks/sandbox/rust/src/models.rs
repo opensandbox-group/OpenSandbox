@@ -19,6 +19,7 @@
 //! (`Option` + `skip_serializing_if`) so callers only send what they set.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -668,18 +669,24 @@ pub struct OutputMessage {
 /// One MIME-keyed execution result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionResult {
-    /// MIME type to payload, for example `text/plain` to `4`.
+    /// MIME type to payload. execd renames `text/plain` to `text`, and
+    /// structured results such as `application/json` carry objects or arrays.
     #[serde(default)]
-    pub results: BTreeMap<String, String>,
+    pub results: BTreeMap<String, serde_json::Value>,
     /// Server-side timestamp in milliseconds.
     #[serde(default)]
     pub timestamp: i64,
 }
 
 impl ExecutionResult {
-    /// Returns the `text/plain` payload, when present.
+    /// Returns the plain-text payload: `text` first, then `text/plain`.
+    ///
+    /// execd rewrites the wire `text/plain` MIME key to `text` before
+    /// forwarding a result, so both keys are accepted.
     pub fn text(&self) -> Option<&str> {
-        self.results.get("text/plain").map(String::as_str)
+        ["text", "text/plain"]
+            .iter()
+            .find_map(|key| self.results.get(*key).and_then(serde_json::Value::as_str))
     }
 }
 
@@ -745,9 +752,16 @@ pub struct RunCommandRequest {
     /// Start asynchronously.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background: bool,
-    /// Maximum duration in **milliseconds**. Zero means no timeout.
-    #[serde(default, skip_serializing_if = "is_zero_i64")]
-    pub timeout: i64,
+    /// Maximum runtime. [`Duration::ZERO`] means no timeout.
+    ///
+    /// The wire format carries integer milliseconds; the two are converted at
+    /// the serde boundary so callers never handle raw millisecond counts.
+    #[serde(
+        default,
+        with = "duration_millis",
+        skip_serializing_if = "Duration::is_zero"
+    )]
+    pub timeout: Duration,
     /// Run as this uid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<i32>,
@@ -759,8 +773,41 @@ pub struct RunCommandRequest {
     pub envs: Option<BTreeMap<String, String>>,
 }
 
-fn is_zero_i64(value: &i64) -> bool {
-    *value == 0
+/// Serde bridge between [`Duration`] and the integer-millisecond wire format.
+///
+/// Non-positive values are treated as "no timeout", and a sub-millisecond
+/// duration rounds up to `1` so it can never collapse into "no timeout".
+mod duration_millis {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i64(millis(duration))
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = i64::deserialize(deserializer)?;
+        Ok(u64::try_from(value)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::ZERO))
+    }
+
+    /// Converts to milliseconds, rounding a sub-millisecond value up to `1`.
+    fn millis(duration: &Duration) -> i64 {
+        let millis = duration.as_millis();
+        if millis == 0 && !duration.is_zero() {
+            1
+        } else {
+            i64::try_from(millis).unwrap_or(i64::MAX)
+        }
+    }
 }
 
 impl RunCommandRequest {
@@ -796,9 +843,18 @@ impl RunCommandRequest {
         self
     }
 
-    /// Sets the timeout in milliseconds.
+    /// Sets the maximum runtime. [`Duration::ZERO`] means no timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Sets the maximum runtime from a raw millisecond count.
+    #[deprecated(note = "use `with_timeout` with a `Duration`")]
     pub fn with_timeout_millis(mut self, millis: i64) -> Self {
-        self.timeout = millis;
+        self.timeout = u64::try_from(millis)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::ZERO);
         self
     }
 
@@ -877,9 +933,13 @@ pub struct RunInSessionRequest {
     /// Working directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// Maximum duration in milliseconds.
-    #[serde(default, skip_serializing_if = "is_zero_i64")]
-    pub timeout: i64,
+    /// Maximum runtime. [`Duration::ZERO`] means no timeout.
+    #[serde(
+        default,
+        with = "duration_millis",
+        skip_serializing_if = "Duration::is_zero"
+    )]
+    pub timeout: Duration,
 }
 
 /// Code execution context.
@@ -1271,4 +1331,39 @@ pub struct CredentialBindingListResponse {
     /// Bindings in the vault.
     #[serde(default)]
     pub bindings: Vec<CredentialBindingMetadata>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_round_trips_as_milliseconds() {
+        let request = RunCommandRequest::shell("make").with_timeout(Duration::from_millis(1500));
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["timeout"], 1500);
+
+        let decoded: RunCommandRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.timeout, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn zero_timeout_is_omitted_from_the_wire() {
+        let value = serde_json::to_value(RunCommandRequest::shell("make")).unwrap();
+        assert!(value.get("timeout").is_none(), "zero means no timeout");
+    }
+
+    #[test]
+    fn sub_millisecond_timeout_never_collapses_into_no_timeout() {
+        let request = RunCommandRequest::shell("make").with_timeout(Duration::from_nanos(1));
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["timeout"], 1);
+    }
+
+    #[test]
+    fn negative_wire_timeout_decodes_as_no_timeout() {
+        let decoded: RunInSessionRequest =
+            serde_json::from_str(r#"{"command":"ls","timeout":-1}"#).unwrap();
+        assert_eq!(decoded.timeout, Duration::ZERO);
+    }
 }

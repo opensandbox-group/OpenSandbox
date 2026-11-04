@@ -44,6 +44,9 @@ pub(crate) struct Http {
     api_key: Option<String>,
     headers: HeaderMap,
     retry: RetryConfig,
+    /// Upper bound on waiting for a streamed response's headers. The body that
+    /// follows is intentionally unbounded.
+    header_timeout: Duration,
 }
 
 impl Http {
@@ -62,6 +65,7 @@ impl Http {
             .map_err(Error::Http)?;
         // Streamed responses (SSE, metrics, file downloads) are unbounded: the
         // caller closes them through the stream's lifetime, not a total timeout.
+        // Only the handshake is bounded, enforced in `execute_with_accept`.
         let streaming = reqwest::Client::builder()
             .connect_timeout(timeout)
             .pool_idle_timeout(Duration::from_secs(90))
@@ -90,6 +94,7 @@ impl Http {
             api_key: api_key.filter(|v| !v.is_empty()),
             headers,
             retry: retry.clone(),
+            header_timeout: timeout,
         })
     }
 
@@ -266,12 +271,13 @@ impl Http {
         let started = Instant::now();
         let mut generic_retries = 0u32;
         let mut wake_retries = 0u32;
+        let streaming = is_streaming(accept, path);
 
         loop {
             let request = self.request(&method, path, &body, accept)?;
-            let outcome = match request.send().await {
+            let outcome = match self.send(request, streaming, &method, path).await {
                 Ok(response) => self.check(response).await,
-                Err(err) => Err(Error::Http(err)),
+                Err(err) => Err(err),
             };
 
             match outcome {
@@ -293,6 +299,30 @@ impl Http {
         }
     }
 
+    /// Sends one request, bounding the wait for response headers.
+    ///
+    /// Streamed responses must stay open for as long as the caller reads them,
+    /// so the streaming client has no total timeout. The handshake is still
+    /// bounded here: a server that never answers must not hang the caller.
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        streaming: bool,
+        method: &Method,
+        path: &str,
+    ) -> Result<Response> {
+        if !streaming {
+            return request.send().await.map_err(Error::Http);
+        }
+        match tokio::time::timeout(self.header_timeout, request.send()).await {
+            Ok(sent) => sent.map_err(Error::Http),
+            Err(_) => Err(Error::Timeout {
+                operation: format!("{} {}", method.as_str(), path),
+                timeout: self.header_timeout,
+            }),
+        }
+    }
+
     fn request(
         &self,
         method: &Method,
@@ -302,7 +332,7 @@ impl Http {
     ) -> Result<reqwest::RequestBuilder> {
         let url = format!("{}{}", self.base, path);
         let url = url::Url::parse(&url)?;
-        let client = if accept == Some("text/event-stream") || path.contains("/files/download") {
+        let client = if is_streaming(accept, path) {
             &self.streaming
         } else {
             &self.plain
@@ -349,11 +379,21 @@ impl Http {
         if let Error::Api(api) = err {
             if api.wake_expired && self.retry.wake_retry_enabled {
                 let deadline = self.wake_deadline();
-                if *wake_retries < self.retry.wake_max_attempts && started.elapsed() < deadline {
-                    *wake_retries += 1;
-                    return Some(api.retry_after.unwrap_or(WAKE_DEFAULT_WAIT));
+                let remaining = deadline.checked_sub(started.elapsed())?;
+                if remaining.is_zero() || *wake_retries >= self.retry.wake_max_attempts {
+                    return None;
                 }
-                return None;
+                // Never sleep past the wake deadline: an over-long
+                // `Retry-After` would otherwise park the caller beyond the
+                // budget it was supposed to respect. `Retry-After: 0` means
+                // "the sandbox is awake, retry now" and stays valid.
+                let wait = api
+                    .retry_after
+                    .unwrap_or(WAKE_DEFAULT_WAIT)
+                    .min(RETRY_AFTER_CAP)
+                    .min(remaining);
+                *wake_retries += 1;
+                return Some(wait);
             }
             if !generic_retry || *generic_retries >= self.retry.max_retries {
                 return None;
@@ -409,6 +449,14 @@ fn encode_body(body: Option<&impl Serialize>) -> Result<Option<Vec<u8>>> {
         Some(value) => Ok(Some(serde_json::to_vec(value)?)),
         None => Ok(None),
     }
+}
+
+/// Whether this request uses the streaming client.
+///
+/// These responses stay open for the caller to read, so they are excluded from
+/// the total request timeout and only their handshake is bounded.
+fn is_streaming(accept: Option<&str>, path: &str) -> bool {
+    accept == Some("text/event-stream") || path.contains("/files/download")
 }
 
 fn is_idempotent(method: &Method) -> bool {
@@ -498,5 +546,44 @@ mod tests {
             Some(Duration::from_millis(10))
         );
         assert_eq!(wake, 1);
+    }
+
+    fn wake_error(retry_after: Option<Duration>) -> Error {
+        Error::Api(ApiError {
+            status: 503,
+            code: "WAKE_PENDING".into(),
+            message: String::new(),
+            request_id: None,
+            retry_after,
+            wake_expired: true,
+        })
+    }
+
+    #[test]
+    fn wake_retry_is_clamped_to_the_remaining_budget() {
+        let http = http();
+        let err = wake_error(Some(Duration::from_secs(3600)));
+        let mut generic = 0;
+        let mut wake = 0;
+        let wait = http
+            .retry_delay(&err, false, false, &mut generic, &mut wake, Instant::now())
+            .expect("the wake retry is still allowed");
+        assert!(
+            wait <= http.wake_deadline(),
+            "wait {wait:?} must not exceed the wake deadline"
+        );
+    }
+
+    #[test]
+    fn wake_retry_stops_once_the_budget_is_spent() {
+        let http = http();
+        let err = wake_error(None);
+        let mut generic = 0;
+        let mut wake = 0;
+        let started = Instant::now() - http.wake_deadline() - Duration::from_secs(1);
+        assert!(http
+            .retry_delay(&err, false, false, &mut generic, &mut wake, started)
+            .is_none());
+        assert_eq!(wake, 0, "an exhausted budget must not consume an attempt");
     }
 }

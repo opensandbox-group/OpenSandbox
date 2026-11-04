@@ -84,6 +84,8 @@ pub enum Reply {
         /// Body chunks, in order.
         chunks: Vec<Vec<u8>>,
     },
+    /// Never answers; the connection stays open until the client gives up.
+    Hang,
 }
 
 impl Reply {
@@ -137,6 +139,7 @@ impl Reply {
         let header = (name.into(), value.into());
         match &mut self {
             Self::Simple { headers, .. } | Self::Chunked { headers, .. } => headers.push(header),
+            Self::Hang => {}
         }
         self
     }
@@ -316,6 +319,11 @@ where
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
             writer.write_all(b"0\r\n\r\n").await?;
+        }
+        Reply::Hang => {
+            // Keep the connection open without writing a single byte so the
+            // client's handshake has to time out on its own.
+            std::future::pending::<()>().await;
         }
     }
     writer.flush().await

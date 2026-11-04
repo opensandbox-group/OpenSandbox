@@ -428,40 +428,29 @@ impl Sandbox {
             ));
         }
         let lifecycle = LifecycleClient::new(&config)?;
-        let deadline = Instant::now() + options.timeout;
-
-        loop {
-            match Self::resolve(&config, &lifecycle, &sandbox_id).await {
-                Ok((execd, origin)) => {
-                    let sandbox = Self {
-                        id: sandbox_id.clone(),
-                        config: Arc::new(config.clone()),
-                        lifecycle,
-                        execd,
-                        origin,
-                    };
-                    if !options.skip_health_check {
-                        sandbox
-                            .wait_until_ready(options.timeout, options.polling_interval)
-                            .await?;
-                    }
-                    return Ok(sandbox);
-                }
-                Err(err) => {
-                    // A pod that exists but has no IP yet is retryable.
-                    let retryable = err
-                        .api()
-                        .map(|api| {
-                            api.is_not_found() && api.code == "KUBERNETES::POD_IP_NOT_AVAILABLE"
-                        })
-                        .unwrap_or(false);
-                    if !retryable || Instant::now() >= deadline {
-                        return Err(err);
-                    }
-                    tokio::time::sleep(options.polling_interval).await;
-                }
-            }
+        // A pod that exists but has no IP yet is a transient state, so endpoint
+        // resolution is retried for the same budget as the readiness probe.
+        let (execd, origin) = resolve_with_retry(
+            &config,
+            &lifecycle,
+            &sandbox_id,
+            options.timeout,
+            options.polling_interval,
+        )
+        .await?;
+        let sandbox = Self {
+            id: sandbox_id,
+            config: Arc::new(config.clone()),
+            lifecycle,
+            execd,
+            origin,
+        };
+        if !options.skip_health_check {
+            sandbox
+                .wait_until_ready(options.timeout, options.polling_interval)
+                .await?;
         }
+        Ok(sandbox)
     }
 
     /// Resumes a paused sandbox and reconnects to it.
@@ -489,7 +478,14 @@ impl Sandbox {
                 options.poll_interval,
             )
             .await?;
-            let (execd, origin) = Self::resolve(&config, &lifecycle, &id).await?;
+            let (execd, origin) = resolve_with_retry(
+                &config,
+                &lifecycle,
+                &id,
+                options.ready_timeout,
+                options.poll_interval,
+            )
+            .await?;
             let sandbox = Self {
                 id: id.clone(),
                 config: Arc::new(config.clone()),
@@ -652,22 +648,32 @@ impl Sandbox {
     }
 
     /// Polls execd until it answers or the budget is exhausted.
+    ///
+    /// Both the probe and the pause between probes are bounded by `timeout`: a
+    /// single probe can otherwise outlive the whole readiness budget, and a
+    /// probe that only succeeds after the deadline must not be reported ready.
     pub async fn wait_until_ready(
         &self,
         timeout: Duration,
         polling_interval: Duration,
     ) -> Result<()> {
-        let deadline = Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            match self.execd.ping().await {
-                Ok(()) => return Ok(()),
-                Err(_) if Instant::now() >= deadline => {
-                    return Err(Error::ReadyTimeout {
-                        sandbox_id: self.id.clone(),
-                        elapsed: timeout,
-                    });
+            // `timeout_at` bounds the probe itself: without it a single ping
+            // could block past the budget, and a success that only arrives
+            // after the deadline would still be reported as ready.
+            match tokio::time::timeout_at(deadline, self.execd.ping()).await {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(_)) | Err(_) => {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(Error::ReadyTimeout {
+                            sandbox_id: self.id.clone(),
+                            elapsed: timeout,
+                        });
+                    }
+                    tokio::time::sleep(polling_interval.min(remaining)).await;
                 }
-                Err(_) => tokio::time::sleep(polling_interval).await,
             }
         }
     }
@@ -699,6 +705,42 @@ impl std::fmt::Debug for Sandbox {
             .field("id", &self.id)
             .field("origin", &self.origin)
             .finish_non_exhaustive()
+    }
+}
+
+/// Resolves the execd endpoint, retrying the transient "pod has no IP yet"
+/// window until the budget expires.
+///
+/// Creation and connection hit the same race: the sandbox object exists before
+/// the runtime has assigned a pod IP, and the server answers
+/// `KUBERNETES::POD_IP_NOT_AVAILABLE`. Resolving only once turned that race into
+/// a hard failure, so both paths share this retry.
+async fn resolve_with_retry(
+    config: &ConnectionConfig,
+    lifecycle: &LifecycleClient,
+    sandbox_id: &str,
+    timeout: Duration,
+    polling_interval: Duration,
+) -> Result<(ExecdClient, SandboxOrigin)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match Sandbox::resolve(config, lifecycle, sandbox_id).await {
+            Ok(resolved) => return Ok(resolved),
+            Err(err) => {
+                let retryable = err
+                    .api()
+                    .map(|api| api.is_not_found() && api.code == "KUBERNETES::POD_IP_NOT_AVAILABLE")
+                    .unwrap_or(false);
+                if !retryable {
+                    return Err(err);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(err);
+                }
+                tokio::time::sleep(polling_interval.min(remaining)).await;
+            }
+        }
     }
 }
 
