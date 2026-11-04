@@ -133,7 +133,16 @@ func TestGetSandboxHostRejectsZeroPortWithStableError(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://myhost-0.example.com/", nil)
 	_, status, err := proxy.getSandboxHostDefinition(request)
 	assert.Equal(t, http.StatusBadRequest, status)
-	assert.EqualError(t, err, "invalid ingress route: missing sandbox ID or port")
+	assert.EqualError(t, err, `invalid ingress route: invalid port format: invalid port "0"`)
+}
+
+func TestServeHTTPRejectsInvalidHostRoutePort(t *testing.T) {
+	proxy := NewProxy(context.Background(), stubNoSecureProvider{}, ModeHeader, nil, nil, nil)
+	for _, host := range []string{"myhost-70000.example.com", "myhost-08080.example.com", "my-host-08080.example.com"} {
+		rec := httptest.NewRecorder()
+		proxy.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://"+host+"/", nil))
+		assert.Equal(t, http.StatusBadRequest, rec.Code, host)
+	}
 }
 
 func TestGetClientIP(t *testing.T) {
