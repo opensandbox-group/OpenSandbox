@@ -61,8 +61,14 @@ type EndpointCache struct {
 	maxSize int
 	ttl     time.Duration
 
-	group singleflight.Group
+	group    singleflight.Group
+	inflight map[endpointCacheKey]*endpointFetch
 }
+
+// endpointFetch identifies one inflight generation. It is retained only while
+// that fetch is current, so invalidations do not accumulate sandbox IDs.
+// Keep the token non-zero-sized so distinct fetches have distinct pointers.
+type endpointFetch struct{ _ byte }
 
 // NewEndpointCache creates a cache with the given max size and TTL.
 // If maxSize <= 0, DefaultEndpointCacheSize is used.
@@ -75,10 +81,11 @@ func NewEndpointCache(maxSize int, ttl time.Duration) *EndpointCache {
 		ttl = DefaultEndpointCacheTTL
 	}
 	return &EndpointCache{
-		entries: make(map[endpointCacheKey]*list.Element),
-		order:   list.New(),
-		maxSize: maxSize,
-		ttl:     ttl,
+		entries:  make(map[endpointCacheKey]*list.Element),
+		order:    list.New(),
+		maxSize:  maxSize,
+		ttl:      ttl,
+		inflight: make(map[endpointCacheKey]*endpointFetch),
 	}
 }
 
@@ -104,7 +111,10 @@ func (c *EndpointCache) Get(key endpointCacheKey) (*Endpoint, bool) {
 func (c *EndpointCache) Put(key endpointCacheKey, ep *Endpoint) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.putLocked(key, ep)
+}
 
+func (c *EndpointCache) putLocked(key endpointCacheKey, ep *Endpoint) {
 	if elem, ok := c.entries[key]; ok {
 		c.order.MoveToFront(elem)
 		entry := elem.Value.(*endpointCacheEntry)
@@ -138,6 +148,11 @@ func (c *EndpointCache) Invalidate(sandboxID string) {
 	for key, elem := range c.entries {
 		if key.sandboxID == sandboxID {
 			c.removeLocked(elem)
+		}
+	}
+	for key := range c.inflight {
+		if key.sandboxID == sandboxID {
+			delete(c.inflight, key)
 			c.group.Forget(key.String())
 		}
 	}
@@ -165,7 +180,25 @@ func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fe
 		return ep, nil
 	}
 
+	// Register the call under the same lock used by Invalidate, so a new
+	// caller cannot join a forgotten generation.
+	c.mu.Lock()
+	fetchID := c.inflight[key]
+	if fetchID == nil {
+		fetchID = &endpointFetch{}
+		c.inflight[key] = fetchID
+	}
 	ch := c.group.DoChan(key.String(), func() (interface{}, error) {
+		defer func() {
+			c.mu.Lock()
+			// Forget before dropping the token: singleflight removes its own
+			// entry only after this function returns.
+			if c.inflight[key] == fetchID {
+				c.group.Forget(key.String())
+				delete(c.inflight, key)
+			}
+			c.mu.Unlock()
+		}()
 		if ep, ok := c.Get(key); ok {
 			return ep, nil
 		}
@@ -173,9 +206,14 @@ func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fe
 		if err != nil {
 			return nil, err
 		}
-		c.Put(key, ep)
+		c.mu.Lock()
+		if c.inflight[key] == fetchID {
+			c.putLocked(key, ep)
+		}
+		c.mu.Unlock()
 		return ep, nil
 	})
+	c.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
