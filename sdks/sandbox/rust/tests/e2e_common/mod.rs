@@ -32,7 +32,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use opensandbox::{ConnectionConfig, CreateOptions, Sandbox};
+use opensandbox::{ConnectionConfig, CreateOptions, NetworkPolicy, NetworkRule, Sandbox};
 
 pub const DEFAULT_DOMAIN: &str = "localhost:8080";
 pub const DEFAULT_PROTOCOL: &str = "http";
@@ -136,3 +136,85 @@ macro_rules! require_e2e {
 }
 
 pub(crate) use require_e2e;
+
+/// Like [`require_e2e!`], but also requires the credential-vault echo target.
+#[allow(unused_macros)]
+macro_rules! require_vault {
+    () => {
+        $crate::e2e_common::require_e2e!();
+        if $crate::e2e_common::vault_target_ip().is_none() {
+            eprintln!(
+                "skipping: set OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_IP (scripts/rust-e2e.sh exports it)"
+            );
+            return;
+        }
+    };
+}
+
+#[allow(unused_imports)]
+pub(crate) use require_vault;
+
+/// Hostname the vault e2e target answers on inside the egress proxy.
+pub const VAULT_TARGET_HOST: &str = "credential-vault-e2e.opensandbox.test";
+
+/// Hostname of the credential-vault echo target, overridable like the Go and
+/// Python runners.
+pub fn vault_target_host() -> String {
+    env_or(
+        "OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_HOST",
+        VAULT_TARGET_HOST,
+    )
+}
+
+/// IP of the credential-vault echo target. `None` disables the vault suite.
+pub fn vault_target_ip() -> Option<String> {
+    std::env::var("OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_IP")
+        .ok()
+        .map(|ip| ip.trim().to_string())
+        .filter(|ip| !ip.is_empty())
+}
+
+/// Creates a sandbox with the credential-vault transparent proxy enabled and a
+/// deny-default egress policy that only admits the echo target. Returns `None`
+/// when the server does not run the `dns+nft` egress mode that the vault
+/// proxy requires.
+pub async fn create_vault_sandbox(metadata: &[(&str, &str)]) -> Option<Sandbox> {
+    let target_ip = vault_target_ip().expect("vault suite requires the echo target IP");
+    let target_host = vault_target_host();
+    let mut options = CreateOptions::from_image(image())
+        .with_manual_cleanup()
+        .with_timeout_seconds(1800)
+        .with_ready_timeout(READY_TIMEOUT)
+        .with_poll_interval(POLL_INTERVAL)
+        .with_resource_limit("cpu", "1")
+        .with_resource_limit("memory", "2Gi")
+        .with_credential_proxy()
+        .with_network_policy(NetworkPolicy {
+            default_action: Some("deny".to_string()),
+            egress: Some(vec![
+                NetworkRule {
+                    action: "allow".to_string(),
+                    target: Some(target_host),
+                    ports: None,
+                },
+                NetworkRule {
+                    action: "allow".to_string(),
+                    target: Some(target_ip),
+                    ports: None,
+                },
+            ]),
+        });
+    for (key, value) in metadata {
+        options = options.with_metadata(*key, *value);
+    }
+    match Sandbox::create(connection_config(), options).await {
+        Ok(sandbox) => Some(sandbox),
+        Err(opensandbox::Error::Api(api))
+            if api.status == 400 && api.message.contains("credentialProxy") =>
+        {
+            eprintln!("skipping: server egress mode does not support the credential proxy: {api}");
+            None
+        }
+        Err(error) => panic!("creating the vault sandbox failed: {error}"),
+    }
+}

@@ -943,13 +943,13 @@ cd sdks/sandbox/rust
 cargo test --all-targets
 ```
 
-Live-server E2E tests live in `tests/e2e_lifecycle.rs` and `tests/e2e_execd.rs`. They are gated by `OPENSANDBOX_E2E=1` so the default `cargo test` stays hermetic. Run them the same way CI does:
+Live-server E2E tests live in `tests/e2e_lifecycle.rs`, `tests/e2e_execd.rs`, and `tests/e2e_vault.rs`. They are gated by `OPENSANDBOX_E2E=1` so the default `cargo test` stays hermetic. Run them the same way CI does:
 
 ```bash
 bash scripts/rust-e2e.sh
 ```
 
-Set `RUN_CODE_INTERPRETER_E2E=true` to include the Jupyter code-execution suite.
+Set `RUN_CODE_INTERPRETER_E2E=true` to include the Jupyter code-execution suite. The credential-vault suite runs automatically when `scripts/rust-e2e.sh` started its echo target; see `tests/README.md` for the full environment variable list.
 
 ## Scope and limitations
 

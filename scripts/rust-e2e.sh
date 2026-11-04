@@ -80,7 +80,16 @@ server = load_config().server
 host = "127.0.0.1" if server.host in ("", "0.0.0.0", "::") else server.host
 print(f"{host}:{server.port}")
 ')"
-uv run python -m opensandbox_server.main > server.log 2>&1 &
+# `opensandbox_server.main` runs uvicorn with reload=True; the reloader watches
+# the server directory and stops mid-suite when server.log is rewritten, which
+# kills the E2E run. Start a plain (non-reloading) server instead.
+uv run python -c "
+import uvicorn
+from opensandbox_server.config import load_config
+from opensandbox_server.main import app
+config = load_config()
+uvicorn.run(app, host=config.server.host, port=config.server.port, reload=False)
+" > server.log 2>&1 &
 SERVER_PID=$!
 cd ..
 
@@ -111,4 +120,4 @@ cd sdks/sandbox/rust
 mkdir -p reports
 OPENSANDBOX_E2E=1 \
   RUN_CODE_INTERPRETER_E2E="${RUN_CODE_INTERPRETER_E2E}" \
-  cargo test --test e2e_lifecycle --test e2e_execd -- --test-threads=1 2>&1 | tee reports/test-output.txt
+  cargo test --test e2e_lifecycle --test e2e_execd --test e2e_vault -- --test-threads=1 2>&1 | tee reports/test-output.txt

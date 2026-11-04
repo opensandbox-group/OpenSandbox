@@ -24,7 +24,10 @@ mod e2e_common;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use opensandbox::{CreateOptions, ListSandboxesQuery, Sandbox, SandboxState};
+use opensandbox::{
+    CreateOptions, Error, LifecycleClient, ListSandboxesQuery, ListSnapshotsQuery, NetworkRule,
+    Sandbox, SandboxState, SnapshotState,
+};
 
 use e2e_common::{create_sandbox, kill_quietly, require_e2e, unique_tag};
 
@@ -256,9 +259,201 @@ async fn connect_attaches_to_an_existing_sandbox() {
 }
 
 #[tokio::test]
-async fn egress_policy_is_readable() {
+async fn egress_policy_patch_and_delete_round_trip() {
     require_e2e!();
     let sandbox = create_sandbox(&[("e2e.suite", "rust-egress")]).await;
+
+    match sandbox.egress().await {
+        Ok(egress) => {
+            let allow_dns = [NetworkRule {
+                action: "allow".to_string(),
+                target: Some("*.opensandbox.internal".to_string()),
+                ports: Some(vec![53]),
+            }];
+            // The sidecar proxies policy mutations; until it is fully up the
+            // server answers 502, so retry readiness-style like the other
+            // eventually() probes. Runtimes without the policy mutation
+            // backend answer 502 forever — degrade like the readable probe.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let patched = loop {
+                match egress.patch_policy(&allow_dns).await {
+                    Ok(patched) => break Some(patched),
+                    Err(Error::Api(api)) if api.status == 502 || api.status == 503 => {
+                        if Instant::now() >= deadline {
+                            break None;
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    Err(error) => panic!("patch egress policy: {error}"),
+                }
+            };
+            let Some(patched) = patched else {
+                eprintln!("runtime does not support egress policy mutation, skipping");
+                kill_quietly(&sandbox).await;
+                return;
+            };
+            let rules = patched
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.egress.as_ref())
+                .map(Vec::len)
+                .unwrap_or_default();
+            assert!(rules >= 1, "patched policy should contain rules");
+
+            let deleted = egress
+                .delete_policy(&["*.opensandbox.internal".to_string()])
+                .await
+                .expect("delete egress policy rule");
+            eprintln!("policy after delete: {:?}", deleted.policy);
+        }
+        Err(error) => eprintln!("no egress endpoint for this runtime, skipping: {error}"),
+    }
+
+    kill_quietly(&sandbox).await;
+}
+
+#[tokio::test]
+async fn snapshot_round_trip_preserves_the_filesystem() {
+    require_e2e!();
+    // Snapshots are asynchronous and can take minutes on a cold runner, so this
+    // case owns its options with a long TTL and no auto cleanup.
+    let options = CreateOptions::from_image(e2e_common::image())
+        .with_manual_cleanup()
+        .with_timeout_seconds(1800)
+        .with_ready_timeout(e2e_common::READY_TIMEOUT)
+        .with_poll_interval(e2e_common::POLL_INTERVAL)
+        .with_metadata("e2e.suite", "rust-snapshot");
+    let source = Sandbox::create(e2e_common::connection_config(), options)
+        .await
+        .expect("create snapshot source");
+
+    let marker = format!("snapshot-marker-{}", unique_tag("marker"));
+    let written = source
+        .exec(&format!(
+            "mkdir -p /tmp/snapshot-e2e && printf '%s' '{marker}' > /tmp/snapshot-e2e/marker.txt"
+        ))
+        .await
+        .expect("write marker");
+    assert_eq!(written.exit_code, Some(0));
+
+    let name = unique_tag("rust-snapshot");
+    let accepted = source.snapshot(Some(&name)).await.expect("create snapshot");
+    let snapshot_id = accepted.id.clone();
+    assert!(!snapshot_id.is_empty(), "snapshot id must be assigned");
+    assert_eq!(accepted.name.as_deref(), Some(name.as_str()));
+
+    // Poll until the snapshot is usable; capture is asynchronous server-side.
+    let lifecycle = source.lifecycle().clone();
+    eventually("snapshot reaching Ready", Duration::from_secs(300), || {
+        let lifecycle = lifecycle.clone();
+        let snapshot_id = snapshot_id.clone();
+        async move {
+            matches!(
+                lifecycle
+                    .get_snapshot(&snapshot_id)
+                    .await
+                    .map(|info| info.status.state)
+                    .unwrap_or(SnapshotState::Creating),
+                SnapshotState::Ready
+            )
+        }
+    })
+    .await;
+    let ready = lifecycle
+        .get_snapshot(&snapshot_id)
+        .await
+        .expect("snapshot after wait");
+    assert_eq!(ready.status.state, SnapshotState::Ready);
+
+    // The list endpoint must find it both by sandbox and by name.
+    let listed = lifecycle
+        .list_snapshots(&ListSnapshotsQuery {
+            sandbox_id: Some(source.id().to_string()),
+            name: Some(name.clone()),
+            states: vec![SnapshotState::Ready],
+            page: Some(1),
+            page_size: Some(50),
+        })
+        .await
+        .expect("list snapshots");
+    assert!(
+        listed.items.iter().any(|info| info.id == snapshot_id),
+        "snapshot {snapshot_id} missing from filtered list: {:?}",
+        listed.items
+    );
+
+    // Restore into a fresh sandbox and verify the filesystem came along.
+    let restore = CreateOptions::from_snapshot(&snapshot_id)
+        .with_manual_cleanup()
+        .with_timeout_seconds(1800)
+        .with_ready_timeout(e2e_common::READY_TIMEOUT)
+        .with_poll_interval(e2e_common::POLL_INTERVAL)
+        .with_metadata("e2e.suite", "rust-snapshot-restore");
+    let restored = Sandbox::create(e2e_common::connection_config(), restore)
+        .await
+        .expect("restore from snapshot");
+    let read_back = restored
+        .exec("cat /tmp/snapshot-e2e/marker.txt")
+        .await
+        .expect("read marker from restored sandbox");
+    assert_eq!(read_back.exit_code, Some(0));
+    assert!(
+        read_back.text().contains(&marker),
+        "restored marker mismatch: {:?}",
+        read_back.text()
+    );
+
+    kill_quietly(&restored).await;
+
+    lifecycle
+        .delete_snapshot(&snapshot_id)
+        .await
+        .expect("delete snapshot");
+    let deleted = lifecycle.get_snapshot(&snapshot_id).await;
+    match deleted {
+        Err(Error::Api(api)) => assert_eq!(api.status, 404, "unexpected api error: {api:?}"),
+        other => panic!("deleted snapshot should 404, got {other:?}"),
+    }
+
+    kill_quietly(&source).await;
+}
+
+#[tokio::test]
+async fn missing_resources_report_api_errors() {
+    require_e2e!();
+    let lifecycle = LifecycleClient::new(&e2e_common::connection_config())
+        .expect("lifecycle client for 404 probes");
+
+    for (label, error) in [
+        (
+            "get_sandbox",
+            lifecycle
+                .get_sandbox("rust-e2e-does-not-exist")
+                .await
+                .map(|info| format!("{info:?}")),
+        ),
+        (
+            "get_snapshot",
+            lifecycle
+                .get_snapshot("rust-e2e-does-not-exist")
+                .await
+                .map(|info| format!("{info:?}")),
+        ),
+    ] {
+        match error {
+            Err(Error::Api(api)) => {
+                assert_eq!(api.status, 404, "{label}: unexpected api error {api:?}");
+                assert!(!api.code.is_empty(), "{label}: error code must be set");
+            }
+            other => panic!("{label} should report a 404 api error, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn egress_policy_is_readable() {
+    require_e2e!();
+    let sandbox = create_sandbox(&[("e2e.suite", "rust-egress-read")]).await;
 
     match sandbox.egress().await {
         Ok(egress) => match egress.policy().await {
