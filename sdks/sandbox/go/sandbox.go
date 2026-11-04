@@ -594,11 +594,9 @@ func (s *Sandbox) waitForRunning(ctx context.Context, timeout time.Duration) err
 		timeout = time.Duration(DefaultReadyTimeoutSeconds) * time.Second
 	}
 
-	waitCtx := ctx
-	cancel := func() {}
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		waitCtx, cancel = context.WithTimeout(ctx, timeout)
-	}
+	// Always enforce the running-state budget, including when the caller has
+	// a longer deadline. WithTimeout preserves an earlier parent deadline.
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()

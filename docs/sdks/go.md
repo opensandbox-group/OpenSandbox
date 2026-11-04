@@ -339,6 +339,8 @@ if _, err := resumed.Renew(ctx, 30*time.Minute); err != nil {
 }
 ```
 
+During sandbox creation, `ReadyTimeout` bounds the wait for the lifecycle state to become `Running`, even when the caller context has a longer deadline. An earlier caller deadline or cancellation still takes precedence.
+
 Use `ConnectSandbox(ctx, config, id, opensandbox.ReadyOptions{})` to attach to an already running sandbox with a readiness check. See [Pause and Resume](/guides/pause-resume).
 
 ### Resource metrics
