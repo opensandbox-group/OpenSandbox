@@ -64,7 +64,10 @@ def create_read_bytes_response(
         if response.status_code == 206
         else None
     )
-    if response.status_code == 206:
+    content_encoding = response.headers.get("content-encoding", "").strip().lower()
+    if content_encoding and content_encoding != "identity":
+        total_size = -1
+    elif response.status_code == 206:
         total_size = content_range.total if content_range is not None else -1
     else:
         total_size = -1 if line_based else content_length
