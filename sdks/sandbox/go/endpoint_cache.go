@@ -45,9 +45,11 @@ type endpointCacheEntry struct {
 	expiresAt time.Time
 }
 
-// endpointFlight tracks the callers waiting on one shared cache-miss fetch.
-// The fetch runs with ctx, which is cancelled once the last waiter leaves so
-// an abandoned request does not outlive every caller.
+// endpointFlight identifies one inflight cache-miss fetch and tracks the
+// callers waiting on it. The fetch runs with ctx, which is cancelled once the
+// last waiter leaves so an abandoned request does not outlive every caller.
+// The record is retained only while that fetch is current, so invalidations do
+// not accumulate sandbox IDs.
 type endpointFlight struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -115,7 +117,10 @@ func (c *EndpointCache) Get(key endpointCacheKey) (*Endpoint, bool) {
 func (c *EndpointCache) Put(key endpointCacheKey, ep *Endpoint) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.putLocked(key, ep)
+}
 
+func (c *EndpointCache) putLocked(key endpointCacheKey, ep *Endpoint) {
 	if elem, ok := c.entries[key]; ok {
 		c.order.MoveToFront(elem)
 		entry := elem.Value.(*endpointCacheEntry)
@@ -149,6 +154,11 @@ func (c *EndpointCache) Invalidate(sandboxID string) {
 	for key, elem := range c.entries {
 		if key.sandboxID == sandboxID {
 			c.removeLocked(elem)
+		}
+	}
+	for key := range c.flights {
+		if key.sandboxID == sandboxID {
+			delete(c.flights, key)
 			c.group.Forget(key.String())
 		}
 	}
@@ -179,8 +189,9 @@ func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fe
 	}
 
 	// Joining the flight and starting or joining the singleflight call happen
-	// under c.mu, so every call for key is owned by the flight currently
-	// registered for key. DoChan runs fn in its own goroutine.
+	// under c.mu, the same lock used by Invalidate, so every call for key is
+	// owned by the flight currently registered for key and a new caller cannot
+	// join a forgotten generation. DoChan runs fn in its own goroutine.
 	c.mu.Lock()
 	flight, ok := c.flights[key]
 	if !ok {
@@ -190,6 +201,16 @@ func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fe
 	}
 	flight.waiters++
 	ch := c.group.DoChan(key.String(), func() (interface{}, error) {
+		defer func() {
+			c.mu.Lock()
+			// Forget before dropping the flight: singleflight removes its own
+			// entry only after this function returns.
+			if c.flights[key] == flight {
+				c.group.Forget(key.String())
+				delete(c.flights, key)
+			}
+			c.mu.Unlock()
+		}()
 		if ep, ok := c.Get(key); ok {
 			return ep, nil
 		}
@@ -197,7 +218,11 @@ func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fe
 		if err != nil {
 			return nil, err
 		}
-		c.Put(key, ep)
+		c.mu.Lock()
+		if c.flights[key] == flight {
+			c.putLocked(key, ep)
+		}
+		c.mu.Unlock()
 		return ep, nil
 	})
 	c.mu.Unlock()

@@ -333,9 +333,22 @@ func parseRetryAfterValue(val string) (time.Duration, bool) {
 	if val == "" {
 		return 0, false
 	}
-	if secs, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+	number := strings.TrimSpace(val)
+	secs, err := strconv.ParseInt(number, 10, 64)
+	// ParseInt can report overflow before examining trailing non-digits.
+	if errors.Is(err, strconv.ErrRange) {
+		digits := strings.TrimLeft(number, "+-")
+		if strings.Trim(digits, "0123456789") != "" {
+			return 0, false
+		}
+		err = nil // ParseInt has already clamped the value to an int64 bound.
+	}
+	if err == nil {
 		if secs < 0 {
 			return 0, true
+		}
+		if secs > math.MaxInt64/int64(time.Second) {
+			return time.Duration(math.MaxInt64), true
 		}
 		return time.Duration(secs) * time.Second, true
 	}

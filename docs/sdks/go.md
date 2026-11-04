@@ -71,7 +71,7 @@ func main() {
 
 `ConnectSandbox` and `ResumeSandbox` check health only when you pass the optional `ReadyOptions` argument (an empty `ReadyOptions{}` uses the default check). Omitting it resolves the endpoint without a health check. Pause is asynchronous: wait until sandbox info reports `Paused` before resuming.
 
-`ConnectionConfig.APIKey` authenticates lifecycle requests. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when `UseServerProxy` is true; in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication.
+`ConnectionConfig.APIKey` authenticates lifecycle requests. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when `UseServerProxy` is true; in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
 
 The following snippets go inside a function returning `error`, with the live `sandbox`, `config`, and `ctx` above. Add standard-library imports used by each snippet. Creation examples are alternatives; terminate sandboxes with `Kill` when done. `Close` currently does not terminate the sandbox.
 
@@ -338,6 +338,8 @@ if _, err := resumed.Renew(ctx, 30*time.Minute); err != nil {
     return err
 }
 ```
+
+During sandbox creation, `ReadyTimeout` bounds the wait for the lifecycle state to become `Running`, even when the caller context has a longer deadline. An earlier caller deadline or cancellation still takes precedence.
 
 Use `ConnectSandbox(ctx, config, id, opensandbox.ReadyOptions{})` to attach to an already running sandbox with a readiness check. See [Pause and Resume](/guides/pause-resume).
 
@@ -663,6 +665,8 @@ if _, err := sandbox.PatchMetadata(ctx, opensandbox.MetadataPatch{
 
 Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 
+Successful `PauseSandbox`, `ResumeSandbox`, and `DeleteSandbox` requests remove cached endpoints for that sandbox from the client's endpoint cache, so subsequent lookups fetch current endpoint information. Failed requests leave cached entries intact; other sandboxes are unaffected.
+
 | Method | Description |
 |--------|-------------|
 | `CreateSandbox(ctx, req)` | Create a new sandbox from a container image |
@@ -766,6 +770,8 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 
 ## SSE Streaming
 
+The stream parser accepts LF, CRLF, and CR line endings for both standard SSE and execd's legacy bare-JSON frames, including when a line ending is split across network reads.
+
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 
 ```go
@@ -800,7 +806,7 @@ SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by d
 :::
 
 ::: tip SDK Telemetry
-`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
+`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Each best-effort background report has a five-second deadline, including when using a custom `HTTPClient`; a shorter client timeout still applies, and the caller-owned client is not modified. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
 
 ### Follow redirects
