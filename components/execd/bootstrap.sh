@@ -243,18 +243,25 @@ OPENSANDBOX_MERGED_CA=""
 trust_mitm_ca() {
 	cert="$1"
 	merged="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+	# A failed update invocation is transient (watch_mitm_ca retries it);
+	# missing tooling is a permanent image property and only warns.
+	_failed=""
 
 	# 1) Try to install into the system trust store (best-effort).
 	if command -v update-ca-certificates >/dev/null 2>&1; then
-		_sudo mkdir -p /usr/local/share/ca-certificates \
+		if ! { _sudo mkdir -p /usr/local/share/ca-certificates \
 			&& _sudo cp "$cert" /usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt \
-			&& _sudo update-ca-certificates \
-			|| echo "warning: update-ca-certificates failed; system trust store may not include mitm CA" >&2
+			&& _sudo update-ca-certificates; }; then
+			echo "warning: update-ca-certificates failed; system trust store may not include mitm CA" >&2
+			_failed=1
+		fi
 	elif command -v update-ca-trust >/dev/null 2>&1; then
-		_sudo mkdir -p /etc/pki/ca-trust/source/anchors \
+		if ! { _sudo mkdir -p /etc/pki/ca-trust/source/anchors \
 			&& _sudo cp "$cert" /etc/pki/ca-trust/source/anchors/opensandbox-mitmproxy-ca.pem \
-			&& { _sudo update-ca-trust extract || _sudo update-ca-trust; } \
-			|| echo "warning: update-ca-trust failed; system trust store may not include mitm CA" >&2
+			&& { _sudo update-ca-trust extract || _sudo update-ca-trust; }; }; then
+			echo "warning: update-ca-trust failed; system trust store may not include mitm CA" >&2
+			_failed=1
+		fi
 	else
 		echo "warning: no system trust-store tooling found (need update-ca-certificates or update-ca-trust)" >&2
 	fi
@@ -277,13 +284,22 @@ trust_mitm_ca() {
 		/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
 		if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -s "$candidate" ]; then
 			mkdir -p "$(dirname "$merged")" 2>/dev/null || true
-			cat "$candidate" "$cert" > "$merged"
-			OPENSANDBOX_MERGED_CA="$merged"
-			return 0
+			if cat "$candidate" "$cert" > "$merged"; then
+				OPENSANDBOX_MERGED_CA="$merged"
+				if [ -n "$_failed" ]; then
+					return 1
+				fi
+				return 0
+			fi
+			echo "warning: failed to write merged CA bundle at $merged" >&2
+			_failed=1
 		fi
 	done
 
 	echo "warning: could not locate any CA bundle to merge with mitm CA" >&2
+	if [ -n "$_failed" ]; then
+		return 1
+	fi
 	return 0
 }
 
@@ -523,11 +539,14 @@ wait_for_trustworthy_mitm_ca() {
 # CA changes (MITM_CA_WATCH_INTERVAL, 30s). The env vars bootstrap exported
 # point at refreshed files, so new processes heal without re-exec; processes
 # with in-memory trust (e.g. JVM cacerts) still need a restart, which the
-# change log line calls out.
+# change log line calls out. $2 is the fingerprint of the already-installed
+# generation (empty = nothing installed yet, so the first export installs);
+# a failed install pass is retried on the next poll.
 watch_mitm_ca() {
 	ca="$1"
+	# Empty $2 means nothing trusted yet: the first export seen installs it.
+	_prev="${2:-}"
 	_interval="${MITM_CA_WATCH_INTERVAL:-30}"
-	_prev="$(_ca_fingerprint "$ca")"
 	echo "watching mitm CA at $ca for rotation (interval ${_interval}s)" >&2
 	while :; do
 		sleep "$_interval" 2>/dev/null || sleep 1
@@ -537,19 +556,29 @@ watch_mitm_ca() {
 			continue
 		fi
 		if [ "$_cur" != "$_prev" ]; then
-			_prev="$_cur"
 			echo "mitm CA changed (egress restarted?); reinstalling trust stores; restart long-running processes that cached the old CA" >&2
-			trust_mitm_ca "$ca" || true
+			_failed=0
+			trust_mitm_ca "$ca" || _failed=1
 			trust_mitm_ca_nss "$ca" || true
 			trust_mitm_ca_jdk "$ca" || true
+			if [ "$_failed" -eq 0 ]; then
+				_prev="$_cur"
+			else
+				echo "warning: mitm CA reinstall failed; retrying on the next poll" >&2
+			fi
 		fi
 	done
 }
 
 MITM_CA="${OPENSANDBOX_MITM_CA:-/opt/opensandbox/mitmproxy-ca-cert.pem}"
 if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
+	_baseline_fp=""
 	if wait_for_trustworthy_mitm_ca "$MITM_CA"; then
 		echo "mitm CA ready at $MITM_CA after ${MITM_CA_WAIT_SECONDS}s"
+		# Baseline for the rotation watcher: what we are about to trust. If
+		# egress swaps the file during the install pass below, the watcher
+		# sees the drift and reinstalls.
+		_baseline_fp="$(_ca_fingerprint "$MITM_CA")"
 		if ! trust_mitm_ca "$MITM_CA"; then
 			echo "warning: failed to install mitm CA into system trust store; TLS interception may not work for system libraries" >&2
 		fi
@@ -572,10 +601,12 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 			export REQUESTS_CA_BUNDLE="$MITM_CA"
 			export SSL_CERT_FILE="$MITM_CA"
 		fi
-
-		# Track egress CA rotation for the sandbox lifetime.
-		watch_mitm_ca "$MITM_CA" &
 	fi
+
+	# Arm regardless of the export's current presence: it covers a purge or
+	# re-export racing the trust pass above, and a first export after a
+	# wait timeout (empty baseline installs the first thing that shows up).
+	watch_mitm_ca "$MITM_CA" "$_baseline_fp" &
 fi
 
 EXECD="${EXECD:=/opt/opensandbox/execd}"

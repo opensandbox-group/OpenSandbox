@@ -14,7 +14,9 @@
 # limitations under the License.
 
 # Regression tests for the mitm CA rotation watcher: reinstall trust on every
-# content change, stay silent while unchanged.
+# content change against the installed-generation baseline, stay silent while
+# unchanged, adopt a first export when nothing was trusted yet, and retry a
+# failed install pass.
 
 set -euo pipefail
 
@@ -44,12 +46,28 @@ fail() {
   exit 1
 }
 
-# Stub the production trust helpers before sourcing the watcher, so the
-# background job calls the stubs instead of production code.
+CA_A="$TESTDIR/ca-a.pem"
+CA_B="$TESTDIR/ca-b.pem"
+CA_C="$TESTDIR/ca-c.pem"
+printf '%s\n' 'certificate-generation-a' > "$CA_A"
+printf '%s\n' 'certificate-generation-b' > "$CA_B"
+printf '%s\n' 'certificate-generation-c' > "$CA_C"
+
+export MITM_CA_WATCH_INTERVAL=0.3
+
+# Stub trust helpers, defined before sourcing the watcher so the background
+# job calls the stubs instead of production code. trust_mitm_ca honors an
+# optional fail-once counter to emulate a transient install failure.
 TRUST_LOG="$TESTDIR/trust.log"
 : > "$TRUST_LOG"
+FAIL_ONCE=0
 trust_mitm_ca() {
   printf 'system %s\n' "$1" >> "$TRUST_LOG"
+  if [ "$FAIL_ONCE" -gt 0 ]; then
+    FAIL_ONCE=$((FAIL_ONCE - 1))
+    return 1
+  fi
+  return 0
 }
 trust_mitm_ca_nss() {
   printf 'nss %s\n' "$1" >> "$TRUST_LOG"
@@ -61,49 +79,81 @@ trust_mitm_ca_jdk() {
 # shellcheck source=/dev/null
 . "$TESTDIR/helpers.sh"
 
-CA_A="$TESTDIR/ca-a.pem"
-CA_B="$TESTDIR/ca-b.pem"
-printf '%s\n' 'certificate-generation-a' > "$CA_A"
-printf '%s\n' 'certificate-generation-b' > "$CA_B"
+fp() {
+  _ca_fingerprint "$1"
+}
 
-live="$TESTDIR/live-ca.pem"
+reset_log() {
+  : > "$TRUST_LOG"
+}
+
+stop_watcher() {
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+count_calls() {
+  grep -c "^$1 " "$TRUST_LOG" || true
+}
+
+# --- Case A: baseline given — quiet while unchanged, reinstall per rotation.
+reset_log
+live="$TESTDIR/live-a.pem"
 cp "$CA_A" "$live"
-
-export MITM_CA_WATCH_INTERVAL=0.3
-watch_mitm_ca "$live" > "$TESTDIR/watch.log" 2>&1 &
+watch_mitm_ca "$live" "$(fp "$live")" > "$TESTDIR/watch-a.log" 2>&1 &
 watcher=$!
+sleep 0.7
+cp "$CA_B" "$live"; sleep 0.7          # rotation 1: in-place replacement
+rm -f "$live"; sleep 0.3
+cp "$CA_C" "$live"; sleep 0.7          # rotation 2: purge, then re-export
+stop_watcher "$watcher"
+for store in system nss jdk; do
+  [ "$(count_calls "$store")" -eq 2 ] || fail "case A: expected 2 $store reinstalls, got $(count_calls "$store")"
+done
+grep -q 'mitm CA changed' "$TESTDIR/watch-a.log" || fail "case A: rotation not logged"
+echo "PASS: case A baseline watcher reinstall per rotation, silent while unchanged"
 
-sleep 1
-# Steady state: unchanged CA must not trigger a reinstall.
-grep -q 'certificate-generation-a' "$live" || fail "fixture broken"
-
-# Rotation 1: egress exports a new CA in place.
-cp "$CA_B" "$live"
-sleep 1
-
-# Rotation 2: full egress restart cycle — purge, then re-export another CA.
-rm -f "$live"
+# --- Case B: empty baseline (nothing trusted yet) — the first export seen
+# must install, not become the baseline.
+reset_log
+live="$TESTDIR/live-b.pem" # absent at arm time
+watch_mitm_ca "$live" "" > "$TESTDIR/watch-b.log" 2>&1 &
+watcher=$!
 sleep 0.5
-printf '%s\n' 'certificate-generation-c' > "$live"
+cp "$CA_A" "$live"; sleep 0.7          # late first export: must install
+cp "$CA_B" "$live"; sleep 0.7          # rotation: must install again
+stop_watcher "$watcher"
+for store in system nss jdk; do
+  [ "$(count_calls "$store")" -eq 2 ] || fail "case B: expected 2 $store installs, got $(count_calls "$store")"
+done
+echo "PASS: case B empty baseline installs the first export it sees"
+
+# --- Case C: stale baseline, file already holds a newer generation — must
+# install on the first poll instead of treating it as already done.
+reset_log
+live="$TESTDIR/live-c.pem"
+cp "$CA_B" "$live" # installed generation is A, but the export already holds B
+watch_mitm_ca "$live" "$(fp "$CA_A")" > "$TESTDIR/watch-c.log" 2>&1 &
+watcher=$!
 sleep 1
+stop_watcher "$watcher"
+[ "$(count_calls system)" -eq 1 ] || fail "case C: expected 1 install for the newer generation, got $(count_calls system)"
+echo "PASS: case C stale baseline reinstalls the newer generation on first poll"
 
-kill "$watcher" 2>/dev/null || true
-wait "$watcher" 2>/dev/null || true
+# --- Case D: transient install failure must be retried, not dropped.
+reset_log
+live="$TESTDIR/live-d.pem"
+cp "$CA_A" "$live"
+FAIL_ONCE=1
+watch_mitm_ca "$live" "$(fp "$live")" > "$TESTDIR/watch-d.log" 2>&1 &
+watcher=$!
+sleep 0.7
+cp "$CA_B" "$live" # rotation: first install attempt fails, retry succeeds
+sleep 1.2
+stop_watcher "$watcher"
+[ "$(count_calls system)" -eq 2 ] || fail "case D: expected a failed attempt plus a retry, got $(count_calls system) system calls"
+grep -q 'retrying on the next poll' "$TESTDIR/watch-d.log" || fail "case D: retry not logged"
+grep -q 'mitm CA changed' "$TESTDIR/watch-d.log" || fail "case D: rotation not logged"
+echo "PASS: case D failed install is retried on the next poll"
 
-system_calls="$(grep -c '^system ' "$TRUST_LOG" || true)"
-nss_calls="$(grep -c '^nss ' "$TRUST_LOG" || true)"
-jdk_calls="$(grep -c '^jdk ' "$TRUST_LOG" || true)"
-
-[ "$system_calls" -eq 2 ] || fail "expected exactly 2 system-store reinstalls (one per rotation; steady state must stay silent), got $system_calls"
-[ "$nss_calls" -eq 2 ] || fail "expected exactly 2 NSS reinstalls, got $nss_calls"
-[ "$jdk_calls" -eq 2 ] || fail "expected exactly 2 JDK reinstalls, got $jdk_calls"
-
-grep -q 'mitm CA changed' "$TESTDIR/watch.log" || fail "watcher did not log the rotation"
-grep -q 'restart long-running processes' "$TESTDIR/watch.log" || fail "watcher did not tell users to restart processes with cached trust"
-grep -q 'watching mitm CA' "$TESTDIR/watch.log" || fail "watcher did not announce itself"
-
-# The last reinstall must target the live CA path.
-last_system="$(grep '^system ' "$TRUST_LOG" | tail -n 1)"
-[ "$last_system" = "system $live" ] || fail "unexpected reinstall target: $last_system"
-
-echo "PASS: watcher reinstalls trust on every rotation and stays quiet otherwise"
+echo "PASS: watcher behaves correctly in all 4 scenarios"

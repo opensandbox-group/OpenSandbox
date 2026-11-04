@@ -67,10 +67,25 @@ def where():
     return os.environ["FAKE_CERTIFI_PEM"]
 PYEOF
 
-# Shield the host: sudo pretends success, java/keytool are logging stubs.
+# Shield the host, for root and non-root runs alike: as root, bootstrap's
+# _sudo executes directly and bypasses the sudo stub, so the trust commands
+# themselves must be stubbed too (cp and update-ca-* are only used by the
+# trust paths inside bootstrap; the fake egress runs outside this PATH).
 cat > "$SHIM/sudo" <<STUB
 #!/bin/sh
 echo "sudo \$1" >> "$SHIM/sudo.log"
+exit 0
+STUB
+cat > "$SHIM/cp" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+cat > "$SHIM/update-ca-certificates" <<STUB
+#!/bin/sh
+echo "invoked" >> "$SHIM/update-ca.log"
+STUB
+cat > "$SHIM/update-ca-trust" <<'STUB'
+#!/bin/sh
 exit 0
 STUB
 cat > "$SHIM/java" <<STUB
@@ -82,7 +97,7 @@ cat > "$SHIM/keytool" <<STUB
 echo "keytool \$*" >> "$SHIM/keytool.log"
 exit 0
 STUB
-chmod +x "$SHIM/sudo" "$SHIM/java" "$SHIM/keytool"
+chmod +x "$SHIM/sudo" "$SHIM/cp" "$SHIM/update-ca-certificates" "$SHIM/update-ca-trust" "$SHIM/java" "$SHIM/keytool"
 
 # Fixture JDK: keeps the JDK trust branch in a sandboxed store.
 FAKE_JDK="$TESTDIR/fake-jdk"
@@ -181,10 +196,18 @@ grep -q 'mitm CA changed' "$LOG" || fail "watcher missed the second rotation"
 grep -q 'certificate-generation-rotated' "$MERGED" || fail "watcher did not rebuild the merged bundle with the rotated CA"
 grep -q 'certificate-generation-stale' "$MERGED" && fail "merged bundle contains the STALE pre-existing CA" || true
 
-# 3) System-trust installs: 2 on Linux CI (initial + watcher), 0 where the
-#    update-ca-certificates branch is skipped.
+# 3) System-trust installs: 2 per trusted generation (initial + watcher),
+#    counted via the sudo stub on non-root runs and via the
+#    update-ca-certificates stub when root bypasses it; 0 where the
+#    system-install branch is skipped entirely (no tooling).
 install_passes=0
-[ -f "$SHIM/sudo.log" ] && install_passes="$(grep -c '^sudo update-ca-certificates$' "$SHIM/sudo.log" || true)"
+if [ -f "$SHIM/sudo.log" ]; then
+  install_passes="$(grep -c '^sudo update-ca-certificates$' "$SHIM/sudo.log" || true)"
+fi
+if [ -f "$SHIM/update-ca.log" ]; then
+  uc_passes="$(grep -c 'invoked' "$SHIM/update-ca.log" || true)"
+  install_passes=$((install_passes + uc_passes))
+fi
 case "$install_passes" in
 0 | 2) ;;
 *) fail "expected 0 or 2 system-trust install passes, got $install_passes" ;;
