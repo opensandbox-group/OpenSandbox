@@ -67,7 +67,8 @@ jobs:
                 path.startsWith("sdks/") ||
                 path.startsWith("tests/") ||
                 path === "scripts/python-execd-init-e2e.sh" ||
-                path === "scripts/python-execd-hardening-e2e.sh",
+                path === "scripts/python-execd-hardening-e2e.sh" ||
+                path === "scripts/rust-e2e.sh",
               "fast-sandbox": (path) =>
                 workflowChanged(path, "fast-sandbox-test.yml") ||
                 path.startsWith("scripts/fast-sandbox-env/") ||
