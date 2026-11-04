@@ -36,7 +36,7 @@ func RecordTLSAdmission(decision, reason string) {
 	case "deny":
 		switch reason {
 		case "unknown_identity", "invalid_sni", "snapshot_missing", "generation_mismatch",
-			"invalid_input", "registry_exhausted", "admission_disabled", "ssl_insecure", "malformed_extensions":
+			"invalid_input", "non_canonical_port", "registry_exhausted", "admission_disabled", "ssl_insecure", "malformed_extensions":
 			valid = true
 		}
 	}
