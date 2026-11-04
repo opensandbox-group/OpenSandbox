@@ -605,8 +605,22 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	# time. (REQUESTS_CA_BUNDLE and SSL_CERT_FILE replace the default
 	# bundle, so they point at the merged roots, not the bare mitm CA.)
 	export NODE_EXTRA_CA_CERTS="$MITM_CA"
-	export REQUESTS_CA_BUNDLE="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
-	export SSL_CERT_FILE="$REQUESTS_CA_BUNDLE"
+	if [ -n "$OPENSANDBOX_MERGED_CA" ]; then
+		# Merged bundle built: point at the stable merged path.
+		export REQUESTS_CA_BUNDLE="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+		export SSL_CERT_FILE="$REQUESTS_CA_BUNDLE"
+	elif [ -f "$MITM_CA" ]; then
+		# Minimal image with no root bundle to merge: fall back to the bare
+		# mitm CA so transparent-MITM HTTPS still verifies.
+		echo "warning: merged CA bundle unavailable; REQUESTS_CA_BUNDLE/SSL_CERT_FILE will only contain the mitm CA" >&2
+		export REQUESTS_CA_BUNDLE="$MITM_CA"
+		export SSL_CERT_FILE="$MITM_CA"
+	else
+		# No export yet (wait timeout): the watcher builds the merged bundle
+		# on its first install, so seed the path it will appear at.
+		export REQUESTS_CA_BUNDLE="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+		export SSL_CERT_FILE="$REQUESTS_CA_BUNDLE"
+	fi
 
 	# Arm regardless of the export's current presence: it covers a purge or
 	# re-export racing the trust pass above, and a first export after a
