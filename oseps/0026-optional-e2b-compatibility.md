@@ -21,7 +21,7 @@ status: draft
 - [Design Details](#design-details)
   - [Initial Version and Capability Profile](#initial-version-and-capability-profile)
   - [Control Plane and Resource Identity](#control-plane-and-resource-identity)
-  - [Upstream envd Image and Readiness](#upstream-envd-image-and-readiness)
+  - [Upstream envd Packaging and Readiness](#upstream-envd-packaging-and-readiness)
   - [Routing and Security](#routing-and-security)
   - [Errors and Operational Behavior](#errors-and-operational-behavior)
   - [Delivery Gates and Community Work](#delivery-gates-and-community-work)
@@ -35,7 +35,7 @@ status: draft
 
 ## Summary
 
-This proposal adds an optional control-plane API adapter so selected applications can use an unmodified E2B SDK with OpenSandbox. The adapter translates sandbox lifecycle operations; an opt-in sandbox image runs a pinned, unmodified upstream envd for command and file operations, with no envd-to-execd protocol translation. The first candidate is Python `e2b==2.62.1` with envd `0.8.0` on Linux/amd64 Docker; this documentation proposal does not establish tested compatibility, implementation ownership, or a release commitment.
+This proposal adds an optional control-plane API adapter so selected applications can use an unmodified E2B SDK with OpenSandbox. The adapter translates sandbox lifecycle operations; an opt-in sandbox runtime runs a pinned, unmodified upstream envd for command and file operations, with no envd-to-execd protocol translation. The first candidate is Python `e2b==2.62.1` with envd `0.8.0` on Linux/amd64 Docker; this documentation proposal does not establish tested compatibility, implementation ownership, or a release commitment.
 
 ## Motivation
 
@@ -69,7 +69,7 @@ This OSEP narrows the question to an optional, tested compatibility surface with
 | ID | Requirement |
 |---|---|
 | R1 | Compatibility is opt-in and separately addressable; disabling it leaves native OpenSandbox APIs usable without an E2B dependency. |
-| R2 | Each advertised profile pins the SDK packages, relevant protocol sources, OpenSandbox version, runtime, image digest, transport configuration, and operation-level tests. No version is supported solely because its source was inspected. |
+| R2 | Each advertised profile pins the SDK packages, relevant protocol sources, OpenSandbox version, runtime, image/template and any injected-payload digest, transport configuration, and operation-level tests. No version is supported solely because its source was inspected. |
 | R3 | The actual official SDK and a selected real framework workflow must pass against a real OpenSandbox backend before that integration is advertised. Mock or direct HTTP tests alone are insufficient. |
 | R4 | Accepted inputs retain their documented semantics. Unsupported control-plane operations and non-default options fail explicitly before side effects; no ignored security policy, fabricated metadata, or success-shaped fallback. |
 | R5 | Authentication and resource authorization apply to both planes. Routing identifiers never confer access, and native backend credentials never reach clients or sandbox workloads. |
@@ -81,7 +81,7 @@ This OSEP narrows the question to an optional, tested compatibility surface with
 
 Use a separately deployable control-plane adapter on its own API origin. It authenticates E2B lifecycle requests, translates the supported subset to native OpenSandbox lifecycle APIs, and tracks resource identity and readiness. No E2B routes are added to the native server.
 
-Run the original upstream envd executable in an explicitly selected sandbox image. The SDK sends command/file traffic to envd through operator-configured TLS routing. The adapter does not parse or translate that traffic, and execd does not implement envd APIs. Image packaging, private envd initialization, endpoint discovery, and ingress configuration are integration work; they do not require a new command/file protocol implementation.
+Run the original upstream envd executable inside the sandbox. For Pod sandboxes, inject its files through an init container and shared volume; for MicroVMs, bake them into the template rootfs. The initial standalone Docker experiment can use a prebuilt image. The SDK sends command/file traffic to envd through operator-configured TLS routing. The adapter does not parse or translate that traffic, and execd does not implement envd APIs. Runtime packaging, private envd initialization, endpoint discovery, and ingress configuration are integration work; they do not require a new command/file protocol implementation.
 
 ```mermaid
 flowchart TB
@@ -94,7 +94,7 @@ flowchart TB
         Adapter -->|"Lifecycle calls"| Native
     end
     Route["TLS router<br/>E2B hostname config"]
-    subgraph Sandbox["Opt-in sandbox image"]
+    subgraph Sandbox["Opt-in sandbox runtime"]
         Envd["Unmodified upstream envd 0.8.0"]
     end
     SDK -->|"Lifecycle REST"| Adapter
@@ -142,7 +142,7 @@ The initial proposed tuple is concrete but **unvalidated**. It is a starting poi
 | Dimension | Initial candidate | Evidence still required |
 |---|---|---|
 | Official client | Python synchronous `e2b==2.62.1`, source `9301cd84757b0e3f3fccbd349e85ff2bd403a1f4` | Lock transitive dependencies and Python version; run actual SDK calls without forks or monkeypatches. |
-| Sandbox daemon | envd `0.8.0`, from official runtime release `2026.30`, source `f32ee8a2a50052f32e3632ceb451111a98dd5104` | Pin binary provenance/checksum and immutable image digest; verify the running version. |
+| Sandbox daemon | envd `0.8.0`, from official runtime release `2026.30`, source `f32ee8a2a50052f32e3632ceb451111a98dd5104` | Pin binary provenance/checksum and immutable image or injected-payload digest; verify the running version. |
 | Backend | OpenSandbox inspected baseline `fab314287bded086a5f76b2735935c7f484a0332`; Linux/amd64 Docker | Build/pin server and sandbox artifacts from declared revisions and record the actual runtime configuration. |
 | Client transport | Documented custom domain/API configuration; explicitly set `E2B_HTTP_VERSION=1.1` for this profile because the pinned SDK defaults to HTTP/2 | Prove both lifecycle and sandbox hosts, TLS, and proxy behavior; debug mode is not an acceptance configuration. |
 | Framework | One base-SDK scenario, to be agreed at Gate 0 | Exact framework/version/configuration and complete call inventory; none is claimed supported yet. |
@@ -155,11 +155,11 @@ The [released Python package source](https://github.com/e2b-dev/E2B/blob/9301cd8
 | Lifecycle | Create, connect to a running sandbox, get info, list, set timeout, kill | Exact supported defaults, filters, pagination, error behavior, and repeated-delete behavior are fixtures. No resume of paused sandboxes. |
 | Commands via envd | Foreground commands, stdout/stderr, exit status, command timeout | Test approved users, environment, working directory, disconnect behavior, and resource bounds. |
 | Files via envd | Read/write and binary upload/download | Test paths, overwrite, permissions, missing files, and size limits. |
-| Template configuration | Operator alias → immutable image, startup, resource limits, allowed identity/network settings | No E2B template build service; alias updates affect only future creates. |
+| Template configuration | Operator alias → immutable image/template and any injected-payload digest, startup, resource limits, allowed identity/network settings | No E2B template build service; alias updates affect only future creates. |
 | Other envd capabilities | Outside the initial tested/advertised matrix | The original daemon may expose more methods. A support boundary is not an access-control filter; do not claim that untested PTY/watch/background methods are removed. |
 | Code interpreter and other SDKs | Deferred | The code-interpreter client uses a separate Jupyter service and API. Adding it needs its own image, pins, tests, and accepted scope; no mapping to execd is proposed. |
 
-The support matrix describes tested behavior, not a new envd implementation. Deployments needing to prohibit particular envd capabilities must establish an enforceable policy before adopting this image. Failure to enforce a required policy blocks that deployment; it is not solved by silently changing envd or execd.
+The support matrix describes tested behavior, not a new envd implementation. Deployments needing to prohibit particular envd capabilities must establish an enforceable policy before adopting this runtime recipe. Failure to enforce a required policy blocks that deployment; it is not solved by silently changing envd or execd.
 
 ### Control Plane and Resource Identity
 
@@ -176,15 +176,27 @@ The pinned [SDK lifecycle implementation](https://github.com/e2b-dev/E2B/blob/93
 
 Create/connect responses must use the actual pinned models, including `sandboxID`, `templateID`, `clientID`, `envdVersion`, `envdAccessToken`, and the configured `domain` where needed. IDs represent real adapter-owned identities; version fields describe the running daemon, never a fabricated high version to bypass SDK feature checks. Return the initialized `envdAccessToken` for this authenticated profile. Supply the separate optional `trafficAccessToken` only if the chosen deployment implements its proxy-access semantics.
 
-Maintain a durable binding between authenticated scope, E2B-facing ID, native sandbox ID, template revision/image digest, version tuple, expiration, and readiness/cleanup state. Protect any stored per-sandbox token material. Native state is authoritative for existence and lifetime; a persisted binding alone cannot establish that a sandbox is running. TTL-stopping/terminated, failed, and paused resources cannot be returned as usable running sessions.
+Maintain a durable binding between authenticated scope, E2B-facing ID, native sandbox ID, template revision/image digest and any injected-payload digest, version tuple, expiration, and readiness/cleanup state. Protect any stored per-sandbox token material. Native state is authoritative for existence and lifetime; a persisted binding alone cannot establish that a sandbox is running. TTL-stopping/terminated, failed, and paused resources cannot be returned as usable running sessions.
 
 Inventory defaults as well as explicit options. In particular, the pinned v2 client includes memory-related defaults for auto-pause/connect; accepting an irrelevant default for a running-only operation does not provide snapshot support. Reject requests that actually require pause/resume, memory restore, volumes, cloud identity, or unmapped network policy before side effects. The first contract inventory must distinguish these cases and define list filters over the supported resource set.
 
 The initial profile excludes caller-supplied `Idempotency-Key`: reject it explicitly before allocation. The [pinned SDK](https://github.com/e2b-dev/E2B/blob/9301cd84757b0e3f3fccbd349e85ff2bd403a1f4/packages/python-sdk/e2b/retry.py) omits the key when none is supplied. Require SDK lifecycle `retries=0` and `E2B_CONNECTION_RETRIES=0` for the first profile: response retries and connection retries are separate SDK settings. Disable proxy retries for mutating requests. If an allocation outcome is ambiguous, return a non-retryable result (`Should-Retry: false` where a response can be delivered), reconcile recorded intent against backend allocations, and never blindly create again. No native exactly-once guarantee is assumed. Gate 1 must specify persistence/concurrency control, allocation correlation, restart recovery, and a bounded orphan cleanup policy before implementation proceeds.
 
-### Upstream envd Image and Readiness
+### Upstream envd Packaging and Readiness
 
-Package the pinned upstream executable without protocol changes. The image recipe records its source/binary provenance, license/dependencies, process supervisor, approved default user, writable paths, and resource limits. It must not make envd mandatory in ordinary native OpenSandbox images. If execd is present for native operation, it remains independent.
+Package the pinned upstream executable without protocol changes. The packaging recipe records its source/binary provenance, license/dependencies, process supervisor, approved default user, writable paths, and resource limits. envd remains opt-in; if execd is present for native operation, it remains independent.
+
+| Runtime | Proposed delivery mechanism | Validation boundary |
+|---|---|---|
+| Standalone Docker | Prebuilt image containing the pinned envd executable and startup wiring | Initial local experiment only; does not validate Pod or MicroVM packaging. |
+| Pod sandbox | A digest-pinned, one-shot init container copies envd and startup files into a shared `emptyDir` and exits successfully before workload startup; the workload container mounts that volume and starts envd in the workload container's execution context, using the binary from the shared volume | Validate copy-before-start ordering, architecture/dependencies, user permissions, volume executability, process supervision, private initialization, and network isolation. No envd protocol implementation in the init container. |
+| MicroVM / Fast Sandbox | Bake pinned envd files and startup wiring into an immutable template rootfs, following the existing execd build-stage pattern | Validate the template build, guest startup or snapshot restore, per-instance initialization, and endpoint readiness. Baking the binary does not establish a supported E2B profile. |
+
+The Pod pattern has concrete prior art in Kruise Agents: its [SandboxSet example](https://github.com/openkruise/agents/blob/29bd5f37a2ca1c80e8e96df4ad893a840758c4cc/test/e2b/assets/sandboxset-code-interpreter.yaml) mounts a shared `emptyDir` into a restartable init container and the workload container; the [runtime entrypoint](https://github.com/openkruise/agents/blob/29bd5f37a2ca1c80e8e96df4ad893a840758c4cc/cmd/agent-runtime/entrypoint.sh) copies envd files, and a workload `postStart` hook invokes `envd-run.sh`. Reuse the delivery pattern, not an assumption that this example proves our readiness ordering or security policy. The OpenSandbox recipe must gate startup on completed artifact delivery and gate untrusted work/public access on authenticated envd readiness; a [`postStart` hook](https://v1-35.docs.kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/) alone is not that barrier. Do not inherit the example's `latest` image, user/sudo setup, or separate code-interpreter service. Its [runtime Dockerfile](https://github.com/openkruise/agents/blob/29bd5f37a2ca1c80e8e96df4ad893a840758c4cc/dockerfiles/agent-runtime.Dockerfile) builds envd from a different upstream release (`2025.33`); it does not validate this proposal's `0.8.0` candidate.
+
+For MicroVMs, Fast Sandbox's [template converter](https://github.com/opensandbox-group/fast-sandbox/blob/f44561ad111e6a94ae00e5923fce307317dba17d/cmd/sandboxtemplate-builder/convert.go) already copies execd runtime files into the guest rootfs and renders guest-init/startup configuration. Reuse that build-stage approach to include envd, through the source image and its startup recipe or a separately reviewed builder extension. This is a packaging direction, not a claim that the inspected builder already has an envd-specific field or implementation; the existing execd contract must remain intact. A golden rootfs or memory snapshot must not contain live per-sandbox envd credentials or tenant sessions. Template restore can resume existing processes without rerunning guest init, so verify isolated per-instance token initialization after allocation/restore and before exposure, rather than relying on a fresh boot. Infrastructure use of a golden snapshot does not add E2B pause/resume support to this profile.
+
+These two runtime delivery mechanisms are design directions for their own acceptance entries. The initial Docker tuple and SDK/envd pins are unchanged; Pod and MicroVM support still require their own Gate 1–3 evidence and explicit ownership.
 
 Upstream envd provides `-isnotfc` for execution outside Firecracker and `-no-cgroups` to disable its own cgroup management. Gate 1 must test the selected flags under Docker, including envd's built-in localhost port scanner/forwarder and post-init MMDS polling under container network policy; outer runtime resource enforcement remains mandatory. Do not copy an upstream debug image or its privileges into a supported deployment without review.
 
@@ -242,11 +254,11 @@ Record version tuple, operation, result class, latency, and safe correlation IDs
 | Gate | Deliverable | Exit condition |
 |---|---|---|
 | 0 — Target agreement | Confirm the proposed pins, select one base-SDK framework scenario, lock its dependencies/options, and define resource/stream limits | Maintainer confirmation and explicit contributor opt-in recorded in this PR or a tracking issue. If pins or scope change, update the candidate and rationale visibly. |
-| 1 — Control-plane and packaging feasibility | Lifecycle adapter spike, original envd image, persistence/recovery design, private bootstrap, routing configuration, and dependency review | Real pinned SDK passes create → command → binary file round trip → delete; lifecycle defaults, auth, failure cleanup, and restart isolation are demonstrated. No data-plane bridge. Resolve design gaps before OSEP status becomes `implementable`. |
+| 1 — Control-plane and packaging feasibility | Lifecycle adapter spike, original envd packaging, persistence/recovery design, private bootstrap, routing configuration, and dependency review | Real pinned SDK passes create → command → binary file round trip → delete; lifecycle defaults, auth, failure cleanup, and restart isolation are demonstrated. No data-plane bridge. Resolve design gaps before OSEP status becomes `implementable`. |
 | 2 — Experimental implementation | Reviewable PRs, contract fixtures, runtime/security tests, deployment example, and framework evidence | T1–T7 pass for the complete candidate tuple; publish exact artifacts, limitations, and an experimental label. |
 | 3 — Supported release decision | Version matrix, retained upgrade/rollback artifacts, accepted owners and deprecation policy | Maintainers explicitly accept the advertised scope and maintenance responsibilities. Passing Gate 2 does not automatically establish support or an SLA. |
 
-Community work can split into control-plane contracts/translation; durable bindings and reconciliation; envd image/bootstrap and routing configuration; and real SDK/framework tests plus version-matrix maintenance. Each work item records its dependencies, accepting reviewer, and evidence. There is no envd-to-execd workstream. Contributors opt in; nobody is assigned indefinite ownership by this proposal.
+Community work can split into control-plane contracts/translation; durable bindings and reconciliation; envd packaging/bootstrap and routing configuration; and real SDK/framework tests plus version-matrix maintenance. Each work item records its dependencies, accepting reviewer, and evidence. There is no envd-to-execd workstream. Contributors opt in; nobody is assigned indefinite ownership by this proposal.
 
 The proposal author can coordinate discussion and the initial contract inventory. Implementation schedules, review capacity, and release responsibility are accepted separately. Invite the existing PoC contributor to share reusable lifecycle code, image configuration, and tests with attribution/license review; access to that implementation is not assumed.
 
@@ -258,7 +270,7 @@ These are future implementation acceptance criteria, not results of this documen
 |---|---|
 | T1 — Control-plane contract | Pinned v2 create/connect/list and other lifecycle fixtures; required response fields; defaults/options; filtering/pagination; units; SDK exception behavior; unsupported options and idempotency keys rejected before allocation. |
 | T2 — Real SDK lifecycle | Create/readiness, running reconnect with explicit/omitted timeout and extension-only TTL, info/list, explicit timeout shortening/extension, expiry, kill/repeated kill, missing sandbox, invalid credentials, and retry suppression against the real backend. |
-| T3 — Unmodified envd integration | Pinned original daemon through the real TLS/router path: interleaved stdout/stderr, nonzero exit, timeout/disconnect, text/binary files, overwrite, missing paths, permissions, and configured bounds. Record binary/image provenance and running version. |
+| T3 — Unmodified envd integration | Pinned original daemon through the real TLS/router path: interleaved stdout/stderr, nonzero exit, timeout/disconnect, text/binary files, overwrite, missing paths, permissions, and configured bounds. Record binary/image or injected-payload provenance and running version; runtime expansions also test Pod delivery ordering or MicroVM build/restore initialization. |
 | T4 — Authorization/bootstrap | Two sandboxes in parallel; wrong/missing tokens, signed file access, forged/conflicting selectors, forbidden ports, public init/upgrade attempts, direct-backend bypass, and cold-start/restart races. Test two independent user scopes only if that tenancy mode is proposed. |
 | T5 — Recovery | Adapter/storage/backend failures, lost create responses, partial allocation, concurrent timeout/delete, expiry, route revocation and existing-stream termination, envd restart, and cleanup bounds. No blind replay or unauthenticated restart window. |
 | T6 — Framework integration | One pinned real base-SDK framework scenario through its normal integration, with the complete call path and documented configuration. No SDK fork/monkeypatch. Additional required services or framework changes block a configuration-only claim until separately accepted. |
@@ -288,7 +300,7 @@ Maintained usage documentation belongs under `docs/guides/`, architecture under 
 
 Native deployments need no migration. Compatibility is opt-in through an adapter version and approved template mapping. Existing E2B cloud sandboxes, templates, snapshots, and data are not imported. The SDK's deprecated `api_url`/`sandbox_url` overrides must be recorded if used; prefer a tested custom-domain configuration and do not promise that future SDKs retain those overrides.
 
-Maintain **version tuples**, not broad claims such as “E2B v2 supported.” Each entry records adapter revision, SDK/package lock, envd source/binary version, image digest, OpenSandbox revision, runtime/transport configuration, tested operations/workflow, evidence, limitations, and accepted release owner. The initial tuple above is candidate; source inspection alone cannot promote it.
+Maintain **version tuples**, not broad claims such as “E2B v2 supported.” Each entry records adapter revision, SDK/package lock, envd source/binary version, image/template and any injected-payload digest, OpenSandbox revision, runtime/transport configuration, tested operations/workflow, evidence, limitations, and accepted release owner. The initial tuple above is candidate; source inspection alone cannot promote it.
 
 ```mermaid
 flowchart TB
@@ -316,7 +328,7 @@ Orange denotes pending/change-policy states, green evidence/acceptance gates, an
 
 For an upgrade, a contributor reviews upstream SDK control-plane changes, envd release/security changes, and dependencies, then proposes an exact new tuple with contract diffs and migration notes. CI retains tests for advertised tuples and evaluates the candidate alongside them; it does not promise every SDK/envd cross-product. New SDK languages or code-interpreter packages are separate profile expansions. Failed candidates leave the prior approved tuple unchanged.
 
-Use immutable images and template revisions. Existing sandboxes keep their recorded envd/image tuple; do not hot-upgrade envd or change its reported version in place. Roll out a verified tuple to new disposable allocations before changing the default alias. Adapter upgrades must preserve response/routing behavior for retained live tuples, or require an explicit drain before deployment.
+Use immutable images, injected payloads, and template revisions. Existing sandboxes keep their recorded envd/image/payload tuple; do not hot-upgrade envd or change its reported version in place. Roll out a verified tuple to new disposable allocations before changing the default alias. Adapter upgrades must preserve response/routing behavior for retained live tuples, or require an explicit drain before deployment.
 
 Before a supported release, record who owns control-plane contract changes, image/envd updates, test infrastructure, and release approval, plus the deprecation notice mechanism and retention/removal conditions. No fixed support window or indefinite upstream tracking is promised here. Security-driven exceptions must document affected tuples, stop-new-allocation/drain or termination policy, and operator action; they must not silently change running sessions.
 
@@ -329,6 +341,7 @@ Rollback restores the previous adapter/image/template artifacts only with compat
 - [OpenSandbox ingress routing at the inspected baseline](https://github.com/opensandbox-group/OpenSandbox/blob/fab314287bded086a5f76b2735935c7f484a0332/docs/architecture/network/ingress.md).
 - [Official E2B Python SDK connection configuration](https://github.com/e2b-dev/E2B/blob/9301cd84757b0e3f3fccbd349e85ff2bd403a1f4/packages/python-sdk/e2b/connection_config.py) and [sandbox implementation](https://github.com/e2b-dev/E2B/blob/9301cd84757b0e3f3fccbd349e85ff2bd403a1f4/packages/python-sdk/e2b/sandbox_sync/main.py).
 - [Upstream runtime release 2026.30](https://github.com/e2b-dev/runtime/releases/tag/2026.30), [envd startup flags](https://github.com/e2b-dev/runtime/blob/f32ee8a2a50052f32e3632ceb451111a98dd5104/packages/envd/main.go), [initialization](https://github.com/e2b-dev/runtime/blob/f32ee8a2a50052f32e3632ceb451111a98dd5104/packages/envd/internal/api/init.go), and [authentication](https://github.com/e2b-dev/runtime/blob/f32ee8a2a50052f32e3632ceb451111a98dd5104/packages/envd/internal/api/auth.go).
+- [Kruise Agents Pod injection pattern](https://github.com/openkruise/agents/blob/29bd5f37a2ca1c80e8e96df4ad893a840758c4cc/test/e2b/assets/sandboxset-code-interpreter.yaml) and [Fast Sandbox template runtime injection](https://github.com/opensandbox-group/fast-sandbox/blob/f44561ad111e6a94ae00e5923fce307317dba17d/cmd/sandboxtemplate-builder/convert.go): packaging references, not compatibility test evidence.
 - [Separate code-interpreter service calls](https://github.com/e2b-dev/E2B/blob/9301cd84757b0e3f3fccbd349e85ff2bd403a1f4/packages/code-interpreter-python/e2b_code_interpreter/code_interpreter_sync.py).
 
 The source revisions were inspected to define the candidate and protocol boundaries. Runtime interoperability, image/route security, and framework acceptance remain to be demonstrated; this PR contains no such execution evidence.
