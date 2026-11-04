@@ -221,6 +221,10 @@ func (c *FilesystemController) RemoveDirs() {
 			)
 			return
 		}
+		if err := rejectStagingPath(resolvedDir); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := os.RemoveAll(resolvedDir); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,

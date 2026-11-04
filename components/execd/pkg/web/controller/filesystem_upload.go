@@ -362,8 +362,8 @@ func isAnyStagingName(name string) bool {
 }
 
 // rejectStagingPath refuses a path whose cleaned final component is a staging
-// file, so a name-addressed ordinary route cannot read, stat, rename or delete
-// another route's in-flight upload.
+// file, so a name-addressed ordinary route cannot read, stat, rename, remove
+// or create another route's in-flight upload.
 func rejectStagingPath(path string) error {
 	if isAnyStagingName(filepath.Base(filepath.Clean(path))) {
 		return &os.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
