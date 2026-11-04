@@ -208,7 +208,9 @@ func newFastSandboxSubjectLaunchOwner(enabled bool, uid, gid int) (*fastSandboxS
 	return &fastSandboxSubjectLaunchOwner{
 		cfg:      fastSandboxSubjectSessionConfig{parent: defaultRevisionSessionParent, uid: uid, gid: gid},
 		sessions: make(map[*mitmproxy.Running]*fastSandboxSubjectSession),
-		stop:     func(r *mitmproxy.Running) { mitmproxy.GracefulShutdown(r, time.Second) },
+		// Subject and sidecar revision session owners use the same fixed 1s
+		// grace period, even when the outer shutdown caller allows longer.
+		stop: func(r *mitmproxy.Running) { mitmproxy.GracefulShutdown(r, time.Second) },
 	}, nil
 }
 

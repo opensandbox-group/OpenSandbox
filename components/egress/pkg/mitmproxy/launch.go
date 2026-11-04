@@ -192,6 +192,8 @@ func WithSubjectRevision(cfg Config, handoff SubjectRevisionIPCConfig) (Config, 
 func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
 	env := buildMitmdumpEnv(base, home, cfg.RevisionIPC)
 	if cfg.SubjectRevisionIPC == nil {
+		// Preserve inherited OPENSANDBOX_EGRESS_SUBJECT_REVISION_* values
+		// intentionally: the disabled path has no reader for this prefix.
 		return env
 	}
 	clean := make([]string, 0, len(env)+7)

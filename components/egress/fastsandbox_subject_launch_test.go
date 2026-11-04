@@ -228,6 +228,79 @@ func TestFastSandboxSubjectLaunchFailures(t *testing.T) {
 	}
 }
 
+func TestFastSandboxSubjectRestartPrePublishExit(t *testing.T) {
+	for _, stopping := range []bool{false, true} {
+		name := "retry-with-fresh-control-generation"
+		if stopping {
+			name = "stopping-is-terminal"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT", "true")
+			o := subjectTestOwner(t)
+			launch, configs := subjectAddonLauncher(t, o)
+			m := &mitmTransparent{subjectOwner: o, restartCh: make(chan exitEvent, 64), shutdownCh: make(chan struct{})}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			deps := mitmLaunchDependencies{launch: launch, listen: func(context.Context, string, time.Duration) error { return nil }}
+			require.NoError(t, m.startInitial(ctx, deps, func() error { return nil }))
+			o.stop(m.running)
+			ev := <-m.restartCh
+			require.Equal(t, m.currentGen, ev.gen)
+			m.closeRevisionSession(ev.gen)
+			gate := mitmproxy.NewHealthGate()
+			gate.SetReady(false)
+			var delays []time.Duration
+			deps.retry = func(_ context.Context, _ <-chan struct{}, delay time.Duration) bool {
+				delays = append(delays, delay)
+				require.True(t, gate.MitmPending())
+				require.Nil(t, m.running)
+				require.Empty(t, o.sessions, "failed session must be closed before retry")
+				return len(delays) <= 2
+			}
+			deps.listen = func(context.Context, string, time.Duration) error {
+				h := (*configs)[len(*configs)-1].SubjectRevisionIPC
+				require.NoError(t, revision.CheckFreshSubjectSession(ctx, h.SocketPath, h.SessionToken, h.ControlGeneration))
+				if len(*configs) <= 3 {
+					if stopping {
+						m.claimForShutdown()
+					}
+					// The receiver is ready and this listener check succeeds, but
+					// the child is reaped and OnExit recorded before publication.
+					o.stop(m.pending.running)
+				}
+				return nil
+			}
+			// Use the same restart loop as watchMitmproxy after the current exit.
+			m.restartWithBackoffUsing(ctx, gate, deps)
+			if stopping {
+				require.Len(t, *configs, 2)
+				require.Empty(t, delays, "stopping must not schedule another launch")
+				require.Nil(t, m.running)
+				require.True(t, gate.MitmPending())
+			} else {
+				require.Equal(t, []time.Duration{time.Second, 2 * time.Second}, delays)
+				require.Len(t, *configs, 4)
+				require.NotNil(t, m.running)
+				require.Equal(t, uint64(4), m.currentGen)
+				require.False(t, gate.MitmPending())
+				require.Len(t, o.sessions, 1)
+			}
+			controls := make(map[string]bool)
+			for _, cfg := range *configs {
+				h := cfg.SubjectRevisionIPC
+				require.False(t, controls[h.ControlGeneration], "every attempt needs a fresh controlGeneration")
+				controls[h.ControlGeneration] = true
+				if m.running == nil || h != (*configs)[len(*configs)-1].SubjectRevisionIPC {
+					_, err := os.Stat(filepath.Dir(h.SocketPath))
+					require.True(t, os.IsNotExist(err), "unpublished session directory must be removed")
+				}
+			}
+			m.shutdown(time.Second)
+			require.Empty(t, o.sessions)
+		})
+	}
+}
+
 func TestFastSandboxSubjectSessionDirectorySafety(t *testing.T) {
 	o := subjectTestOwner(t)
 	require.NoError(t, os.Chmod(o.cfg.parent, 0o777))

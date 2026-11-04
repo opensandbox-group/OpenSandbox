@@ -493,7 +493,14 @@ func (m *mitmTransparent) restartWithBackoffUsing(ctx context.Context, gate *mit
 			if m.revisionOwner != nil && m.revisionOwner.server != nil {
 				err = publishRevisionReady(ctx, m, result)
 			} else if !m.publishRunning(result.running, result.session, result.generation) {
-				err = revision.ErrClosed
+				// A subject child can exit after readiness but before publication.
+				// Retry that attempt; only shutdown makes rejection terminal.
+				err = revision.ErrTransportUnavailable
+				m.mu.RLock()
+				if m.stopping {
+					err = revision.ErrClosed
+				}
+				m.mu.RUnlock()
 			} else {
 				gate.SetReady(true)
 			}
