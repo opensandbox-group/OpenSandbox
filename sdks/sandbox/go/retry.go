@@ -435,6 +435,7 @@ func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn 
 	}
 
 	var lastErr error
+	var lastWakeErr *APIError
 	var wakeAttempts int
 	retriesUsed := 0
 	started := time.Now()
@@ -443,7 +444,17 @@ func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn 
 		// attempt's wait for response headers is bounded by the remaining
 		// overall budget, not only the waits between attempts.
 		if wakeAttempts > 0 && wakeDeadline >= 0 {
-			attemptCtx, attempt := startWakeAttempt(ctx, wakeDeadline-time.Since(started))
+			// A generic backoff may have spent the rest of the budget. Nothing
+			// is sent then, so the wake timeout is still safe to retry.
+			remaining := wakeDeadline - time.Since(started)
+			if remaining <= 0 {
+				return &SandboxWakeTimeoutError{
+					Attempts: wakeAttempts,
+					Waited:   time.Since(started),
+					LastErr:  lastWakeErr,
+				}
+			}
+			attemptCtx, attempt := startWakeAttempt(ctx, remaining)
 			lastErr = fn(attemptCtx)
 			if attempt.finish(lastErr == nil) && lastErr != nil && ctx.Err() == nil {
 				// The attempt may already have reached the sandbox, so this is
@@ -464,6 +475,7 @@ func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn 
 		var apiErr *APIError
 		if c.retry.wakeEnabled() && errors.As(lastErr, &apiErr) && apiErr.WakeExpired {
 			wakeAttempts++
+			lastWakeErr = apiErr
 			elapsed := time.Since(started)
 			// An explicit Retry-After of 0 means retry immediately; only a
 			// missing or unparseable header falls back to the 1s default.
@@ -575,6 +587,12 @@ func doAttempt(client *http.Client, req *http.Request) (*http.Response, error) {
 	}
 	if a.state.CompareAndSwap(wakeAttemptPending, wakeAttemptResponded) {
 		a.timer.Stop()
+		return resp, nil
+	}
+	// A fresh-connection replay in doRequestCapture re-sends on the same
+	// attempt context after its headers already arrived once; the budget no
+	// longer applies to it.
+	if a.state.Load() == wakeAttemptResponded {
 		return resp, nil
 	}
 	_ = resp.Body.Close()

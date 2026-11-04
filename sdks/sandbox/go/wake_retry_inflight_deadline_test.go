@@ -219,3 +219,65 @@ func TestWakeOverallDeadline_DownloadBodyOutlivesBudget(t *testing.T) {
 		t.Fatalf("body = %q, want %q", data, "head-tail")
 	}
 }
+
+// After a bounded wake retry received its headers, a mid-body failure on the
+// reused pooled connection triggers the fresh-connection replay on the same
+// attempt context. That replay's response is valid and must be honored.
+func TestWakeOverallDeadline_FreshConnReplayAfterHeadersSucceeds(t *testing.T) {
+	var truncated atomic.Bool
+	srv, calls := newInflightWakeServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		if truncated.CompareAndSwap(false, true) {
+			conn, buf, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+			_ = buf.Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"sandbox-1"}`))
+	})
+
+	client := NewLifecycleClient(srv.URL, "", WithRetry(inflightWakeConfig(time.Minute)))
+	sb, err := client.GetSandbox(context.Background(), "sandbox-1")
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if sb.ID != "sandbox-1" {
+		t.Fatalf("ID = %q, want sandbox-1", sb.ID)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("calls = %d, want marked response, truncated body and fresh-connection replay", got)
+	}
+}
+
+// A generic backoff during the wake phase can spend the rest of the budget;
+// the next attempt must then not be sent at all.
+func TestWakeOverallDeadline_SpentByBackoffSendsNoFurtherAttempt(t *testing.T) {
+	srv, calls := newInflightWakeServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+
+	cfg := inflightWakeConfig(inflightWakeBudget)
+	cfg.MaxRetries = 1
+	cfg.InitialBackoff = 4 * inflightWakeBudget
+	client := NewLifecycleClient(srv.URL, "", WithRetry(cfg))
+	_, err := client.GetSandbox(context.Background(), "sandbox-1")
+
+	var wakeErr *SandboxWakeTimeoutError
+	if !errors.As(err, &wakeErr) {
+		t.Fatalf("err = %v, want SandboxWakeTimeoutError", err)
+	}
+	if wakeErr.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1", wakeErr.Attempts)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !apiErr.WakeExpired {
+		t.Fatalf("err = %v, want it to wrap the marked wake response", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want no attempt after the budget was spent", got)
+	}
+}
