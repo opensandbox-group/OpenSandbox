@@ -40,9 +40,16 @@ type Registry struct {
 	mu           sync.Mutex
 	closed       bool
 	sseKeepalive time.Duration
-	bridges      map[string]http.Handler
+	bridges      map[string]bridge
 	servers      map[string]*ServerConfig
 	stdio        map[string]*stdioBridge
+}
+
+// bridge is one registered upstream: an HTTP handler plus teardown that
+// aborts in-flight requests and subprocesses.
+type bridge interface {
+	http.Handler
+	Close()
 }
 
 // NewRegistry returns an empty registry. The keepalive interval is applied
@@ -50,7 +57,7 @@ type Registry struct {
 func NewRegistry(sseKeepalive time.Duration) *Registry {
 	return &Registry{
 		sseKeepalive: sseKeepalive,
-		bridges:      make(map[string]http.Handler),
+		bridges:      make(map[string]bridge),
 		servers:      make(map[string]*ServerConfig),
 		stdio:        make(map[string]*stdioBridge),
 	}
@@ -58,17 +65,17 @@ func NewRegistry(sseKeepalive time.Duration) *Registry {
 
 // addLocked builds and registers one bridge; r.mu must be held.
 func (r *Registry) addLocked(s *ServerConfig) error {
-	var handler http.Handler
+	var b bridge
 	var err error
 	switch s.Transport {
 	case TransportHTTP:
-		handler, err = newHTTPBridge(s, r.sseKeepalive)
+		b, err = newHTTPBridge(s, r.sseKeepalive)
 	case TransportStdio:
-		var bridge *stdioBridge
-		bridge, err = newStdioBridge(s)
+		var sb *stdioBridge
+		sb, err = newStdioBridge(s)
 		if err == nil {
-			r.stdio[s.Name] = bridge
-			handler = bridge
+			r.stdio[s.Name] = sb
+			b = sb
 		}
 	default:
 		err = errors.New("mcpproxy: unknown transport " + string(s.Transport))
@@ -76,7 +83,7 @@ func (r *Registry) addLocked(s *ServerConfig) error {
 	if err != nil {
 		return err
 	}
-	r.bridges[s.Name] = handler
+	r.bridges[s.Name] = b
 	r.servers[s.Name] = s
 	return nil
 }
@@ -102,7 +109,8 @@ func (r *Registry) Add(s *ServerConfig) error {
 	return r.addLocked(s)
 }
 
-// Remove unregisters one server and tears down its stdio sessions.
+// Remove unregisters one server and tears down its bridge — stdio
+// subprocesses and in-flight HTTP upstream streams alike.
 func (r *Registry) Remove(name string) error {
 	if r == nil {
 		return ErrRegistryClosed
@@ -118,13 +126,13 @@ func (r *Registry) Remove(name string) error {
 		return ErrUnknownServer
 	}
 	delete(r.servers, name)
+	b := r.bridges[name]
 	delete(r.bridges, name)
-	bridge := r.stdio[name]
 	delete(r.stdio, name)
 	r.mu.Unlock()
 
-	if bridge != nil {
-		bridge.Close()
+	if b != nil {
+		b.Close()
 	}
 	return nil
 }
@@ -132,11 +140,12 @@ func (r *Registry) Remove(name string) error {
 // Empty reports whether any MCP server is registered.
 func (r *Registry) Empty() bool { return r == nil || len(r.bridges) == 0 }
 
-// Reset closes every bridge and empties the registry without shutting it
+// Reset closes every bridge — aborting in-flight HTTP upstream streams and
+// stdio subprocesses alike — and empties the registry without shutting it
 // down. A full runtime re-init (a new sandbox allocation on a pooled execd)
 // must not hand the previous allocation's registrations — with their stored
-// upstream credentials and stdio environments — to the next one; the
-// preserveRuntimeState path keeps them instead.
+// upstream credentials, environments, or still-streaming clients — to the
+// next one; the preserveRuntimeState path keeps them instead.
 func (r *Registry) Reset() {
 	if r == nil {
 		return
@@ -146,11 +155,11 @@ func (r *Registry) Reset() {
 		r.mu.Unlock()
 		return
 	}
-	bridges := make([]*stdioBridge, 0, len(r.stdio))
-	for _, b := range r.stdio {
+	bridges := make([]bridge, 0, len(r.bridges))
+	for _, b := range r.bridges {
 		bridges = append(bridges, b)
 	}
-	r.bridges = make(map[string]http.Handler)
+	r.bridges = make(map[string]bridge)
 	r.servers = make(map[string]*ServerConfig)
 	r.stdio = make(map[string]*stdioBridge)
 	r.mu.Unlock()
@@ -196,8 +205,8 @@ func (r *Registry) List() []ServerInfo {
 	return out
 }
 
-// Close terminates every stdio subprocess. HTTP bridges hold no global
-// state and need no shutdown.
+// Close terminates every bridge (stdio subprocesses and in-flight HTTP
+// streams) and rejects further use.
 func (r *Registry) Close() {
 	if r == nil {
 		return
@@ -208,8 +217,8 @@ func (r *Registry) Close() {
 		return
 	}
 	r.closed = true
-	bridges := make([]*stdioBridge, 0, len(r.stdio))
-	for _, b := range r.stdio {
+	bridges := make([]bridge, 0, len(r.bridges))
+	for _, b := range r.bridges {
 		bridges = append(bridges, b)
 	}
 	r.mu.Unlock()

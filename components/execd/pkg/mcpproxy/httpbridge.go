@@ -15,11 +15,15 @@
 package mcpproxy
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
@@ -35,6 +39,7 @@ type httpBridge struct {
 	target    *url.URL
 	keepalive time.Duration
 	proxy     *httputil.ReverseProxy
+	transport *cancellableTransport
 }
 
 func newHTTPBridge(cfg *ServerConfig, sseKeepalive time.Duration) (*httpBridge, error) {
@@ -43,16 +48,19 @@ func newHTTPBridge(cfg *ServerConfig, sseKeepalive time.Duration) (*httpBridge, 
 		return nil, fmt.Errorf("mcpproxy: parse upstream url: %w", err)
 	}
 
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          20,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		// No ResponseHeaderTimeout: MCP POST requests may legitimately stream
-		// for a long time before (or without) final headers.
+	transport := &cancellableTransport{
+		inner: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          20,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+			// No ResponseHeaderTimeout: MCP POST requests may legitimately stream
+			// for a long time before (or without) final headers.
+		},
+		inflight: make(map[*http.Request]context.CancelFunc),
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -95,7 +103,7 @@ func newHTTPBridge(cfg *ServerConfig, sseKeepalive time.Duration) (*httpBridge, 
 		},
 	}
 
-	return &httpBridge{cfg: cfg, target: target, keepalive: sseKeepalive, proxy: proxy}, nil
+	return &httpBridge{cfg: cfg, target: target, keepalive: sseKeepalive, proxy: proxy, transport: transport}, nil
 }
 
 // ServeHTTP forwards the request with idle-SSE keepalive injection.
@@ -103,4 +111,95 @@ func (b *httpBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	kw := newKeepaliveWriter(w, b.keepalive)
 	defer kw.Stop()
 	b.proxy.ServeHTTP(kw, r)
+}
+
+// Close aborts every in-flight upstream request (long-lived SSE streams
+// included) and fails all later ones, so a removed or reset bridge stops
+// serving the previous client immediately.
+func (b *httpBridge) Close() {
+	b.transport.Close()
+}
+
+// cancellableTransport wraps the bridge transport so Close can abort
+// in-flight requests. Successful responses tie the derived context's cancel
+// to resp.Body.Close, so cancellation only strikes requests still streaming
+// when Close runs.
+type cancellableTransport struct {
+	inner    http.RoundTripper
+	mu       sync.Mutex
+	closed   bool
+	inflight map[*http.Request]context.CancelFunc
+}
+
+func (t *cancellableTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		cancel()
+		return nil, errors.New("mcpproxy: bridge closed")
+	}
+	t.inflight[req] = cancel
+	t.mu.Unlock()
+
+	resp, err := t.inner.RoundTrip(req)
+
+	t.mu.Lock()
+	closed := t.closed
+	t.mu.Unlock()
+	if err != nil {
+		t.untrack(req)
+		cancel()
+		if closed {
+			return nil, errors.New("mcpproxy: bridge closed")
+		}
+		return nil, err
+	}
+	// The request stays tracked until the response body closes, so Close can
+	// abort streams that are still being copied to the client.
+	resp.Body = cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel, remove: func() { t.untrack(req) }}
+	return resp, nil
+}
+
+func (t *cancellableTransport) untrack(req *http.Request) {
+	t.mu.Lock()
+	delete(t.inflight, req)
+	t.mu.Unlock()
+}
+
+// Close cancels every in-flight request, rejects later ones, and releases
+// the wrapped transport's idle connections.
+func (t *cancellableTransport) Close() {
+	t.mu.Lock()
+	t.closed = true
+	cancels := make([]context.CancelFunc, 0, len(t.inflight))
+	for _, cancel := range t.inflight {
+		cancels = append(cancels, cancel)
+	}
+	t.inflight = make(map[*http.Request]context.CancelFunc)
+	t.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+	if idle, ok := t.inner.(interface{ CloseIdleConnections() }); ok {
+		idle.CloseIdleConnections()
+	}
+}
+
+// cancelOnCloseBody releases the request context (and untracks the request)
+// when the proxy closes the response body.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	remove func()
+}
+
+func (b cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	b.remove()
+	return err
 }

@@ -18,7 +18,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
@@ -74,6 +78,7 @@ type stdioSession struct {
 
 	mu            sync.Mutex
 	clientSession *mcp.ClientSession
+	childCmd      *exec.Cmd
 	ended         bool
 	cancel        context.CancelFunc
 	endOnce       sync.Once
@@ -244,10 +249,13 @@ func (s *stdioSession) initUpstream() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+	// connectUpstream reads s.childCmd; reserve the spawn slot first so a
+	// concurrent call cannot double-spawn (s.cancel already set above).
 	s.mu.Unlock()
 
-	sess, err := s.connectUpstream(ctx)
+	sess, cmd, err := s.connectUpstream(ctx)
 	s.mu.Lock()
+	s.childCmd = cmd
 	if err != nil {
 		// Keep cancel so the failed exec context is released on end().
 		s.mu.Unlock()
@@ -261,17 +269,26 @@ func (s *stdioSession) initUpstream() {
 	go func() {
 		_ = sess.Wait()
 		log.Info("mcpproxy: upstream %s: subprocess for session %s exited", s.bridge.cfg.Name, s.id)
+		// The SDK's transport owns exec.Cmd.Wait; once it has the exit
+		// status, drop the reaper adoption so the consumed exit cannot
+		// leave a stale owned entry behind.
+		runtime.ReleaseManagedChild(cmd)
 		s.end()
 	}()
 }
 
 // connectUpstream launches the configured command and performs the MCP
 // initialize handshake with it.
-func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession, error) {
+func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession, *exec.Cmd, error) {
 	cfg := s.bridge.cfg
-	cmd := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
+	env := childEnviron(cfg.Env)
+	// exec.CommandContext resolves the executable against execd's own PATH
+	// at construction; resolve against the child's merged PATH instead so
+	// commands shipped via the runtime binding, EXECD_ENVS, or the
+	// registration env (venv/npm bin) are found.
+	cmd := exec.CommandContext(ctx, resolveChildCommand(cfg.Command, env, cfg.CWD), cfg.Args...)
 	cmd.Dir = cfg.CWD
-	cmd.Env = childEnviron(cfg.Env)
+	cmd.Env = env
 	configureProcessGroup(cmd)
 
 	// stdio children are workload processes: run them through the same
@@ -280,7 +297,7 @@ func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession,
 	// before Connect and the child is adopted right after.
 	release, err := runtime.PrepareManagedChild(cmd)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	client := mcp.NewClient(
@@ -290,10 +307,10 @@ func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession,
 	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
 	release()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	runtime.AdoptManagedChild(cmd)
-	return sess, nil
+	return sess, cmd, nil
 }
 
 // end tears the session down exactly once: close the child client (stdin
@@ -356,10 +373,62 @@ func (b *stdioBridge) Close() {
 // childEnviron builds the subprocess environment on the same base every
 // other user process gets — runtime.UserProcessEnvironment layers the
 // sandbox binding envs and the EXECD_ENVS file over the daemon environment
-// and strips execd's own config env (access tokens, credentials) — then
-// overlays the registration's env entries.
+// and strips execd's own config env — then filters the merged result again
+// (the env-file overlay is applied after UserProcessEnvironment's own
+// filtering and could reintroduce reserved credential entries) and overlays
+// the registration's env entries.
 func childEnviron(extra map[string]string) []string {
-	return append(runtime.UserProcessEnvironment(), envSlice(extra)...)
+	return append(filterBlacklistedEnv(runtime.UserProcessEnvironment()), envSlice(extra)...)
+}
+
+// filterBlacklistedEnv drops execd config/credential entries from a merged
+// environment slice.
+func filterBlacklistedEnv(env []string) []string {
+	blocked := make(map[string]struct{})
+	for _, k := range isolation.ExecdConfigEnvBlacklist() {
+		blocked[strings.ToUpper(k)] = struct{}{}
+	}
+	out := env[:0:0]
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, bad := blocked[strings.ToUpper(k)]; !bad {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// resolveChildCommand resolves a command name against the PATH the child
+// will actually run with. Paths containing a separator and names not found
+// in the child PATH are returned unchanged (the latter keeps exec's natural
+// not-found error at spawn time).
+func resolveChildCommand(command string, env []string, dir string) string {
+	if command == "" || strings.ContainsRune(command, '/') || strings.ContainsRune(command, os.PathSeparator) {
+		return command
+	}
+	childPath := ""
+	for _, kv := range env {
+		if k, v, _ := strings.Cut(kv, "="); strings.EqualFold(k, "PATH") {
+			childPath = v
+			break
+		}
+	}
+	if childPath == "" {
+		return command
+	}
+	for _, d := range filepath.SplitList(childPath) {
+		if d == "" {
+			d = "."
+		}
+		if dir != "" && !filepath.IsAbs(d) {
+			d = filepath.Join(dir, d)
+		}
+		candidate := filepath.Join(d, command)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return command
 }
 
 // envSlice flattens an env map for exec.Cmd.

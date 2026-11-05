@@ -16,6 +16,8 @@ package mcpproxy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,12 @@ func TestChildEnvironFiltersExecdSecrets(t *testing.T) {
 	t.Setenv("JUPYTER_TOKEN", "jupyter-secret")
 	t.Setenv("MCPECHO_MARKER", "plain-env-value")
 
+	// An EXECD_ENVS file can reintroduce reserved credential entries; the
+	// merged environment must be re-filtered.
+	envFile := filepath.Join(t.TempDir(), "envs")
+	require.NoError(t, os.WriteFile(envFile, []byte("EXECD_ACCESS_TOKEN=file-leak\nMCP_FILE_VALUE=ok\n"), 0o600))
+	t.Setenv("EXECD_ENVS", envFile)
+
 	env := childEnviron(map[string]string{"FOO": "bar"})
 
 	has := func(key string) (string, bool) {
@@ -164,9 +172,37 @@ func TestChildEnvironFiltersExecdSecrets(t *testing.T) {
 	if v, ok := has("FOO"); !ok || v != "bar" {
 		t.Error("cfg.Env overlay missing from child environment")
 	}
+	if v, ok := has("MCP_FILE_VALUE"); !ok || v != "ok" {
+		t.Error("EXECD_ENVS overlay missing from child environment")
+	}
 	if _, ok := has("PATH"); !ok {
 		t.Error("inherited environment lost")
 	}
+}
+
+func TestResolveChildCommand(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	src, err := os.ReadFile(buildEchoServer(t))
+	require.NoError(t, err)
+	target := filepath.Join(nested, "mcp-from-path")
+	require.NoError(t, os.WriteFile(target, src, 0o755))
+
+	path := "PATH=" + nested
+	env := []string{path, "OTHER=1"}
+
+	// Found via the child PATH.
+	require.Equal(t, target, resolveChildCommand("mcp-from-path", env, ""))
+	// PATH lookup honors a relative dir against cmd.Dir.
+	require.Equal(t, target, resolveChildCommand("mcp-from-path", []string{"PATH=nested"}, dir))
+	// Separator-containing commands pass through untouched.
+	require.Equal(t, "./my-server", resolveChildCommand("./my-server", env, ""))
+	require.Equal(t, "/usr/bin/env", resolveChildCommand("/usr/bin/env", env, ""))
+	// Unknown names pass through so exec reports the natural not-found error.
+	require.Equal(t, "definitely-not-on-disk-xyz", resolveChildCommand("definitely-not-on-disk-xyz", env, ""))
+	// No PATH in env: unchanged.
+	require.Equal(t, "anything", resolveChildCommand("anything", []string{"OTHER=1"}, ""))
 }
 
 func TestStdioBridgeAdvertisesCompletionCapability(t *testing.T) {

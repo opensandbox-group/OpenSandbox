@@ -52,3 +52,19 @@ func AdoptManagedChild(cmd *exec.Cmd) {
 	initReaper.owned[cmd.Process.Pid] = mp
 	initReaper.mu.Unlock()
 }
+
+// ReleaseManagedChild removes a child adopted with AdoptManagedChild once
+// its starter (the MCP SDK's CommandTransport owns exec.Cmd.Wait) has
+// consumed the exit status. Without this, a starter-consumed exit leaves a
+// stale owned entry that shutdown would signal as a live process group.
+// No-op when init mode is off or the reaper already reaped the child.
+func ReleaseManagedChild(cmd *exec.Cmd) {
+	if initReaper == nil || cmd.Process == nil {
+		return
+	}
+	initReaper.mu.Lock()
+	if mp, ok := initReaper.owned[cmd.Process.Pid]; ok && mp.cmd == cmd {
+		delete(initReaper.owned, cmd.Process.Pid)
+	}
+	initReaper.mu.Unlock()
+}

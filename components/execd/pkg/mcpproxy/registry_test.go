@@ -15,7 +15,12 @@
 package mcpproxy
 
 import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -156,6 +161,73 @@ func TestRegistryResetClearsAndStaysUsable(t *testing.T) {
 	// Reset on a closed registry is a no-op.
 	r.Close()
 	r.Reset()
+}
+
+func TestRegistryResetAbortsInFlightHTTPStreams(t *testing.T) {
+	upstreamStarted := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		close(upstreamStarted)
+		flusher := w.(http.Flusher)
+		for i := 0; ; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+			fmt.Fprintf(w, "data: tick %d\n\n", i)
+			flusher.Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+
+	r := NewRegistry(0)
+	defer r.Close()
+	require.NoError(t, r.Add(&ServerConfig{Name: "alpha", Transport: TransportHTTP, URL: upstream.URL + "/mcp"}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		handler, ok := r.Handler("alpha")
+		require.True(t, ok)
+		handler.ServeHTTP(w, req)
+	}))
+	defer server.Close()
+
+	readErr := make(chan error, 1)
+	go func() {
+		resp, err := server.Client().Get(server.URL + "/mcp/alpha")
+		if err != nil {
+			readErr <- err
+			return
+		}
+		buf := make([]byte, 32)
+		if _, err := io.ReadFull(resp.Body, buf); err != nil {
+			readErr <- err
+			return
+		}
+		// Stream established; the reset below must abort it. Buffered
+		// ticks may satisfy a few reads, so drain until error or deadline.
+		r.Reset()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := resp.Body.Read(buf); err != nil {
+				readErr <- err
+				return
+			}
+			if time.Now().After(deadline) {
+				readErr <- nil
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-readErr:
+		require.Error(t, err, "in-flight stream survived the registry reset")
+	case <-time.After(10 * time.Second):
+		t.Fatal("stream setup timed out")
+	}
 }
 
 func TestRegistryBadUpstreamFailsAdd(t *testing.T) {

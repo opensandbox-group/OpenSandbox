@@ -23,3 +23,5 @@ import "os/exec"
 func PrepareManagedChild(cmd *exec.Cmd) (func(), error) { return func() {}, nil }
 
 func AdoptManagedChild(cmd *exec.Cmd) {}
+
+func ReleaseManagedChild(cmd *exec.Cmd) {}
