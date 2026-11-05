@@ -757,7 +757,7 @@ func TestRetry_LargeWakeRetryAfterExhaustsDeadline(t *testing.T) {
 	wait, present := parseRetryAfterValue("9223372036854775807")
 	client := &Client{retry: &RetryConfig{WakeOverallDeadline: time.Millisecond}}
 	attempts := 0
-	err := client.withRetry(context.Background(), func() error {
+	err := client.withRetry(context.Background(), func(context.Context) error {
 		attempts++
 		return &APIError{StatusCode: http.StatusServiceUnavailable, WakeExpired: true,
 			RetryAfter: wait, RetryAfterPresent: present}
