@@ -50,6 +50,12 @@ def stub_workload_informer(monkeypatch):
         def invalidate(self):
             return None
 
+        def track_write(self, response):
+            return None
+
+        def track_delete(self, name, response):
+            return None
+
     monkeypatch.setattr(
         "opensandbox_server.services.k8s.client.WorkloadInformer", _FakeInformer
     )
