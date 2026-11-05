@@ -29,46 +29,31 @@ var (
 	ErrDuplicateServer = errors.New("mcpproxy: duplicate server name")
 	// ErrUnknownServer reports a removal of a name that is not registered.
 	ErrUnknownServer = errors.New("mcpproxy: unknown server name")
-	// ErrStaticServer rejects removal of a startup-configured server.
-	ErrStaticServer = errors.New("mcpproxy: server is configured via EXECD_MCP_SERVERS and cannot be removed at runtime")
 	// ErrRegistryClosed reports use of a closed registry (shutdown).
 	ErrRegistryClosed = errors.New("mcpproxy: registry is closed")
 )
 
-// Registry holds the MCP bridges. Servers come from two sources: the
-// startup flag/env configuration (source "config") and the runtime
-// management API (source "dynamic"). Dynamic registrations are in-memory
-// only — they vanish when execd exits — and cannot shadow or replace
-// configured names.
+// Registry holds the MCP bridges. Servers are registered at runtime through
+// the /mcp/servers management API; registrations are in-memory only — they
+// vanish when execd exits.
 type Registry struct {
 	mu           sync.Mutex
 	closed       bool
-	config       *Config
 	sseKeepalive time.Duration
 	bridges      map[string]http.Handler
 	servers      map[string]*ServerConfig
-	dynamic      map[string]bool
 	stdio        map[string]*stdioBridge
 }
 
-// NewRegistry builds one bridge per configured server. The config must
-// already be validated (see ParseConfig).
-func NewRegistry(cfg *Config) (*Registry, error) {
-	r := &Registry{
-		config:       cfg,
-		sseKeepalive: cfg.SSEKeepalive,
-		bridges:      make(map[string]http.Handler, len(cfg.Servers)),
-		servers:      make(map[string]*ServerConfig, len(cfg.Servers)),
-		dynamic:      make(map[string]bool),
+// NewRegistry returns an empty registry. The keepalive interval is applied
+// to every HTTP bridge registered later (see Add).
+func NewRegistry(sseKeepalive time.Duration) *Registry {
+	return &Registry{
+		sseKeepalive: sseKeepalive,
+		bridges:      make(map[string]http.Handler),
+		servers:      make(map[string]*ServerConfig),
 		stdio:        make(map[string]*stdioBridge),
 	}
-	for _, s := range cfg.Servers {
-		if err := r.addLocked(s); err != nil {
-			r.Close()
-			return nil, err
-		}
-	}
-	return r, nil
 }
 
 // addLocked builds and registers one bridge; r.mu must be held.
@@ -96,8 +81,8 @@ func (r *Registry) addLocked(s *ServerConfig) error {
 	return nil
 }
 
-// Add validates and registers one dynamic server. Dynamic entries live in
-// memory only and are lost when execd restarts.
+// Add validates and registers one server. Registrations are in-memory only
+// and are lost when execd restarts.
 func (r *Registry) Add(s *ServerConfig) error {
 	if r == nil {
 		return ErrRegistryClosed
@@ -114,15 +99,10 @@ func (r *Registry) Add(s *ServerConfig) error {
 	if _, exists := r.servers[s.Name]; exists {
 		return ErrDuplicateServer
 	}
-	if err := r.addLocked(s); err != nil {
-		return err
-	}
-	r.dynamic[s.Name] = true
-	return nil
+	return r.addLocked(s)
 }
 
-// Remove unregisters one dynamic server and tears down its stdio sessions.
-// Configured (startup) servers are refused with ErrStaticServer.
+// Remove unregisters one server and tears down its stdio sessions.
 func (r *Registry) Remove(name string) error {
 	if r == nil {
 		return ErrRegistryClosed
@@ -137,12 +117,7 @@ func (r *Registry) Remove(name string) error {
 		r.mu.Unlock()
 		return ErrUnknownServer
 	}
-	if !r.dynamic[name] {
-		r.mu.Unlock()
-		return ErrStaticServer
-	}
 	delete(r.servers, name)
-	delete(r.dynamic, name)
 	delete(r.bridges, name)
 	bridge := r.stdio[name]
 	delete(r.stdio, name)
@@ -172,12 +147,10 @@ func (r *Registry) Handler(name string) (http.Handler, bool) {
 }
 
 // ServerInfo describes one registered server (for the /mcp index and the
-// management API). Source is "config" for startup-declared servers and
-// "dynamic" for runtime registrations.
+// management API).
 type ServerInfo struct {
 	Name      string `json:"name"`
 	Transport string `json:"transport"`
-	Source    string `json:"source"`
 }
 
 // List returns the registered servers sorted by name.
@@ -189,11 +162,7 @@ func (r *Registry) List() []ServerInfo {
 	defer r.mu.Unlock()
 	out := make([]ServerInfo, 0, len(r.servers))
 	for name, s := range r.servers {
-		source := "config"
-		if r.dynamic[name] {
-			source = "dynamic"
-		}
-		out = append(out, ServerInfo{Name: name, Transport: string(s.Transport), Source: source})
+		out = append(out, ServerInfo{Name: name, Transport: string(s.Transport)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

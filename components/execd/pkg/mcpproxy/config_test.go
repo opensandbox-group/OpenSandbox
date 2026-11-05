@@ -15,73 +15,44 @@
 package mcpproxy
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseConfigEmpty(t *testing.T) {
-	cfg, err := ParseConfig("", 30*time.Second)
-	require.NoError(t, err)
-	require.Empty(t, cfg.Servers)
-	require.Equal(t, 30*time.Second, cfg.SSEKeepalive)
+func TestServerConfigJSONRoundTrip(t *testing.T) {
+	raw := `{"name":"http-upstream","transport":"http","url":"http://127.0.0.1:8000/mcp","headers":{"Authorization":"Bearer x"}}`
+	var s ServerConfig
+	require.NoError(t, json.Unmarshal([]byte(raw), &s))
+	require.Equal(t, "http-upstream", s.Name)
+	require.Equal(t, TransportHTTP, s.Transport)
+	require.Equal(t, "http://127.0.0.1:8000/mcp", s.URL)
+	require.Equal(t, map[string]string{"Authorization": "Bearer x"}, s.Headers)
 }
 
-func TestParseConfigValid(t *testing.T) {
-	raw := `[
-		{"name":"http-upstream","transport":"http","url":"http://127.0.0.1:8000/mcp","headers":{"Authorization":"Bearer x"}},
-		{"name":"stdio-upstream","transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-everything"],"cwd":"/workspace","env":{"FOO":"bar"}},
-		{"name":"remote","transport":"http","url":"https://mcp.example.com/mcp"}
-	]`
-
-	cfg, err := ParseConfig(raw, 0)
-	require.NoError(t, err)
-	require.Len(t, cfg.Servers, 3)
-
-	first := cfg.Servers[0]
-	require.Equal(t, "http-upstream", first.Name)
-	require.Equal(t, TransportHTTP, first.Transport)
-	require.Equal(t, "http://127.0.0.1:8000/mcp", first.URL)
-	require.Equal(t, map[string]string{"Authorization": "Bearer x"}, first.Headers)
-
-	second := cfg.Servers[1]
-	require.Equal(t, "stdio-upstream", second.Name)
-	require.Equal(t, TransportStdio, second.Transport)
-	require.Equal(t, "npx", second.Command)
-	require.Equal(t, []string{"-y", "@modelcontextprotocol/server-everything"}, second.Args)
-	require.Equal(t, "/workspace", second.CWD)
-	require.Equal(t, map[string]string{"FOO": "bar"}, second.Env)
-
-	third := cfg.Servers[2]
-	require.Equal(t, "https://mcp.example.com/mcp", third.URL)
-}
-
-func TestParseConfigErrors(t *testing.T) {
+func TestServerConfigValidateErrors(t *testing.T) {
 	cases := []struct {
 		name string
-		raw  string
+		cfg  ServerConfig
 		want string
 	}{
-		{"not json", `[{`, "parse servers JSON"},
-		{"null entry", `[null]`, "is null"},
-		{"missing name", `[{"transport":"http","url":"http://x/mcp"}]`, "invalid name"},
-		{"bad name chars", `[{"name":"a/b","transport":"http","url":"http://x/mcp"}]`, "invalid name"},
-		{"name too long", `[{"name":"` + strings.Repeat("a", 65) + `","transport":"http","url":"http://x/mcp"}]`, "invalid name"},
-		{"unknown transport", `[{"name":"a","transport":"grpc","url":"http://x/mcp"}]`, "unknown transport"},
-		{"http missing url", `[{"name":"a","transport":"http"}]`, "must use http or https"},
-		{"http bad scheme", `[{"name":"a","transport":"http","url":"ftp://x/mcp"}]`, "must use http or https"},
-		{"http no host", `[{"name":"a","transport":"http","url":"http:///mcp"}]`, "missing a host"},
-		{"http with command", `[{"name":"a","transport":"http","url":"http://x/mcp","command":"foo"}]`, "must not set command"},
-		{"stdio missing command", `[{"name":"a","transport":"stdio"}]`, "requires command"},
-		{"stdio with url", `[{"name":"a","transport":"stdio","command":"x","url":"http://x/mcp"}]`, "must not set url"},
-		{"duplicate names", `[{"name":"a","transport":"http","url":"http://x/mcp"},{"name":"a","transport":"http","url":"http://y/mcp"}]`, "duplicate server name"},
-		{"reserved name", `[{"name":"servers","transport":"http","url":"http://x/mcp"}]`, "reserved"},
+		{"missing name", ServerConfig{Transport: TransportHTTP, URL: "http://x/mcp"}, "invalid name"},
+		{"bad name chars", ServerConfig{Name: "a/b", Transport: TransportHTTP, URL: "http://x/mcp"}, "invalid name"},
+		{"name too long", ServerConfig{Name: strings.Repeat("a", 65), Transport: TransportHTTP, URL: "http://x/mcp"}, "invalid name"},
+		{"unknown transport", ServerConfig{Name: "a", Transport: "grpc", URL: "http://x/mcp"}, "unknown transport"},
+		{"http missing url", ServerConfig{Name: "a", Transport: TransportHTTP}, "must use http or https"},
+		{"http bad scheme", ServerConfig{Name: "a", Transport: TransportHTTP, URL: "ftp://x/mcp"}, "must use http or https"},
+		{"http no host", ServerConfig{Name: "a", Transport: TransportHTTP, URL: "http:///mcp"}, "missing a host"},
+		{"http with command", ServerConfig{Name: "a", Transport: TransportHTTP, URL: "http://x/mcp", Command: "foo"}, "must not set command"},
+		{"stdio missing command", ServerConfig{Name: "a", Transport: TransportStdio}, "requires command"},
+		{"stdio with url", ServerConfig{Name: "a", Transport: TransportStdio, Command: "x", URL: "http://x/mcp"}, "must not set url"},
+		{"reserved name", ServerConfig{Name: "servers", Transport: TransportHTTP, URL: "http://x/mcp"}, "reserved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseConfig(tc.raw, 0)
+			err := tc.cfg.Validate()
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.want)
 		})

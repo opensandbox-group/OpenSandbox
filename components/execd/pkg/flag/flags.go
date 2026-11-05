@@ -56,10 +56,6 @@ var (
 	// preserving legacy behavior for control planes that never call it.
 	RuntimeInit bool
 
-	// MCPServers is the raw JSON array of MCP bridge upstreams; empty
-	// disables the /mcp bridge. Parsed by pkg/mcpproxy.
-	MCPServers string
-
 	// MCPSSEKeepalive is the idle interval for SSE keepalive comment frames
 	// injected by HTTP MCP bridges. Zero disables injection.
 	MCPSSEKeepalive time.Duration

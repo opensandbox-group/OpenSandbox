@@ -29,11 +29,8 @@ import (
 
 func testMCPRegistry(t *testing.T, upstreamURL string) *mcpproxy.Registry {
 	t.Helper()
-	raw := `[{"name":"alpha","transport":"http","url":"` + upstreamURL + `/mcp"}]`
-	cfg, err := mcpproxy.ParseConfig(raw, 0)
-	require.NoError(t, err)
-	registry, err := mcpproxy.NewRegistry(cfg)
-	require.NoError(t, err)
+	registry := mcpproxy.NewRegistry(0)
+	require.NoError(t, registry.Add(&mcpproxy.ServerConfig{Name: "alpha", Transport: mcpproxy.TransportHTTP, URL: upstreamURL + "/mcp"}))
 	t.Cleanup(registry.Close)
 	return registry
 }
@@ -58,7 +55,7 @@ func TestMCPRoutesIndexListsServers(t *testing.T) {
 
 	var servers []mcpproxy.ServerInfo
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&servers))
-	require.Equal(t, []mcpproxy.ServerInfo{{Name: "alpha", Transport: "http", Source: "config"}}, servers)
+	require.Equal(t, []mcpproxy.ServerInfo{{Name: "alpha", Transport: "http"}}, servers)
 }
 
 func TestMCPRoutesIndexEmptyWhenUnconfigured(t *testing.T) {
@@ -135,18 +132,18 @@ func TestMCPRoutesDynamicServerLifecycle(t *testing.T) {
 
 	r := NewRouter("", testMCPRegistry(t, upstream.URL))
 
-	// List shows the configured server.
+	// List shows the registered server.
 	w := doMCPRequest(r, http.MethodGet, "/mcp/servers", "", nil)
 	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `[{"name":"alpha","transport":"http","source":"config"}]`, w.Body.String())
+	require.JSONEq(t, `[{"name":"alpha","transport":"http"}]`, w.Body.String())
 
-	// Register a dynamic upstream.
+	// Register another upstream.
 	body := `{"name":"dyn","transport":"http","url":"` + upstream.URL + `/mcp"}`
 	w = doMCPRequest(r, http.MethodPost, "/mcp/servers", body, map[string]string{"Content-Type": "application/json"})
 	require.Equal(t, http.StatusCreated, w.Code)
-	require.JSONEq(t, `{"name":"dyn","transport":"http","source":"dynamic"}`, w.Body.String())
+	require.JSONEq(t, `{"name":"dyn","transport":"http"}`, w.Body.String())
 
-	// The dynamic server is bridgeable immediately.
+	// The new server is bridgeable immediately.
 	w = doMCPRequest(r, http.MethodPost, "/mcp/dyn", `{"jsonrpc":"2.0","method":"initialize","id":1}`, map[string]string{"Content-Type": "application/json"})
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), `"dynamic":true`)
@@ -154,7 +151,7 @@ func TestMCPRoutesDynamicServerLifecycle(t *testing.T) {
 	// Both servers are listed.
 	w = doMCPRequest(r, http.MethodGet, "/mcp/servers", "", nil)
 	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `[{"name":"alpha","transport":"http","source":"config"},{"name":"dyn","transport":"http","source":"dynamic"}]`, w.Body.String())
+	require.JSONEq(t, `[{"name":"alpha","transport":"http"},{"name":"dyn","transport":"http"}]`, w.Body.String())
 
 	// Remove it; dispatch answers 404 again.
 	w = doMCPRequest(r, http.MethodDelete, "/mcp/servers/dyn", "", nil)
@@ -179,14 +176,9 @@ func TestMCPRoutesManageServerErrors(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "reserved")
 
-	// Duplicate of a configured server.
+	// Duplicate of a registered server.
 	w = doMCPRequest(r, http.MethodPost, "/mcp/servers", `{"name":"alpha","transport":"http","url":"`+upstream.URL+`/mcp"}`, map[string]string{"Content-Type": "application/json"})
 	require.Equal(t, http.StatusConflict, w.Code)
-
-	// Configured servers cannot be removed at runtime.
-	w = doMCPRequest(r, http.MethodDelete, "/mcp/servers/alpha", "", nil)
-	require.Equal(t, http.StatusConflict, w.Code)
-	require.Contains(t, w.Body.String(), "EXECD_MCP_SERVERS")
 
 	// Unknown removal.
 	w = doMCPRequest(r, http.MethodDelete, "/mcp/servers/missing", "", nil)

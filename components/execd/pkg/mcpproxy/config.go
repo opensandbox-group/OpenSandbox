@@ -14,18 +14,18 @@
 
 // Package mcpproxy bridges MCP (Model Context Protocol) clients to upstream
 // MCP servers. Clients connect with any MCP SDK over Streamable HTTP at
-// /mcp/{name}; execd forwards to the configured upstream, either an HTTP
-// (Streamable HTTP) MCP server or a stdio MCP server subprocess. The bridge
-// is protocol-aware only where the upstream requires it (stdio); HTTP
-// upstreams are proxied as an opaque stream without JSON-RPC inspection.
+// /mcp/{name}; execd forwards to a registered upstream, either an HTTP
+// (Streamable HTTP) MCP server or a stdio MCP server subprocess. Upstreams
+// are registered at runtime through the /mcp/servers management API. The
+// bridge is protocol-aware only where the upstream requires it (stdio);
+// HTTP upstreams are proxied as an opaque stream without JSON-RPC
+// inspection.
 package mcpproxy
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
-	"time"
 )
 
 // Transport selects the upstream bridge type.
@@ -60,53 +60,15 @@ type ServerConfig struct {
 	Headers map[string]string `json:"headers,omitempty"`
 
 	// Command is the stdio server executable. Required for the stdio
-	// transport. Commands come from sandbox image or platform
-	// configuration, or from the runtime management API (in-sandbox
-	// clients can already run arbitrary commands via the exec APIs).
+	// transport. Commands come from the runtime management API; in-sandbox
+	// clients can already run arbitrary commands via the exec APIs, so a
+	// client-supplied command grants no new privilege.
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	// Env is added to the subprocess environment on top of execd's own.
 	Env map[string]string `json:"env,omitempty"`
 	// CWD is the subprocess working directory; empty inherits execd's.
 	CWD string `json:"cwd,omitempty"`
-}
-
-// Config is the parsed mcpproxy configuration.
-type Config struct {
-	Servers []*ServerConfig
-	// SSEKeepalive is the idle interval at which HTTP bridges inject an SSE
-	// comment line on text/event-stream responses. Zero disables injection.
-	SSEKeepalive time.Duration
-}
-
-// ParseConfig parses the JSON server list and validates every entry.
-// An empty payload yields an empty (disabled) configuration.
-func ParseConfig(raw string, sseKeepalive time.Duration) (*Config, error) {
-	cfg := &Config{SSEKeepalive: sseKeepalive}
-	if raw == "" {
-		return cfg, nil
-	}
-
-	var servers []*ServerConfig
-	if err := json.Unmarshal([]byte(raw), &servers); err != nil {
-		return nil, fmt.Errorf("mcpproxy: parse servers JSON: %w", err)
-	}
-	cfg.Servers = servers
-
-	seen := make(map[string]struct{}, len(servers))
-	for i, s := range servers {
-		if s == nil {
-			return nil, fmt.Errorf("mcpproxy: server[%d] is null", i)
-		}
-		if err := s.Validate(); err != nil {
-			return nil, fmt.Errorf("mcpproxy: server[%d]: %w", i, err)
-		}
-		if _, dup := seen[s.Name]; dup {
-			return nil, fmt.Errorf("mcpproxy: duplicate server name %q", s.Name)
-		}
-		seen[s.Name] = struct{}{}
-	}
-	return cfg, nil
 }
 
 // Validate checks one server entry.

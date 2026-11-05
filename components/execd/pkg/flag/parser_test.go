@@ -88,7 +88,7 @@ func TestInitFlagsDefaultsGracefulShutdownTimeout(t *testing.T) {
 	require.Equal(t, 200*time.Millisecond, ApiGracefulShutdownTimeout)
 }
 
-func TestInitFlagsMCPServersFromEnv(t *testing.T) {
+func TestInitFlagsMCPSSEKeepaliveFromEnv(t *testing.T) {
 	previousArgs := os.Args
 	previousCommandLine := flag.CommandLine
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
@@ -97,12 +97,10 @@ func TestInitFlagsMCPServersFromEnv(t *testing.T) {
 		os.Args = previousArgs
 		flag.CommandLine = previousCommandLine
 	})
-	t.Setenv("EXECD_MCP_SERVERS", `[{"name":"a","transport":"http","url":"http://127.0.0.1:8000/mcp"}]`)
 	t.Setenv("EXECD_MCP_SSE_KEEPALIVE", "5s")
 
 	InitFlags()
 
-	require.Equal(t, `[{"name":"a","transport":"http","url":"http://127.0.0.1:8000/mcp"}]`, MCPServers)
 	require.Equal(t, 5*time.Second, MCPSSEKeepalive)
 }
 
@@ -118,7 +116,6 @@ func TestInitFlagsMCPDefaults(t *testing.T) {
 
 	InitFlags()
 
-	require.Empty(t, MCPServers)
 	require.Equal(t, 30*time.Second, MCPSSEKeepalive)
 }
 

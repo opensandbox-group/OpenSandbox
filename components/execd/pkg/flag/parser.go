@@ -33,7 +33,6 @@ const (
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
 	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
-	mcpServersEnv              = "EXECD_MCP_SERVERS"
 	mcpSSEKeepaliveEnv         = "EXECD_MCP_SSE_KEEPALIVE"
 	sseLegacyCompatEnv         = "EXECD_SSE_LEGACY_COMPAT"
 )
@@ -49,7 +48,6 @@ func InitFlags() {
 	InitMode = false
 	LifecycleStartupStatusFile = ""
 	RuntimeInit = false
-	MCPServers = ""
 	SseLegacyCompat = false
 
 	// First, set default values from environment variables
@@ -116,11 +114,6 @@ func InitFlags() {
 		RuntimeInit = enabled
 	}
 	flag.BoolVar(&RuntimeInit, "runtime-init", RuntimeInit, "Gate preStart and the entrypoint on POST /internal/init; until then only /ping, /ready, and /internal/init are served")
-
-	if mcpFromEnv := os.Getenv(mcpServersEnv); mcpFromEnv != "" {
-		MCPServers = mcpFromEnv
-	}
-	flag.StringVar(&MCPServers, "mcp-servers", MCPServers, `MCP bridge upstreams as a JSON array, e.g. [{"name":"tools","transport":"http","url":"http://127.0.0.1:8000/mcp"},{"name":"fs","transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-everything"]}]`)
 
 	MCPSSEKeepalive = 30 * time.Second
 	if keepaliveFromEnv := os.Getenv(mcpSSEKeepaliveEnv); keepaliveFromEnv != "" {

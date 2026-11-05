@@ -29,11 +29,8 @@ func startBridgedEchoServer(t *testing.T, marker string) (*testHTTPServer, *Regi
 	t.Helper()
 	binary := buildEchoServer(t)
 
-	raw := `[{"name":"echo","transport":"stdio","command":"` + binary + `","env":{"MCPECHO_MARKER":"` + marker + `"}}]`
-	cfg, err := ParseConfig(raw, 0)
-	require.NoError(t, err)
-	registry, err := NewRegistry(cfg)
-	require.NoError(t, err)
+	registry := NewRegistry(0)
+	require.NoError(t, registry.Add(&ServerConfig{Name: "echo", Transport: TransportStdio, Command: binary, Env: map[string]string{"MCPECHO_MARKER": marker}}))
 	t.Cleanup(registry.Close)
 
 	handler, ok := registry.Handler("echo")
@@ -144,11 +141,8 @@ func TestStdioBridgeSessionIsolationAndDelete(t *testing.T) {
 }
 
 func TestStdioBridgeSpawnFailureSurfacesAsRPCError(t *testing.T) {
-	raw := `[{"name":"broken","transport":"stdio","command":"/nonexistent/mcp-server-xyz"}]`
-	cfg, err := ParseConfig(raw, 0)
-	require.NoError(t, err)
-	registry, err := NewRegistry(cfg)
-	require.NoError(t, err)
+	registry := NewRegistry(0)
+	require.NoError(t, registry.Add(&ServerConfig{Name: "broken", Transport: TransportStdio, Command: "/nonexistent/mcp-server-xyz"}))
 	defer registry.Close()
 
 	handler, ok := registry.Handler("broken")
@@ -160,18 +154,15 @@ func TestStdioBridgeSpawnFailureSurfacesAsRPCError(t *testing.T) {
 
 	session := connectEchoClient(t, server.baseURL+"/mcp/broken")
 
-	_, err = session.ListTools(context.Background(), nil)
+	_, err := session.ListTools(context.Background(), nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not available")
 }
 
 func TestStdioBridgeCloseKillsSubprocesses(t *testing.T) {
 	binary := buildEchoServer(t)
-	raw := `[{"name":"echo","transport":"stdio","command":"` + binary + `"}]`
-	cfg, err := ParseConfig(raw, 0)
-	require.NoError(t, err)
-	registry, err := NewRegistry(cfg)
-	require.NoError(t, err)
+	registry := NewRegistry(0)
+	require.NoError(t, registry.Add(&ServerConfig{Name: "echo", Transport: TransportStdio, Command: binary}))
 
 	handler, ok := registry.Handler("echo")
 	require.True(t, ok)
@@ -192,6 +183,6 @@ func TestStdioBridgeCloseKillsSubprocesses(t *testing.T) {
 	}, 10*time.Second, 20*time.Millisecond)
 
 	// The client observes the session termination on its next call.
-	_, err = session.ListTools(context.Background(), nil)
+	_, err := session.ListTools(context.Background(), nil)
 	require.Error(t, err)
 }
