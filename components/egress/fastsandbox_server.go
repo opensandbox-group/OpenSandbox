@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"hash/crc32"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -76,6 +77,10 @@ type fastSandboxPolicyServer struct {
 	// subjAtt records the latest validated registration attempt, including
 	// failed enforcement, for same-fence comparison and old-IP cleanup.
 	subjAtt map[subject.Subject]actionhandler.NetworkAttachment
+	// subjSandbox mirrors the SET_BINDING SandboxRef.Name (wire sandboxId,
+	// D11); the resolve path puts it on the resolver wire. Refreshed and
+	// purged with subjAtt.
+	subjSandbox map[subject.Subject]string
 	// subjFence mirrors the registered fence per subject: the relay paths
 	// finish registry pre-reads before taking s.mu; no registry lock spans mu.
 	// The mirror is published after successful registration, and
@@ -135,25 +140,45 @@ type fastSandboxPolicyServer struct {
 	// makes the Fastlet invalidate Binding readiness and replay SET_BINDING
 	// followed by the reached Hooks (restart recovery).
 	instanceID string
+	// actionsAPIVersion is one protocol for the whole shared Fastlet domain.
+	// V2 is explicit and default-off; in that mode v1 action and relay routes
+	// are not mounted, so older senders fail closed.
+	actionsAPIVersion string
+	actionOwners      map[subject.Subject]actionhandler.Owner
+	actionOwnerLocks  [256]sync.RWMutex
 }
 
 func newFastSandboxPolicyServer(ctx context.Context, reg *subject.MemoryRegistry, nft fastSandboxNftApplier) *fastSandboxPolicyServer {
 	return &fastSandboxPolicyServer{
-		ctx:              ctx,
-		reg:              reg,
-		nft:              nft,
-		actionGate:       make(chan struct{}, 1),
-		rebinds:          make(map[subject.Subject]*subjectRebind),
-		vaults:           make(map[subject.Subject]vaultEntry),
-		pendingPolicies:  make(map[subject.Subject]*policy.NetworkPolicy),
-		policies:         make(map[subject.Subject]*policyEntry),
-		subjAtt:          make(map[subject.Subject]actionhandler.NetworkAttachment),
-		subjFence:        make(map[subject.Subject]subject.Fencing),
-		gatewayDNSRefs:   make(map[subject.Subject]netip.Addr),
-		dnsRedirectApply: iptables.ReplaceGatewayDNSRedirects,
-		mitmEntries:      make(map[subject.Subject]iptables.MitmRedirectEntry),
-		instanceID:       newHandlerInstanceID(),
+		ctx:               ctx,
+		reg:               reg,
+		nft:               nft,
+		actionGate:        make(chan struct{}, 1),
+		rebinds:           make(map[subject.Subject]*subjectRebind),
+		vaults:            make(map[subject.Subject]vaultEntry),
+		pendingPolicies:   make(map[subject.Subject]*policy.NetworkPolicy),
+		policies:          make(map[subject.Subject]*policyEntry),
+		subjAtt:           make(map[subject.Subject]actionhandler.NetworkAttachment),
+		subjSandbox:       make(map[subject.Subject]string),
+		subjFence:         make(map[subject.Subject]subject.Fencing),
+		gatewayDNSRefs:    make(map[subject.Subject]netip.Addr),
+		dnsRedirectApply:  iptables.ReplaceGatewayDNSRedirects,
+		mitmEntries:       make(map[subject.Subject]iptables.MitmRedirectEntry),
+		instanceID:        newHandlerInstanceID(),
+		actionsAPIVersion: constants.ActionsAPIVersion,
+		actionOwners:      make(map[subject.Subject]actionhandler.Owner),
 	}
+}
+
+func (s *fastSandboxPolicyServer) SetActionsAPIVersion(version string) {
+	s.actionsAPIVersion = version
+}
+
+func (s *fastSandboxPolicyServer) ownerLock(subj subject.Subject) *sync.RWMutex {
+	// Subject names are caller-provided identifiers. A bounded stripe set
+	// prevents requests for arbitrary subjects from growing a lock map forever;
+	// hash collisions only serialize otherwise independent subjects.
+	return &s.actionOwnerLocks[crc32.ChecksumIEEE([]byte(subj))%uint32(len(s.actionOwnerLocks))]
 }
 
 // SetMitm wires the shared mitmproxy into the control plane: the healthz gate
@@ -259,10 +284,20 @@ func cloneGatewayDNSRefs(refs map[subject.Subject]netip.Addr) map[subject.Subjec
 // the healthz probe. No proxy-route surface.
 func (s *fastSandboxPolicyServer) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(constants.ActionsStatusPath, s.handleActionsStatus)
-	mux.HandleFunc(constants.ActionsDispatchPath, s.handleActions)
-	mux.HandleFunc(constants.VaultRelayPathPrefix, s.handleVaultRelay)
-	mux.HandleFunc(constants.PolicyRelayPathPrefix, s.handlePolicyRelay)
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		mux.HandleFunc(vaultInitializationPrefix, s.handleVaultInitialization)
+		mux.HandleFunc(vaultStatePrefix, s.handleVaultState)
+		mux.HandleFunc(constants.ActionsV2StatusPath, s.handleActionsV2Status)
+		mux.HandleFunc(constants.ActionsV2DispatchPath, s.handleActionsV2)
+		mux.HandleFunc(constants.ActionsV2OwnerPathPrefix, s.handleActionsV2Owner)
+		mux.HandleFunc(constants.ActionsV2VaultRelayPathPrefix, s.handleVaultRelay)
+		mux.HandleFunc(constants.ActionsV2PolicyRelayPathPrefix, s.handlePolicyRelay)
+	} else {
+		mux.HandleFunc(constants.ActionsStatusPath, s.handleActionsStatus)
+		mux.HandleFunc(constants.ActionsDispatchPath, s.handleActions)
+		mux.HandleFunc(constants.VaultRelayPathPrefix, s.handleVaultRelay)
+		mux.HandleFunc(constants.PolicyRelayPathPrefix, s.handlePolicyRelay)
+	}
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	return mux
 }
@@ -361,32 +396,100 @@ func (s *fastSandboxPolicyServer) handleCredentialVaultActive(w http.ResponseWri
 		http.Error(w, fmt.Sprintf("invalid clientIp %q", raw), http.StatusBadRequest)
 		return
 	}
+	result := s.withVaultAccess(ip, func(store *credentialvault.Store, _ string) vaultAccessResult {
+		return vaultAccessResult{respond: captureActiveVaultSnapshot(r, store)}
+	})
+	if result.err != nil {
+		result.err.write(w)
+		return
+	}
+	result.respond(w)
+}
+
+// vaultAccessError is a fixed-vocabulary failure of the clientIp → subject →
+// vault derivation.
+type vaultAccessError struct {
+	status int
+	reason string
+}
+
+func (e *vaultAccessError) write(w http.ResponseWriter) {
+	http.Error(w, e.reason, e.status)
+}
+
+// vaultAccessResult is the locked derivation outcome: store and wire
+// sandboxId, or a failure. respond, when set, was produced under the same
+// s.mu hold (the active-snapshot capture).
+type vaultAccessResult struct {
+	store     *credentialvault.Store
+	sandboxID string
+	respond   func(http.ResponseWriter)
+	err       *vaultAccessError
+}
+
+// withVaultAccess applies the active-vault identity discipline (registry
+// pre-read, then s.mu; lock order registry → s.mu unchanged) and runs derive
+// under the same hold. Shared by the _active and _resolve paths; the resolve
+// path additionally requires the recorded sandboxId.
+func (s *fastSandboxPolicyServer) withVaultAccess(
+	ip netip.Addr,
+	derive func(store *credentialvault.Store, sandboxID string) vaultAccessResult,
+) vaultAccessResult {
 	subj, resolved := s.reg.Resolve(subject.SubjectKey{SourceIP: ip})
 	fence, registered := s.reg.Fence(subj)
-	respond := func() func(http.ResponseWriter) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if !resolved {
-			return func(w http.ResponseWriter) { http.Error(w, "no subject for clientIp", http.StatusNotFound) }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !resolved {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusNotFound, "no subject for clientIp"}}
+	}
+	if s.subjectRebindingLocked(subj) {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "subject rebind in progress"}}
+	}
+	if !registered || !s.fenceMatchesLocked(subj, fence) || s.subjAtt[subj].IP != ip {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusNotFound, "no subject for clientIp"}}
+	}
+	store := s.vaultForLocked(subj, fence)
+	if s.vaultSealedLocked(subj) {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusConflict, "subject vault is sealed"}}
+	}
+	if entry := s.vaults[subj]; entry.vaultStateUnknown {
+		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "vault state is unknown"}}
+	}
+	return derive(store, s.subjSandbox[subj])
+}
+
+// resolveVaultAccess derives the fast-sandbox resolve access: clientIp →
+// subject → store plus the wire subject (the SET_BINDING-recorded sandboxId,
+// never a protocol value). Runs again at recheck; failure there is a scoped
+// invalidation of the in-flight resolution.
+func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	raw := strings.TrimSpace(r.URL.Query().Get("clientIp"))
+	if raw == "" {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
+			Status: http.StatusBadRequest,
+			Reason: "clientIp query parameter required",
 		}
-		if s.subjectRebindingLocked(subj) {
-			return func(w http.ResponseWriter) {
-				http.Error(w, "subject rebind in progress", http.StatusServiceUnavailable)
-			}
+	}
+	ip, err := netip.ParseAddr(raw)
+	if err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
+			Status: http.StatusBadRequest,
+			Reason: "invalid clientIp",
 		}
-		if !registered || !s.fenceMatchesLocked(subj, fence) || s.subjAtt[subj].IP != ip {
-			return func(w http.ResponseWriter) { http.Error(w, "no subject for clientIp", http.StatusNotFound) }
+	}
+	result := s.withVaultAccess(ip, func(store *credentialvault.Store, sandboxID string) vaultAccessResult {
+		if sandboxID == "" {
+			return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "sandbox identity unavailable"}}
 		}
-		store := s.vaultForLocked(subj, fence)
-		if s.vaultSealedLocked(subj) {
-			return func(w http.ResponseWriter) { http.Error(w, "subject vault is sealed", http.StatusConflict) }
+		return vaultAccessResult{store: store, sandboxID: sandboxID}
+	})
+	if result.err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
+			Status: result.err.status,
+			Reason: result.err.reason,
 		}
-		if entry := s.vaults[subj]; entry.vaultStateUnknown {
-			return func(w http.ResponseWriter) { http.Error(w, "vault state is unknown", http.StatusServiceUnavailable) }
-		}
-		return captureActiveVaultSnapshot(r, store)
-	}()
-	respond(w)
+	}
+	return credentialvault.ResolveAccess{SandboxID: result.sandboxID, Store: result.store}, nil
 }
 
 // applyPolicy applies a policy to a subject. Ordering: nft FIRST, registry
@@ -431,6 +534,7 @@ type vaultEntry struct {
 	sealed            bool
 	fileMeta          vaultFileMetadata
 	vaultStateUnknown bool
+	v2Verified        bool
 	// vaultStateProtected records that this live fence previously observed a
 	// non-v1 or unreadable source. A later missing/legacy file cannot erase that
 	// provenance and reopen the v1 writer path.
@@ -492,7 +596,7 @@ func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence sub
 		}
 		delete(s.vaults, subj)
 	}
-	v := credentialvault.NewStore(nil, func() bool { return true })
+	v := credentialvault.NewSubjectStore()
 	e := vaultEntry{store: v, fence: fence, lazyVaultProbe: true}
 	s.inspectLazyVaultStateLocked(subj, &e)
 	if s.vaultFiles != nil && s.vaultFiles.isSealed(subj) {
@@ -664,16 +768,22 @@ func (s *fastSandboxPolicyServer) dropSubjectStateLocked(subj subject.Subject) e
 	delete(s.subjFence, subj)
 	delete(s.pendingPolicies, subj)
 	delete(s.subjAtt, subj)
+	delete(s.subjSandbox, subj)
 	return nil
 }
 
-// recordBindingState records a validated network attempt before enforcement.
-// A failed initial deny-first may already have kernel effects; retries must
-// still compare its network rather than treat missing success metadata as
-// evidence that no rules exist. Called outside the registry lock.
-func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment) {
+// recordBindingState records a validated network attempt before enforcement
+// (a failed deny-first may already have kernel effects; retries must compare
+// its network). sandboxName is the envelope's SandboxRef.Name — the wire
+// sandboxId; the CR name is immutable per fence, so only a non-empty name is
+// recorded (a degenerate replay cannot erase the identity). Called outside
+// the registry lock.
+func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment, sandboxName string) {
 	s.mu.Lock()
 	s.subjAtt[subj] = att
+	if name := strings.TrimSpace(sandboxName); name != "" {
+		s.subjSandbox[subj] = name
+	}
 	s.mu.Unlock()
 }
 
@@ -700,16 +810,6 @@ func (s *fastSandboxPolicyServer) attachment(subj subject.Subject) (actionhandle
 	defer s.mu.Unlock()
 	att, ok := s.subjAtt[subj]
 	return att, ok
-}
-
-// storePendingPolicy holds the SET_BINDING policy of a still-denying subject
-// until its data-plane-ready Hook activates it. DNS dispatch keeps denying
-// while the policy is only pending (fail closed).
-func (s *fastSandboxPolicyServer) storePendingPolicy(subj subject.Subject, pol *policy.NetworkPolicy) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pendingPolicies[subj] = pol
-	log.Infof("subject %s: policy stored (deny-first until data-plane-ready)", subj)
 }
 
 // clearPendingPolicy drops a subject's pending policy (binding removal or

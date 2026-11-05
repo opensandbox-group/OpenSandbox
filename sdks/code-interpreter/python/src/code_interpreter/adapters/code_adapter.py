@@ -77,7 +77,6 @@ class CodesAdapter(Codes):
     """
 
     RUN_CODE_PATH = "/code"
-    CREATE_CONTEXT_PATH = "/code/context"
 
     def __init__(
         self, execd_endpoint: SandboxEndpoint, connection_config: ConnectionConfig

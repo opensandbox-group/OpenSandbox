@@ -73,7 +73,6 @@ async def main() -> None:
         timeout=timedelta(minutes=10),
         connection_config=ConnectionConfig(
             domain="localhost:8080",
-            use_server_proxy=True,
         ),
     )
     try:
@@ -93,7 +92,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-`use_server_proxy=True` routes sandbox traffic through the lifecycle server, which is useful when the client cannot reach container addresses directly. `destroy()` terminates the remote sandbox and closes local SDK resources. Closing the client alone does not terminate the remote sandbox.
+`destroy()` terminates the remote sandbox and closes local SDK resources. Closing the client alone does not terminate the remote sandbox.
 
 ## 4. Try the CLI
 
@@ -103,7 +102,6 @@ pip install opensandbox-cli
 osb config init
 osb config set connection.domain localhost:8080
 osb config set connection.protocol http
-osb config set connection.use_server_proxy true
 osb sandbox create --image python:3.12 --timeout 30m -o json
 osb command run <sandbox-id> -o raw --argv -- python -c "print(1 + 1)"
 osb sandbox kill <sandbox-id> -o json

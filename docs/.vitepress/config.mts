@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 const sdkSidebar = [
   {
@@ -45,7 +46,7 @@ const sdkSidebar = [
   },
 ];
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: "OpenSandbox",
   description: "Universal Sandbox Infrastructure for AI Applications",
   cleanUrls: true,
@@ -226,6 +227,7 @@ export default defineConfig({
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            { text: "OCI Templates", link: "/guides/oci-templates" },
             {
               text: "Auto-Pause & Wake-on-Access",
               link: "/guides/auto-pause-wake",
@@ -428,4 +430,4 @@ export default defineConfig({
       level: [2, 3],
     },
   },
-});
+}));

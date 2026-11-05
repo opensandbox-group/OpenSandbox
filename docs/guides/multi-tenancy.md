@@ -40,8 +40,7 @@ When multi-tenancy is active:
 2. The tenant's namespace is injected into a request-scoped `ContextVar`.
 3. Sandbox lifecycle operations (create/list/get/delete) use the resolved namespace.
 4. List operations only return sandboxes within the authenticated tenant's namespace.
-5. Proxy routes (`/sandboxes/{id}/proxy/...`) also require `OPEN-SANDBOX-API-KEY` in multi-tenant mode.
-6. Create stamps `opensandbox.io/tenant=<name>` on the workload. When several tenants share one namespace, list/get/delete/proxy hide other tenants' labeled sandboxes (`404`). Unlabeled legacy sandboxes stay visible until they expire.
+5. Create stamps `opensandbox.io/tenant=<name>` on the workload. When several tenants share one namespace, list/get/delete hide other tenants' labeled sandboxes (`404`). Unlabeled legacy sandboxes stay visible until they expire.
 
 ## Configuration
 

@@ -27,14 +27,16 @@ import type {
   Permission,
   RenameFileItem,
   ReplaceFileContentItem,
+  ReadBytesResponse,
+  ReadBytesStream,
   SearchEntry,
   SearchFilesResponse,
   SetPermissionEntry,
   WriteEntry,
 } from "../models/filesystem.js";
 import { SandboxApiException, SandboxError } from "../core/exceptions.js";
-import { iterateBodyStream } from "../core/streams.js";
 import { throwOnUploadFailure } from "./uploadFailure.js";
+import { createReadBytesResponse, readResponseBody } from "./downloadResponse.js";
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -579,34 +581,20 @@ export class FilesystemAdapter implements SandboxFiles {
     path: string,
     opts?: { range?: string; offset?: number; limit?: number }
   ): Promise<Uint8Array> {
-    let url =
-      joinUrl(this.opts.baseUrl, "/files/download") +
-      `?path=${encodeURIComponent(path)}`;
-    if (opts?.offset != null) url += `&offset=${opts.offset}`;
-    if (opts?.limit != null) url += `&limit=${opts.limit}`;
-    const res = await this.fetch(url, {
-      method: "GET",
-      headers: {
-        ...(this.opts.headers ?? {}),
-        ...(opts?.range ? { Range: opts.range } : {}),
-      },
-    });
-    if (!res.ok) {
-      const requestId = res.headers.get("x-request-id") ?? undefined;
-      const rawBody = await res.text().catch(() => undefined);
-      throw new SandboxApiException({
-        message: "Download failed",
-        statusCode: res.status,
-        requestId,
-        error: new SandboxError(
-          SandboxError.UNEXPECTED_RESPONSE,
-          "Download failed"
-        ),
-        rawBody,
-      });
-    }
+    return (await this.readBytesDetailed(path, opts)).body;
+  }
+
+  async readBytesDetailed(
+    path: string,
+    opts?: { range?: string; offset?: number; limit?: number }
+  ): Promise<ReadBytesResponse<Uint8Array>> {
+    const res = await this.fetchDownload(path, opts, "Download failed");
     const ab = await res.arrayBuffer();
-    return new Uint8Array(ab);
+    return createReadBytesResponse(
+      res,
+      new Uint8Array(ab),
+      opts?.offset != null || opts?.limit != null,
+    );
   }
 
   readBytesStream(
@@ -616,10 +604,23 @@ export class FilesystemAdapter implements SandboxFiles {
     return this.downloadStream(path, opts);
   }
 
-  private async *downloadStream(
+  async readBytesStreamDetailed(
     path: string,
     opts?: { range?: string; offset?: number; limit?: number }
-  ): AsyncIterable<Uint8Array> {
+  ): Promise<ReadBytesResponse<ReadBytesStream>> {
+    const res = await this.fetchDownload(path, opts, "Download stream failed");
+    return createReadBytesResponse(
+      res,
+      readResponseBody(res),
+      opts?.offset != null || opts?.limit != null,
+    );
+  }
+
+  private async fetchDownload(
+    path: string,
+    opts: { range?: string; offset?: number; limit?: number } | undefined,
+    errorMessage: string,
+  ): Promise<Response> {
     let url =
       joinUrl(this.opts.baseUrl, "/files/download") +
       `?path=${encodeURIComponent(path)}`;
@@ -636,20 +637,25 @@ export class FilesystemAdapter implements SandboxFiles {
       const requestId = res.headers.get("x-request-id") ?? undefined;
       const rawBody = await res.text().catch(() => undefined);
       throw new SandboxApiException({
-        message: "Download stream failed",
+        message: errorMessage,
         statusCode: res.status,
         requestId,
         error: new SandboxError(
           SandboxError.UNEXPECTED_RESPONSE,
-          "Download stream failed"
+          errorMessage
         ),
         rawBody,
       });
     }
+    return res;
+  }
 
-    const body = res.body as ReadableStream<Uint8Array> | null;
-    if (!body) return;
-    yield* iterateBodyStream(body);
+  private async *downloadStream(
+    path: string,
+    opts?: { range?: string; offset?: number; limit?: number }
+  ): AsyncIterable<Uint8Array> {
+    const response = await this.readBytesStreamDetailed(path, opts);
+    yield* response.body;
   }
 
   async readFile(

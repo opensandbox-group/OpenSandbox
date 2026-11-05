@@ -246,7 +246,7 @@ OpenSandbox release images are published under the same component name in three 
 - GitHub Container Registry: `ghcr.io/opensandbox-group/opensandbox/<component>`
 - Alibaba Cloud Container Registry: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/<component>`
 
-Tagged release images are signed keylessly with Cosign and include provenance attestations. Pin production images by digest and follow the [release verification guide](docs/community/release-verification.md) to verify the image against the OpenSandbox GitHub Actions identity before deployment.
+Pin production images by digest and check the [release verification guide](docs/community/release-verification.md) for signing coverage before deployment. Legacy per-component releases support Cosign signatures and provenance attestations; current umbrella releases have a [tracked signing and provenance gap](https://github.com/opensandbox-group/OpenSandbox/issues/2463) and must not be assumed to provide the same verification evidence.
 
 ## Documentation
 
@@ -273,4 +273,4 @@ Tagged release images are signed keylessly with Cosign and include provenance at
 
 OpenSandbox is a project of the [Agentic AI Foundation (AAIF)](https://aaif.io/projects/opensandbox).
 
-Licensed under the [Apache 2.0 License](LICENSE).
+Code is licensed under the [Apache 2.0 License](LICENSE). See the [contribution guide](CONTRIBUTING.md#license) for documentation licensing and contribution terms.

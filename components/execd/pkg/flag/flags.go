@@ -63,4 +63,14 @@ var (
 	// MCPSSEKeepalive is the idle interval for SSE keepalive comment frames
 	// injected by HTTP MCP bridges. Zero disables injection.
 	MCPSSEKeepalive time.Duration
+
+	// SseLegacyCompat omits the exit_code field from execution_complete and
+	// error SSE events so that clients whose EventNode schemas predate the
+	// field never observe an unknown key. Successful foreground commands
+	// carry no information in the field (it is a constant 0; failures are
+	// reported via the error event), and newer SDKs already infer 0 from a
+	// complete event without exit_code, so enabling this is lossless for
+	// successful commands. Enable it while legacy SDK versions are still
+	// deployed; turn it off once the fleet has upgraded.
+	SseLegacyCompat bool
 )

@@ -127,6 +127,25 @@ func TestFilesystemControllerSearchFiles(t *testing.T) {
 	require.Equal(t, "file", files[0].Type)
 }
 
+func TestFilesystemControllerSearchFilesHidesUploadStaging(t *testing.T) {
+	tmpDir := t.TempDir()
+	visible := filepath.Join(tmpDir, "visible.txt")
+	staging := filepath.Join(tmpDir, uploadTempPattern+"0123456789abcdef")
+	require.NoError(t, os.WriteFile(visible, []byte("visible"), 0o644))
+	require.NoError(t, os.WriteFile(staging, []byte("in flight"), 0o600))
+
+	rawURL := fmt.Sprintf("/files/search?path=%s&pattern=%s", url.QueryEscape(tmpDir), url.QueryEscape("**"))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.SearchFiles()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var files []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &files))
+	require.Len(t, files, 1)
+	require.Equal(t, visible, files[0].Path)
+}
+
 func TestFilesystemControllerListDirectoryDefaultDepth(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "alpha.txt")
@@ -153,6 +172,25 @@ func TestFilesystemControllerListDirectoryDefaultDepth(t *testing.T) {
 	require.Equal(t, "file", byPath[filePath].Type)
 	require.Equal(t, "directory", byPath[dirPath].Type)
 	require.NotContains(t, byPath, deepFile)
+}
+
+func TestFilesystemControllerListDirectoryHidesUploadStaging(t *testing.T) {
+	tmpDir := t.TempDir()
+	visible := filepath.Join(tmpDir, "visible.txt")
+	staging := filepath.Join(tmpDir, uploadTempPattern+"0123456789abcdef")
+	require.NoError(t, os.WriteFile(visible, []byte("visible"), 0o644))
+	require.NoError(t, os.WriteFile(staging, []byte("in flight"), 0o600))
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s", url.QueryEscape(tmpDir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	require.Len(t, entries, 1)
+	require.Equal(t, visible, entries[0].Path)
 }
 
 func TestFilesystemControllerListDirectoryDepth(t *testing.T) {
@@ -386,6 +424,77 @@ func TestReplaceContentFailsUnknownFile(t *testing.T) {
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+func TestFilesystemDirectoryRoutesRejectStagingNames(t *testing.T) {
+	for _, stagingName := range []string{
+		".osb-staging-0123456789abcdef",
+		uploadTempPattern + "0123456789abcdef",
+	} {
+		t.Run(stagingName, func(t *testing.T) {
+			t.Run("make", func(t *testing.T) {
+				target := filepath.Join(t.TempDir(), stagingName)
+				payload, err := json.Marshal(map[string]model.Permission{
+					target + string(os.PathSeparator) + ".": {Mode: 0o755},
+				})
+				require.NoError(t, err)
+
+				ctrl, rec := newFilesystemController(t, http.MethodPost, "/directories", payload)
+				ctrl.MakeDirs()
+
+				require.Equal(t, http.StatusNotFound, rec.Code)
+				_, err = os.Stat(target)
+				require.ErrorIs(t, err, os.ErrNotExist)
+			})
+
+			t.Run("remove", func(t *testing.T) {
+				target := filepath.Join(t.TempDir(), stagingName)
+				require.NoError(t, os.WriteFile(target, []byte("in flight"), 0o600))
+
+				rawURL := fmt.Sprintf("/directories?path=%s", url.QueryEscape(target+string(os.PathSeparator)+"."))
+				ctrl, rec := newFilesystemController(t, http.MethodDelete, rawURL, nil)
+				ctrl.RemoveDirs()
+
+				require.Equal(t, http.StatusNotFound, rec.Code)
+				got, err := os.ReadFile(target)
+				require.NoError(t, err)
+				require.Equal(t, "in flight", string(got), "an in-flight staging file must not be removed through the directory API")
+			})
+		})
+	}
+}
+
+// ReplaceContent reads and truncates the target in place, so it must resolve a
+// trailing "/." the same way the filesystem helpers do before checking the
+// reserved staging names. Otherwise it can expose or corrupt an upload another
+// route is still staging.
+func TestReplaceContentRejectsStagingPath(t *testing.T) {
+	for _, stagingName := range []string{
+		".osb-staging-0123456789abcdef",
+		uploadTempPattern + "0123456789abcdef",
+	} {
+		t.Run(stagingName, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), stagingName)
+			require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o644))
+
+			requestPath := target + string(os.PathSeparator) + "."
+			body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+				requestPath: {
+					Old: "world",
+					New: "universe",
+				},
+			})
+			require.NoError(t, err)
+
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+			ctrl.ReplaceContent()
+
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, "hello world", string(got), "the in-flight staging file must not be rewritten")
+		})
+	}
+}
+
 func TestFormatContentDisposition(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -433,6 +542,17 @@ func TestFormatContentDisposition(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := formatContentDisposition(tt.filename)
 			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatContentDispositionRoundTrips(t *testing.T) {
+	// filename* must stick to RFC 8187 attr-chars so standard parsers accept it.
+	for _, filename := range []string{"ü=1.txt", "报告:v1@2.txt", "测试 文件.txt", `a"b.txt`, "a'b(1).txt"} {
+		t.Run(filename, func(t *testing.T) {
+			_, params, err := mime.ParseMediaType(formatContentDisposition(filename))
+			require.NoError(t, err)
+			require.Equal(t, filename, params["filename"])
 		})
 	}
 }

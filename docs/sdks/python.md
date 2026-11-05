@@ -249,6 +249,8 @@ manual = await Sandbox.create(
 
 Resolving an endpoint confirms that a route exists; it does not confirm that the application on that port is healthy. For service readiness, make a bounded request to the application's health endpoint and include the returned endpoint headers.
 
+Endpoint-cache invalidation is scoped to the affected sandbox. An in-flight lookup for a different sandbox can still populate the cache; a lookup invalidated for its own sandbox cannot repopulate it with an older endpoint. This applies to both the synchronous and asynchronous Python clients.
+
 With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
@@ -417,7 +419,7 @@ await sandbox.files.delete_files(["/tmp/hello.txt"])
 
 For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`; use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()` also accept `offset` and `limit` for partial reads.
 
-Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
+Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. A connection failure while reading a download body raises the same SDK exception as a failed request (for example `SandboxConnectionException`), with the underlying `httpx` error as its `__cause__`; this applies to the sync streams too. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
 
 ```python
 from contextlib import aclosing
@@ -427,6 +429,19 @@ async with aclosing(await sandbox.files.read_bytes_stream("/tmp/large.bin")) as 
         if enough_data(chunk):
             break
 ```
+
+Use `read_bytes_detailed` or `read_bytes_stream_detailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check the optional `DownloadFilesystem` capability before calling them:
+
+```python
+from opensandbox.services import DownloadFilesystem
+
+files = sandbox.files
+if isinstance(files, DownloadFilesystem):
+    download = await files.read_bytes_detailed("/tmp/data.bin", range_header="bytes=5-")
+    print(download.is_partial, download.total_size, download.content_range)
+```
+
+Check `is_partial` before appending a resumed download. Use `async with download.body` for a detailed stream so it closes even on early exit. The synchronous equivalent uses `DownloadFilesystemSync` from `opensandbox.sync.services` and `with download.body`.
 
 #### File operations with an explicit identity
 
@@ -540,22 +555,21 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 | `api_key`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
 | `domain`          | The endpoint domain of the sandbox service (`host[:port]` or a full URL); a trailing `/` or `/v1` is ignored | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`        | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `request_timeout` | Timeout for API requests; command streams (SSE) wait at most `max(request_timeout, 30s)` for the response and between stream bytes | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
 | `follow_redirects` | Follow HTTP redirects for SDK requests    | `False`                      | -                      |
 | `event_hooks`     | Additional httpx hooks for adapter clients | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry); custom transports must honor request timeouts  | SDK-created per instance     | -                      |
 | `retry_policy`    | Automatic retry policy; streaming requests only get its wake retry (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
-| `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
 | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `False` | - |
 
-The Python Code Interpreter inherits the sandbox's connection configuration. With `use_server_proxy=True`, context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
+The Python Code Interpreter inherits the sandbox's connection configuration. With the deprecated `use_server_proxy=True` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
 When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
 
-File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. This applies to both direct chunked uploads and uploads through the server proxy. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
+File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 
 `ConnectionConfig.event_hooks` accepts async httpx hooks, while `ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured request hooks run before the SDK safety hook, so they cannot re-add protected OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors `follow_redirects` and the SDK safety hook, but does not invoke configured user hooks.
 

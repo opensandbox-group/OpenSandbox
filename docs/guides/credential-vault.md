@@ -21,6 +21,7 @@ Credential Vault is OpenSandbox's outbound credential broker for sandboxed agent
 - Sandbox create request includes an outbound network policy.
 - The outbound network policy should use `defaultAction="deny"` and explicitly allow every host referenced by a credential binding. Default-allow remains temporarily supported for backward compatibility but emits a security warning.
 - Sandbox create request enables Credential Proxy.
+- Exchange credentials (dynamic header resolution, the section below) require OpenSandbox release **1.2.1** or newer — the egress image, the server, and the Python/JavaScript/Go SDKs from the same release. Kotlin and C# SDK support is follow-up work.
 - Sandbox pods are not running with an additional transparent service-mesh sidecar (for example Istio/Envoy injection) in the same network namespace. Credential Vault currently assumes the OpenSandbox egress sidecar is the only transparent outbound interception layer in the pod.
 - The sandbox image has the tools you want to run. For Claude Code, use an image with Node.js and npm, such as the OpenSandbox code-interpreter image.
 
@@ -45,11 +46,7 @@ At a high level:
 
 When the active-vault check succeeds, requests that do not match any credential binding are forwarded unchanged. Credential path-safety checks apply only after a binding matches and the request would otherwise receive credentials. The active-vault check itself runs before binding selection for every intercepted flow, including requests to hosts that would not match a binding.
 
-The active vault used by the MITM process is served over a local Unix domain socket inside the sidecar. The sandbox workload cannot fetch this active state over the normal server proxy path.
-
-Each new flow conditionally reads that private endpoint with the cached opaque snapshot tag in `If-None-Match`. A `304 Not Modified` response reuses the same immutable in-process snapshot without rendering or transferring secret values; a `200 OK` response carries a fully validated replacement snapshot and a new opaque `ETag`. Successful create and patch responses are acknowledged only after the store has changed that tag, so the next flow immediately observes the new credentials without a cache-TTL delay.
-
-The opaque tag is separate from the public vault revision. Deleting a vault and creating it again can reset the public revision to `1`, but the recreated vault receives a different tag and cannot reuse plaintext from the deleted snapshot. A `404 Not Found` from the private endpoint is the normal "no active vault" result: the MITM process clears its cached snapshot and continues without credential injection.
+Each flow reads that private endpoint with a cached opaque snapshot tag in `If-None-Match`: a `304 Not Modified` reuses the in-process snapshot without transferring secret values, a `200 OK` returns a fully validated replacement, and successful create/patch acks guarantee the next flow sees the new credentials with no cache-TTL delay. The tag is separate from the public revision — a deleted-and-recreated vault gets a different tag and cannot reuse plaintext from the old snapshot — and a `404` is the normal "no active vault" result: no injection, traffic continues.
 
 ::: warning Runtime availability dependency
 The private active-vault socket is a hard availability dependency for all traffic intercepted by Credential Proxy, not only traffic that ultimately matches a credential binding. A timeout, refused connection, unexpected EOF, `5xx` response, malformed snapshot, or invalid `ETag` clears the affected plaintext cache and fails the request closed before any upstream forwarding. Small requests whose bodies are safely buffered receive a local `503 Service Unavailable` response. Requests that are already streaming, may cross the streaming threshold, or have an unknown body length are terminated instead, because mitmproxy cannot safely synthesize a local response after streaming has started. Operators should monitor the sidecar and private socket as part of the egress data plane's availability.
@@ -58,17 +55,15 @@ The private active-vault socket is a hard availability dependency for all traffi
 ## Persistence Across Pause and Resume
 
 ::: warning In-memory state
-Credential Vault entries are process-local memory in the egress sidecar; they are not part of the sandbox root filesystem or the `BatchSandbox` Pod template. Kubernetes pause deletes the Pod after snapshotting, so the fresh egress sidecar created by resume starts with an empty vault. Credential injection does not resume until a trusted client creates the credentials and bindings again.
+For sidecar-profile sandboxes the vault is process-local memory in the egress sidecar — not part of the sandbox root filesystem or the Pod template. Kubernetes pause deletes the Pod after snapshotting, so resume starts with an empty vault: re-create it once the sandbox is `Running`, before work that depends on those credentials. Docker pause/unpause preserves the sidecar and its vault — no re-creation needed; only a sidecar replacement or restart resets to an empty vault and requires re-injection.
 
-Keep the original vault request or an equivalent secret-manager reference in a trusted control plane outside the sandbox. After the sandbox returns to `Running`, call the Credential Vault create API again before allowing work that depends on those credentials. Do not persist real credential values in sandbox metadata, environment variables, snapshots, or logs.
-
-Docker pause/unpause retains the existing container processes, but any egress sidecar replacement or restart also creates a new in-memory vault and requires the same re-injection procedure.
+Keep the original vault request (or a secret-manager reference) in a trusted control plane outside the sandbox. Never persist real credential values in sandbox metadata, environment variables, snapshots, or logs.
 :::
 
 ::: info Fast-sandbox profile: server-routed vault
-For template-backed (fsb) sandboxes the vault is egress-held: the server pushes complete vault revisions to the egress vault over the FastPath handler relay and the relay response is the synchronous egress-validated ack. The same SDK entry points (`sandbox.credential_vault` / `credentialVault` / `CredentialVault`) work for template-backed sandboxes through the server-routed API — no sidecar endpoint is resolved. The vault is **not** carried at create time: create the sandbox first, then call the vault API.
+For template-backed (fsb) sandboxes the vault is egress-held: the server relays complete vault revisions to the egress and the relay response is the synchronous egress-validated ack. The same SDK entry points work unchanged (`sandbox.credential_vault` / `credentialVault` / `CredentialVault`) — but the vault is **not** carried at create time: create the sandbox first, then call the vault API.
 
-Everything else is unchanged for this profile: values are write-only and stripped from every read, `PATCH` is atomic (composed server-side over the relay; a `412` means another writer won the revision — re-read and retry with the fresh `expectedRevision`), and the vault persists egress-locally (memory plus one plaintext v1 file per sandbox under a Pod-scoped `emptyDir`), so an egress container restart inside the live Pod recovers locally when the Fastlet replays the bindings, and a Kubernetes pause/resume carries the vault files in the snapshot bundle (export strictly before teardown, re-stamped import at restore). The vault volume is part of the credential trust surface (mount it with `medium: Memory` to keep plaintext off node disk). See [fast-sandbox networking](/architecture/fast-sandbox/networking#credential-delivery).
+Values stay write-only, and `PATCH` stays atomic (`412` = another writer won the revision — re-read and retry with the fresh `expectedRevision`). The vault persists egress-locally (memory plus one plaintext v1 file per sandbox under a Pod-scoped `emptyDir`): an egress restart inside the live Pod recovers when the Fastlet replays the bindings, and pause/resume carries the vault files in the snapshot bundle (export before teardown, re-stamped import at restore). The volume is part of the credential trust surface — mount it with `medium: Memory`. See [fast-sandbox networking](/architecture/fast-sandbox/networking#credential-delivery).
 :::
 
 ## Service Mesh Compatibility
@@ -164,9 +159,7 @@ Substitution is disabled by default and is exact, literal, and case-sensitive. O
 | `header` | Replaces placeholders in the original request headers, excluding hop-by-hop and security-sensitive headers such as `Host`, `Content-Length`, and forwarding headers. Substitutions run before Credential Vault injects auth headers, so the sidecar does not rewrite the credential headers it creates. |
 | `body` | Replaces placeholders in UTF-8 request bodies. For `application/json`, the replacement is encoded as JSON string contents, so put the placeholder inside a quoted JSON string. For `application/x-www-form-urlencoded`, the replacement is form-encoded. Compressed and multipart bodies are skipped. |
 
-The sidecar applies all replacements for a surface against the original request text in one pass. Inserted credential values are not scanned again for later placeholders, which prevents one secret from accidentally rewriting another secret. When a body is rewritten, the sidecar updates `Content-Length` and removes `Transfer-Encoding` because the forwarded request now has a fixed-size buffered body.
-
-The placeholder, raw credential value, URL-encoded value, form-encoded value, and JSON-escaped values are added to the active redaction set. A binding with substitutions that matched the request but did not find any placeholder emits a substitution-miss log without exposing credential values.
+Replacements for each surface run against the original request text in one pass, and inserted values are never re-scanned — one secret cannot rewrite another. A rewritten body becomes a fixed-size buffered body with an updated `Content-Length`. The placeholder and every encoding of the value (raw, URL-, form-, JSON-escaped) join the active redaction set; a matched binding that finds no placeholder logs a substitution miss without exposing values.
 
 Example configuration:
 
@@ -229,6 +222,193 @@ content-type: application/json
 {"client_secret":"body \"secret\" value"}
 ```
 
+## Exchange Credentials (Dynamic Header Resolution)
+
+::: tip New in 1.2.1
+Exchange credentials ship in OpenSandbox release **1.2.1**. The egress image, the server, and the Python/JavaScript/Go SDKs must all come from that release or newer; inline credentials behave identically on older releases.
+:::
+
+Static credentials are delivered once at vault creation and rendered at revision time. Some credentials cannot work that way: identity-derived tokens (STS or OAuth2 client-credentials grants, SPIFFE-style signed proofs) are short-lived and computed from request context — an audience derived from the destination, or a signature bound to the method and path of one specific request. Exchange credentials cover this case: the credential does not carry a value, it names a **header resolver**; when a bound request arrives, the egress asks that resolver for a fresh header set and injects the response. The sandbox process never sees or holds the material, exactly like the static path.
+
+An exchange credential declares where to resolve; a typeless binding auth declares when:
+
+```jsonc
+// vault create payload (POST /sandboxes/{id}/credential-vault)
+{
+  "credentials": [
+    { "name": "spi-signer", "source": { "type": "exchange", "endpoint": "unix:///run/spi/spi.sock" } },
+    { "name": "corp-resolver", "source": { "type": "exchange", "endpoint": "https://header-resolver.internal" } }
+  ],
+  "bindings": [
+    { "name": "internal-api",
+      "match": { "hosts": ["*.internal.example.com"], "methods": ["GET"], "paths": ["/v1/*"] },
+      "auth": { "credential": "spi-signer" } }   // no "type": typeless = exchange reference
+  ]
+}
+```
+
+The rules that keep the two worlds unambiguous:
+
+- Auth with a static `type` (`bearer`, `basic`, `apiKey`, `customHeaders`) must reference an `inline` credential; auth **without** `type` must reference an `exchange` credential. Cross-references are rejected with `400`.
+- The typeless form carries only `credential` — `name`, `headers`, and `substitutions` are not valid on it. Substitutions always require a static type.
+- Static and exchange bindings can coexist in one vault, including on the same host with disjoint `paths`/`methods` scopes.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Sandbox app
+    participant Egr as Egress (MITM + vault)
+    participant Res as Resolver (unix:// or https://)
+    participant Up as Upstream API
+
+    App->>Egr: GET https://api.internal.example.com/v1/foo?a=1
+    Note over Egr: binding match (host/method/path)<br/>typeless auth → exchange credential
+    Egr->>Res: POST /resolve {subject: sandboxId, credential, binding, destination, request}
+    Note over Res: mint / sign fresh headers<br/>(identity scheme + caching are resolver-internal)
+    Res-->>Egr: 200 {headers}
+    Egr->>Up: request + fresh headers injected
+    Up-->>Egr: response
+    Egr-->>App: response — every injected header redacted by name and value
+    note over Egr,Res: any failure (unreachable, timeout, invalid response,<br/>binding mutated mid-flight) → 407 or stream kill,<br/>never forwarded uncredentialed
+```
+
+The egress derives the caller identity from the connection — the sandbox id, never client-supplied — and sends it as `subject`, so one shared resolver can select per-sandbox identity. Resolved material exists for exactly one request: it is never persisted, and the vault travels pause/resume and egress restarts as pure configuration, re-resolving on demand.
+
+### Failure Semantics
+
+Resolution failure fails closed, never open: if the resolver is unreachable, slow beyond the timeout, returns an invalid or oversized response, or the bound credential is mutated mid-flight, the matched request is denied — a local `407` for buffered requests, a terminated stream for requests already streaming. The request is never forwarded without credentials, and a failed resolve never poisons the next one. Static bindings in the same vault keep flowing during a resolver outage.
+
+Per-request resolution is bounded: every resolve carries its own timeout, and all resolves share the process-wide concurrency limit below. A slow resolver never blocks non-bound traffic, but when the concurrency limit is saturated (for example several slow resolvers, or a deliberately low limit), resolves for **other** bindings and sandboxes queue behind it and fail closed on their own timeouts.
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT` | `2` | Per-request resolver timeout in **integer seconds** (`2`, not `2s` — the egress parses an integer in `1..120`; any other value fails the resolver gate closed). |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY` | `32` | Process-wide concurrent-resolve limit, integer `1..1024`, shared across all bindings and subjects in the egress process. |
+
+A vault that references an exchange credential is rejected at write time unless the egress was started with resolver configuration (fail closed; inline-only vaults are unaffected).
+
+### Running a Resolver
+
+A resolver is any service that answers one route: `POST /resolve` with a JSON document describing the request, and returns the headers to inject. Both transports use the same framing — HTTP over a Unix socket for `unix:///path/to.sock`, TLS for `https://host[:port][/prefix]`:
+
+```jsonc
+// egress -> resolver
+{
+  "subject": "fsb-4f8a...",                 // the sandbox id, filled authoritatively by the egress
+  "credential": "spi-signer",
+  "binding": "internal-api",
+  "destination": { "scheme": "https", "authority": "api.internal.example.com:443", "sni": "api.internal.example.com" },
+  "request": { "method": "GET", "host": "api.internal.example.com", "path": "/v1/foo?a=1", "headers": {} }
+}
+
+// 200 OK
+{ "headers": { "authorization": "Bearer ...", "x-signature": "..." } }
+```
+
+`request.path` is the full request target including the query string, so a resolver can bind signatures to the complete target. The `headers` field is reserved and currently always empty — request headers are not forwarded to the resolver, so proofs can only bind to the method, host, and path today. The optional `redactions` field on the response is additive only — the egress redacts every returned header regardless.
+
+Hard requirements on a resolver endpoint:
+
+- **Reachable only by the egress process.** A sandbox that could call the resolver directly could mint credentials and bypass the policy plane. Unix sockets are structurally isolated by directory/socket permissions (for example `0710`/`0660`) — guests have no filesystem path to them. For `https://` endpoints there is **no structural isolation today**: the guarantee comes from the egress policy layer — deny-by-default plus the resolver host never appearing in any sandbox's egress allow list. In the sidecar profile, the UID-scoped exclusion that lets the egress dial the resolver is scoped to the MITM uid (transparently intercepted dials are re-originated by it, the same mechanism as upstream proxies), so that exclusion alone is **not** the trust boundary — a disallowed sandbox dial is denied by policy before any upstream connection, which is exactly why the resolver host must stay out of every allow list. HTTPS caller authentication (egress-presented bearer tokens) is declared follow-up work and is not implemented yet; until it lands, treat an `https://` resolver as reachable by anything that can route to it and protect it accordingly (network segmentation, dedicated resolver ports, no shared allow-list entries).
+- **Bounded responses.** The egress enforces an envelope — 64KiB total, at most 16 headers, 8KiB per value, 64 redaction entries — and denies the request when exceeded.
+- **Per-request semantics.** Input includes request context; caching and rotation are resolver-internal and invisible to the contract.
+
+A runnable reference resolver (with deterministic signatures and fault injection) ships at `components/egress/tests/resolver/resolver.py` in the repository.
+
+### Quick-Start: a Runnable Resolver
+
+That reference resolver is a single stdlib-only Python file — enough to wire the full path end to end and to develop against. It creates the production socket layout itself (`0710` directory, `0660` socket); run it as the egress user (or a user sharing its group) so the egress process can connect:
+
+```bash
+# 1. Place the resolver (from the repository; the egress image ships python3).
+install -D -m 0755 components/egress/tests/resolver/resolver.py /opt/resolver/resolver.py
+
+# 2. Start it on the socket your vault's endpoint names.
+sudo -u <egress-user> python3 /opt/resolver/resolver.py --uds /run/spi/spi.sock
+
+# 3. Verify POST /resolve from the egress environment.
+curl -fsS --unix-socket /run/spi/spi.sock http://localhost/resolve \
+  -H 'content-type: application/json' \
+  -d '{"subject":"fsb-demo","credential":"spi-signer","binding":"internal-api",
+       "destination":{"scheme":"https","authority":"api.internal.example.com:443","sni":"api.internal.example.com"},
+       "request":{"method":"GET","host":"api.internal.example.com","path":"/v1/foo?a=1","headers":{}}}'
+```
+
+A working resolver answers `200` with deterministic headers — `authorization: Bearer test-spi-signer`, `x-test-subject` echoing the subject, and `x-test-signature = sha256(subject|credential|binding|authority|path)` — and supports `--delay <ms>`, `--fail once|rate`, and `--incomplete-redactions` for outage drills. In containerized deployments the same file runs next to the egress with a shared socket volume (the fast-sandbox integration verify drives it exactly that way). It is a test harness, not an identity service: for production, put your real signing service behind the same `POST /resolve` contract.
+
+### Python SDK Example
+
+This example grants a sandbox access to an internal API through a signing resolver. The host-side script writes only the resolver endpoint into the vault; the sandbox code uses plain `requests` with no credential material anywhere in the process, environment, or logs.
+
+```python
+import os
+from datetime import timedelta
+
+from opensandbox import SandboxSync
+from opensandbox.models.sandboxes import (
+    Credential,
+    CredentialBinding,
+    CredentialProxyConfig,
+    NetworkPolicy,
+    NetworkRule,
+    SandboxImageSpec,
+)
+
+API_HOST = "api.internal.example.com"
+RESOLVER_ENDPOINT = "unix:///run/spi/spi.sock"  # or "https://header-resolver.internal"
+
+sandbox = SandboxSync.create(
+    image=SandboxImageSpec(os.getenv("SANDBOX_IMAGE", "opensandbox/code-interpreter:latest")),
+    timeout=timedelta(minutes=15),
+    network_policy=NetworkPolicy(
+        defaultAction="deny",
+        egress=[NetworkRule(action="allow", target=API_HOST)],
+    ),
+    credential_proxy=CredentialProxyConfig(enabled=True),
+)
+
+try:
+    state = sandbox.credential_vault.create(
+        credentials=[
+            Credential(
+                name="spi-signer",
+                source={"type": "exchange", "endpoint": RESOLVER_ENDPOINT},
+            )
+        ],
+        bindings=[
+            CredentialBinding(
+                name="internal-api",
+                match={
+                    "schemes": ["https"],
+                    "hosts": [API_HOST],
+                    "methods": ["GET"],
+                    "paths": ["/v1/*"],
+                },
+                auth={"credential": "spi-signer"},  # typeless: exchange reference
+            )
+        ],
+    )
+    print(f"vault revision {state.revision}")
+
+    # The sandbox process carries no credentials. Fresh, per-request headers
+    # are injected on the way out; if the resolver is down this call fails
+    # closed with 407 instead of leaking an unauthenticated request.
+    result = sandbox.commands.run(
+        "curl -fsS https://api.internal.example.com/v1/foo?a=1"
+    )
+    print(result.text)
+finally:
+    sandbox.kill()
+```
+
+The typed model `ExchangeCredentialSource` (`from opensandbox.models.sandboxes import ExchangeCredentialSource`) is equivalent to the `source` dict form; the typeless auth form is validated client-side — `CredentialAuth(credential="spi-signer")` without `type` accepts only the credential reference.
+
+Reads are sanitized for exchange credentials the same way as for inline ones: `get`/`list` return `sourceType: "exchange"` and the typeless auth as `{"credential": "spi-signer"}`; the endpoint is treated as configuration and never carries resolved material.
+
+::: info SDK support
+Exchange credentials require release 1.2.1+ and are implemented in the Python, JavaScript/TypeScript, and Go SDKs. Kotlin and C# support is tracked as follow-up (T5b); until it lands, use the raw lifecycle API for those languages.
+:::
+
 ## Egress Sidecar Configuration
 
 | Environment variable | Default | Description |
@@ -252,9 +432,7 @@ All sandbox SDKs use the same wire contract. The main differences are naming and
 | Kotlin/JVM | `.credentialProxyEnabled(true)` or `.credentialProxy { enabled(true) }` | `sandbox.credentialVault()` | `create(request)`, `patch(request)` |
 | C#/.NET | `CredentialProxy = new CredentialProxyConfig { Enabled = true }` | `sandbox.CredentialVault` or sandbox helpers | `CreateCredentialVaultAsync(...)`, `PatchCredentialVaultAsync(...)` |
 
-The vault APIs return sanitized metadata. Plaintext credential values are write-only and are not returned by `get`, `list`, or patch responses.
-
-The same entry points and methods work for template-backed (fsb) sandboxes: the SDK routes the vault through the lifecycle server, which relays revisions to the egress-held vault. No sidecar endpoint is resolved for them, and the `credentialProxy` create-time flag is ignored on that profile (the vault is set after creation, through the API).
+Plaintext values are write-only — `get`, `list`, and patch responses carry sanitized metadata only. The same entry points work for template-backed (fsb) sandboxes through the server relay; the `credentialProxy` create-time flag is ignored on that profile (set the vault after creation, through the API).
 
 ## Claude Code With Anthropic
 

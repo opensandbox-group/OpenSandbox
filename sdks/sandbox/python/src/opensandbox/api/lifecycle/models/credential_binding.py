@@ -22,12 +22,8 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from attrs import define as _attrs_define
 
 if TYPE_CHECKING:
-    from ..models.api_key_credential_auth import ApiKeyCredentialAuth
-    from ..models.basic_credential_auth import BasicCredentialAuth
-    from ..models.bearer_credential_auth import BearerCredentialAuth
+    from ..models.credential_auth import CredentialAuth
     from ..models.credential_match import CredentialMatch
-    from ..models.custom_headers_credential_auth import CustomHeadersCredentialAuth
-    from ..models.passthrough_credential_auth import PassthroughCredentialAuth
 
 
 T = TypeVar("T", bound="CredentialBinding")
@@ -39,41 +35,33 @@ class CredentialBinding:
     Attributes:
         name (str):
         match (CredentialMatch):
-        auth (ApiKeyCredentialAuth | BasicCredentialAuth | BearerCredentialAuth | CustomHeadersCredentialAuth |
-            PassthroughCredentialAuth):
+        auth (CredentialAuth): How a binding injects credential material. Exactly one auth kind:
+
+            - `bearer`: `type: bearer` plus `credential`.
+            - `basic`: `type: basic` plus `credential`.
+            - `apiKey`: `type: apiKey` plus `name` and `credential`.
+            - `customHeaders`: `type: customHeaders` plus `headers`.
+            - `passthrough`: `type: passthrough`, no credential reference.
+            - typeless exchange: `type` omitted with only `credential` set. The
+              referenced credential must be exchange-sourced; egress resolves the
+              header set per request from the credential's endpoint.
+
+            Static kinds must reference inline-sourced credentials, and the
+            typeless form must reference an exchange-sourced credential and must
+            not set `name`, `headers`, or `substitutions`. The five static kinds
+            accept optional `substitutions`. Violations are rejected with 400.
     """
 
     name: str
     match: CredentialMatch
-    auth: (
-        ApiKeyCredentialAuth
-        | BasicCredentialAuth
-        | BearerCredentialAuth
-        | CustomHeadersCredentialAuth
-        | PassthroughCredentialAuth
-    )
+    auth: CredentialAuth
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.api_key_credential_auth import ApiKeyCredentialAuth
-        from ..models.basic_credential_auth import BasicCredentialAuth
-        from ..models.bearer_credential_auth import BearerCredentialAuth
-        from ..models.custom_headers_credential_auth import CustomHeadersCredentialAuth
-
         name = self.name
 
         match = self.match.to_dict()
 
-        auth: dict[str, Any]
-        if isinstance(self.auth, BearerCredentialAuth):
-            auth = self.auth.to_dict()
-        elif isinstance(self.auth, BasicCredentialAuth):
-            auth = self.auth.to_dict()
-        elif isinstance(self.auth, ApiKeyCredentialAuth):
-            auth = self.auth.to_dict()
-        elif isinstance(self.auth, CustomHeadersCredentialAuth):
-            auth = self.auth.to_dict()
-        else:
-            auth = self.auth.to_dict()
+        auth = self.auth.to_dict()
 
         field_dict: dict[str, Any] = {}
 
@@ -89,66 +77,15 @@ class CredentialBinding:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.api_key_credential_auth import ApiKeyCredentialAuth
-        from ..models.basic_credential_auth import BasicCredentialAuth
-        from ..models.bearer_credential_auth import BearerCredentialAuth
+        from ..models.credential_auth import CredentialAuth
         from ..models.credential_match import CredentialMatch
-        from ..models.custom_headers_credential_auth import CustomHeadersCredentialAuth
-        from ..models.passthrough_credential_auth import PassthroughCredentialAuth
 
         d = dict(src_dict)
         name = d.pop("name")
 
         match = CredentialMatch.from_dict(d.pop("match"))
 
-        def _parse_auth(
-            data: object,
-        ) -> (
-            ApiKeyCredentialAuth
-            | BasicCredentialAuth
-            | BearerCredentialAuth
-            | CustomHeadersCredentialAuth
-            | PassthroughCredentialAuth
-        ):
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                componentsschemas_credential_auth_type_0 = BearerCredentialAuth.from_dict(data)
-
-                return componentsschemas_credential_auth_type_0
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                componentsschemas_credential_auth_type_1 = BasicCredentialAuth.from_dict(data)
-
-                return componentsschemas_credential_auth_type_1
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                componentsschemas_credential_auth_type_2 = ApiKeyCredentialAuth.from_dict(data)
-
-                return componentsschemas_credential_auth_type_2
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                componentsschemas_credential_auth_type_3 = CustomHeadersCredentialAuth.from_dict(data)
-
-                return componentsschemas_credential_auth_type_3
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            if not isinstance(data, dict):
-                raise TypeError()
-            componentsschemas_credential_auth_type_4 = PassthroughCredentialAuth.from_dict(data)
-
-            return componentsschemas_credential_auth_type_4
-
-        auth = _parse_auth(d.pop("auth"))
+        auth = CredentialAuth.from_dict(d.pop("auth"))
 
         credential_binding = cls(
             name=name,

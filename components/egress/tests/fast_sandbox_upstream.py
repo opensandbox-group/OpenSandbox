@@ -165,6 +165,18 @@ def run_ext_http():
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(body)))
+            # Opt-in response-header reflection (OSEP-0025 R9 e2e): when the
+            # probe asks for it, the received credential headers come back as
+            # response headers so the smoke can assert the addon's by-name
+            # suppression and by-value redaction on the return path. The
+            # trigger header keeps every earlier probe byte-identical.
+            if self.headers.get("X-Osb-Echo-Response-Headers") == "1":
+                authorization = self.headers.get("Authorization")
+                if authorization:
+                    self.send_header("Authorization", authorization)
+                signature = self.headers.get("X-Test-Signature")
+                if signature:
+                    self.send_header("X-Echo-Sig", "sig=" + signature)
             self.end_headers()
             self.wfile.write(body)
 

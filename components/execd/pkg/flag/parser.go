@@ -35,6 +35,7 @@ const (
 	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
 	mcpServersEnv              = "EXECD_MCP_SERVERS"
 	mcpSSEKeepaliveEnv         = "EXECD_MCP_SSE_KEEPALIVE"
+	sseLegacyCompatEnv         = "EXECD_SSE_LEGACY_COMPAT"
 )
 
 // InitFlags registers CLI flags and env overrides.
@@ -49,6 +50,7 @@ func InitFlags() {
 	LifecycleStartupStatusFile = ""
 	RuntimeInit = false
 	MCPServers = ""
+	SseLegacyCompat = false
 
 	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -129,6 +131,14 @@ func InitFlags() {
 		MCPSSEKeepalive = duration
 	}
 	flag.DurationVar(&MCPSSEKeepalive, "mcp-sse-keepalive", MCPSSEKeepalive, "Idle interval for SSE keepalive frames on HTTP MCP bridges (0 disables; default: 30s)")
+
+	if sseLegacyCompatFromEnv := os.Getenv(sseLegacyCompatEnv); sseLegacyCompatFromEnv != "" {
+		enabled, err := strconv.ParseBool(sseLegacyCompatFromEnv)
+		if err != nil {
+			stdlog.Panicf("Invalid %s=%s: must be a boolean value", sseLegacyCompatEnv, sseLegacyCompatFromEnv)
+		}
+		SseLegacyCompat = enabled
+	}
 
 	// Parse flags - these will override environment variables if provided
 	flag.Parse()

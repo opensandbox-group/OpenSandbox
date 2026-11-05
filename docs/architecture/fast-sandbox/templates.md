@@ -20,10 +20,12 @@ Builds are asynchronous by design: the API returns an accepted state immediately
 
 A `SandboxTemplate` describes a conversion, not just a copy: an ordinary OCI image plus the OpenSandbox guest wiring, compiled into an immutable golden image.
 
-- **Guest wiring is injected**: an init path (PID 1, carrying the readiness marker and heartbeat) and the execd runtime files always come from the template — every sandbox built from it is execd-ready by construction.
+- **Guest wiring is injected**: an init path (PID 1, carrying the readiness marker and heartbeat) and the execd runtime files always come from the template — every sandbox built from it is execd-ready by construction. With the server's `runtime.execd_run_as_init` enabled, the server bakes `EXECD_INIT=1` into the template envs, so the baked `bootstrap.sh` execs into `execd --init` and execd becomes the root of the workload tree as a subreaper under the guest init (child reaping, signal forwarding, and the optional hardening floor; the PID 1 signal shield stays with the guest init).
 - **Business entrypoint and envs** are baked in: an empty entrypoint defaults to a keep-alive; envs are injected literally into the guest (no runtime indirection).
 - **Runtime shape is declared**: the template names the Firecracker guest kernel and reference machine; readiness defines when the guest counts as up.
 - **Output is content-addressed**: the build publishes artifacts to the store and records a manifest reference plus artifact digest in the CR status — builds are immutable and verifiable, never mutated in place.
+
+Native templates publish to S3-compatible storage and resolve through the per-template image index. OverlayBD templates publish paired rootfs and snapshot images to an OCI registry; the catalog records the immutable OCI manifest reference, which becomes the runtime image at sandbox creation. Build credentials are selected by destination through server configuration. See [OCI template setup](/guides/oci-templates) for deployment and usage.
 
 ## Using templates
 

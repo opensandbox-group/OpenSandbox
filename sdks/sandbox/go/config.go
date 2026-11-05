@@ -38,6 +38,10 @@ type ConnectionConfig struct {
 
 	// UseServerProxy routes execd/egress requests through the sandbox server
 	// instead of connecting directly to the sandbox endpoint.
+	//
+	// Deprecated: the server-proxied data path is in maintenance mode and only
+	// receives security fixes and bug fixes. Route data-plane traffic through
+	// the ingress gateway instead.
 	UseServerProxy bool
 
 	// RequestTimeout is the timeout for non-streaming HTTP requests.
@@ -202,6 +206,7 @@ func (c *ConnectionConfig) clientOptsWithHeaders(includeAuthHeader bool, headers
 }
 
 // dataPlaneHeaders merges connection and endpoint headers for execd/egress.
+// Endpoint headers take precedence regardless of HTTP header name casing.
 // Direct-mode requests terminate inside the sandbox, so the tenant API key must
 // never be forwarded there, even when a caller supplied it via Headers.
 func (c *ConnectionConfig) dataPlaneHeaders(endpointHeaders map[string]string) map[string]string {
@@ -214,6 +219,7 @@ func (c *ConnectionConfig) dataPlaneHeaders(endpointHeaders map[string]string) m
 		headers[key] = value
 	}
 	for key, value := range endpointHeaders {
+		deleteHeaderFold(headers, key)
 		headers[key] = value
 	}
 	if !c.UseServerProxy {

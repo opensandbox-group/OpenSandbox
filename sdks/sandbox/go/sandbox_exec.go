@@ -47,6 +47,15 @@ func (s *Sandbox) ExecuteCode(ctx context.Context, req RunCodeRequest, handlers 
 		return nil, fmt.Errorf("opensandbox: execd client not initialized")
 	}
 	exec := &Execution{}
+	if req.Context != nil {
+		// An omitted language selects shell execution in execd, as do the
+		// explicit command modes. Keep their legacy line separators.
+		switch req.Context.Language {
+		case "", "command", "background-command":
+		default:
+			exec.codeExecution = true
+		}
+	}
 	err := s.execd.ExecuteCode(ctx, req, func(event StreamEvent) error {
 		return processStreamEvent(exec, event, handlers)
 	})

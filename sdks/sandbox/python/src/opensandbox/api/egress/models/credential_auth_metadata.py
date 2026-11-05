@@ -28,42 +28,51 @@ T = TypeVar("T", bound="CredentialAuthMetadata")
 
 @_attrs_define
 class CredentialAuthMetadata:
-    """
-    Attributes:
-        type_ (str):
-        name (str | Unset):
+    """Sanitized auth shape — `type` (plus `name` for `apiKey`) for static kinds; `credential` only for the typeless
+    exchange form.
+
+        Attributes:
+            type_ (str | Unset):
+            name (str | Unset):
+            credential (str | Unset):
     """
 
-    type_: str
+    type_: str | Unset = UNSET
     name: str | Unset = UNSET
+    credential: str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         type_ = self.type_
 
         name = self.name
 
+        credential = self.credential
+
         field_dict: dict[str, Any] = {}
 
-        field_dict.update(
-            {
-                "type": type_,
-            }
-        )
+        field_dict.update({})
+        if type_ is not UNSET:
+            field_dict["type"] = type_
         if name is not UNSET:
             field_dict["name"] = name
+        if credential is not UNSET:
+            field_dict["credential"] = credential
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        type_ = d.pop("type")
+        type_ = d.pop("type", UNSET)
 
         name = d.pop("name", UNSET)
+
+        credential = d.pop("credential", UNSET)
 
         credential_auth_metadata = cls(
             type_=type_,
             name=name,
+            credential=credential,
         )
 
         return credential_auth_metadata

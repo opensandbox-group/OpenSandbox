@@ -37,7 +37,7 @@ func admissionFixture(t *testing.T) (valid, invalid []tlsAdmissionPair) {
 	require.NoError(t, err)
 	var fixture struct{ Valid, Invalid []tlsAdmissionPair }
 	require.NoError(t, json.Unmarshal(data, &fixture))
-	require.Len(t, fixture.Valid, 14, "closed admission vocabulary changed; review its privacy/cardinality contract")
+	require.Len(t, fixture.Valid, 15, "closed admission vocabulary changed; review its privacy/cardinality contract")
 	require.NotEmpty(t, fixture.Invalid)
 	return fixture.Valid, fixture.Invalid
 }

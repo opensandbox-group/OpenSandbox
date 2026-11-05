@@ -570,6 +570,7 @@ components:
           type: string
         sourceType:
           type: string
+          description: Credential source kind (`inline` or `exchange`).
         revision:
           type: integer
       additionalProperties: false
@@ -593,18 +594,40 @@ components:
         name:
           type: string
         source:
-          $ref: '#/components/schemas/InlineCredentialSource'
+          $ref: '#/components/schemas/CredentialSource'
       additionalProperties: false
-    InlineCredentialSource:
+    CredentialSource:
       type: object
-      required: [type, value]
+      required: [type]
+      description: |
+        Where the credential material comes from. Exactly one kind, selected
+        by `type`:
+
+        - `inline`: the secret value travels in this request via `value`.
+          Inline values are write-only and never appear in reads.
+        - `exchange`: no local material. Egress resolves header sets per
+          request from a header-resolver service addressed by `endpoint`.
+          Supported endpoint forms are `unix:///absolute/path` (HTTP over a
+          Unix domain socket) and `https://host[:port]` (TLS); anything else
+          is rejected with 400.
+
+        Fields of the other kind must be absent; for example `value` together
+        with `type: exchange` is rejected with 400.
       properties:
         type:
           type: string
-          enum: [inline]
+          enum: [inline, exchange]
         value:
           type: string
           writeOnly: true
+          description: |
+            Inline secret value. Required when `type` is `inline`; must be
+            absent otherwise.
+        endpoint:
+          type: string
+          description: |
+            Header-resolver endpoint. Required when `type` is `exchange`; must
+            be absent otherwise.
       additionalProperties: false
     CredentialBinding:
       type: object
@@ -649,94 +672,52 @@ components:
           default: ["/*"]
       additionalProperties: false
     CredentialAuth:
-      oneOf:
-        - $ref: '#/components/schemas/BearerCredentialAuth'
-        - $ref: '#/components/schemas/BasicCredentialAuth'
-        - $ref: '#/components/schemas/ApiKeyCredentialAuth'
-        - $ref: '#/components/schemas/CustomHeadersCredentialAuth'
-        - $ref: '#/components/schemas/PassthroughCredentialAuth'
-      discriminator:
-        propertyName: type
-        mapping:
-          bearer: '#/components/schemas/BearerCredentialAuth'
-          basic: '#/components/schemas/BasicCredentialAuth'
-          apiKey: '#/components/schemas/ApiKeyCredentialAuth'
-          customHeaders: '#/components/schemas/CustomHeadersCredentialAuth'
-          passthrough: '#/components/schemas/PassthroughCredentialAuth'
-    BearerCredentialAuth:
       type: object
-      required: [type, credential]
+      description: |
+        How a binding injects credential material. Exactly one auth kind:
+
+        - `bearer`: `type: bearer` plus `credential`.
+        - `basic`: `type: basic` plus `credential`.
+        - `apiKey`: `type: apiKey` plus `name` and `credential`.
+        - `customHeaders`: `type: customHeaders` plus `headers`.
+        - `passthrough`: `type: passthrough`, no credential reference.
+        - typeless exchange: `type` omitted with only `credential` set. The
+          referenced credential must be exchange-sourced; egress resolves the
+          header set per request from the credential's endpoint.
+
+        Static kinds must reference inline-sourced credentials, and the
+        typeless form must reference an exchange-sourced credential and must
+        not set `name`, `headers`, or `substitutions`. The five static kinds
+        accept optional `substitutions`. Violations are rejected with 400.
       properties:
         type:
           type: string
-          enum: [bearer]
+          enum: [bearer, basic, apiKey, customHeaders, passthrough]
+          description: Static auth kind. Omit entirely for the typeless exchange form.
         credential:
           type: string
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      additionalProperties: false
-    BasicCredentialAuth:
-      type: object
-      required: [type, credential]
-      properties:
-        type:
-          type: string
-          enum: [basic]
-        credential:
-          type: string
-          description: Credential containing pre-encoded base64(username:password).
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      additionalProperties: false
-    ApiKeyCredentialAuth:
-      type: object
-      required: [type, name, credential]
-      properties:
-        type:
-          type: string
-          enum: [apiKey]
+          description: |
+            Name of the sandbox-local credential whose value is injected. For
+            `basic` the referenced credential contains pre-encoded
+            base64(username:password). Required for `bearer`, `basic`,
+            `apiKey`, and the typeless exchange form; must be absent otherwise.
         name:
           type: string
           pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
-        credential:
-          type: string
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      additionalProperties: false
-    CustomHeadersCredentialAuth:
-      type: object
-      required: [type, headers]
-      properties:
-        type:
-          type: string
-          enum: [customHeaders]
+          description: Request header name. Required for `apiKey`; must be absent otherwise.
         headers:
           type: array
           minItems: 1
           items:
             $ref: '#/components/schemas/CustomHeaderEntry'
+          description: Static header set. Required for `customHeaders`; must be absent otherwise.
         substitutions:
           type: array
           items:
             $ref: '#/components/schemas/CredentialSubstitution'
-      additionalProperties: false
-    PassthroughCredentialAuth:
-      type: object
-      required: [type]
-      properties:
-        type:
-          type: string
-          enum: [passthrough]
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
+          description: |
+            Optional placeholder replacement set. Accepted for the five static
+            kinds; must be absent for the typeless exchange form.
       additionalProperties: false
     CustomHeaderEntry:
       type: object
@@ -770,10 +751,12 @@ components:
       additionalProperties: false
     CredentialAuthMetadata:
       type: object
-      required: [type]
+      description: Sanitized auth shape — `type` (plus `name` for `apiKey`) for static kinds; `credential` only for the typeless exchange form.
       properties:
         type:
           type: string
         name:
+          type: string
+        credential:
           type: string
       additionalProperties: false

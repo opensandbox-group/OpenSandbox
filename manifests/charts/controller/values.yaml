@@ -61,6 +61,14 @@ controller:
     # -- Burst for Kubernetes client rate limiter.
     burst: 200
 
+  # -- Namespaces used to scope the controller informer cache (`--namespaces`).
+  # Empty (default) watches the whole cluster. On large shared clusters, list
+  # the namespaces holding Pool/BatchSandbox workloads to shrink the cache and
+  # avoid startup OOMs. Every watched namespace (CRs and their Pods/Jobs) must
+  # be listed; multi-tenant deployments spread across many namespaces should
+  # keep this empty.
+  namespaces: []
+
   # -- Image pull stuck pod recovery during initial startup (BatchSandbox).
   # Rendered into the `feature-flags` ConfigMap in the controller namespace;
   # the controller hot-reloads it without a restart.
@@ -80,8 +88,8 @@ controller:
   # -- Pause/Resume snapshot configuration
   snapshot:
     # -- Image used for commit operations.
-    # DockerHub: opensandbox/image-committer:release-1.2.0
-    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.0"
+    # DockerHub: opensandbox/image-committer:release-1.2.1-rc.1
+    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.1"
     # -- PodTemplateSpec overlay for image-committer commit Job Pods.
     imageCommitterPodTemplate: {}
     # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag.

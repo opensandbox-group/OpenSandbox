@@ -72,6 +72,7 @@ export interface RedirectSafeFetchOptions {
    * Overall deadline for the whole redirect chain, in milliseconds. Each hop
    * re-enters the transport (and re-arms its per-request timeout), so without
    * an overall budget a long chain could run much longer than one request.
+   * Zero, negative and non-finite values disable it.
    */
   overallTimeoutMs?: number;
 }
@@ -206,7 +207,14 @@ export function createRedirectSafeFetch(
     return baseFetch;
   }
   const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
-  const overallTimeoutMs = opts.overallTimeoutMs;
+  // Like requestTimeoutSeconds, a non-positive or non-finite value means no
+  // deadline. setTimeout would otherwise fire almost at once for either.
+  const overallTimeoutMs =
+    opts.overallTimeoutMs !== undefined &&
+    Number.isFinite(opts.overallTimeoutMs) &&
+    opts.overallTimeoutMs > 0
+      ? opts.overallTimeoutMs
+      : undefined;
 
   return async function redirectSafeFetch(
     input: RequestInfo | URL,
