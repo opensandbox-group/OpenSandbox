@@ -290,3 +290,16 @@ runtime:
     enabled: false
     # -- Shared overlaybd block cache capacity (OVERLAYBD_CACHE_SIZE_GB).
     cacheSizeGB: 16
+    # -- Target idle ublk device count when OCI is enabled. Set to 0 to disable pooling.
+    poolLow: 4
+    # -- Maximum idle ublk devices retained on release; not a Sandbox count limit. Must be >= poolLow.
+    poolHigh: 8
+    # -- Pool device capacity in GiB (OVERLAYBD_POOL_SIZE_GB). Default 2 matches the OpenSandbox template API's default resourceLimits.disk=2Gi. Must exactly match the built template rootfs capacity; a mismatch falls back to cold device creation.
+    # For 60Gi/200Gi templates set 60/200, respectively; a 200Gi pool cannot
+    # serve a 60Gi template. One daemon supports one capacity. The standalone
+    # fast-sandbox CRD default (30Gi) and fsb-vm build default (20Gi) differ.
+    # Check machine.rootfsSizeMiB in the snapfiles artifact's manifest.json:
+    # for whole-GiB templates,
+    # poolSizeGB = rootfsSizeMiB / 1024. This is unrelated to image layer size,
+    # disk usage or runtime.oci.cacheSizeGB, and is not inferred by Helm.
+    poolSizeGB: 2

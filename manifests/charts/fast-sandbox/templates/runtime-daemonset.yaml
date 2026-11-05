@@ -316,6 +316,12 @@ spec:
           value: {{ .Values.runtime.stateRoot }}
         - name: OVERLAYBD_CACHE_SIZE_GB
           value: {{ .Values.runtime.oci.cacheSizeGB | quote }}
+        - name: OVERLAYBD_POOL_LOW
+          value: {{ .Values.runtime.oci.poolLow | quote }}
+        - name: OVERLAYBD_POOL_HIGH
+          value: {{ .Values.runtime.oci.poolHigh | quote }}
+        - name: OVERLAYBD_POOL_SIZE_GB
+          value: {{ .Values.runtime.oci.poolSizeGB | quote }}
         securityContext:
           privileged: true
         {{- with .Values.runtime.resources.ublkd }}

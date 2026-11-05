@@ -25,6 +25,7 @@ boxlite, containerd-based runtimes and the upstream central sandbox-proxy are ou
 
 - Nodes that should serve Firecracker sandboxes need bare-metal KVM (`/dev/kvm`). There is NO manual labeling step: the firecracker-runtime readiness loop verifies each host, installs the Firecracker assets, and applies the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` labels plus the `FirecrackerReady` condition itself (rechecking every 5 minutes).
 - OverlayBD OCI on-demand loading (`runtime.oci.enabled=true`) additionally needs kernel ublk support on every runtime node (`CONFIG_BLK_DEV_UBLK`, `/dev/ublkc*`; `modprobe ublk_drv` when built as a module) and an OCI registry reachable from the cluster: SandboxTemplates publish `oci://` artifacts there and nodes read blocks on demand. The SandboxPool's fastlet containers must set `FAST_SANDBOX_OCI_ENABLED=true` separately — pools are not managed by this chart. See the fast-sandbox [OverlayBD OCI guide](https://github.com/opensandbox-group/fast-sandbox/blob/main/docs/guides/overlaybd-oci-sandboxes.md) for the credential (registry Secret + `fast-sandbox-registry` ConfigMap) and StateRoot-sharing requirements.
+- With `runtime.oci.enabled=true`, this chart enables the ublk warm pool at low/high watermarks of 4/8 with 2 GiB devices, matching the OpenSandbox template API's default disk capacity. Configure `runtime.oci.poolSizeGB` for templates built at another capacity; see the matching requirements below. Standalone fast-sandbox keeps pooling disabled by default.
 
 - The agent registry Secret with artifact-store pull credentials (compiled `registry.json`):
 
@@ -45,6 +46,31 @@ Or as part of the umbrella chart:
 helm install opensandbox manifests/charts/opensandbox \
   --set fast-sandbox.enabled=true
 ```
+
+## OCI warm pool and template capacity
+
+The warm pool holds idle writable ublk devices on each node. `poolLow=4` is the target idle reserve; `poolHigh=8` is the maximum retained on release, not a limit on running Sandboxes. Setting `runtime.oci.poolLow=0` disables pooling. The pool is separate from SandboxPool fastlet capacity, template prewarming, and the OverlayBD block cache.
+
+**`runtime.oci.poolSizeGB` must exactly match the built template's rootfs virtual capacity.** Despite the parameter name, the unit is GiB (1 GiB = 2^30 bytes). It is not the compressed image size, used disk space, or `runtime.oci.cacheSizeGB`. A larger pool device cannot serve a smaller template; mismatches fall back to cold device creation. Writable mode and block size must also match.
+
+For OpenSandbox template builds, `resourceLimits.disk` is projected to `SandboxTemplate.spec.output.rootfsSize` and passed to `fsb-vm build --disk-size-gb`. When disk is omitted, the OpenSandbox API explicitly chooses `2Gi`, so this chart defaults to `poolSizeGB: 2`. This differs from the standalone fast-sandbox CRD's `30Gi` default and the standalone `fsb-vm build` default of 20 GiB. The integration CI explicitly builds `disk=2Gi` templates and sets the pool to 2 GiB as well.
+
+Check `machine.rootfsSizeMiB` in the built snapfiles artifact's `manifest.json`, since the pool matches the actual built rootfs. For whole-GiB capacities, `poolSizeGB = rootfsSizeMiB / 1024`; for example, 61440 MiB requires `60` and 204800 MiB requires `200`. Update the pool configuration whenever template capacity changes. Helm does not discover templates or derive this value automatically.
+
+For a template built with `resourceLimits.disk: 60Gi`, use:
+
+```yaml
+runtime:
+  oci:
+    enabled: true
+    poolLow: 4
+    poolHigh: 8
+    poolSizeGB: 60
+```
+
+For a `200Gi` template, set `poolSizeGB: 200`. These are values for the standalone fast-sandbox chart; under the OpenSandbox umbrella chart, nest them beneath `fast-sandbox` (for example, `fast-sandbox.runtime.oci.poolSizeGB`).
+
+Each upstream daemon supports only one pool capacity. A single daemon cannot accelerate both 60 GiB and 200 GiB templates with one setting. To accelerate both, use separate node groups with matching daemon configurations, or implement separate daemons and capacity-based routing for the same node; the current chart/runtime does not provide that routing. After deployment, inspect `/v1/pool` through the node daemon's Unix socket and check `enabled`, `size_gb`, `idle`, and the changes in `hits`/`misses` during creates.
 
 ## Parameters
 
@@ -93,9 +119,12 @@ The following table lists the configurable parameters of the chart and their def
 | runtime.image.repository | string | `"opensandbox/fsb-firecracker-runtime"` | Runtime image repository (built by manifests/release/build-fast-sandbox.sh) |
 | runtime.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
 | runtime.nodeSelector | object | `{}` | Node selector. Empty by default: the runtime applies the firecracker scheduling labels itself, so it must run on every candidate node. Pin it with your own coarse selector only if the cluster hosts unrelated node pools. |
-| runtime.oci | object | `{"cacheSizeGB":16,"enabled":false}` | OverlayBD OCI on-demand loading: installs the fsb-vm + OverlayBD tools bundle (init container), sets FAST_SANDBOX_OCI_ENABLED on the agent, and runs one overlaybd-ublkd sidecar per node. Nodes need KVM plus kernel ublk support. Pool fastlets set the flag separately (pools are not managed by this chart). |
+| runtime.oci | object | `{"cacheSizeGB":16,"enabled":false,"poolHigh":8,"poolLow":4,"poolSizeGB":2}` | OverlayBD OCI on-demand loading: installs the fsb-vm + OverlayBD tools bundle (init container), sets FAST_SANDBOX_OCI_ENABLED on the agent, and runs one overlaybd-ublkd sidecar per node. Nodes need KVM plus kernel ublk support. Pool fastlets set the flag separately (pools are not managed by this chart). |
 | runtime.oci.cacheSizeGB | int | `16` | Shared overlaybd block cache capacity (OVERLAYBD_CACHE_SIZE_GB). |
 | runtime.oci.enabled | bool | `false` | Whether the node OCI stack (tools init + overlaybd-ublkd sidecar + agent flag + janitor oci-state-root) is installed |
+| runtime.oci.poolHigh | int | `8` | Maximum idle ublk devices retained on release; not a Sandbox count limit. Must be >= poolLow. |
+| runtime.oci.poolLow | int | `4` | Target idle ublk device count when OCI is enabled. Set to 0 to disable pooling. |
+| runtime.oci.poolSizeGB | int | `2` | Pool device capacity in GiB (OVERLAYBD_POOL_SIZE_GB). Default 2 matches the OpenSandbox template API's default resourceLimits.disk=2Gi. Must exactly match the built template rootfs capacity; a mismatch falls back to cold device creation. For 60Gi/200Gi templates set 60/200, respectively; a 200Gi pool cannot serve a 60Gi template. One daemon supports one capacity. The standalone fast-sandbox CRD default (30Gi) and fsb-vm build default (20Gi) differ. Check machine.rootfsSizeMiB in the snapfiles artifact's manifest.json: for whole-GiB templates, poolSizeGB = rootfsSizeMiB / 1024. This is unrelated to image layer size, disk usage or runtime.oci.cacheSizeGB, and is not inferred by Helm. |
 | runtime.p2p | object | `{"enabled":true}` | DART P2P artifact delivery: when true (default) the chart renders the dart headless Service, the DaemonSet peer port, and the default agent.yaml p2p block (each node runs a node-local DART child and peers fetch blocks from each other). When false the agent pulls artifacts directly from the origin store (upstream semantics: an empty p2p config section means direct header-signed pulls) and none of the DART resources are rendered. Ignored when runtime.config overrides the whole agent.yaml. |
 | runtime.podAnnotations | object | `{}` | Extra annotations merged into the firecracker-runtime pod template annotations (on top of the built-in prometheus.io/* ones). |
 | runtime.podLabels | object | `{}` | Extra labels merged into the firecracker-runtime pod template labels. |
