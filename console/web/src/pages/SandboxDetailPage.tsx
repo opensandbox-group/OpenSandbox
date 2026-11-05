@@ -22,6 +22,7 @@ import { SandboxLogPanel } from '../components/SandboxLogPanel';
 import type { Sandbox } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { formatDuration, sandboxDisplayName } from '../utils/format';
+import { ShellLink } from '../components/ShellLink';
 
 export function SandboxDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -228,6 +229,12 @@ export function SandboxDetailPage() {
                         恢复
                       </Button>
                       <Button onClick={() => void load()}>刷新</Button>
+                      <ShellLink
+                        sandboxId={id ?? ''}
+                        state={state}
+                        tenant={isAdminProxy ? adminTenant : undefined}
+                        variant="button"
+                      />
                     </Space>
                   </Card>
                 </Col>

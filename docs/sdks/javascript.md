@@ -232,6 +232,8 @@ Execute commands and handle output streams in real-time.
 
 Command and code-interpreter event streams accept LF, CRLF, and CR line endings, including when a line ending is split across network chunks.
 
+`timeoutSeconds` on `commands.run()` and `commands.runInSession()` is rounded to the nearest whole millisecond, with a minimum of 1 ms for positive values, so a positive sub-millisecond timeout cannot disable the timeout. Omitted timeouts and explicit zero retain the server defaults. Negative or non-finite values, including values that overflow the millisecond conversion, are rejected before a request is sent.
+
 ```ts
 import type { ExecutionHandlers } from "@alibaba-group/opensandbox";
 

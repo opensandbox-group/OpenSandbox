@@ -66,6 +66,14 @@ kind delete cluster --name sandbox-k8s-test-e2e
 
 ## Core E2E Common Issues
 
+### BeforeSuite Fails: "Failed to load the alpine image into Kind" (content digest not found)
+
+**Symptom**: The suite fails in BeforeSuite while loading a pulled image (registry or alpine) into Kind, with `ctr: content digest sha256:...: not found`.
+
+**Cause**: `docker save` of an image pulled from a multi-arch tag (with a containerd-image-store daemon) exports an OCI archive whose index nests the full manifest list, referencing platforms whose blobs were never pulled. containerd 1.x nodes (older Kind versions such as v1.22/v1.28) fetch every manifest reachable from that nested index while unpacking and fail on the missing platforms; containerd 2.x nodes filter platforms correctly, which is why only some K8s matrix jobs fail.
+
+**Fix**: Use `utils.LoadPulledImageToKindClusterWithName`, which saves with `docker save --platform <daemon-arch>` (flattens the archive) and imports without `--digests` (skips docker's unnamed attestation manifests, whose `application/vnd.in-toto+json` layers containerd 1.x cannot unpack). References: kubernetes-sigs/kind#3795, kubernetes-sigs/kind#4255.
+
 ### Controller Pod Not Ready
 
 **Symptom**: `Eventually(verifyControllerUp)` times out.
