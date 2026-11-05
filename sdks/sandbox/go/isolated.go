@@ -333,7 +333,7 @@ func (e *ExecdClient) IsolatedRunLogs(ctx context.Context, sessionID, runID stri
 
 	var text string
 	nextCursor := cursor
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+path, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -347,7 +347,7 @@ func (e *ExecdClient) IsolatedRunLogs(ctx context.Context, sessionID, runID stri
 		}
 		req.Header.Set("Accept", "text/plain")
 
-		resp, err := e.client.httpClient.Do(req)
+		resp, err := doAttempt(e.client.httpClient, req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}

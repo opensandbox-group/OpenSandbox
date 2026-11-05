@@ -45,7 +45,7 @@ class WakeupTests(unittest.TestCase):
         context.client.sni = 'example.test'
         context.server.address = ('example.test', 443)
         context.server.tls = True
-        token = self.runtime.admit_tls('example.test').token
+        token = self.runtime.admit_tls('example.test', destination_port=443).token
         self.runtime.track(token, context.client)
         self.root = layers.HttpLayer(context, layers.HTTPMode.transparent)
         self.adapter = BoundH2Server(context.fork(), self.runtime, self.root, token)

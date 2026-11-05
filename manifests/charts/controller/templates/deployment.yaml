@@ -100,6 +100,9 @@ spec:
         {{- if .Values.controller.snapshot.resumePullSecret }}
         - --resume-pull-secret={{ .Values.controller.snapshot.resumePullSecret }}
         {{- end }}
+        {{- with .Values.controller.extraArgs }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         ports:
         - name: health
           containerPort: {{ .Values.controller.livenessProbe.httpGet.port }}

@@ -439,6 +439,9 @@ Note: `/capabilities` reports `available: false` when the native workload gate c
 - **No hardware-level guarantee.** Namespaces + seccomp only; pair with a secure runtime for kernel-exploit defense.
 - **Linux only.** Non-Linux builds return `available: false`.
 - **Serialized runs per session** — create multiple sessions for parallelism.
+- **Runs read stdin from `/dev/null`**, foreground and background alike. Pass input through a file or a here-document.
+- **A run's code is read in full before it executes**, so the first output of a very large script waits until the whole script has been transferred.
+- **Runs share one shell.** A function or alias named `eval` is bypassed, but a run that redefines a builtin the session itself relies on, such as `command`, `echo`, or `trap`, changes how every later run in that session executes or reports its exit code. Create a new session to recover.
 - **Bind destinations must pre-exist** in the sandbox image.
 
 ---

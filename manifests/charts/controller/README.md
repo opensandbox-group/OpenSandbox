@@ -67,6 +67,7 @@ The following table lists the configurable parameters of the chart and their def
 |-----|------|---------|-------------|
 | controller.affinity | object | `{}` | Affinity for controller pod assignment |
 | controller.containerSecurityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":false}` | Container security context |
+| controller.extraArgs | list | `[]` | Additional args appended to the controller container command, after the chart-managed flags. Unlocks binary flags the chart does not model, e.g. --enable-file-log --log-file-path=/var/log/sandbox-controller/controller.log (rotating file output alongside stdout) or --concurrency=batchsandbox=32. Entries are passed to the container directly (no shell), so do not shell-quote the values. |
 | controller.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller","tag":""}` | Controller image configuration |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller"` | Controller image repository |

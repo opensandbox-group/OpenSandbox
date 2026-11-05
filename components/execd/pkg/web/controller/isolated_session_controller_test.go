@@ -444,7 +444,7 @@ func TestBackgroundRun_Endpoints404(t *testing.T) {
 	}
 }
 
-func TestIsolatedDownloadFile_RangeHeader(t *testing.T) {
+func TestIsolatedDownloadFile(t *testing.T) {
 	previousRunner := isolatedRunner
 	runner, err := runtime.NewIsolatedRunner(
 		runtime.NewController("", ""),
@@ -470,6 +470,9 @@ func TestIsolatedDownloadFile_RangeHeader(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, "data.bin"), []byte("0123456789"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(workspace, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
 		WorkspacePath: workspace,
 		WorkspaceMode: "rw",
@@ -488,22 +491,73 @@ func TestIsolatedDownloadFile_RangeHeader(t *testing.T) {
 		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream"},
 		// A malformed Range gets a JSON 416 without the file's Content-Length.
 		{rangeHeader: "bytes=abc", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
+		{rangeHeader: "2-5", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
+		{rangeHeader: "bytes=5-2", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
+		{rangeHeader: "bytes=a-b", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
 	}
 	for _, tt := range tests {
-		ctx, rec := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/files/download?path=data.bin", nil)
-		ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
-		ctx.Request.Header.Set("Range", tt.rangeHeader)
-		NewIsolatedSessionController(ctx).DownloadFile()
+		t.Run(tt.rangeHeader, func(t *testing.T) {
+			ctx, rec := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/files/download?path=data.bin", nil)
+			ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+			ctx.Request.Header.Set("Range", tt.rangeHeader)
+			NewIsolatedSessionController(ctx).DownloadFile()
 
-		if rec.Code != tt.wantStatus {
-			t.Fatalf("Range %q: status = %d, want %d; body: %s", tt.rangeHeader, rec.Code, tt.wantStatus, rec.Body.String())
-		}
-		if got := rec.Header().Get("Content-Length"); got != tt.wantLength {
-			t.Errorf("Range %q: Content-Length = %q, want %q", tt.rangeHeader, got, tt.wantLength)
-		}
-		if got := rec.Header().Get("Content-Type"); got != tt.wantType {
-			t.Errorf("Range %q: Content-Type = %q, want %q", tt.rangeHeader, got, tt.wantType)
-		}
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("Range %q: status = %d, want %d; body: %s", tt.rangeHeader, rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Length"); got != tt.wantLength {
+				t.Errorf("Range %q: Content-Length = %q, want %q", tt.rangeHeader, got, tt.wantLength)
+			}
+			if got := rec.Header().Get("Content-Type"); got != tt.wantType {
+				t.Errorf("Range %q: Content-Type = %q, want %q", tt.rangeHeader, got, tt.wantType)
+			}
+			if tt.wantStatus == http.StatusRequestedRangeNotSatisfiable {
+				var resp model.ErrorResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatal(err)
+				}
+				if resp.Code != model.ErrorCodeUnknown || resp.Message != "invalid Range header: "+tt.rangeHeader {
+					t.Errorf("Range %q: error = %+v", tt.rangeHeader, resp)
+				}
+				if got := rec.Header().Get("Content-Disposition"); got != "" {
+					t.Errorf("Content-Disposition = %q, want empty", got)
+				}
+			} else if got := rec.Body.String(); got != "2345" {
+				t.Errorf("body = %q, want 2345", got)
+			}
+		})
+	}
+
+	for _, tt := range []struct{ name, path, query, rangeHeader string }{
+		{name: "directory plain", path: "docs"},
+		{name: "directory range", path: "docs", rangeHeader: "bytes=0-3"},
+		{name: "directory lines", path: "docs", query: "&offset=1&limit=2"},
+		{name: "directory offset", path: "docs", query: "&offset=1"},
+		{name: "directory limit", path: "docs", query: "&limit=2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, rec := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/files/download?path="+tt.path+tt.query, nil)
+			ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+			if tt.rangeHeader != "" {
+				ctx.Request.Header.Set("Range", tt.rangeHeader)
+			}
+			NewIsolatedSessionController(ctx).DownloadFile()
+			requireDirectoryRejected(t, rec, tt.path)
+		})
+	}
+
+	for _, tt := range []struct{ name, query string }{
+		{name: "file plain"},
+		{name: "file lines", query: "&offset=1&limit=1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, rec := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/files/download?path=data.bin"+tt.query, nil)
+			ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+			NewIsolatedSessionController(ctx).DownloadFile()
+			if rec.Code != http.StatusOK || rec.Body.String() != "0123456789" {
+				t.Fatalf("file download: status = %d, body = %q", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

@@ -117,7 +117,18 @@ class TLSRegistryTest(unittest.TestCase):
             sni=sni,
             ech_hidden=kwargs.pop("ech_hidden", False),
             static_passthrough=kwargs.pop("static_passthrough", ()),
+            destination_port=kwargs.pop("destination_port", 443),
         )
+
+    def test_non_canonical_port_never_consumes_registry_capacity(self):
+        registry = registry_module.BoundConnectionRegistry(capacity=1)
+        registry.activate(self.snapshot())
+        for port in (80, 8443):
+            result = self.admit(registry, destination_port=port)
+            self.assertEqual((result.action, result.reason, result.token),
+                             ("deny", "non_canonical_port", None))
+            self.assertEqual(registry.count, 0)
+        self.assertEqual(self.admit(registry, destination_port=443).action, "decrypt")
 
     def test_unknown_snapshot_denies_but_early_passthrough_stays_available(self):
         registry = registry_module.BoundConnectionRegistry(capacity=1)
