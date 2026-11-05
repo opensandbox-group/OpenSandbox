@@ -1373,6 +1373,7 @@ control_plane_up() {
 	apply_ns "$NS"
 	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml"
 	kubectl apply -f "$GEN_DIR/fsb-base.yaml" >/dev/null
+	# Keep poolSizeGB=2 in sync with the disk=2Gi template builds below.
 	helm_render fast-sandbox "$OSB_ROOT/manifests/charts/fast-sandbox" "$NS" \
 		"$GEN_DIR/fast-sandbox.yaml" \
 		--set controller.image.repository="$(image_repo "$IMG_CONTROLLER")" \
@@ -1385,7 +1386,10 @@ control_plane_up() {
 		--set runtime.image.tag="$(image_tag "$IMG_RUNTIME")" \
 		--set artifactStore.store="s3://$RUSTFS_BUCKET/publish" \
 		--set artifactStore.endpoint="$RUSTFS_ENDPOINT" \
-		--set runtime.oci.enabled="$([[ "$OCI_STACK" == 1 ]] && echo true || echo false)"
+		--set runtime.oci.enabled="$([[ "$OCI_STACK" == 1 ]] && echo true || echo false)" \
+		--set runtime.oci.poolLow=4 \
+		--set runtime.oci.poolHigh=8 \
+		--set runtime.oci.poolSizeGB=2
 	kubectl apply -f "$GEN_DIR/fast-sandbox.yaml" >/dev/null
 	local image
 	for image in "$IMG_CONTROLLER" "$IMG_FASTLET" "$IMG_FASTLET_PROXY" \
@@ -3803,6 +3807,30 @@ verify_native() {
 	run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
 }
 
+# Capture each node's counters so successful CI logs prove warm-device reuse.
+ublk_pool_state() {
+	local pods pod state restarts states=""
+	pods="$(runtime_pods)" || return 1
+	[[ -n "$pods" ]] || return 1
+	for pod in $pods; do
+		state="$(kubectl exec -n "$NS" "$pod" -c overlaybd-ublkd -- \
+			curl -fsS -m 5 --noproxy '*' --unix-socket /run/fast-sandbox/overlaybd/ublkd.sock \
+			http://ublkd/v1/pool)" || return 1
+		restarts="$(kubectl -n "$NS" get pod "$pod" \
+			-o jsonpath='{.status.containerStatuses[?(@.name=="overlaybd-ublkd")].restartCount}')" || return 1
+		state="$(printf '%s' "$state" | jq -c --arg pod "$pod" --argjson restarts "$restarts" \
+			'. + {pod: $pod, restarts: $restarts}')" || return 1
+		states+="$state"$'\n'
+	done
+	printf '%s' "$states" | jq -cs '.'
+}
+
+ublk_pool_ready() {
+	ublk_pool_state | jq -e 'length > 0 and all(.[];
+		.ok == true and .enabled == true and .low == 4 and .high == 8 and
+		.size_gb == 2 and .idle >= .low)' >/dev/null
+}
+
 verify_overlaybd() {
 	require_live_stack
 	[[ "$OCI_STACK" == 1 ]] || {
@@ -3813,7 +3841,21 @@ verify_overlaybd() {
 	# build ~16 minutes in; the probe fails in seconds and heals itself.
 	run_stage "ublk add/del probe (node daemon -> kernel path)" ublk_probe_or_heal
 	run_stage "SandboxTemplate build (overlaybd, oci:// publication)" template_up_overlaybd
+	wait_for "ublk warm pool ready (4/8, 2 GiB on every node)" 60 ublk_pool_ready
+	local pool_before pool_after
+	pool_before="$(ublk_pool_state)"
+	log "ublk pool before template creates: $pool_before"
 	run_stage "end-to-end verify (overlaybd template)" opensandbox_verify "$OCI_TEMPLATE_ID"
+	wait_for "ublk pool replenished after sandbox deletion" 60 ublk_pool_ready
+	pool_after="$(ublk_pool_state)"
+	log "ublk pool after template creates/deletes: $pool_after"
+	printf '%s' "$pool_after" | jq -e --argjson before "$pool_before" '
+		([$before[].pod] | sort) == ([.[].pod] | sort) and
+		([.[].restarts] | add) == ([$before[].restarts] | add) and
+		([.[].hits] | add) >= (([$before[].hits] | add) + 6) and
+		([.[].misses] | add) == ([$before[].misses] | add)' >/dev/null \
+		|| fail "six overlaybd template creates must hit the warm pool without misses, daemon restarts or pod replacement"
+	pass "ublk warm pool: at least six hits, zero new misses/restarts, idle devices replenished"
 	run_stage "execd-as-init verify (overlaybd template)" init_mode_verify "$OCI_TEMPLATE_ID"
 	run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
 	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
