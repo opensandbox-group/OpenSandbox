@@ -203,7 +203,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_write(obj)
         return obj
 
     def get_custom_object(
@@ -343,7 +343,7 @@ class K8sClient:
         """Delete a namespaced custom resource."""
         if self._write_limiter:
             self._write_limiter.acquire()
-        self.get_custom_objects_api().delete_namespaced_custom_object(
+        response = self.get_custom_objects_api().delete_namespaced_custom_object(
             group=group,
             version=version,
             namespace=namespace,
@@ -354,7 +354,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_delete(name, response)
 
     def patch_custom_object(
         self,
@@ -378,7 +378,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_write(obj)
         return obj
 
     # ------------------------------------------------------------------
