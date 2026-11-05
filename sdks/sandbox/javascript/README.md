@@ -333,20 +333,22 @@ await manager.close();
 ```ts
 const manager = SandboxManager.create({ connectionConfig: config });
 
-const template = await manager.createTemplate({
+let template = await manager.createTemplate({
   image: "python:3.11",
   publish: "s3://bucket/templates/py311",
   format: "native",
 });
 
-// Poll getTemplate until the build finishes.
-while (template.status.phase !== "Succeeded") {
+// Poll getTemplate until the build finishes (or fails).
+while (template.status.phase !== "Succeeded" && template.status.phase !== "Failed") {
   await new Promise((r) => setTimeout(r, 5000));
-  const current = await manager.getTemplate(template.templateId);
-  template = current;
+  template = await manager.getTemplate(template.templateId);
+}
+if (template.status.phase === "Failed") {
+  throw new Error(`template build failed: ${template.status.message}`);
 }
 
-const sandbox = await Sandbox.create({
+const sandbox = await Sandbox.createFromTemplate({
   connectionConfig: config,
   templateId: template.templateId,
   timeoutSeconds: 3600,

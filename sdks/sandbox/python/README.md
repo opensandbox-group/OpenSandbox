@@ -458,9 +458,10 @@ async with await SandboxManager.create(connection_config=config) as manager:
 import asyncio
 from datetime import timedelta
 
+from opensandbox.manager import SandboxManager
 from opensandbox.models.templates import CreateTemplateRequest
 
-manager = SandboxManager(connection_config=config)
+manager = await SandboxManager.create(connection_config=config)
 
 template = await manager.create_template(
     CreateTemplateRequest(
@@ -470,12 +471,14 @@ template = await manager.create_template(
     )
 )
 
-# Poll get_template until the build finishes.
-while template.status.phase != "Succeeded":
+# Poll get_template until the build finishes (or fails).
+while template.status.phase not in ("Succeeded", "Failed"):
     await asyncio.sleep(5)
     template = await manager.get_template(template.template_id)
+if template.status.phase == "Failed":
+    raise RuntimeError(f"template build failed: {template.status.message}")
 
-sandbox = await Sandbox.create(
+sandbox = await Sandbox.create_from_template(
     template.template_id,
     connection_config=config,
     timeout=timedelta(hours=1),
