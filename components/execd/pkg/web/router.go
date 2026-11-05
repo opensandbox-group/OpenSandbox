@@ -93,6 +93,8 @@ func registerMCPRoutes(r *gin.Engine, registry *mcpproxy.Registry) {
 				c.JSON(http.StatusCreated, mcpproxy.ServerInfo{Name: server.Name, Transport: string(server.Transport)})
 			case errors.Is(err, mcpproxy.ErrDuplicateServer):
 				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			case errors.Is(err, mcpproxy.ErrTooManyServers):
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 			case errors.Is(err, mcpproxy.ErrRegistryClosed):
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 			default:

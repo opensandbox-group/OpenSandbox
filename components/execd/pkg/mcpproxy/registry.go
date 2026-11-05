@@ -31,7 +31,16 @@ var (
 	ErrUnknownServer = errors.New("mcpproxy: unknown server name")
 	// ErrRegistryClosed reports use of a closed registry (shutdown).
 	ErrRegistryClosed = errors.New("mcpproxy: registry is closed")
+	// ErrTooManyServers rejects registrations beyond maxServers; an
+	// authenticated client can already run arbitrary commands, so this is
+	// an accident brake, not a security boundary.
+	ErrTooManyServers = errors.New("mcpproxy: too many registered mcp servers")
 )
+
+// maxServers caps concurrent registrations. MCP sessions are stdio
+// subprocesses or HTTP streams, so unbounded registrations are an accident
+// brake for resource exhaustion by buggy clients.
+const maxServers = 64
 
 // Registry holds the MCP bridges. Servers are registered at runtime through
 // the /mcp/servers management API; registrations are in-memory only — they
@@ -106,6 +115,9 @@ func (r *Registry) Add(s *ServerConfig) error {
 	if _, exists := r.servers[s.Name]; exists {
 		return ErrDuplicateServer
 	}
+	if len(r.servers) >= maxServers {
+		return ErrTooManyServers
+	}
 	return r.addLocked(s)
 }
 
@@ -138,7 +150,14 @@ func (r *Registry) Remove(name string) error {
 }
 
 // Empty reports whether any MCP server is registered.
-func (r *Registry) Empty() bool { return r == nil || len(r.bridges) == 0 }
+func (r *Registry) Empty() bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.bridges) == 0
+}
 
 // Reset closes every bridge — aborting in-flight HTTP upstream streams and
 // stdio subprocesses alike — and empties the registry without shutting it

@@ -93,6 +93,21 @@ func TestRegistryAddRejectsDuplicatesAndInvalid(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestRegistryAddCapsServerCount(t *testing.T) {
+	r := NewRegistry(0)
+	defer r.Close()
+	for i := 0; i < maxServers; i++ {
+		require.NoError(t, r.Add(&ServerConfig{
+			Name: fmt.Sprintf("srv-%03d", i), Transport: TransportHTTP, URL: "http://127.0.0.1:1/mcp",
+		}))
+	}
+	err := r.Add(&ServerConfig{Name: "one-too-many", Transport: TransportHTTP, URL: "http://127.0.0.1:1/mcp"})
+	require.ErrorIs(t, err, ErrTooManyServers)
+	// Removing one frees a slot.
+	require.NoError(t, r.Remove("srv-000"))
+	require.NoError(t, r.Add(&ServerConfig{Name: "one-more", Transport: TransportHTTP, URL: "http://127.0.0.1:1/mcp"}))
+}
+
 func TestRegistryRemoveLifecycle(t *testing.T) {
 	upstream := echoUpstream(t)
 	defer upstream.Close()

@@ -204,6 +204,16 @@ func (r *reaper) drain() {
 				if errors.Is(err, unix.EINTR) {
 					continue
 				}
+				if errors.Is(err, unix.ECHILD) {
+					// Another waiter (an externally waited child, e.g. the
+					// MCP SDK's CommandTransport owning exec.Cmd.Wait)
+					// consumed the exit status first. Delete the entry so a
+					// starter-won wait cannot leak it — stale entries would
+					// grow without bound and shutdown could signal a
+					// recycled process group.
+					delete(r.owned, pid)
+					continue
+				}
 				log.Error("init: reaper consume pid %d: %v", pid, err)
 				return
 			}

@@ -130,13 +130,11 @@ func (b *stdioBridge) middleware() mcp.Middleware {
 			if ok {
 				s := b.sessionByID(serverSession.ID())
 				if s == nil {
-					s = b.registerSession(serverSession)
-				}
-				if s == nil {
-					// The bridge is shutting down; sessions are closing.
-					return nil, &jsonrpc.Error{
-						Code:    jsonrpc.CodeInternalError,
-						Message: "mcp bridge is shutting down",
+					var err error
+					s, err = b.registerSession(serverSession)
+					if err != nil {
+						// Shutting down, or the per-bridge session cap hit.
+						return nil, err
 					}
 				}
 				result, err := s.forward(ctx, method, req.GetParams())
@@ -153,6 +151,18 @@ func (b *stdioBridge) middleware() mcp.Middleware {
 // errNotBridged marks methods the bridge does not handle itself.
 var errNotBridged = errors.New("mcpproxy: method not bridged")
 
+// errBridgeClosed marks session registration on a bridge that is closing.
+var errBridgeClosed = &jsonrpc.Error{
+	Code:    jsonrpc.CodeInternalError,
+	Message: "mcp bridge is shutting down",
+}
+
+// errTooManySessions marks registration beyond maxSessionsPerBridge.
+var errTooManySessions = &jsonrpc.Error{
+	Code:    jsonrpc.CodeInternalError,
+	Message: "mcp bridge session limit reached; close sessions or remove the server and re-register",
+}
+
 // bridgedMethods are the MCP request methods forwarded to the stdio
 // subprocess. Everything else (initialize, ping, notifications, resource
 // subscriptions, logging levels) is served by the bridge server itself.
@@ -165,6 +175,16 @@ var bridgedMethods = map[string]struct{}{
 	"resources/templates/list": {},
 	"resources/read":           {},
 	"completion/complete":      {},
+}
+
+// badParams reports a params shape the bridge did not expect (an SDK
+// upgrade changed a method's params type); the request degrades to a
+// JSON-RPC error instead of a panic.
+func badParams(method string) error {
+	return &jsonrpc.Error{
+		Code:    jsonrpc.CodeInternalError,
+		Message: "mcp bridge received unexpected params for " + method,
+	}
 }
 
 // forward dispatches one bridged method to the subprocess client session.
@@ -182,28 +202,59 @@ func (s *stdioSession) forward(ctx context.Context, method string, params mcp.Pa
 
 	switch method {
 	case "tools/list":
-		return cs.ListTools(ctx, params.(*mcp.ListToolsParams))
+		p, ok := params.(*mcp.ListToolsParams)
+		if !ok {
+			return nil, badParams(method)
+		}
+		return cs.ListTools(ctx, p)
 	case "tools/call":
 		// The server receives raw arguments; the client side takes any
 		// JSON-marshalable value, so forward the raw message unchanged.
-		raw := params.(*mcp.CallToolParamsRaw)
+		raw, ok := params.(*mcp.CallToolParamsRaw)
+		if !ok {
+			return nil, badParams(method)
+		}
 		return cs.CallTool(ctx, &mcp.CallToolParams{
 			Meta:      raw.Meta,
 			Name:      raw.Name,
 			Arguments: raw.Arguments,
 		})
 	case "prompts/list":
-		return cs.ListPrompts(ctx, params.(*mcp.ListPromptsParams))
+		p, ok := params.(*mcp.ListPromptsParams)
+		if !ok {
+			return nil, badParams(method)
+		}
+		return cs.ListPrompts(ctx, p)
 	case "prompts/get":
-		return cs.GetPrompt(ctx, params.(*mcp.GetPromptParams))
+		p, ok := params.(*mcp.GetPromptParams)
+		if !ok {
+			return nil, badParams(method)
+		}
+		return cs.GetPrompt(ctx, p)
 	case "resources/list":
-		return cs.ListResources(ctx, params.(*mcp.ListResourcesParams))
+		p, ok := params.(*mcp.ListResourcesParams)
+		if !ok {
+			return nil, badParams(method)
+		}
+		return cs.ListResources(ctx, p)
 	case "resources/templates/list":
-		return cs.ListResourceTemplates(ctx, params.(*mcp.ListResourceTemplatesParams))
+		p, ok := params.(*mcp.ListResourceTemplatesParams)
+		if !ok {
+			return nil, badParams(method)
+		}
+		return cs.ListResourceTemplates(ctx, p)
 	case "resources/read":
-		return cs.ReadResource(ctx, params.(*mcp.ReadResourceParams))
+		p, ok := params.(*mcp.ReadResourceParams)
+		if !ok {
+			return nil, badParams(method)
+		}
+		return cs.ReadResource(ctx, p)
 	case "completion/complete":
-		return cs.Complete(ctx, params.(*mcp.CompleteParams))
+		p, ok := params.(*mcp.CompleteParams)
+		if !ok {
+			return nil, badParams(method)
+		}
+		return cs.Complete(ctx, p)
 	default:
 		return nil, errNotBridged
 	}
@@ -217,18 +268,26 @@ func (s *stdioSession) upstream() *mcp.ClientSession {
 	return s.clientSession
 }
 
+// maxSessionsPerBridge caps concurrent stdio sessions per upstream. Each
+// session owns a subprocess, so this is an accident brake for runaway
+// clients, not a security boundary.
+const maxSessionsPerBridge = 64
+
 // registerSession starts tracking an MCP session. The watcher tears the
 // subprocess down whenever the web session ends, including sessions that
 // never reach initialization (e.g. ephemeral discover sessions, which the
 // SDK handler closes right after answering).
-func (b *stdioBridge) registerSession(serverSession *mcp.ServerSession) *stdioSession {
+func (b *stdioBridge) registerSession(serverSession *mcp.ServerSession) (*stdioSession, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if s := b.sessions[serverSession.ID()]; s != nil {
-		return s
+		return s, nil
 	}
 	if b.closed {
-		return nil
+		return nil, errBridgeClosed
+	}
+	if len(b.sessions) >= maxSessionsPerBridge {
+		return nil, errTooManySessions
 	}
 	s := &stdioSession{bridge: b, id: serverSession.ID(), serverSession: serverSession}
 	b.sessions[s.id] = s
@@ -236,7 +295,7 @@ func (b *stdioBridge) registerSession(serverSession *mcp.ServerSession) *stdioSe
 		_ = serverSession.Wait()
 		s.end()
 	}()
-	return s
+	return s, nil
 }
 
 // initUpstream spawns the subprocess once the session is initialized and

@@ -17,6 +17,7 @@ package mcpproxy
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -203,6 +204,25 @@ func TestResolveChildCommand(t *testing.T) {
 	require.Equal(t, "definitely-not-on-disk-xyz", resolveChildCommand("definitely-not-on-disk-xyz", env, ""))
 	// No PATH in env: unchanged.
 	require.Equal(t, "anything", resolveChildCommand("anything", []string{"OTHER=1"}, ""))
+}
+
+func TestForwardBadParamsReturnsRPCError(t *testing.T) {
+	binary := buildEchoServer(t)
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcpproxy-test", Version: "0.0.1"}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cs, err := client.Connect(ctx, &mcp.CommandTransport{Command: exec.Command(binary)}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	s := &stdioSession{clientSession: cs}
+	_, err = s.forward(ctx, "tools/list", &mcp.CompleteParams{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unexpected params for tools/list")
+
+	// Correctly typed params keep working.
+	_, err = s.forward(ctx, "tools/list", &mcp.ListToolsParams{})
+	require.NoError(t, err)
 }
 
 func TestStdioBridgeAdvertisesCompletionCapability(t *testing.T) {
