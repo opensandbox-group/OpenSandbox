@@ -16,6 +16,7 @@
 
 import asyncio
 import gc
+import sys
 
 import httpx
 import pytest
@@ -24,7 +25,7 @@ from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import SandboxConnectionException
+from opensandbox.exceptions import InvalidArgumentException, SandboxConnectionException
 from opensandbox.models import ByteRange
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services import DownloadFilesystem
@@ -83,6 +84,29 @@ async def test_async_read_bytes_detailed_exposes_partial_metadata() -> None:
         (206, None, None, -1),
         (206, "garbage", ByteRange(-1, -1, -1, "garbage"), -1),
         (206, "bytes 5-9/*", ByteRange(5, 9, -1, "bytes 5-9/*"), -1),
+        (
+            206,
+            "bytes 0-1/9223372036854775807",
+            ByteRange(0, 1, 9223372036854775807, "bytes 0-1/9223372036854775807"),
+            9223372036854775807,
+        ),
+        (
+            206,
+            "bytes 0-1/9223372036854775808",
+            ByteRange(-1, -1, -1, "bytes 0-1/9223372036854775808"),
+            -1,
+        ),
+        (
+            206,
+            "bytes " + "9" * 5000 + "-" + "9" * 5000 + "/" + "9" * 5000,
+            ByteRange(
+                -1,
+                -1,
+                -1,
+                "bytes " + "9" * 5000 + "-" + "9" * 5000 + "/" + "9" * 5000,
+            ),
+            -1,
+        ),
     ],
 )
 async def test_async_read_bytes_detailed_handles_range_responses(
@@ -117,6 +141,53 @@ class _TrackingAsyncStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("isolated", [False, True])
+@pytest.mark.parametrize("failure", ["mapper", "content-length"])
+async def test_async_stream_closes_response_when_metadata_mapping_fails(
+    monkeypatch, isolated: bool, failure: str
+) -> None:
+    headers = {"Content-Range": "bytes 0-4/10"}
+    if failure == "content-length":
+        digit_limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        if digit_limit == 0:
+            pytest.skip("Python's integer string conversion limit is disabled")
+        headers["Content-Length"] = "9" * (digit_limit + 1)
+
+    source = _TrackingAsyncStream()
+    response = httpx.Response(
+        206,
+        stream=source,
+        headers=headers,
+    )
+    config = ConnectionConfig(
+        protocol="http", transport=httpx.MockTransport(lambda _: response)
+    )
+    if isolated:
+        adapter = IsolatedFilesystemAdapter(config, _endpoint(), _SESSION_ID)
+    else:
+        adapter = FilesystemAdapter(config, _endpoint())
+
+    def fail_mapping(*args, **kwargs):
+        raise ValueError("invalid response metadata")
+
+    if failure == "mapper":
+        module = "isolated_filesystem_adapter" if isolated else "filesystem_adapter"
+        monkeypatch.setattr(
+            f"opensandbox.adapters.{module}.create_read_bytes_response",
+            fail_mapping,
+        )
+    try:
+        with pytest.raises(InvalidArgumentException) as exc:
+            await adapter.read_bytes_stream_detailed("/data.bin")
+        assert isinstance(exc.value.__cause__, ValueError)
+        assert response.is_closed
+        assert source.closed
+    finally:
+        await response.aclose()
+        await adapter._httpx_client.aclose()
 
 
 @pytest.mark.asyncio
