@@ -47,7 +47,10 @@ func (w *correlationFirstFailureWriter) Write(payload []byte) (int, error) {
 }
 
 func TestSSECommandRuntimeOutputBeforeInit(t *testing.T) {
-	logPath := captureSSECorrelationLog(t)
+	logPath, child := captureSSECorrelationLog(t)
+	if !child {
+		return
+	}
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	ctx, recorder := newTestContext(http.MethodPost, "/command", nil)

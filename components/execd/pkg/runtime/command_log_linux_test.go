@@ -34,7 +34,10 @@ import (
 )
 
 func TestCommandLogCorrelationDeadlineAfterProcessExit(t *testing.T) {
-	logPath := captureCommandLog(t)
+	logPath, child := captureCommandLog(t)
+	if !child {
+		return
+	}
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	require.Nil(t, initReaper, "this regression exercises exec.Cmd's classic-mode context watcher")
@@ -102,7 +105,10 @@ func TestCommandLogCorrelationDeadlineAfterProcessExit(t *testing.T) {
 }
 
 func TestCommandLogCorrelationInitReaperObservedStatus(t *testing.T) {
-	logPath := captureCommandLog(t)
+	logPath, child := captureCommandLog(t)
+	if !child {
+		return
+	}
 	startReaperForTest(t)
 	executable, err := os.Executable()
 	require.NoError(t, err)

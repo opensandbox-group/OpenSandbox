@@ -22,7 +22,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,13 +41,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func captureSSECorrelationLog(t *testing.T) string {
+func captureSSECorrelationLog(t *testing.T) (string, bool) {
 	t.Helper()
-	t.Cleanup(func() { log.Init(6) })
-	path := filepath.Join(t.TempDir(), "execd.log")
-	t.Setenv("EXECD_LOG_FILE", path)
-	log.Init(6)
-	return path
+	const testEnv = "EXECD_SSE_LOG_CAPTURE_TEST"
+	const pathEnv = "EXECD_SSE_LOG_CAPTURE_PATH"
+	name, path := os.Getenv(testEnv), os.Getenv(pathEnv)
+	if name != "" || path != "" {
+		require.Equal(t, t.Name(), name, "capture subprocess must run only its designated test")
+		require.NotEmpty(t, path)
+		t.Setenv("EXECD_LOG_FILE", path)
+		log.Init(6)
+		return path, true
+	}
+
+	// Keep the capture sink in a child process so its handles are closed
+	// before the parent's TempDir cleanup, including on native Windows.
+	path = filepath.Join(t.TempDir(), "execd.log")
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.Command(executable, "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
+	cmd.Env = append(os.Environ(), testEnv+"="+t.Name(), pathEnv+"="+path)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "capture subprocess failed:\n%s", output)
+	// Exercise removal of the real sink after exit to catch Windows sharing
+	// violations without relying on logger replacement or garbage collection.
+	require.NoError(t, os.Remove(path), "capture sink must be removable after child exit")
+	return "", false
 }
 
 // Only the transport is faulted; real SSE serialization and logging still run.
@@ -80,7 +101,10 @@ func correlationEvents(t *testing.T, recorder *httptest.ResponseRecorder) []mode
 }
 
 func TestSSECommandCorrelationBeforeInit(t *testing.T) {
-	logPath := captureSSECorrelationLog(t)
+	logPath, child := captureSSECorrelationLog(t)
+	if !child {
+		return
+	}
 	ctx, recorder := newTestContext(http.MethodPost, "/command", nil)
 	c := NewCodeInterpretingController(ctx)
 	pingCtx, cancel := context.WithCancel(context.Background())
@@ -117,7 +141,10 @@ func TestSSECommandCorrelationBeforeInit(t *testing.T) {
 }
 
 func TestSSECommandCorrelationWriteFailureAndDisconnect(t *testing.T) {
-	logPath := captureSSECorrelationLog(t)
+	logPath, child := captureSSECorrelationLog(t)
+	if !child {
+		return
+	}
 	for _, failure := range []string{"write", "short_write", "disconnect"} {
 		t.Run(failure, func(t *testing.T) {
 			ctx, _ := newTestContext(http.MethodPost, "/command", nil)
@@ -159,7 +186,10 @@ func TestSSECommandCorrelationWriteFailureAndDisconnect(t *testing.T) {
 }
 
 func TestSSENonCommandCorrelationIsSessionScoped(t *testing.T) {
-	logPath := captureSSECorrelationLog(t)
+	logPath, child := captureSSECorrelationLog(t)
+	if !child {
+		return
+	}
 	ctx, _ := newTestContext(http.MethodPost, "/code", nil)
 	c := NewCodeInterpretingController(ctx)
 	pingCtx, cancel := context.WithCancel(context.Background())
@@ -193,7 +223,10 @@ func TestSSELogProcess(t *testing.T) {
 }
 
 func TestRunCommandLogCorrelationConcurrent(t *testing.T) {
-	logPath := captureSSECorrelationLog(t)
+	logPath, child := captureSSECorrelationLog(t)
+	if !child {
+		return
+	}
 	previousRunner, previousTimeout := codeRunner, flag.ApiGracefulShutdownTimeout
 	c := runtime.NewController("", "")
 	codeRunner, flag.ApiGracefulShutdownTimeout = c, 0
@@ -245,7 +278,7 @@ func TestRunCommandLogCorrelationConcurrent(t *testing.T) {
 	wg.Wait()
 
 	// Extract IDs before assertions so all background waiters finish before
-	// the capture logger can be restored, even when a later assertion fails.
+	// inspecting the captured log, even when a later assertion fails.
 	ids := make([]string, len(cases))
 	for i, recorder := range recorders {
 		for _, line := range strings.Split(recorder.Body.String(), "\n") {

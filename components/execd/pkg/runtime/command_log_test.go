@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,18 +62,39 @@ func TestCommandLogProcess(t *testing.T) {
 	os.Exit(code)
 }
 
-func captureCommandLog(t *testing.T) string {
+func captureCommandLog(t *testing.T) (string, bool) {
 	t.Helper()
-	// Restore the environment before reconstructing the global logger.
-	t.Cleanup(func() { log.Init(6) })
-	path := filepath.Join(t.TempDir(), "execd.log")
-	t.Setenv("EXECD_LOG_FILE", path)
-	log.Init(6)
-	return path
+	const testEnv = "EXECD_COMMAND_LOG_CAPTURE_TEST"
+	const pathEnv = "EXECD_COMMAND_LOG_CAPTURE_PATH"
+	name, path := os.Getenv(testEnv), os.Getenv(pathEnv)
+	if name != "" || path != "" {
+		require.Equal(t, t.Name(), name, "capture subprocess must run only its designated test")
+		require.NotEmpty(t, path)
+		t.Setenv("EXECD_LOG_FILE", path)
+		log.Init(6)
+		return path, true
+	}
+
+	// The parent owns the directory; only the child owns the logger and its
+	// open sink. Process exit closes every handle before Windows cleanup.
+	path = filepath.Join(t.TempDir(), "execd.log")
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.Command(executable, "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
+	cmd.Env = append(os.Environ(), testEnv+"="+t.Name(), pathEnv+"="+path)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "capture subprocess failed:\n%s", output)
+	// Remove the actual captured log, not a probe file: on Windows this fails
+	// if any process still holds the capture sink open.
+	require.NoError(t, os.Remove(path), "capture sink must be removable after child exit")
+	return "", false
 }
 
 func TestCommandLogCorrelationConcurrent(t *testing.T) {
-	logPath := captureCommandLog(t)
+	logPath, child := captureCommandLog(t)
+	if !child {
+		return
+	}
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	for _, background := range []bool{false, true} {
@@ -144,7 +166,7 @@ func TestCommandLogCorrelationConcurrent(t *testing.T) {
 			}
 			releaseErr := os.WriteFile(gate, nil, 0600)
 			wg.Wait()
-			// Drain every background waiter before any assertion can reset logging.
+			// Drain every background waiter before inspecting the captured log.
 			for _, result := range results {
 				if result.allocated != "" && result.err == nil {
 					require.Eventually(t, func() bool {
@@ -206,7 +228,10 @@ func TestCommandLogCorrelationConcurrent(t *testing.T) {
 }
 
 func TestCommandLogCorrelationBeforeLaunch(t *testing.T) {
-	logPath := captureCommandLog(t)
+	logPath, child := captureCommandLog(t)
+	if !child {
+		return
+	}
 	for _, background := range []bool{false, true} {
 		for _, preparationFailure := range []bool{false, true} {
 			mode, language := "foreground", Command
@@ -261,7 +286,10 @@ func TestCommandLogCorrelationBeforeLaunch(t *testing.T) {
 }
 
 func TestCommandInterruptLogCorrelation(t *testing.T) {
-	logPath := captureCommandLog(t)
+	logPath, child := captureCommandLog(t)
+	if !child {
+		return
+	}
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	c := NewController("", "")
@@ -305,7 +333,10 @@ func TestCommandInterruptLogCorrelation(t *testing.T) {
 }
 
 func TestCommandLogCorrelationUnknownWaitStatus(t *testing.T) {
-	logPath := captureCommandLog(t)
+	logPath, child := captureCommandLog(t)
+	if !child {
+		return
+	}
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	cmd := exec.Command(executable, "-test.run=^TestCommandLogProcess$")
