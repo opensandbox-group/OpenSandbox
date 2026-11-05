@@ -15,6 +15,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -118,12 +120,10 @@ type BatchSandboxSpec struct {
 	// +kubebuilder:validation:Schemaless
 	// +kubebuilder:validation:Optional
 	TaskTemplate *TaskTemplateSpec `json:"taskTemplate,omitempty"`
-	// ShardTaskPatches indicates patching to the TaskTemplate for individual Task.
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +kubebuilder:validation:Schemaless
+	// ShardTaskPatches is a partial TaskTemplate patch for individual tasks.
 	// +optional
 	// +kubebuilder:validation:Optional
-	ShardTaskPatches []runtime.RawExtension `json:"shardTaskPatches,omitempty"`
+	ShardTaskPatches []TaskTemplatePatch `json:"shardTaskPatches,omitempty"`
 	// TaskResourcePolicyWhenCompleted specifies how resources should be handled once a task reaches a completed state (SUCCEEDED or FAILED).
 	// - Retain: Keep the resources until the BatchSandbox is deleted.
 	// - Release: Free the resources immediately when the task completes.
@@ -232,6 +232,73 @@ func init() {
 type TaskTemplateSpec struct {
 	// +optional
 	Spec TaskSpec `json:"spec,omitempty"`
+}
+
+// TaskTemplatePatch is a partial TaskTemplateSpec.
+type TaskTemplatePatch struct {
+	Spec TaskSpecPatch `json:"spec,omitempty"`
+}
+
+// TaskSpecPatch is a partial TaskSpec.
+type TaskSpecPatch struct {
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Process ProcessTaskPatch `json:"process,omitempty"`
+	// +optional
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+}
+
+// ProcessTaskPatch is a partial ProcessTask.
+type ProcessTaskPatch struct {
+	// +optional
+	Command *[]string `json:"command,omitempty"`
+	// +optional
+	Args *[]string `json:"args,omitempty"`
+	// Extra preserves other ProcessTask fields for backward-compatible strategic merges.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes command and args while preserving other process fields.
+func (p *ProcessTaskPatch) UnmarshalJSON(data []byte) error {
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	p.Extra = fields
+	p.Command, p.Args = nil, nil
+	if raw, ok := fields["command"]; ok {
+		if err := json.Unmarshal(raw, &p.Command); err != nil {
+			return err
+		}
+	}
+	if raw, ok := fields["args"]; ok {
+		if err := json.Unmarshal(raw, &p.Args); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarshalJSON restores preserved fields and overlays the typed fields.
+func (p ProcessTaskPatch) MarshalJSON() ([]byte, error) {
+	fields := make(map[string]json.RawMessage, len(p.Extra)+2)
+	for key, raw := range p.Extra {
+		fields[key] = raw
+	}
+	if p.Command != nil {
+		raw, err := json.Marshal(p.Command)
+		if err != nil {
+			return nil, err
+		}
+		fields["command"] = raw
+	}
+	if p.Args != nil {
+		raw, err := json.Marshal(p.Args)
+		if err != nil {
+			return nil, err
+		}
+		fields["args"] = raw
+	}
+	return json.Marshal(fields)
 }
 
 // ExecMode defines where a process should be executed.
