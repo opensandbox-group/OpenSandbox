@@ -57,7 +57,7 @@ func TestRegistryHTTPDispatch(t *testing.T) {
 	_, ok = r.Handler("missing")
 	require.False(t, ok)
 
-	require.Equal(t, []ServerInfo{{Name: "alpha", Transport: "http"}}, r.List())
+	require.Equal(t, []ServerInfo{{Name: "alpha", Transport: "http", Source: "config"}}, r.List())
 }
 
 func TestRegistryListSorted(t *testing.T) {
@@ -96,4 +96,90 @@ func TestRegistryBadStdioCommandFails(t *testing.T) {
 		_, err = NewRegistry(cfg)
 	}
 	require.Error(t, err)
+}
+
+func TestRegistryAddDynamicHTTP(t *testing.T) {
+	upstream := echoUpstream(t)
+	defer upstream.Close()
+
+	cfg, err := ParseConfig("", 0)
+	require.NoError(t, err)
+	r, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	defer r.Close()
+
+	added := &ServerConfig{Name: "dyn", Transport: TransportHTTP, URL: upstream.URL + "/mcp"}
+	require.NoError(t, r.Add(added))
+
+	_, ok := r.Handler("dyn")
+	require.True(t, ok)
+	require.Equal(t, []ServerInfo{{Name: "dyn", Transport: "http", Source: "dynamic"}}, r.List())
+
+	require.NoError(t, r.Remove("dyn"))
+	_, ok = r.Handler("dyn")
+	require.False(t, ok)
+	require.Empty(t, r.List())
+}
+
+func TestRegistryAddRejectsDuplicatesAndInvalid(t *testing.T) {
+	cfg, err := ParseConfig(`[{"name":"alpha","transport":"http","url":"http://127.0.0.1:1/mcp"}]`, 0)
+	require.NoError(t, err)
+	r, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	defer r.Close()
+
+	err = r.Add(&ServerConfig{Name: "alpha", Transport: TransportHTTP, URL: "http://127.0.0.1:2/mcp"})
+	require.ErrorIs(t, err, ErrDuplicateServer)
+
+	require.Error(t, r.Add(&ServerConfig{Name: "bad name!", Transport: TransportHTTP, URL: "http://127.0.0.1:2/mcp"}))
+	require.ErrorContains(t, r.Add(&ServerConfig{Name: "servers", Transport: TransportHTTP, URL: "http://127.0.0.1:2/mcp"}), "reserved")
+	require.ErrorContains(t, r.Add(&ServerConfig{Name: "no-url", Transport: TransportHTTP}), "url")
+}
+
+func TestRegistryRemoveRejectsStaticAndUnknown(t *testing.T) {
+	cfg, err := ParseConfig(`[{"name":"alpha","transport":"http","url":"http://127.0.0.1:1/mcp"}]`, 0)
+	require.NoError(t, err)
+	r, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	defer r.Close()
+
+	require.ErrorIs(t, r.Remove("alpha"), ErrStaticServer)
+	require.ErrorIs(t, r.Remove("missing"), ErrUnknownServer)
+
+	require.NoError(t, r.Add(&ServerConfig{Name: "dyn", Transport: TransportHTTP, URL: "http://127.0.0.1:2/mcp"}))
+	require.NoError(t, r.Remove("dyn"))
+}
+
+func TestRegistryRemoveDynamicStdioClosesBridge(t *testing.T) {
+	cfg, err := ParseConfig("", 0)
+	require.NoError(t, err)
+	r, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	defer r.Close()
+
+	require.NoError(t, r.Add(&ServerConfig{Name: "echo", Transport: TransportStdio, Command: buildEchoServer(t)}))
+
+	r.mu.Lock()
+	bridge := r.stdio["echo"]
+	r.mu.Unlock()
+	require.NotNil(t, bridge)
+
+	require.NoError(t, r.Remove("echo"))
+	r.mu.Lock()
+	_, exists := r.stdio["echo"]
+	r.mu.Unlock()
+	require.False(t, exists)
+	// Removing again reports unknown.
+	require.ErrorIs(t, r.Remove("echo"), ErrUnknownServer)
+}
+
+func TestRegistryClosedRejectsManagement(t *testing.T) {
+	cfg, err := ParseConfig("", 0)
+	require.NoError(t, err)
+	r, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	r.Close()
+
+	require.ErrorIs(t, r.Add(&ServerConfig{Name: "dyn", Transport: TransportHTTP, URL: "http://127.0.0.1:2/mcp"}), ErrRegistryClosed)
+	require.ErrorIs(t, r.Remove("dyn"), ErrRegistryClosed)
 }

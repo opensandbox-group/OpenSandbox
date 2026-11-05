@@ -42,7 +42,7 @@ Everything execd exposes lives under one API. When the platform configures an ac
 | Terminals | `/pty` | PTY sessions with a WebSocket attach point |
 | Files | `/files`, `/directories` | The whole filesystem surface |
 | Isolated sessions | `/v1/isolated/*` | Private-namespace shells with their own file operations |
-| MCP proxy bridge | `/mcp`, `/mcp/{name}` | List configured upstreams; Streamable HTTP endpoint per upstream |
+| MCP proxy bridge | `/mcp`, `/mcp/{name}`, `/mcp/servers` | List and manage upstreams; Streamable HTTP endpoint per upstream |
 | Metrics | `/metrics`, `/metrics/watch` | Snapshot and live stream |
 | Reverse proxy | `/proxy/{port}` | Reach any sandbox port through execd |
 
@@ -146,11 +146,21 @@ Upstreams are declared in the `EXECD_MCP_SERVERS` environment variable (or `--mc
 Two transports are supported:
 
 - **`http`** proxies a Streamable HTTP MCP server as an opaque stream — request/response bodies, SSE streams, status codes, and MCP headers (`Mcp-Session-Id`, `MCP-Protocol-Version`) pass through without JSON-RPC inspection, so the bridge stays compatible with any protocol version both sides support. Idle SSE responses receive keepalive comment frames every `EXECD_MCP_SSE_KEEPALIVE` (default 30s, `0` disables) so read-idle clients stay connected.
-- **`stdio`** spawns the configured command as a sandbox-local subprocess — one per MCP session — and bridges it to Streamable HTTP using the official Go MCP SDK. Sessions end (and subprocesses terminate) on client `DELETE`, idle timeout, or child exit. Commands come from image or platform configuration only; clients choose a bridge by name and cannot start arbitrary processes.
+- **`stdio`** spawns the configured command as a sandbox-local subprocess — one per MCP session — and bridges it to Streamable HTTP using the official Go MCP SDK. Sessions end (and subprocesses terminate) on client `DELETE`, idle timeout, or child exit. Commands come from image or platform configuration, or from the runtime management API below — in-sandbox clients can already run arbitrary commands through the exec APIs, so a client-supplied stdio command grants no new privilege.
 
 The execd access token never leaves execd: it is stripped before forwarding, while client `Authorization` headers pass through to the upstream. Configured `headers` on an upstream override client-supplied values, which keeps upstream credentials inside sandbox configuration. Upstream status codes — including `404` (session terminated) and `405` — are returned unmodified so clients apply their normal session-recovery behavior.
 
 `GET /mcp` lists the configured bridges; unknown names answer `404`. The routes sit behind the same runtime-init gate and access-token check as every other execd endpoint, and are reference-implementation extensions outside the published execd API spec.
+
+### Dynamic server management
+
+Besides the startup configuration, clients can register and remove upstreams at runtime through the management API (same access-token check; the server name `servers` is reserved for it):
+
+- `GET /mcp/servers` — list every bridge as `{"name", "transport", "source"}`, where `source` is `"config"` (declared in `EXECD_MCP_SERVERS`) or `"dynamic"`.
+- `POST /mcp/servers` — register one server; the body is a single entry in the same format as the `EXECD_MCP_SERVERS` array (both transports, `headers` may carry upstream credentials). Answers `201` with the created entry, `400` on validation errors, `409` when the name is taken.
+- `DELETE /mcp/servers/{name}` — remove a dynamic bridge and tear down its stdio sessions. Answers `204`; `404` when unknown and `409` for a `config`-sourced server (those are platform-owned).
+
+Dynamic registrations are in-memory: execd answers `404` for them again after a restart, so control planes or SDKs re-register after recreating a sandbox. The name `servers` cannot be registered because `/mcp/servers` is the management route.
 
 ## Layered security
 

@@ -41,6 +41,10 @@ const (
 // namePattern constrains server names to one path segment without escapes.
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
+// reservedNames are routing segments owned by the /mcp management API and
+// therefore unavailable as server names.
+var reservedNames = map[string]struct{}{"servers": {}}
+
 // ServerConfig describes one upstream MCP server.
 type ServerConfig struct {
 	// Name is the routing segment under /mcp/. Required, unique.
@@ -56,8 +60,9 @@ type ServerConfig struct {
 	Headers map[string]string `json:"headers,omitempty"`
 
 	// Command is the stdio server executable. Required for the stdio
-	// transport. Commands come from sandbox image or platform configuration,
-	// never from clients.
+	// transport. Commands come from sandbox image or platform
+	// configuration, or from the runtime management API (in-sandbox
+	// clients can already run arbitrary commands via the exec APIs).
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	// Env is added to the subprocess environment on top of execd's own.
@@ -108,6 +113,9 @@ func ParseConfig(raw string, sseKeepalive time.Duration) (*Config, error) {
 func (s *ServerConfig) Validate() error {
 	if !namePattern.MatchString(s.Name) {
 		return fmt.Errorf("invalid name %q (want 1-64 chars: letters, digits, '.', '_', '-')", s.Name)
+	}
+	if _, reserved := reservedNames[s.Name]; reserved {
+		return fmt.Errorf("name %q is reserved by the /mcp management API", s.Name)
 	}
 	switch s.Transport {
 	case TransportHTTP:

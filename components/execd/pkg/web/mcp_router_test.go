@@ -58,7 +58,7 @@ func TestMCPRoutesIndexListsServers(t *testing.T) {
 
 	var servers []mcpproxy.ServerInfo
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&servers))
-	require.Equal(t, []mcpproxy.ServerInfo{{Name: "alpha", Transport: "http"}}, servers)
+	require.Equal(t, []mcpproxy.ServerInfo{{Name: "alpha", Transport: "http", Source: "config"}}, servers)
 }
 
 func TestMCPRoutesIndexEmptyWhenUnconfigured(t *testing.T) {
@@ -123,5 +123,88 @@ func TestMCPRoutesRequireAccessToken(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 
 	w = doMCPRequest(r, http.MethodGet, "/mcp/alpha", "", map[string]string{"X-EXECD-ACCESS-TOKEN": "tok"})
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestMCPRoutesDynamicServerLifecycle(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"dynamic":true}}`))
+	}))
+	defer upstream.Close()
+
+	r := NewRouter("", testMCPRegistry(t, upstream.URL))
+
+	// List shows the configured server.
+	w := doMCPRequest(r, http.MethodGet, "/mcp/servers", "", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.JSONEq(t, `[{"name":"alpha","transport":"http","source":"config"}]`, w.Body.String())
+
+	// Register a dynamic upstream.
+	body := `{"name":"dyn","transport":"http","url":"` + upstream.URL + `/mcp"}`
+	w = doMCPRequest(r, http.MethodPost, "/mcp/servers", body, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusCreated, w.Code)
+	require.JSONEq(t, `{"name":"dyn","transport":"http","source":"dynamic"}`, w.Body.String())
+
+	// The dynamic server is bridgeable immediately.
+	w = doMCPRequest(r, http.MethodPost, "/mcp/dyn", `{"jsonrpc":"2.0","method":"initialize","id":1}`, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), `"dynamic":true`)
+
+	// Both servers are listed.
+	w = doMCPRequest(r, http.MethodGet, "/mcp/servers", "", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.JSONEq(t, `[{"name":"alpha","transport":"http","source":"config"},{"name":"dyn","transport":"http","source":"dynamic"}]`, w.Body.String())
+
+	// Remove it; dispatch answers 404 again.
+	w = doMCPRequest(r, http.MethodDelete, "/mcp/servers/dyn", "", nil)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	w = doMCPRequest(r, http.MethodPost, "/mcp/dyn", "", nil)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestMCPRoutesManageServerErrors(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	r := NewRouter("", testMCPRegistry(t, upstream.URL))
+
+	// Invalid JSON body.
+	w := doMCPRequest(r, http.MethodPost, "/mcp/servers", `{`, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	// Validation failures.
+	w = doMCPRequest(r, http.MethodPost, "/mcp/servers", `{"name":"no-url","transport":"http"}`, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	w = doMCPRequest(r, http.MethodPost, "/mcp/servers", `{"name":"servers","transport":"http","url":"http://127.0.0.1:9/mcp"}`, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "reserved")
+
+	// Duplicate of a configured server.
+	w = doMCPRequest(r, http.MethodPost, "/mcp/servers", `{"name":"alpha","transport":"http","url":"`+upstream.URL+`/mcp"}`, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusConflict, w.Code)
+
+	// Configured servers cannot be removed at runtime.
+	w = doMCPRequest(r, http.MethodDelete, "/mcp/servers/alpha", "", nil)
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Contains(t, w.Body.String(), "EXECD_MCP_SERVERS")
+
+	// Unknown removal.
+	w = doMCPRequest(r, http.MethodDelete, "/mcp/servers/missing", "", nil)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestMCPRoutesManageServersRequireAccessToken(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+
+	r := NewRouter("tok", testMCPRegistry(t, upstream.URL))
+
+	w := doMCPRequest(r, http.MethodPost, "/mcp/servers", `{"name":"dyn","transport":"http","url":"http://127.0.0.1:9/mcp"}`, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	w = doMCPRequest(r, http.MethodDelete, "/mcp/servers/alpha", "", nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	w = doMCPRequest(r, http.MethodGet, "/mcp/servers", "", map[string]string{"X-EXECD-ACCESS-TOKEN": "tok"})
 	require.Equal(t, http.StatusOK, w.Code)
 }

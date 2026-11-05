@@ -77,6 +77,7 @@ func TestParseConfigErrors(t *testing.T) {
 		{"stdio missing command", `[{"name":"a","transport":"stdio"}]`, "requires command"},
 		{"stdio with url", `[{"name":"a","transport":"stdio","command":"x","url":"http://x/mcp"}]`, "must not set url"},
 		{"duplicate names", `[{"name":"a","transport":"http","url":"http://x/mcp"},{"name":"a","transport":"http","url":"http://y/mcp"}]`, "duplicate server name"},
+		{"reserved name", `[{"name":"servers","transport":"http","url":"http://x/mcp"}]`, "reserved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,4 +97,6 @@ func TestServerConfigValidateNameBoundaries(t *testing.T) {
 	for _, name := range invalid {
 		require.Error(t, (&ServerConfig{Name: name, Transport: TransportStdio, Command: "x"}).Validate(), name)
 	}
+	// Reserved by the /mcp/servers management routes.
+	require.ErrorContains(t, (&ServerConfig{Name: "servers", Transport: TransportStdio, Command: "x"}).Validate(), "reserved")
 }

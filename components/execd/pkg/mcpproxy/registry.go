@@ -15,55 +15,146 @@
 package mcpproxy
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 	"sync"
+	"time"
 )
 
-// Registry holds the configured MCP bridges. It is built once at startup
-// from flag/env configuration and consulted by the /mcp routes.
+// Management errors returned by Add and Remove, mapped to HTTP status codes
+// by the /mcp/servers routes.
+var (
+	// ErrDuplicateServer rejects a name that is already registered.
+	ErrDuplicateServer = errors.New("mcpproxy: duplicate server name")
+	// ErrUnknownServer reports a removal of a name that is not registered.
+	ErrUnknownServer = errors.New("mcpproxy: unknown server name")
+	// ErrStaticServer rejects removal of a startup-configured server.
+	ErrStaticServer = errors.New("mcpproxy: server is configured via EXECD_MCP_SERVERS and cannot be removed at runtime")
+	// ErrRegistryClosed reports use of a closed registry (shutdown).
+	ErrRegistryClosed = errors.New("mcpproxy: registry is closed")
+)
+
+// Registry holds the MCP bridges. Servers come from two sources: the
+// startup flag/env configuration (source "config") and the runtime
+// management API (source "dynamic"). Dynamic registrations are in-memory
+// only — they vanish when execd exits — and cannot shadow or replace
+// configured names.
 type Registry struct {
-	mu      sync.Mutex
-	closed  bool
-	config  *Config
-	bridges map[string]http.Handler
-	order   []string
-	stdio   []*stdioBridge
+	mu           sync.Mutex
+	closed       bool
+	config       *Config
+	sseKeepalive time.Duration
+	bridges      map[string]http.Handler
+	servers      map[string]*ServerConfig
+	dynamic      map[string]bool
+	stdio        map[string]*stdioBridge
 }
 
 // NewRegistry builds one bridge per configured server. The config must
 // already be validated (see ParseConfig).
 func NewRegistry(cfg *Config) (*Registry, error) {
 	r := &Registry{
-		config:  cfg,
-		bridges: make(map[string]http.Handler, len(cfg.Servers)),
+		config:       cfg,
+		sseKeepalive: cfg.SSEKeepalive,
+		bridges:      make(map[string]http.Handler, len(cfg.Servers)),
+		servers:      make(map[string]*ServerConfig, len(cfg.Servers)),
+		dynamic:      make(map[string]bool),
+		stdio:        make(map[string]*stdioBridge),
 	}
 	for _, s := range cfg.Servers {
-		var handler http.Handler
-		var err error
-		switch s.Transport {
-		case TransportHTTP:
-			handler, err = newHTTPBridge(s, cfg.SSEKeepalive)
-		case TransportStdio:
-			var bridge *stdioBridge
-			bridge, err = newStdioBridge(s)
-			if err == nil {
-				r.stdio = append(r.stdio, bridge)
-				handler = bridge
-			}
-		}
-		if err != nil {
+		if err := r.addLocked(s); err != nil {
 			r.Close()
 			return nil, err
 		}
-		r.bridges[s.Name] = handler
-		r.order = append(r.order, s.Name)
 	}
-	sort.Strings(r.order)
 	return r, nil
 }
 
-// Empty reports whether any MCP server is configured.
+// addLocked builds and registers one bridge; r.mu must be held.
+func (r *Registry) addLocked(s *ServerConfig) error {
+	var handler http.Handler
+	var err error
+	switch s.Transport {
+	case TransportHTTP:
+		handler, err = newHTTPBridge(s, r.sseKeepalive)
+	case TransportStdio:
+		var bridge *stdioBridge
+		bridge, err = newStdioBridge(s)
+		if err == nil {
+			r.stdio[s.Name] = bridge
+			handler = bridge
+		}
+	default:
+		err = errors.New("mcpproxy: unknown transport " + string(s.Transport))
+	}
+	if err != nil {
+		return err
+	}
+	r.bridges[s.Name] = handler
+	r.servers[s.Name] = s
+	return nil
+}
+
+// Add validates and registers one dynamic server. Dynamic entries live in
+// memory only and are lost when execd restarts.
+func (r *Registry) Add(s *ServerConfig) error {
+	if r == nil {
+		return ErrRegistryClosed
+	}
+	if err := s.Validate(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrRegistryClosed
+	}
+	if _, exists := r.servers[s.Name]; exists {
+		return ErrDuplicateServer
+	}
+	if err := r.addLocked(s); err != nil {
+		return err
+	}
+	r.dynamic[s.Name] = true
+	return nil
+}
+
+// Remove unregisters one dynamic server and tears down its stdio sessions.
+// Configured (startup) servers are refused with ErrStaticServer.
+func (r *Registry) Remove(name string) error {
+	if r == nil {
+		return ErrRegistryClosed
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ErrRegistryClosed
+	}
+	if _, exists := r.servers[name]; !exists {
+		r.mu.Unlock()
+		return ErrUnknownServer
+	}
+	if !r.dynamic[name] {
+		r.mu.Unlock()
+		return ErrStaticServer
+	}
+	delete(r.servers, name)
+	delete(r.dynamic, name)
+	delete(r.bridges, name)
+	bridge := r.stdio[name]
+	delete(r.stdio, name)
+	r.mu.Unlock()
+
+	if bridge != nil {
+		bridge.Close()
+	}
+	return nil
+}
+
+// Empty reports whether any MCP server is registered.
 func (r *Registry) Empty() bool { return r == nil || len(r.bridges) == 0 }
 
 // Handler returns the bridge handler for a server name.
@@ -80,20 +171,29 @@ func (r *Registry) Handler(name string) (http.Handler, bool) {
 	return h, ok
 }
 
-// ServerInfo describes one configured server (for the /mcp index).
+// ServerInfo describes one registered server (for the /mcp index and the
+// management API). Source is "config" for startup-declared servers and
+// "dynamic" for runtime registrations.
 type ServerInfo struct {
 	Name      string `json:"name"`
 	Transport string `json:"transport"`
+	Source    string `json:"source"`
 }
 
-// List returns the configured servers sorted by name.
+// List returns the registered servers sorted by name.
 func (r *Registry) List() []ServerInfo {
 	if r == nil {
 		return nil
 	}
-	out := make([]ServerInfo, 0, len(r.config.Servers))
-	for _, s := range r.config.Servers {
-		out = append(out, ServerInfo{Name: s.Name, Transport: string(s.Transport)})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]ServerInfo, 0, len(r.servers))
+	for name, s := range r.servers {
+		source := "config"
+		if r.dynamic[name] {
+			source = "dynamic"
+		}
+		out = append(out, ServerInfo{Name: name, Transport: string(s.Transport), Source: source})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -111,8 +211,13 @@ func (r *Registry) Close() {
 		return
 	}
 	r.closed = true
-	r.mu.Unlock()
+	bridges := make([]*stdioBridge, 0, len(r.stdio))
 	for _, b := range r.stdio {
+		bridges = append(bridges, b)
+	}
+	r.mu.Unlock()
+
+	for _, b := range bridges {
 		b.Close()
 	}
 }
