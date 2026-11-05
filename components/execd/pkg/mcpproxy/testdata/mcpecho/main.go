@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -48,6 +49,14 @@ func main() {
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "explode", Description: "Always fails"}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
 		return nil, struct{}{}, fmt.Errorf("intentional failure")
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: "die", Description: "Exit the process"}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
+		go func() {
+			// Give the response a moment to reach the client first.
+			time.Sleep(200 * time.Millisecond)
+			os.Exit(0)
+		}()
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "dying"}}, IsError: false}, struct{}{}, nil
 	})
 
 	switch *serve {

@@ -139,6 +139,9 @@ func InitFlags() {
 		stdlog.Printf("Invalid --jupyter-idle-poll-interval=%s; fallback to default %s", JupyterIdlePollInterval, 100*time.Millisecond)
 		JupyterIdlePollInterval = 100 * time.Millisecond
 	}
+	if MCPSSEKeepalive < 0 {
+		stdlog.Panicf("Invalid --mcp-sse-keepalive=%s: must be a non-negative duration (0 disables)", MCPSSEKeepalive)
+	}
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)
 	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))

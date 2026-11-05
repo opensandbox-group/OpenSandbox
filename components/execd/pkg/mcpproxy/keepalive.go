@@ -27,12 +27,19 @@ const sseKeepaliveComment = ": keepalive\n\n"
 
 // keepaliveWriter wraps an http.ResponseWriter and injects an SSE comment
 // line when a text/event-stream response goes idle for the configured
-// interval. Non-SSE responses pass through untouched. The zero interval
-// disables injection entirely.
+// interval. Injections happen only at event boundaries (start of stream or
+// right after a blank line), so a comment can never split a partial event.
+// Non-SSE responses pass through untouched. The zero interval disables
+// injection entirely.
 type keepaliveWriter struct {
 	http.ResponseWriter
 
 	interval time.Duration
+
+	// wmu serializes every write to the underlying ResponseWriter: the
+	// reverse proxy writes from its own goroutine while the keepalive loop
+	// injects from another, and net/http requires single-writer access.
+	wmu sync.Mutex
 
 	mu           sync.Mutex
 	lastWrite    time.Time
@@ -40,6 +47,7 @@ type keepaliveWriter struct {
 	contentSSE   bool
 	writeErr     error
 	stopped      bool
+	boundary     sseBoundaryTracker
 	stop         chan struct{}
 	stopOnce     sync.Once
 	idleInjected int
@@ -51,13 +59,16 @@ func newKeepaliveWriter(w http.ResponseWriter, interval time.Duration) *keepaliv
 		interval:       interval,
 		stop:           make(chan struct{}),
 		lastWrite:      time.Now(),
+		boundary:       newSSEBoundaryTracker(),
 	}
 }
 
 // WriteHeader delegates and, once the response is known to be SSE, starts
 // the idle watch loop.
 func (k *keepaliveWriter) WriteHeader(status int) {
+	k.wmu.Lock()
 	k.ResponseWriter.WriteHeader(status)
+	k.wmu.Unlock()
 	if k.interval <= 0 {
 		return
 	}
@@ -74,10 +85,14 @@ func (k *keepaliveWriter) WriteHeader(status int) {
 	}
 }
 
-// Write delegates, records freshness, and stops injecting after a hard error.
+// Write delegates, records freshness, tracks the SSE event boundary, and
+// stops injecting after a hard error.
 func (k *keepaliveWriter) Write(p []byte) (int, error) {
+	k.wmu.Lock()
 	n, err := k.ResponseWriter.Write(p)
+	k.wmu.Unlock()
 	k.mu.Lock()
+	k.boundary.observe(p)
 	k.lastWrite = time.Now()
 	if err != nil {
 		k.writeErr = err
@@ -88,13 +103,15 @@ func (k *keepaliveWriter) Write(p []byte) (int, error) {
 
 // Flush delegates so the reverse proxy's flushes reach the client.
 func (k *keepaliveWriter) Flush() {
+	k.wmu.Lock()
+	defer k.wmu.Unlock()
 	if f, ok := k.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// loop injects a comment frame whenever the SSE response has been silent for
-// a full interval.
+// loop injects a comment frame whenever the SSE response has been silent
+// for a full interval and the stream sits at an event boundary.
 func (k *keepaliveWriter) loop() {
 	ticker := time.NewTicker(k.interval)
 	defer ticker.Stop()
@@ -108,15 +125,21 @@ func (k *keepaliveWriter) loop() {
 			stopped := k.stopped
 			failed := k.writeErr != nil
 			sse := k.contentSSE
+			atBoundary := k.boundary.atBoundary()
 			k.mu.Unlock()
-			if stopped || failed || !sse || idle < k.interval {
+			if stopped || failed || !sse || !atBoundary || idle < k.interval {
 				continue
 			}
-			if _, err := k.ResponseWriter.Write([]byte(sseKeepaliveComment)); err != nil {
-				return
+			k.wmu.Lock()
+			_, err := k.ResponseWriter.Write([]byte(sseKeepaliveComment))
+			if err == nil {
+				if f, ok := k.ResponseWriter.(http.Flusher); ok {
+					f.Flush()
+				}
 			}
-			if f, ok := k.ResponseWriter.(http.Flusher); ok {
-				f.Flush()
+			k.wmu.Unlock()
+			if err != nil {
+				return
 			}
 			k.mu.Lock()
 			k.idleInjected++
@@ -139,6 +162,57 @@ func (k *keepaliveWriter) IdleInjections() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.idleInjected
+}
+
+// sseBoundaryTracker reports whether the current write position of an SSE
+// stream sits at an event boundary: the very start of the stream, or
+// immediately after a blank line (which terminates an event). Comment
+// frames injected at a boundary can never split a partial event, whatever
+// line endings or chunk boundaries the upstream uses.
+type sseBoundaryTracker struct {
+	lineLen  int  // bytes seen in the current line, excluding terminators
+	carryCR  bool // last byte was CR: swallow a following LF as the same terminator
+	boundary bool
+}
+
+func newSSEBoundaryTracker() sseBoundaryTracker {
+	return sseBoundaryTracker{boundary: true}
+}
+
+// observe folds one write chunk into the tracker state.
+func (t *sseBoundaryTracker) observe(p []byte) {
+	for _, b := range p {
+		switch {
+		case t.carryCR && b == '\n':
+			t.carryCR = false // second byte of CRLF; the line already ended
+		case b == '\n':
+			t.carryCR = false
+			t.endLine()
+		case b == '\r':
+			t.carryCR = true
+			t.endLine()
+		default:
+			t.carryCR = false
+			t.lineLen++
+			t.boundary = false
+		}
+	}
+}
+
+// endLine closes the current line: an empty line completes an event.
+func (t *sseBoundaryTracker) endLine() {
+	if t.lineLen == 0 {
+		t.boundary = true
+	} else {
+		t.lineLen = 0
+		t.boundary = false
+	}
+}
+
+// atBoundary reports whether the stream position is safe for injection.
+// Callers must hold the enclosing keepaliveWriter's mu.
+func (t *sseBoundaryTracker) atBoundary() bool {
+	return t.boundary
 }
 
 // mediaType returns the MIME type without parameters.

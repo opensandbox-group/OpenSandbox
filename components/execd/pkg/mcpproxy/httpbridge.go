@@ -59,10 +59,12 @@ func newHTTPBridge(cfg *ServerConfig, sseKeepalive time.Duration) (*httpBridge, 
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Route to the configured upstream URL. The upstream path is
 			// authoritative; the /mcp/{name} suffix is a routing prefix only.
+			// SetURL also merges the upstream's query string with the
+			// client's (?api_key=... upstream params survive), and RawPath
+			// preserves intentional escaping in the configured path (%2F).
 			pr.SetURL(target)
 			pr.Out.URL.Path = target.Path
-			pr.Out.URL.RawPath = ""
-			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
+			pr.Out.URL.RawPath = target.RawPath
 
 			pr.SetXForwarded()
 
@@ -71,8 +73,14 @@ func newHTTPBridge(cfg *ServerConfig, sseKeepalive time.Duration) (*httpBridge, 
 			pr.Out.Header.Del(model.ApiAccessTokenHeader)
 
 			// Configured headers carry upstream credentials or overrides and
-			// win over client-supplied values.
+			// win over client-supplied values. A configured Host is special:
+			// the transport takes the Host header from Request.Host, not the
+			// header map, so route it there.
 			for k, v := range cfg.Headers {
+				if http.CanonicalHeaderKey(k) == "Host" {
+					pr.Out.Host = v
+					continue
+				}
 				pr.Out.Header.Set(k, v)
 			}
 		},

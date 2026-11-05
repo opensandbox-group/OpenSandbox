@@ -16,6 +16,7 @@ package mcpproxy
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +139,58 @@ func TestStdioBridgeSessionIsolationAndDelete(t *testing.T) {
 	r2, err = session2.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "still-alive"}})
 	require.NoError(t, err)
 	require.Equal(t, map[string]any{"echo": "still-alive", "pid_env": "marker-iso"}, r2.StructuredContent)
+}
+
+func TestChildEnvironFiltersExecdSecrets(t *testing.T) {
+	t.Setenv("EXECD_ACCESS_TOKEN", "sandbox-secret")
+	t.Setenv("JUPYTER_TOKEN", "jupyter-secret")
+	t.Setenv("MCPECHO_MARKER", "plain-env-value")
+
+	env := childEnviron(map[string]string{"FOO": "bar"})
+
+	has := func(key string) (string, bool) {
+		for _, kv := range env {
+			if k, v, _ := strings.Cut(kv, "="); k == key {
+				return v, true
+			}
+		}
+		return "", false
+	}
+	for _, secret := range []string{"EXECD_ACCESS_TOKEN", "JUPYTER_TOKEN"} {
+		if _, present := has(secret); present {
+			t.Errorf("%s leaked into stdio child environment", secret)
+		}
+	}
+	if v, ok := has("FOO"); !ok || v != "bar" {
+		t.Error("cfg.Env overlay missing from child environment")
+	}
+	if _, ok := has("PATH"); !ok {
+		t.Error("inherited environment lost")
+	}
+}
+
+func TestStdioBridgeAdvertisesCompletionCapability(t *testing.T) {
+	_, _, session := startBridgedEchoServer(t, "completions")
+	res := session.InitializeResult()
+	require.NotNil(t, res)
+	require.NotNil(t, res.Capabilities)
+	require.NotNil(t, res.Capabilities.Completions)
+	require.NotNil(t, res.Capabilities.Tools)
+}
+
+func TestStdioBridgeChildExitClosesHTTPSession(t *testing.T) {
+	_, _, session := startBridgedEchoServer(t, "die-marker")
+
+	_, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "die"})
+	require.NoError(t, err)
+
+	// The child exits shortly after; the bridge must close the HTTP session
+	// so the next client call fails with a session-missing error instead of
+	// talking to a dead bridge forever.
+	require.Eventually(t, func() bool {
+		_, err := session.ListTools(context.Background(), nil)
+		return err != nil
+	}, 15*time.Second, 100*time.Millisecond)
 }
 
 func TestStdioBridgeSpawnFailureSurfacesAsRPCError(t *testing.T) {

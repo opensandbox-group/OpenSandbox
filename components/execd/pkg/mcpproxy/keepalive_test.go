@@ -103,6 +103,61 @@ func TestKeepaliveWriterResetsOnActivity(t *testing.T) {
 	require.Less(t, k.IdleInjections(), writes/2)
 }
 
+func TestKeepaliveWriterNeverSplitsPartialEvents(t *testing.T) {
+	rec := httptest.NewRecorder()
+	k := newKeepaliveWriter(rec, 5*time.Millisecond)
+
+	rec.Header().Set("Content-Type", "text/event-stream")
+	k.WriteHeader(http.StatusOK)
+	// A partial event with no trailing blank line: injecting here would
+	// splice a comment into the middle of the event.
+	_, err := k.Write([]byte("data: part"))
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+	k.Stop()
+	require.Equal(t, 0, k.IdleInjections(), "keepalive injected mid-event")
+	require.Equal(t, "data: part", rec.Body.String())
+
+	// Completing the event re-enables injection at the boundary.
+	k2 := newKeepaliveWriter(httptest.NewRecorder(), 5*time.Millisecond)
+	k2.ResponseWriter.(*httptest.ResponseRecorder).Header().Set("Content-Type", "text/event-stream")
+	k2.WriteHeader(http.StatusOK)
+	_, err = k2.Write([]byte("data: par"))
+	require.NoError(t, err)
+	_, err = k2.Write([]byte("tial\n\n"))
+	require.NoError(t, err)
+	waitForIdleInjections(t, k2, 1)
+	k2.Stop()
+}
+
+func TestSSEBoundaryTracker(t *testing.T) {
+	cases := []struct {
+		name     string
+		chunks   []string
+		boundary bool
+	}{
+		{"empty stream", nil, true},
+		{"complete event", []string{"data: x\n\n"}, true},
+		{"complete event crlf", []string{"data: x\r\n\r\n"}, true},
+		{"split across chunks", []string{"data: ", "x", "\n", "\n"}, true},
+		{"partial event", []string{"data: x\n"}, false},
+		{"mid-field", []string{"data"}, false},
+		{"second line started", []string{"data: x\ndata: y"}, false},
+		{"event then partial", []string{"data: x\n\ndata"}, false},
+		{"comment frames", []string{": tick\n\n"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newSSEBoundaryTracker()
+			for _, c := range tc.chunks {
+				tr.observe([]byte(c))
+			}
+			require.Equal(t, tc.boundary, tr.atBoundary())
+		})
+	}
+}
+
 func TestKeepaliveWriterStopIdempotent(t *testing.T) {
 	rec := httptest.NewRecorder()
 	k := newKeepaliveWriter(rec, 5*time.Millisecond)

@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
@@ -90,9 +92,10 @@ func newStdioBridge(cfg *ServerConfig) (*stdioBridge, error) {
 			// advertise the feature surfaces it can bridge up front. If the
 			// upstream lacks one, its method-not-found error passes through.
 			Capabilities: &mcp.ServerCapabilities{
-				Tools:     &mcp.ToolCapabilities{},
-				Prompts:   &mcp.PromptCapabilities{},
-				Resources: &mcp.ResourceCapabilities{},
+				Tools:       &mcp.ToolCapabilities{},
+				Prompts:     &mcp.PromptCapabilities{},
+				Resources:   &mcp.ResourceCapabilities{},
+				Completions: &mcp.CompletionCapabilities{},
 			},
 			InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
 				if sess, ok := req.GetSession().(*mcp.ServerSession); ok {
@@ -270,9 +273,7 @@ func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession,
 	cfg := s.bridge.cfg
 	cmd := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
 	cmd.Dir = cfg.CWD
-	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), envSlice(cfg.Env)...)
-	}
+	cmd.Env = childEnviron(cfg.Env)
 	configureProcessGroup(cmd)
 
 	client := mcp.NewClient(
@@ -283,20 +284,25 @@ func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession,
 }
 
 // end tears the session down exactly once: close the child client (stdin
-// close, then graceful terminate), cancel the process context, and
-// unregister.
+// close, then graceful terminate), cancel the process context, close the
+// inbound HTTP session (so clients see 404 and recover instead of talking
+// to a dead bridge), and unregister.
 func (s *stdioSession) end() {
 	s.endOnce.Do(func() {
 		s.mu.Lock()
 		s.ended = true
 		cs := s.clientSession
 		cancel := s.cancel
+		serverSession := s.serverSession
 		s.mu.Unlock()
 		if cs != nil {
 			_ = cs.Close()
 		}
 		if cancel != nil {
 			cancel()
+		}
+		if serverSession != nil {
+			_ = serverSession.Close()
 		}
 		s.bridge.removeSession(s.id)
 	})
@@ -332,6 +338,25 @@ func (b *stdioBridge) Close() {
 	for _, s := range sessions {
 		s.end()
 	}
+}
+
+// childEnviron builds the subprocess environment: execd's own config env
+// (access tokens, credentials — see isolation.ExecdConfigEnvBlacklist) is
+// stripped so a third-party MCP server cannot read the control-plane token
+// and call protected routes as execd, then cfg.Env overlays the rest.
+func childEnviron(extra map[string]string) []string {
+	blocked := make(map[string]struct{})
+	for _, k := range isolation.ExecdConfigEnvBlacklist() {
+		blocked[k] = struct{}{}
+	}
+	out := make([]string, 0, len(os.Environ())+len(extra))
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, bad := blocked[k]; !bad {
+			out = append(out, kv)
+		}
+	}
+	return append(out, envSlice(extra)...)
 }
 
 // envSlice flattens an env map for exec.Cmd.

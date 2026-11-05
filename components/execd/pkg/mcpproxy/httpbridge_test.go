@@ -44,9 +44,11 @@ func echoUpstream(t *testing.T) *httptest.Server {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"method": r.Method,
-			"path":   r.URL.Path,
-			"query":  r.URL.RawQuery,
+			"method":       r.Method,
+			"path":         r.URL.Path,
+			"escaped_path": r.URL.EscapedPath(),
+			"host":         r.Host,
+			"query":        r.URL.RawQuery,
 			"headers": map[string]string{
 				"Authorization":        r.Header.Get("Authorization"),
 				"Mcp-Session-Id":       r.Header.Get("Mcp-Session-Id"),
@@ -143,6 +145,77 @@ func TestHTTPBridgeConfiguredHeadersOverride(t *testing.T) {
 	require.Equal(t, "injected", got.Headers["X-Upstream-Auth"])
 	// Configured credentials win over client-supplied ones.
 	require.Equal(t, "Bearer platform", got.Headers["Authorization"])
+}
+
+func TestHTTPBridgePreservesUpstreamQuery(t *testing.T) {
+	upstream := echoUpstream(t)
+	defer upstream.Close()
+
+	// The upstream requires its own query string (api_key); the client adds
+	// its own params on top. Both must reach the upstream.
+	bridge := newTestBridge(t, upstream.URL+"/mcp?api_key=upstream-secret")
+	server := httptest.NewServer(bridge)
+	defer server.Close()
+
+	resp, err := server.Client().Post(server.URL+"/mcp/test?cursor=42", "application/json", strings.NewReader("{}"))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var got struct {
+		Query string `json:"query"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Contains(t, got.Query, "api_key=upstream-secret")
+	require.Contains(t, got.Query, "cursor=42")
+}
+
+func TestHTTPBridgeConfiguredHostOverride(t *testing.T) {
+	upstream := echoUpstream(t)
+	defer upstream.Close()
+
+	cfg := &ServerConfig{
+		Name:      "test",
+		Transport: TransportHTTP,
+		URL:       upstream.URL + "/mcp",
+		Headers:   map[string]string{"Host": "tenant.example"},
+	}
+	bridge, err := newHTTPBridge(cfg, 0)
+	require.NoError(t, err)
+
+	server := httptest.NewServer(bridge)
+	defer server.Close()
+
+	resp, err := server.Client().Post(server.URL+"/mcp/test", "application/json", strings.NewReader("{}"))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var got struct {
+		Host string `json:"host"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, "tenant.example", got.Host)
+}
+
+func TestHTTPBridgePreservesEscapedUpstreamPath(t *testing.T) {
+	upstream := echoUpstream(t)
+	defer upstream.Close()
+
+	// %2F in the configured path must stay escaped on the wire.
+	bridge := newTestBridge(t, upstream.URL+"/tenants%2Facme/mcp")
+	server := httptest.NewServer(bridge)
+	defer server.Close()
+
+	resp, err := server.Client().Post(server.URL+"/mcp/test", "application/json", strings.NewReader("{}"))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var got struct {
+		Path        string `json:"path"`
+		EscapedPath string `json:"escaped_path"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, "/tenants/acme/mcp", got.Path)
+	require.Contains(t, got.EscapedPath, "%2F")
 }
 
 func TestHTTPBridgeSSEStreamsUnbuffered(t *testing.T) {

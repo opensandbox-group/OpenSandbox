@@ -119,7 +119,7 @@ func TestInitFlagsMCPDefaults(t *testing.T) {
 	require.Equal(t, 30*time.Second, MCPSSEKeepalive)
 }
 
-func TestInitFlagsInvalidMCPSSEKeepalivePanics(t *testing.T) {
+func TestInitFlagsInvalidMCPSSEKeepaliveEnvPanics(t *testing.T) {
 	previousArgs := os.Args
 	previousCommandLine := flag.CommandLine
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
@@ -129,6 +129,19 @@ func TestInitFlagsInvalidMCPSSEKeepalivePanics(t *testing.T) {
 		flag.CommandLine = previousCommandLine
 	})
 	t.Setenv("EXECD_MCP_SSE_KEEPALIVE", "not-a-duration")
+
+	require.Panics(t, InitFlags)
+}
+
+func TestInitFlagsNegativeMCPSSEKeepaliveFlagPanics(t *testing.T) {
+	previousArgs := os.Args
+	previousCommandLine := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{previousArgs[0], "--mcp-sse-keepalive=-1s"}
+	t.Cleanup(func() {
+		os.Args = previousArgs
+		flag.CommandLine = previousCommandLine
+	})
 
 	require.Panics(t, InitFlags)
 }

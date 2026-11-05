@@ -132,33 +132,16 @@ See the [Isolation Sessions guide](/guides/isolation-sessions) for the full work
 
 ## MCP proxy bridge
 
-Execd can act as an MCP (Model Context Protocol) gateway: clients connect with any official MCP SDK over Streamable HTTP at `/mcp/{name}`, and execd forwards to a registered upstream MCP server. No MCP-specific SDK work is needed on the client side — `streamablehttp_client("https://<sandbox>/mcp/{name}")` in Python or `HttpClientStreamableHttpTransport.builder(base).endpoint("/mcp/{name}")` in Java, both with the usual execd access-token header.
-
-Upstreams are registered at runtime through the management API (see below); the registry starts empty and `/mcp/{name}` answers `404` until a server with that name is registered. A registration is one JSON object with a `name` and a `transport`:
-
-```json
-{"name": "search", "transport": "http", "url": "http://127.0.0.1:8000/mcp", "headers": {"Authorization": "Bearer ..."}}
-{"name": "fs", "transport": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-everything"], "cwd": "/workspace"}
-```
+Execd can act as an MCP (Model Context Protocol) gateway: clients connect with any official MCP SDK over Streamable HTTP at `/mcp/{name}`, and execd forwards to an upstream MCP server registered through the `/mcp/servers` management API. Usage — registration payloads, client snippets, endpoint semantics — is covered in the [MCP Proxy Bridge guide](/guides/mcp-proxy-bridge); this section describes the design.
 
 Two transports are supported:
 
-- **`http`** proxies a Streamable HTTP MCP server as an opaque stream — request/response bodies, SSE streams, status codes, and MCP headers (`Mcp-Session-Id`, `MCP-Protocol-Version`) pass through without JSON-RPC inspection, so the bridge stays compatible with any protocol version both sides support. Idle SSE responses receive keepalive comment frames every `EXECD_MCP_SSE_KEEPALIVE` (`--mcp-sse-keepalive`, default 30s, `0` disables) so read-idle clients stay connected.
-- **`stdio`** spawns the registered command as a sandbox-local subprocess — one per MCP session — and bridges it to Streamable HTTP using the official Go MCP SDK. Sessions end (and subprocesses terminate) on client `DELETE`, idle timeout, or child exit. Commands come from the management API; in-sandbox clients can already run arbitrary commands through the exec APIs, so a client-supplied stdio command grants no new privilege.
+- **`http`** proxies a Streamable HTTP MCP server as an opaque stream — request/response bodies, SSE streams, status codes, and MCP headers pass through without JSON-RPC inspection, so the bridge stays compatible with any protocol version both sides support. Idle SSE responses receive keepalive comment frames (interval configurable via `EXECD_MCP_SSE_KEEPALIVE`, default 30s, `0` disables), injected only between complete events so a frame can never split one, and serialized with proxied writes so the `ResponseWriter` keeps a single writer.
+- **`stdio`** spawns the registered command as a sandbox-local subprocess — one per MCP session, since stdio servers are single-session by design — and bridges it to Streamable HTTP using the official Go MCP SDK. Session teardown (client `DELETE`, idle timeout, child exit, registry shutdown) closes both the subprocess (process-group kill, so launchers like `npx` cannot orphan children) and the inbound HTTP session, so clients see `404` and recover instead of talking to a dead bridge. Subprocess environments are built by stripping execd's own config env (the same blacklist the hardening launcher applies) and overlaying the registration's `env`, so a third-party MCP server can never read execd's control-plane credentials.
 
-The execd access token never leaves execd: it is stripped before forwarding, while client `Authorization` headers pass through to the upstream. Registered `headers` on an upstream override client-supplied values, which keeps upstream credentials inside the sandbox instead of flowing through every MCP call. Upstream status codes — including `404` (session terminated) and `405` — are returned unmodified so clients apply their normal session-recovery behavior.
+Credential flow is one-way: the execd access token is stripped before forwarding and client `Authorization` headers pass through, while registration `headers` override client-supplied values — upstream credentials stay inside the sandbox instead of flowing through every MCP call.
 
-`GET /mcp` and `GET /mcp/servers` list the registered bridges; unknown names answer `404`. All `/mcp` routes sit behind the same runtime-init gate and access-token check as every other execd endpoint, and are reference-implementation extensions outside the published execd API spec.
-
-### Server management
-
-Clients register, list, and remove upstreams through the management API (same access-token check; the server name `servers` is reserved for it):
-
-- `GET /mcp/servers` — list every bridge as `{"name", "transport"}`.
-- `POST /mcp/servers` — register one server; the body is a single registration object as shown above (both transports, `headers` may carry upstream credentials). Answers `201` with the created entry, `400` on validation errors, `409` when the name is taken.
-- `DELETE /mcp/servers/{name}` — remove a bridge and tear down its stdio sessions. Answers `204`, or `404` when unknown.
-
-Registrations are in-memory: execd answers `404` for them again after a restart, so control planes or SDKs re-register after recreating a sandbox.
+The `/mcp` routes sit behind the same runtime-init gate and access-token check as every other execd endpoint, and are reference-implementation extensions outside the published execd API spec.
 
 ## Layered security
 
