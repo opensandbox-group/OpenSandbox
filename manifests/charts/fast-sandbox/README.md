@@ -80,6 +80,7 @@ The following table lists the configurable parameters of the chart and their def
 |-----|------|---------|-------------|
 | artifactStore.endpoint | string | `""` | S3-compatible endpoint (empty = AWS default) |
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
+| controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
 | controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.1-rc.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
@@ -88,6 +89,9 @@ The following table lists the configurable parameters of the chart and their def
 | controller.kubeClientBurst | int | `0` | API-server client burst budget for the rate limiter (upstream "--kube-client-burst" flag). Must be set together with kubeClientQPS; 0 keeps the client-go default. |
 | controller.kubeClientQPS | int | `0` | API-server client rate limit in queries per second for the shared controller client (upstream "--kube-client-qps" flag; speeds up the initial cache-sync LISTs on large clusters; watches are exempt). Must be set together with kubeClientBurst; 0 keeps the client-go default. |
 | controller.namespaces | list | `[]` | Namespaces the controller informer cache watches; empty watches the whole cluster (upstream "--namespaces" flag, introduced at the f44561a pin). When set, the list must cover every namespace holding SandboxPool/Sandbox/SandboxTemplate objects plus systemNamespace (the runtime environment ConfigMap); the controller refuses to start otherwise. Keep empty for multi-tenant deployments where sandboxes span many namespaces (the OpenSandbox default); scope it only when this control plane shares a large cluster with unrelated workloads and the cluster-wide initial cache sync is too heavy. |
+| controller.nodeSelector | object | `{}` | Node selector for the controller pod. |
+| controller.podAnnotations | object | `{}` | Extra annotations merged into the controller pod template annotations. |
+| controller.podLabels | object | `{}` | Extra labels merged into the controller pod template labels. |
 | controller.replicaCount | int | `1` | Number of controller replicas (no leader election; keep 1) |
 | controller.resources | object | `{"limits":{"cpu":"1","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits for the controller |
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
@@ -107,8 +111,9 @@ The following table lists the configurable parameters of the chart and their def
 | routeKeys.existingSecret | string | `""` | Use an existing Secret instead of creating one (its keys must be private-key / public-key) |
 | routeKeys.privateKey | string | `"nWGxne/9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A="` | Ed25519 private key (base64) used by the controller's route signer |
 | routeKeys.publicKey | string | `"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="` | Ed25519 public key (base64) used by the controller's route verifier |
+| runtime.affinity | object | `{}` | Affinity for the firecracker-runtime DaemonSet pod. |
 | runtime.config | string | `""` | Agent config (agent.yaml). Empty = the chart default (upstream config/dev/agent-config.yaml with the dart discover URL pointing at this chart's namespace). socket/stateRoot/registryConfig/p2p are startup-only; the nodeReadiness section (fcVersion, interval, minFree, minMemory) hot-reloads on every readiness pass. |
-| runtime.dartPeerPort | int | `9000` | DART P2P peer listen port (also the headless dart Service port) |
+| runtime.dartPeerPort | int | `9000` | DART P2P peer listen port (also the headless dart Service port; rendered only when runtime.p2p.enabled=true) |
 | runtime.enabled | bool | `true` | Whether the firecracker-runtime DaemonSet, its RBAC, the agent config ConfigMap and the dart headless Service are installed |
 | runtime.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | runtime.image.repository | string | `"opensandbox/fsb-firecracker-runtime"` | Runtime image repository (built by manifests/release/build-fast-sandbox.sh) |
@@ -120,6 +125,9 @@ The following table lists the configurable parameters of the chart and their def
 | runtime.oci.poolHigh | int | `8` | Maximum idle ublk devices retained on release; not a Sandbox count limit. Must be >= poolLow. |
 | runtime.oci.poolLow | int | `4` | Target idle ublk device count when OCI is enabled. Set to 0 to disable pooling. |
 | runtime.oci.poolSizeGB | int | `2` | Pool device capacity in GiB (OVERLAYBD_POOL_SIZE_GB). Default 2 matches the OpenSandbox template API's default resourceLimits.disk=2Gi. Must exactly match the built template rootfs capacity; a mismatch falls back to cold device creation. For 60Gi/200Gi templates set 60/200, respectively; a 200Gi pool cannot serve a 60Gi template. One daemon supports one capacity. The standalone fast-sandbox CRD default (30Gi) and fsb-vm build default (20Gi) differ. Check machine.rootfsSizeMiB in the snapfiles artifact's manifest.json: for whole-GiB templates, poolSizeGB = rootfsSizeMiB / 1024. This is unrelated to image layer size, disk usage or runtime.oci.cacheSizeGB, and is not inferred by Helm. |
+| runtime.p2p | object | `{"enabled":true}` | DART P2P artifact delivery: when true (default) the chart renders the dart headless Service, the DaemonSet peer port, and the default agent.yaml p2p block (each node runs a node-local DART child and peers fetch blocks from each other). When false the agent pulls artifacts directly from the origin store (upstream semantics: an empty p2p config section means direct header-signed pulls) and none of the DART resources are rendered. Ignored when runtime.config overrides the whole agent.yaml. |
+| runtime.podAnnotations | object | `{}` | Extra annotations merged into the firecracker-runtime pod template annotations (on top of the built-in prometheus.io/* ones). |
+| runtime.podLabels | object | `{}` | Extra labels merged into the firecracker-runtime pod template labels. |
 | runtime.registrySecret | string | `"fast-sandbox-agent-registry"` | Secret carrying the compiled agent registry configuration (registry.json key with artifact-store pull credentials); must be provisioned by the operator. |
 | runtime.resources | object | `{"agent":{},"janitor":{},"ublkd":{}}` | Container resources for the DaemonSet. Setting requests matters more than limits here: without them the pod is BestEffort and is evicted first under node pressure, taking down the management API for every fastlet on the node. Limits stay off by default so artifact pulls and the readiness loop are not throttled or OOM-killed at their spikes. |
 | runtime.resources.agent | object | `{}` | Resources for the firecracker-runtime agent container. |
