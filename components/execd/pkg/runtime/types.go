@@ -24,13 +24,16 @@ import (
 
 // ExecuteResultHook groups execution callbacks.
 type ExecuteResultHook struct {
-	OnExecuteInit     func(context string)
-	OnExecuteResult   func(result map[string]any, count int)
-	OnExecuteStatus   func(status string)
-	OnExecuteStdout   func(stdout string) //nolint:predeclared
-	OnExecuteStderr   func(stderr string) //nolint:predeclared
-	OnExecuteError    func(err *execute.ErrorOutput)
-	OnExecuteComplete func(executionTime time.Duration)
+	// OnCommandAllocated binds internal log correlation before any command output.
+	// It does not emit an init event or commit an SSE response.
+	OnCommandAllocated func(commandID string, background bool)
+	OnExecuteInit      func(context string)
+	OnExecuteResult    func(result map[string]any, count int)
+	OnExecuteStatus    func(status string)
+	OnExecuteStdout    func(stdout string) //nolint:predeclared
+	OnExecuteStderr    func(stderr string) //nolint:predeclared
+	OnExecuteError     func(err *execute.ErrorOutput)
+	OnExecuteComplete  func(executionTime time.Duration)
 }
 
 // ExecuteCodeRequest represents a code execution request with context and hooks.

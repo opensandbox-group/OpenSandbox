@@ -83,7 +83,19 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	var pingWg sync.WaitGroup
 
 	hooks := runtime.ExecuteResultHook{
+		OnCommandAllocated: func(commandID string, background bool) {
+			c.chunkWriter.Lock()
+			defer c.chunkWriter.Unlock()
+			c.commandID = commandID
+			c.commandMode = "foreground"
+			if background {
+				c.commandMode = "background"
+			}
+		},
 		OnExecuteInit: func(session string) {
+			c.chunkWriter.Lock()
+			c.sseSessionID = session
+			c.chunkWriter.Unlock()
 			event := model.ServerStreamEvent{
 				Type:      model.StreamEventTypeInit,
 				Text:      session,
@@ -248,15 +260,23 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 		return
 	}
 
+	c.chunkWriter.Lock()
+	defer c.chunkWriter.Unlock()
+	idKey, id := "session_id", c.sseSessionID
+	if c.commandID != "" {
+		idKey, id = "command_id", c.commandID
+	}
+	if handler == "OnExecuteComplete" && c.commandMode == "background" {
+		summary += " acknowledgement=background_startup"
+	}
+
 	select {
 	case <-c.ctx.Request.Context().Done():
-		log.Error("sse: %s client disconnected", handler)
+		log.Error("sse: %s=%s %s client disconnected", idKey, id, handler)
 		return
 	default:
 	}
 
-	c.chunkWriter.Lock()
-	defer c.chunkWriter.Unlock()
 	// Lazily commit SSE response headers on the first event. This lets the
 	// surrounding handler return a proper JSON error via RespondError if the
 	// runtime fails synchronously before any event fires.
@@ -274,10 +294,10 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 	}
 
 	if err != nil {
-		log.Error("sse: %s write %s: %v", handler, summary, err)
+		log.Error("sse: %s=%s %s write %s: %v", idKey, id, handler, summary, err)
 	} else {
 		if verbose {
-			log.Info("sse: %s write %s", handler, summary)
+			log.Info("sse: %s=%s %s write %s", idKey, id, handler, summary)
 		}
 	}
 }

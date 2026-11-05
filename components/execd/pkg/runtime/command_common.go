@@ -18,8 +18,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -36,6 +38,30 @@ const (
 )
 
 var legacyCommandOutputPattern = regexp.MustCompile(`^[0-9a-f]{32}\.(stdout|stderr|output)$`)
+
+// newCommandID binds correlation before either platform can emit output.
+func (c *Controller) newCommandID(request *ExecuteCodeRequest, background bool) string {
+	session := c.newContextID()
+	if request.Hooks.OnCommandAllocated != nil {
+		request.Hooks.OnCommandAllocated(session, background)
+	}
+	return session
+}
+
+// logCommandRunFailure reports observed process status, not the fallback code
+// used by command bookkeeping when Wait fails without an exit-status error.
+func logCommandRunFailure(commandID, mode string, cmd *exec.Cmd, startedAt time.Time, err error) {
+	var exitCode any = "unknown"
+	var exitCodeErr exitCoder
+	if errors.As(err, &exitCodeErr) {
+		// Init-mode waits provide their observed status through the error,
+		// without populating exec.Cmd.ProcessState.
+		exitCode = exitCodeErr.ExitCode()
+	} else if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+	log.Error("command: command_id=%s mode=%s run failed pid=%d exit_code=%v elapsed_ms=%d: %v", commandID, mode, cmd.Process.Pid, exitCode, time.Since(startedAt).Milliseconds(), err)
+}
 
 // tailStdPipe streams appended log data until the process finishes.
 func (c *Controller) tailStdPipe(file string, onExecute func(text string), done <-chan struct{}) {
