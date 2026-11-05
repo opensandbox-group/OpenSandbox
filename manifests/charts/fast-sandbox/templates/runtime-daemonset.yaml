@@ -1,6 +1,12 @@
 {{- if .Values.runtime.enabled }}
 {{- $ns := include "fast-sandbox.namespace" . }}
 {{- $dartDiscover := printf "dns:dart.%s.svc.cluster.local:%d" $ns (int .Values.runtime.dartPeerPort) }}
+{{- $transfer := .Values.runtime.transfer | default dict }}
+{{- $transferFormat := $transfer.format | default "legacy" }}
+{{- if not (has $transferFormat (list "legacy" "chunked")) }}
+{{- fail (printf "runtime.transfer.format must be legacy or chunked, got %q" $transferFormat) }}
+{{- end }}
+{{- $chunked := eq $transferFormat "chunked" }}
 {{- $probeCmd := printf "curl -fsS -X POST --unix-socket %s/runtime.sock -H 'Content-Type: application/json' -d \"{\\\"podUid\\\":\\\"$POD_UID\\\",\\\"namespace\\\":\\\"%s\\\"}\" http://firecracker-agent/v1/health | grep -q '\"ok\":true'" .Values.runtime.socketDir $ns }}
 ---
 # Node-level firecracker runtime: serves the UDS management API (artifact
@@ -126,6 +132,13 @@ data:
         admin: 127.0.0.1:8147
         cacheSize: 8GiB
         discover: {{ $dartDiscover }}
+    {{- if $chunked }}
+    transfer:
+      format: chunked
+      compression: {{ $transfer.compression | default "none" }}
+      concurrency: {{ $transfer.concurrency | default 8 }}
+      chunkSizeMiB: {{ $transfer.chunkSizeMiB | default 4 }}
+    {{- end }}
     nodeReadiness:
       enabled: true
       assetsDir: /opt/fast-sandbox/firecracker
@@ -160,6 +173,11 @@ spec:
         prometheus.io/port: "9092"
         prometheus.io/path: /metrics
         kubectl.kubernetes.io/default-container: firecracker-agent
+        {{- if $chunked }}
+        # The transfer mode is read at agent startup: the annotation rolls
+        # the DaemonSet when it changes.
+        fast-sandbox.io/transfer-format: chunked
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
