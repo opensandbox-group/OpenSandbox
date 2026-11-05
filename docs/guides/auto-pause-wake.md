@@ -141,7 +141,7 @@ anything else / timeout → no record, candidate dropped this sweep (fail-safe: 
                           "not active" lets a pause through)
 ```
 
-`timeoutSeconds` bounds the whole exchange, including reading the body, and the answer must fit in 4 KiB; a slower or larger answer counts as "anything else".
+`timeoutSeconds` bounds the whole exchange, including reading the body, and the answer must be uncompressed and fit in 4 KiB; a slower, larger, or compressed answer counts as "anything else".
 
 ::: tip
 Use the probe when your workload has meaningful silent work. Without it, such a sandbox **will** be paused; the next request recovers state after restore, but the restore cost is real.

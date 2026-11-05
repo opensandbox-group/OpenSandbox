@@ -15,6 +15,7 @@
 """ActivityProber tests: routing, sentinel header, and verdict mapping."""
 
 import asyncio
+import gzip
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -76,6 +77,7 @@ async def test_active_answer_verdict_and_request_shape():
         seen["url"] = str(request.url)
         seen["sentinel"] = request.headers.get(SKIP_ACTIVITY_HEADER)
         seen["route"] = request.headers.get("OpenSandbox-Ingress-To")
+        seen["encoding"] = request.headers.get("Accept-Encoding")
         return httpx.Response(200, json={"active": True})
 
     prober = _prober(
@@ -94,6 +96,7 @@ async def test_active_answer_verdict_and_request_shape():
     assert seen["url"] == "https://gateway.example.com/active"
     assert seen["sentinel"] == SKIP_ACTIVITY_VALUE
     assert seen["route"] == "route-scope"
+    assert seen["encoding"] == "identity"
 
 
 @pytest.mark.asyncio
@@ -180,6 +183,13 @@ async def test_not_active_carries_capped_message():
         httpx.Response(
             200,
             json={"active": False, "message": "x" * MAX_PROBE_BODY_BYTES},
+        ),
+        # An encoded body, since decompressing it would happen before the
+        # size cap applies.
+        httpx.Response(
+            200,
+            content=gzip.compress(b'{"active": false}'),
+            headers={"Content-Encoding": "gzip"},
         ),
     ],
 )

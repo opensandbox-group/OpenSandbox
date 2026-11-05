@@ -135,12 +135,21 @@ class ActivityProber:
     async def _fetch_answer(
         self, url: str, headers: dict[str, str], timeout: float
     ) -> Optional[bytes]:
-        """Return the body of a 200 answer, or None for any other status or
-        a body over ``MAX_PROBE_BODY_BYTES``."""
+        """Return the body of a 200 answer, or None for any other status, an
+        encoded body, or a body over ``MAX_PROBE_BODY_BYTES``.
+
+        httpx decompresses a whole chunk before the size check sees it, so
+        the probe asks for an unencoded answer and refuses any other.
+        """
         async with self._client.stream(
-            "GET", url, headers=headers, timeout=timeout
+            "GET",
+            url,
+            headers={**headers, "Accept-Encoding": "identity"},
+            timeout=timeout,
         ) as response:
             if response.status_code != 200:
+                return None
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
                 return None
             body = bytearray()
             async for chunk in response.aiter_bytes():
