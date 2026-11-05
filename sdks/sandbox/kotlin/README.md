@@ -115,9 +115,11 @@ Renew on access instead of on a timer (OSEP-0009): `renewalPolicy` moves the exp
 Sandbox sandbox = Sandbox.builder()
     .connectionConfig(config)
     .image("ubuntu")
-    .lifecycle(lifecycle -> lifecycle.renewalPolicy(
-        renewal -> renewal.extendSeconds(3600)
-    ))
+    .lifecycle(
+        SandboxLifecycle.builder()
+            .renewalPolicy(RenewalPolicy.builder().extendSeconds(3600).build())
+            .build()
+    )
     .build();
 ```
 
@@ -127,9 +129,13 @@ Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `idlePolic
 Sandbox sandbox = Sandbox.builder()
     .connectionConfig(config)
     .image("ubuntu")
-    .lifecycle(lifecycle -> lifecycle.idlePolicy(
-        idle -> idle.idleTimeoutSeconds(600).onIdle(OnIdleAction.PAUSE)
-    ))
+    .lifecycle(
+        SandboxLifecycle.builder()
+            .idlePolicy(
+                IdlePolicy.builder().idleTimeoutSeconds(600).onIdle(OnIdleAction.PAUSE).build()
+            )
+            .build()
+    )
     .build();
 ```
 
@@ -492,7 +498,7 @@ Sandbox sandbox = Sandbox.builder()
     .build();
 ```
 
-A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected:
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected: The Fast Sandbox backend rejects `ports` rules with HTTP 400 today (Docker and Kubernetes support them); a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
 
 ```java
 Sandbox sandbox = Sandbox.builder()

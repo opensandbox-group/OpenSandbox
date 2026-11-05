@@ -244,16 +244,17 @@ print(f"State: {info.status.state}")
 print(f"Expires: {info.expires_at}")  # None when no automatic expiration is configured
 ```
 
-Create a non-expiring sandbox by omitting `timeout`:
+Create a non-expiring sandbox by passing `timeout=None` explicitly — omitting the argument falls back to the 10-minute default, not manual cleanup:
 
 ```python
 manual = await Sandbox.create(
     "ubuntu",
     connection_config=config,
+    timeout=None,
 )
 ```
 
-Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewal_policy` moves the expiration to `max(now + extend_seconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0.
+Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewal_policy` moves the expiration to `max(now + extend_seconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
 
 ```python
 from opensandbox.models.sandboxes import RenewalPolicy, SandboxLifecycle
@@ -581,7 +582,7 @@ sandbox = await Sandbox.create(
 )
 ```
 
-A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected:
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected: The Fast Sandbox backend rejects `ports` rules with HTTP 400 today (Docker and Kubernetes support them); a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
 
 ```python
 sandbox = await Sandbox.create(

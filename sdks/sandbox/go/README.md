@@ -72,11 +72,14 @@ func main() {
 }
 ```
 
-Renew on access instead of on a timer (OSEP-0009): `Lifecycle.RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0.
+Renew on access instead of on a timer (OSEP-0009): `Lifecycle.RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects `lifecycle.renewalPolicy` outright (HTTP 400); on Docker and Kubernetes the policy takes effect only when the operator enables the `[renew_intent]` integration. Like every image-mode create, the request needs `ResourceLimits`, and the policy only moves an expiration that exists — set `Timeout` too.
 
 ```go
+tenMinutes := 600
 sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-    Image: &opensandbox.ImageSpec{URI: "ubuntu"},
+    Image:          &opensandbox.ImageSpec{URI: "ubuntu"},
+    ResourceLimits: opensandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
+    Timeout:        &tenMinutes,
     Lifecycle: &opensandbox.SandboxLifecycle{
         RenewalPolicy: &opensandbox.RenewalPolicy{ExtendSeconds: 3600},
     },
@@ -88,7 +91,8 @@ Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `Lifecycle
 ```go
 idle := 600
 sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-    Image: &opensandbox.ImageSpec{URI: "ubuntu"},
+    Image:          &opensandbox.ImageSpec{URI: "ubuntu"},
+    ResourceLimits: opensandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
     Lifecycle: &opensandbox.SandboxLifecycle{
         IdlePolicy: &opensandbox.IdlePolicy{
             IdleTimeoutSeconds: &idle,
@@ -98,9 +102,9 @@ sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
 })
 ```
 
-While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`WakeRetryEnabled` / `WakeMaxAttempts` / `WakeOverallDeadline` on the retry policy; defaults `DefaultWakeMaxAttempts` / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutError`, and a returned `SandboxAPIError` reports `WakeExpired` for direct inspection. The request that starts a stream wake-retries too; an established stream is never replayed.
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`WakeRetryEnabled` / `WakeMaxAttempts` / `WakeOverallDeadline` on the `RetryConfig` installed via `WithRetry`; defaults `DefaultWakeMaxAttempts` / 60 seconds; bare `503` responses are never affected). Wake retry requires `WithRetry` to be configured — a client built with a plain `NewLifecycleClient` has no retry loop and returns a marked `503` immediately. When the budget runs out, the request fails with `SandboxWakeTimeoutError`; for direct inspection, the non-2xx error type is `*opensandbox.APIError`, whose `WakeExpired` field reports the marker (also reachable as the wrapped last error of `SandboxWakeTimeoutError`). The request that starts a stream wake-retries too; an established stream is never replayed.
 
-A `NetworkRule` can scope by TCP destination ports instead of a target — `Ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `Target` entirely, and combining a domain `Target` with `Ports` is rejected:
+A `NetworkRule` can scope by TCP destination ports instead of a target — `Ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `Target` entirely, and combining a domain `Target` with `Ports` is rejected. The Fast Sandbox backend rejects `Ports` rules with HTTP 400 today (Docker and Kubernetes support them); a targetless `Ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it:
 
 ```go
 policy := &opensandbox.NetworkPolicy{

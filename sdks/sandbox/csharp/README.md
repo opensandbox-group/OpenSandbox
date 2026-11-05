@@ -92,7 +92,7 @@ var manual = await Sandbox.CreateAsync(new SandboxCreateOptions
 
 Note: unlike the Python, JavaScript, and Kotlin SDKs, the C# SDK uses an explicit `ManualCleanup` flag instead of `TimeoutSeconds = null`. This is intentional: `int?` in the current options model cannot reliably distinguish "unset, use the default TTL" from "explicitly request manual cleanup" without making the default creation path ambiguous.
 
-Renew on access instead of on a timer (OSEP-0009): `RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0.
+Renew on access instead of on a timer (OSEP-0009): `RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
 
 ```csharp
 var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
@@ -495,6 +495,12 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 });
 
 // A rule can scope by TCP destination ports instead of a target — Ports
+// (each 1-65535, at most 256 per rule, no duplicates) may replace Target
+// entirely, and combining a domain Target with Ports is rejected. The Fast
+// Sandbox backend rejects Ports rules with HTTP 400 today (Docker and
+// Kubernetes support them); a targetless Ports rule matches direct IP
+// connections only, so under a deny-default policy hostname traffic still
+// needs a domain rule alongside it.
 // (each 1-65535, at most 256 per rule, no duplicates) may replace Target
 // entirely, and combining a domain Target with Ports is rejected.
 var byPorts = await Sandbox.CreateAsync(new SandboxCreateOptions

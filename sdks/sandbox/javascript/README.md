@@ -151,7 +151,7 @@ const manual = await Sandbox.create({
 });
 ```
 
-Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewalPolicy` moves the expiration to `max(now + extendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0.
+Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewalPolicy` moves the expiration to `max(now + extendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -430,7 +430,7 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected:
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected: The Fast Sandbox backend rejects `ports` rules with HTTP 400 today (Docker and Kubernetes support them); a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
 
 ```ts
 const sandbox = await Sandbox.create({
