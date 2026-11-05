@@ -65,25 +65,19 @@ func newHTTPBridge(cfg *ServerConfig, sseKeepalive time.Duration) (*httpBridge, 
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			// Route to the configured upstream URL. The upstream path is
-			// authoritative; the /mcp/{name} suffix is a routing prefix only.
-			// SetURL also merges the upstream's query string with the
-			// client's (?api_key=... upstream params survive), and RawPath
-			// preserves intentional escaping in the configured path (%2F).
+			// Upstream path/query/escaping are authoritative; the
+			// /mcp/{name} suffix is a routing prefix only.
 			pr.SetURL(target)
 			pr.Out.URL.Path = target.Path
 			pr.Out.URL.RawPath = target.RawPath
 
 			pr.SetXForwarded()
 
-			// The execd access token authenticates the sandbox API only;
-			// forwarding it to an upstream would leak a credential.
+			// The execd access token must never reach the upstream.
 			pr.Out.Header.Del(model.ApiAccessTokenHeader)
 
-			// Configured headers carry upstream credentials or overrides and
-			// win over client-supplied values. A configured Host is special:
-			// the transport takes the Host header from Request.Host, not the
-			// header map, so route it there.
+			// Configured headers override client-supplied ones. Host is
+			// special: the transport reads it from Request.Host.
 			for k, v := range cfg.Headers {
 				if http.CanonicalHeaderKey(k) == "Host" {
 					pr.Out.Host = v
@@ -113,17 +107,15 @@ func (b *httpBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.proxy.ServeHTTP(kw, r)
 }
 
-// Close aborts every in-flight upstream request (long-lived SSE streams
-// included) and fails all later ones, so a removed or reset bridge stops
-// serving the previous client immediately.
+// Close aborts every in-flight upstream request (SSE streams included) and
+// fails all later ones.
 func (b *httpBridge) Close() {
 	b.transport.Close()
 }
 
-// cancellableTransport wraps the bridge transport so Close can abort
-// in-flight requests. Successful responses tie the derived context's cancel
-// to resp.Body.Close, so cancellation only strikes requests still streaming
-// when Close runs.
+// cancellableTransport lets Close abort in-flight requests; responses are
+// untracked when their body closes, so cancellation only strikes requests
+// still streaming.
 type cancellableTransport struct {
 	inner    http.RoundTripper
 	mu       sync.Mutex
@@ -157,8 +149,7 @@ func (t *cancellableTransport) RoundTrip(req *http.Request) (*http.Response, err
 		}
 		return nil, err
 	}
-	// The request stays tracked until the response body closes, so Close can
-	// abort streams that are still being copied to the client.
+	// Stay tracked until the body closes so Close can abort live streams.
 	resp.Body = cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel, remove: func() { t.untrack(req) }}
 	return resp, nil
 }
@@ -169,8 +160,8 @@ func (t *cancellableTransport) untrack(req *http.Request) {
 	t.mu.Unlock()
 }
 
-// Close cancels every in-flight request, rejects later ones, and releases
-// the wrapped transport's idle connections.
+// Close cancels in-flight requests, rejects later ones, and drops idle
+// connections.
 func (t *cancellableTransport) Close() {
 	t.mu.Lock()
 	t.closed = true
@@ -189,8 +180,8 @@ func (t *cancellableTransport) Close() {
 	}
 }
 
-// cancelOnCloseBody releases the request context (and untracks the request)
-// when the proxy closes the response body.
+// cancelOnCloseBody cancels the request context and untracks the request
+// when the body closes.
 type cancelOnCloseBody struct {
 	io.ReadCloser
 	cancel context.CancelFunc

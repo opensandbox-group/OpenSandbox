@@ -22,8 +22,7 @@ import "os/exec"
 // capability drop, seccomp, Landlock — see hardenCmd) to a command that an
 // external party will Start itself, such as the MCP SDK's CommandTransport.
 // The returned release function must be called once the child has started
-// (or failed to): it releases the parent-side launcher policy file, whose
-// FD is CLOEXEC so it never reaches the child.
+// (or failed to).
 func PrepareManagedChild(cmd *exec.Cmd) (release func(), err error) {
 	file, err := hardenCmd(cmd, false, nil)
 	if err != nil {
@@ -36,13 +35,10 @@ func PrepareManagedChild(cmd *exec.Cmd) (release func(), err error) {
 }
 
 // AdoptManagedChild registers an externally started direct child with the
-// init reaper so its exit reaches the starter's Wait instead of being
-// reaped and logged as an orphan. No-op when init mode is off.
-//
-// Unlike launchManagedWith there is a small window between the child
-// starting and this registration; a child dying inside it is reaped as an
-// orphan, which surfaces as a Wait error to the starter — teardown then
-// proceeds normally.
+// init reaper. No-op when init mode is off. Unlike launchManagedWith there
+// is a small post-start window: a child dying inside it is reaped as an
+// orphan and surfaces as a Wait error to the starter — teardown proceeds
+// normally.
 func AdoptManagedChild(cmd *exec.Cmd) {
 	if initReaper == nil || cmd.Process == nil {
 		return
@@ -53,11 +49,9 @@ func AdoptManagedChild(cmd *exec.Cmd) {
 	initReaper.mu.Unlock()
 }
 
-// ReleaseManagedChild removes a child adopted with AdoptManagedChild once
-// its starter (the MCP SDK's CommandTransport owns exec.Cmd.Wait) has
-// consumed the exit status. Without this, a starter-consumed exit leaves a
-// stale owned entry that shutdown would signal as a live process group.
-// No-op when init mode is off or the reaper already reaped the child.
+// ReleaseManagedChild drops an adoption once the starter (which owns
+// exec.Cmd.Wait) consumed the exit status, so a starter-won wait cannot
+// leak an owned entry that shutdown would signal. No-op if already reaped.
 func ReleaseManagedChild(cmd *exec.Cmd) {
 	if initReaper == nil || cmd.Process == nil {
 		return

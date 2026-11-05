@@ -177,8 +177,7 @@ var bridgedMethods = map[string]struct{}{
 	"completion/complete":      {},
 }
 
-// badParams reports a params shape the bridge did not expect (an SDK
-// upgrade changed a method's params type); the request degrades to a
+// badParams reports unexpected params (e.g. an SDK type change) as a
 // JSON-RPC error instead of a panic.
 func badParams(method string) error {
 	return &jsonrpc.Error{
@@ -268,15 +267,13 @@ func (s *stdioSession) upstream() *mcp.ClientSession {
 	return s.clientSession
 }
 
-// maxSessionsPerBridge caps concurrent stdio sessions per upstream. Each
-// session owns a subprocess, so this is an accident brake for runaway
-// clients, not a security boundary.
+// maxSessionsPerBridge caps concurrent stdio sessions per upstream (each
+// owns a subprocess): an accident brake, not a security boundary.
 const maxSessionsPerBridge = 64
 
-// registerSession starts tracking an MCP session. The watcher tears the
-// subprocess down whenever the web session ends, including sessions that
-// never reach initialization (e.g. ephemeral discover sessions, which the
-// SDK handler closes right after answering).
+// registerSession starts tracking an MCP session; the watcher tears the
+// session down when it ends, including sessions that never initialize
+// (ephemeral discover sessions).
 func (b *stdioBridge) registerSession(serverSession *mcp.ServerSession) (*stdioSession, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -308,8 +305,7 @@ func (s *stdioSession) initUpstream() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
-	// connectUpstream reads s.childCmd; reserve the spawn slot first so a
-	// concurrent call cannot double-spawn (s.cancel already set above).
+	// s.cancel set: the spawn slot is reserved against concurrent calls.
 	s.mu.Unlock()
 
 	sess, cmd, err := s.connectUpstream(ctx)
@@ -328,9 +324,6 @@ func (s *stdioSession) initUpstream() {
 	go func() {
 		_ = sess.Wait()
 		log.Info("mcpproxy: upstream %s: subprocess for session %s exited", s.bridge.cfg.Name, s.id)
-		// The SDK's transport owns exec.Cmd.Wait; once it has the exit
-		// status, drop the reaper adoption so the consumed exit cannot
-		// leave a stale owned entry behind.
 		runtime.ReleaseManagedChild(cmd)
 		s.end()
 	}()
@@ -341,19 +334,17 @@ func (s *stdioSession) initUpstream() {
 func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession, *exec.Cmd, error) {
 	cfg := s.bridge.cfg
 	env := childEnviron(cfg.Env)
-	// exec.CommandContext resolves the executable against execd's own PATH
-	// at construction; resolve against the child's merged PATH instead so
-	// commands shipped via the runtime binding, EXECD_ENVS, or the
-	// registration env (venv/npm bin) are found.
+	// Resolve against the child's PATH, not execd's, so venv/npm-bin style
+	// commands from the binding env, EXECD_ENVS, or the registration env
+	// are found.
 	cmd := exec.CommandContext(ctx, resolveChildCommand(cfg.Command, env, cfg.CWD), cfg.Args...)
 	cmd.Dir = cfg.CWD
 	cmd.Env = env
 	configureProcessGroup(cmd)
 
-	// stdio children are workload processes: run them through the same
-	// managed path (hardening floor, init reaper) as command and PTY
-	// launches. The SDK starts the command itself, so the rewrite happens
-	// before Connect and the child is adopted right after.
+	// Run stdio children through the managed path (hardening floor, init
+	// reaper) like command/PTY launches; the SDK starts the command itself,
+	// so rewrite before Connect and adopt after.
 	release, err := runtime.PrepareManagedChild(cmd)
 	if err != nil {
 		return nil, nil, err
@@ -372,10 +363,9 @@ func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession,
 	return sess, cmd, nil
 }
 
-// end tears the session down exactly once: close the child client (stdin
-// close, then graceful terminate), cancel the process context, close the
-// inbound HTTP session (so clients see 404 and recover instead of talking
-// to a dead bridge), and unregister.
+// end tears the session down exactly once: close the subprocess, cancel its
+// context, close the inbound HTTP session (clients see 404 and recover),
+// and unregister.
 func (s *stdioSession) end() {
 	s.endOnce.Do(func() {
 		s.mu.Lock()
@@ -429,12 +419,9 @@ func (b *stdioBridge) Close() {
 	}
 }
 
-// childEnviron builds the subprocess environment on the same base every
-// other user process gets — runtime.UserProcessEnvironment layers the
-// sandbox binding envs and the EXECD_ENVS file over the daemon environment
-// and strips execd's own config env — then filters the merged result again
-// (the env-file overlay is applied after UserProcessEnvironment's own
-// filtering and could reintroduce reserved credential entries) and overlays
+// childEnviron builds the subprocess environment from the standard
+// user-process base (runtime.UserProcessEnvironment), re-filtered because
+// the EXECD_ENVS overlay could reintroduce blacklisted credentials, plus
 // the registration's env entries.
 func childEnviron(extra map[string]string) []string {
 	return append(filterBlacklistedEnv(runtime.UserProcessEnvironment()), envSlice(extra)...)
@@ -457,10 +444,9 @@ func filterBlacklistedEnv(env []string) []string {
 	return out
 }
 
-// resolveChildCommand resolves a command name against the PATH the child
-// will actually run with. Paths containing a separator and names not found
-// in the child PATH are returned unchanged (the latter keeps exec's natural
-// not-found error at spawn time).
+// resolveChildCommand resolves a command name against the child's PATH.
+// Separator-containing paths and unknown names are returned unchanged (the
+// latter keeps exec's natural not-found error).
 func resolveChildCommand(command string, env []string, dir string) string {
 	if command == "" || strings.ContainsRune(command, '/') || strings.ContainsRune(command, os.PathSeparator) {
 		return command

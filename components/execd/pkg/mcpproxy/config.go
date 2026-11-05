@@ -13,13 +13,11 @@
 // limitations under the License.
 
 // Package mcpproxy bridges MCP (Model Context Protocol) clients to upstream
-// MCP servers. Clients connect with any MCP SDK over Streamable HTTP at
-// /mcp/{name}; execd forwards to a registered upstream, either an HTTP
-// (Streamable HTTP) MCP server or a stdio MCP server subprocess. Upstreams
-// are registered at runtime through the /mcp/servers management API. The
-// bridge is protocol-aware only where the upstream requires it (stdio);
-// HTTP upstreams are proxied as an opaque stream without JSON-RPC
-// inspection.
+// MCP servers: clients connect over Streamable HTTP at /mcp/{name}, execd
+// forwards to a registered upstream — an HTTP MCP server (proxied as an
+// opaque stream) or a stdio MCP subprocess (bridged via the official Go
+// SDK). Upstreams are registered at runtime through the /mcp/servers
+// management API.
 package mcpproxy
 
 import (
@@ -41,8 +39,7 @@ const (
 // namePattern constrains server names to one path segment without escapes.
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-// reservedNames are routing segments owned by the /mcp management API and
-// therefore unavailable as server names.
+// reservedNames are routing segments owned by the /mcp management API.
 var reservedNames = map[string]struct{}{"servers": {}}
 
 // ServerConfig describes one upstream MCP server.
@@ -60,9 +57,9 @@ type ServerConfig struct {
 	Headers map[string]string `json:"headers,omitempty"`
 
 	// Command is the stdio server executable. Required for the stdio
-	// transport. Commands come from the runtime management API; in-sandbox
-	// clients can already run arbitrary commands via the exec APIs, so a
-	// client-supplied command grants no new privilege.
+	// transport. Registered via the management API; in-sandbox clients can
+	// already run arbitrary commands via the exec APIs, so this grants no
+	// new privilege.
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	// Env is added to the subprocess environment on top of execd's own.

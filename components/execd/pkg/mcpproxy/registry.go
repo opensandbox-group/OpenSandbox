@@ -31,15 +31,13 @@ var (
 	ErrUnknownServer = errors.New("mcpproxy: unknown server name")
 	// ErrRegistryClosed reports use of a closed registry (shutdown).
 	ErrRegistryClosed = errors.New("mcpproxy: registry is closed")
-	// ErrTooManyServers rejects registrations beyond maxServers; an
-	// authenticated client can already run arbitrary commands, so this is
-	// an accident brake, not a security boundary.
+	// ErrTooManyServers rejects registrations beyond maxServers.
 	ErrTooManyServers = errors.New("mcpproxy: too many registered mcp servers")
 )
 
-// maxServers caps concurrent registrations. MCP sessions are stdio
-// subprocesses or HTTP streams, so unbounded registrations are an accident
-// brake for resource exhaustion by buggy clients.
+// maxServers caps concurrent registrations: an accident brake against
+// resource exhaustion, not a security boundary (token holders already have
+// exec-level access).
 const maxServers = 64
 
 // Registry holds the MCP bridges. Servers are registered at runtime through
@@ -121,8 +119,7 @@ func (r *Registry) Add(s *ServerConfig) error {
 	return r.addLocked(s)
 }
 
-// Remove unregisters one server and tears down its bridge — stdio
-// subprocesses and in-flight HTTP upstream streams alike.
+// Remove unregisters one server and closes its bridge.
 func (r *Registry) Remove(name string) error {
 	if r == nil {
 		return ErrRegistryClosed
@@ -159,12 +156,10 @@ func (r *Registry) Empty() bool {
 	return len(r.bridges) == 0
 }
 
-// Reset closes every bridge — aborting in-flight HTTP upstream streams and
-// stdio subprocesses alike — and empties the registry without shutting it
-// down. A full runtime re-init (a new sandbox allocation on a pooled execd)
-// must not hand the previous allocation's registrations — with their stored
-// upstream credentials, environments, or still-streaming clients — to the
-// next one; the preserveRuntimeState path keeps them instead.
+// Reset closes every bridge and empties the registry without shutting it
+// down: a full runtime re-init (new allocation on a pooled execd) must not
+// hand the previous allocation's registrations to the next one. The
+// preserveRuntimeState path keeps them.
 func (r *Registry) Reset() {
 	if r == nil {
 		return
@@ -224,8 +219,7 @@ func (r *Registry) List() []ServerInfo {
 	return out
 }
 
-// Close terminates every bridge (stdio subprocesses and in-flight HTTP
-// streams) and rejects further use.
+// Close terminates every bridge and rejects further use.
 func (r *Registry) Close() {
 	if r == nil {
 		return

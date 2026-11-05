@@ -220,21 +220,16 @@ func (r *reaper) consumeOwned(pid int, mp *managedProcess) bool {
 			return true
 		}
 		if errors.Is(err, unix.ECHILD) {
-			// Another waiter (an externally waited child, e.g. the
-			// MCP SDK's CommandTransport owning exec.Cmd.Wait)
-			// consumed the exit status first. Delete the entry so a
-			// starter-won wait cannot leak it — stale entries would
-			// grow without bound and shutdown could signal a
-			// recycled process group.
+			// An external waiter (the MCP SDK's CommandTransport) consumed
+			// the status first; drop the entry instead of leaking it.
 			delete(r.owned, pid)
 			return true
 		}
 		log.Error("init: reaper consume pid %d: %v", pid, err)
 		return false
 	}
-	// Drop the child from the registry once reaped: stale entries
-	// would grow without bound and shutdown could signal a recycled
-	// process group.
+	// Drop the child from the registry once reaped: stale entries would
+	// grow without bound and shutdown could signal a recycled process group.
 	delete(r.owned, pid)
 	mp.deliver(ws)
 	return true

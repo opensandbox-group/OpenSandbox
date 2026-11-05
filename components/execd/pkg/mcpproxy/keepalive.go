@@ -26,20 +26,17 @@ import (
 // drops an SSE stream after sse_read_timeout seconds of silence).
 const sseKeepaliveComment = ": keepalive\n\n"
 
-// keepaliveWriter wraps an http.ResponseWriter and injects an SSE comment
-// line when a text/event-stream response goes idle for the configured
-// interval. Injections happen only at event boundaries (start of stream or
-// right after a blank line), so a comment can never split a partial event.
-// Non-SSE responses pass through untouched. The zero interval disables
-// injection entirely.
+// keepaliveWriter injects an SSE comment frame when a text/event-stream
+// response goes idle for the configured interval. Injections happen only at
+// event boundaries and are serialized with proxied writes. Non-SSE and
+// content-encoded responses pass through untouched; zero disables.
 type keepaliveWriter struct {
 	http.ResponseWriter
 
 	interval time.Duration
 
-	// wmu serializes every write to the underlying ResponseWriter: the
-	// reverse proxy writes from its own goroutine while the keepalive loop
-	// injects from another, and net/http requires single-writer access.
+	// wmu serializes writes to the underlying ResponseWriter between the
+	// reverse proxy and the keepalive loop.
 	wmu sync.Mutex
 
 	mu           sync.Mutex
@@ -79,9 +76,7 @@ func (k *keepaliveWriter) WriteHeader(status int) {
 	if mediaType(contentType) != "text/event-stream" {
 		return
 	}
-	// Content-encoded streams (a client that advertised gzip got one) must
-	// not have plaintext comments appended: appending would corrupt the
-	// encoded body. Skip injection entirely for non-identity encodings.
+	// Appending plaintext to an encoded stream would corrupt it.
 	if enc := k.ResponseWriter.Header().Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
 		return
 	}
@@ -120,10 +115,9 @@ func (k *keepaliveWriter) Flush() {
 	}
 }
 
-// loop injects a comment frame whenever the SSE response has been silent
-// for a full interval and the stream sits at an event boundary. The write
-// lock is taken before reading the boundary so a proxied write cannot land
-// between the check and the injection.
+// loop injects a comment when the response has been idle a full interval
+// and sits at an event boundary. The write lock is held from the boundary
+// check through the injection so a proxied write cannot land in between.
 func (k *keepaliveWriter) loop() {
 	defer close(k.done)
 	ticker := time.NewTicker(k.interval)
@@ -167,9 +161,8 @@ func (k *keepaliveWriter) loop() {
 	}
 }
 
-// Stop ends the idle watch loop and joins it, so no in-flight injection can
-// touch the ResponseWriter after ServeHTTP returns. Safe to call multiple
-// times.
+// Stop ends the loop and joins it, so no injection touches the
+// ResponseWriter after ServeHTTP returns. Safe to call multiple times.
 func (k *keepaliveWriter) Stop() {
 	k.stopOnce.Do(func() {
 		k.mu.Lock()
@@ -190,11 +183,9 @@ func (k *keepaliveWriter) IdleInjections() int {
 	return k.idleInjected
 }
 
-// sseBoundaryTracker reports whether the current write position of an SSE
-// stream sits at an event boundary: the very start of the stream, or
-// immediately after a blank line (which terminates an event). Comment
-// frames injected at a boundary can never split a partial event, whatever
-// line endings or chunk boundaries the upstream uses.
+// sseBoundaryTracker reports whether the stream sits at an event boundary:
+// at the start, or right after the blank line that terminates an event.
+// Comments injected there can never split a partial event.
 type sseBoundaryTracker struct {
 	lineLen  int  // bytes seen in the current line, excluding terminators
 	carryCR  bool // last byte was CR: swallow a following LF as the same terminator

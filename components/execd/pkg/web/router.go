@@ -63,12 +63,10 @@ func NewRouter(accessToken string, mcpRegistry *mcpproxy.Registry) *gin.Engine {
 	return r
 }
 
-// registerMCPRoutes exposes the MCP proxy bridge under /mcp. The index lists
-// registered upstreams; {name} dispatches to the matching bridge for the
-// three Streamable HTTP methods (GET, POST, DELETE). The /mcp/servers
-// management routes register, list, and remove dynamic upstreams at runtime.
-// All routes sit behind the same runtime-init gate and access-token check as
-// every other business endpoint.
+// registerMCPRoutes exposes the MCP proxy bridge under /mcp: the index
+// lists upstreams, {name} dispatches to its bridge (GET/POST/DELETE), and
+// /mcp/servers manages registrations at runtime. All routes sit behind the
+// same runtime-init gate and access-token check as every other endpoint.
 func registerMCPRoutes(r *gin.Engine, registry *mcpproxy.Registry) {
 	mcpGroup := r.Group("/mcp")
 	{
