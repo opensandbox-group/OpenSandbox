@@ -158,6 +158,23 @@ func TestSSEBoundaryTracker(t *testing.T) {
 	}
 }
 
+func TestKeepaliveWriterSkipsContentEncodedResponses(t *testing.T) {
+	rec := httptest.NewRecorder()
+	k := newKeepaliveWriter(rec, 5*time.Millisecond)
+
+	// A gzip-encoded SSE stream: appending plaintext comments would corrupt
+	// the encoded body, so injection must stay off.
+	rec.Header().Set("Content-Type", "text/event-stream")
+	rec.Header().Set("Content-Encoding", "gzip")
+	k.WriteHeader(http.StatusOK)
+	_, err := k.Write([]byte("data: first\n\n"))
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+	k.Stop()
+	require.Equal(t, 0, k.IdleInjections())
+}
+
 func TestKeepaliveWriterStopIdempotent(t *testing.T) {
 	rec := httptest.NewRecorder()
 	k := newKeepaliveWriter(rec, 5*time.Millisecond)

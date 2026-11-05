@@ -188,9 +188,16 @@ func run() int {
 	oomWatchStop := telemetry.StartOOMWatch(context.Background())
 	defer oomWatchStop()
 
+	// MCP bridges are registered at runtime through the /mcp/servers
+	// management API; the registry starts empty and /mcp answers 404. A
+	// full runtime re-init clears it (new allocation, new credentials).
+	mcpRegistry := mcpproxy.NewRegistry(flag.MCPSSEKeepalive)
+	defer mcpRegistry.Close()
+
 	initManager := controller.InitRuntimeInitManager(&controller.RuntimeInitConfig{
 		Ctrl:              ctrl,
 		IsolatedResetter:  isolatedRunner,
+		MCPRegistry:       mcpRegistry,
 		LaunchEntrypoint:  entryLauncher(startInitEntrypoint),
 		EntrypointArgs:    flag.Args(),
 		TemplateLifecycle: lifecycleConfig,
@@ -199,11 +206,6 @@ func run() int {
 		},
 	})
 	defer initManager.StopPeriodic()
-
-	// MCP bridges are registered at runtime through the /mcp/servers
-	// management API; the registry starts empty and /mcp answers 404.
-	mcpRegistry := mcpproxy.NewRegistry(flag.MCPSSEKeepalive)
-	defer mcpRegistry.Close()
 
 	engine := web.NewRouter(flag.ServerAccessToken, mcpRegistry)
 	if err := runHTTPServer(

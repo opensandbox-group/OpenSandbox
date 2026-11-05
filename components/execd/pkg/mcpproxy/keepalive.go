@@ -16,6 +16,7 @@ package mcpproxy
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -50,6 +51,7 @@ type keepaliveWriter struct {
 	boundary     sseBoundaryTracker
 	stop         chan struct{}
 	stopOnce     sync.Once
+	done         chan struct{}
 	idleInjected int
 }
 
@@ -58,6 +60,7 @@ func newKeepaliveWriter(w http.ResponseWriter, interval time.Duration) *keepaliv
 		ResponseWriter: w,
 		interval:       interval,
 		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 		lastWrite:      time.Now(),
 		boundary:       newSSEBoundaryTracker(),
 	}
@@ -73,15 +76,22 @@ func (k *keepaliveWriter) WriteHeader(status int) {
 		return
 	}
 	contentType := k.ResponseWriter.Header().Get("Content-Type")
-	if mediaType(contentType) == "text/event-stream" {
-		k.mu.Lock()
-		k.contentSSE = true
-		started := k.started
-		k.started = true
-		k.mu.Unlock()
-		if !started {
-			go k.loop()
-		}
+	if mediaType(contentType) != "text/event-stream" {
+		return
+	}
+	// Content-encoded streams (a client that advertised gzip got one) must
+	// not have plaintext comments appended: appending would corrupt the
+	// encoded body. Skip injection entirely for non-identity encodings.
+	if enc := k.ResponseWriter.Header().Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		return
+	}
+	k.mu.Lock()
+	k.contentSSE = true
+	started := k.started
+	k.started = true
+	k.mu.Unlock()
+	if !started {
+		go k.loop()
 	}
 }
 
@@ -111,8 +121,11 @@ func (k *keepaliveWriter) Flush() {
 }
 
 // loop injects a comment frame whenever the SSE response has been silent
-// for a full interval and the stream sits at an event boundary.
+// for a full interval and the stream sits at an event boundary. The write
+// lock is taken before reading the boundary so a proxied write cannot land
+// between the check and the injection.
 func (k *keepaliveWriter) loop() {
+	defer close(k.done)
 	ticker := time.NewTicker(k.interval)
 	defer ticker.Stop()
 	for {
@@ -120,6 +133,7 @@ func (k *keepaliveWriter) loop() {
 		case <-k.stop:
 			return
 		case <-ticker.C:
+			k.wmu.Lock()
 			k.mu.Lock()
 			idle := time.Since(k.lastWrite)
 			stopped := k.stopped
@@ -127,10 +141,14 @@ func (k *keepaliveWriter) loop() {
 			sse := k.contentSSE
 			atBoundary := k.boundary.atBoundary()
 			k.mu.Unlock()
-			if stopped || failed || !sse || !atBoundary || idle < k.interval {
+			if stopped {
+				k.wmu.Unlock()
+				return
+			}
+			if failed || !sse || !atBoundary || idle < k.interval {
+				k.wmu.Unlock()
 				continue
 			}
-			k.wmu.Lock()
 			_, err := k.ResponseWriter.Write([]byte(sseKeepaliveComment))
 			if err == nil {
 				if f, ok := k.ResponseWriter.(http.Flusher); ok {
@@ -149,12 +167,20 @@ func (k *keepaliveWriter) loop() {
 	}
 }
 
-// Stop ends the idle watch loop. Safe to call multiple times.
+// Stop ends the idle watch loop and joins it, so no in-flight injection can
+// touch the ResponseWriter after ServeHTTP returns. Safe to call multiple
+// times.
 func (k *keepaliveWriter) Stop() {
-	k.stopOnce.Do(func() { close(k.stop) })
-	k.mu.Lock()
-	k.stopped = true
-	k.mu.Unlock()
+	k.stopOnce.Do(func() {
+		k.mu.Lock()
+		started := k.started
+		k.stopped = true
+		k.mu.Unlock()
+		close(k.stop)
+		if started {
+			<-k.done
+		}
+	})
 }
 
 // IdleInjections reports how many keepalive frames were injected (tests).

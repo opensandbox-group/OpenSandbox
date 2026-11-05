@@ -135,6 +135,29 @@ func TestRegistryCloseRejectsEverything(t *testing.T) {
 	require.ErrorIs(t, r.Remove("alpha"), ErrRegistryClosed)
 }
 
+func TestRegistryResetClearsAndStaysUsable(t *testing.T) {
+	r := NewRegistry(0)
+	defer r.Close()
+
+	require.NoError(t, r.Add(&ServerConfig{Name: "echo", Transport: TransportStdio, Command: buildEchoServer(t)}))
+	require.NoError(t, r.Add(&ServerConfig{Name: "alpha", Transport: TransportHTTP, URL: "http://127.0.0.1:1/mcp"}))
+
+	r.Reset()
+	require.Empty(t, r.List())
+	_, ok := r.Handler("echo")
+	require.False(t, ok)
+	require.ErrorIs(t, r.Remove("echo"), ErrUnknownServer)
+
+	// The registry keeps serving new registrations after a reset.
+	require.NoError(t, r.Add(&ServerConfig{Name: "beta", Transport: TransportHTTP, URL: "http://127.0.0.1:2/mcp"}))
+	_, ok = r.Handler("beta")
+	require.True(t, ok)
+
+	// Reset on a closed registry is a no-op.
+	r.Close()
+	r.Reset()
+}
+
 func TestRegistryBadUpstreamFailsAdd(t *testing.T) {
 	// An http upstream with an unparseable URL must fail registration.
 	r := NewRegistry(0)

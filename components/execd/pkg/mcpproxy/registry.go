@@ -132,6 +132,34 @@ func (r *Registry) Remove(name string) error {
 // Empty reports whether any MCP server is registered.
 func (r *Registry) Empty() bool { return r == nil || len(r.bridges) == 0 }
 
+// Reset closes every bridge and empties the registry without shutting it
+// down. A full runtime re-init (a new sandbox allocation on a pooled execd)
+// must not hand the previous allocation's registrations — with their stored
+// upstream credentials and stdio environments — to the next one; the
+// preserveRuntimeState path keeps them instead.
+func (r *Registry) Reset() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	bridges := make([]*stdioBridge, 0, len(r.stdio))
+	for _, b := range r.stdio {
+		bridges = append(bridges, b)
+	}
+	r.bridges = make(map[string]http.Handler)
+	r.servers = make(map[string]*ServerConfig)
+	r.stdio = make(map[string]*stdioBridge)
+	r.mu.Unlock()
+
+	for _, b := range bridges {
+		b.Close()
+	}
+}
+
 // Handler returns the bridge handler for a server name.
 func (r *Registry) Handler(name string) (http.Handler, bool) {
 	if r == nil {

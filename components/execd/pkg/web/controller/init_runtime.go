@@ -48,6 +48,12 @@ type RuntimeInitConfig struct {
 	// without shutting the runner down; nil when isolation is unavailable.
 	IsolatedResetter interface{ Reset() error }
 
+	// MCPRegistry clears the previous generation's MCP bridge
+	// registrations (upstream credentials, stdio environments) on a full
+	// re-init; nil when the MCP proxy is not wired. The
+	// preserveRuntimeState path keeps registrations.
+	MCPRegistry interface{ Reset() }
+
 	// LaunchEntrypoint starts (or replaces) the supervised user entrypoint;
 	// nil in classic mode where the container entrypoint is external.
 	LaunchEntrypoint func([]string) error
@@ -240,6 +246,9 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 			log.Warn("runtime init: isolated runner cleanup: %v", err)
 			warnings = append(warnings, "isolated session cleanup reported errors")
 		}
+	}
+	if m.cfg.MCPRegistry != nil {
+		m.cfg.MCPRegistry.Reset()
 	}
 	// Retire the supervised entrypoint BEFORE killing the remaining
 	// children: retirement must be visible before the entrypoint process

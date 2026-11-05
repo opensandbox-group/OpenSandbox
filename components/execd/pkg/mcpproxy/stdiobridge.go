@@ -18,9 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -28,8 +26,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 
 // stdioIdleSessionTTL closes a bridged MCP session after this much client
@@ -276,11 +274,26 @@ func (s *stdioSession) connectUpstream(ctx context.Context) (*mcp.ClientSession,
 	cmd.Env = childEnviron(cfg.Env)
 	configureProcessGroup(cmd)
 
+	// stdio children are workload processes: run them through the same
+	// managed path (hardening floor, init reaper) as command and PTY
+	// launches. The SDK starts the command itself, so the rewrite happens
+	// before Connect and the child is adopted right after.
+	release, err := runtime.PrepareManagedChild(cmd)
+	if err != nil {
+		return nil, err
+	}
+
 	client := mcp.NewClient(
 		&mcp.Implementation{Name: "opensandbox-execd-mcp-bridge", Version: version.Version},
 		nil,
 	)
-	return client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	release()
+	if err != nil {
+		return nil, err
+	}
+	runtime.AdoptManagedChild(cmd)
+	return sess, nil
 }
 
 // end tears the session down exactly once: close the child client (stdin
@@ -340,23 +353,13 @@ func (b *stdioBridge) Close() {
 	}
 }
 
-// childEnviron builds the subprocess environment: execd's own config env
-// (access tokens, credentials — see isolation.ExecdConfigEnvBlacklist) is
-// stripped so a third-party MCP server cannot read the control-plane token
-// and call protected routes as execd, then cfg.Env overlays the rest.
+// childEnviron builds the subprocess environment on the same base every
+// other user process gets — runtime.UserProcessEnvironment layers the
+// sandbox binding envs and the EXECD_ENVS file over the daemon environment
+// and strips execd's own config env (access tokens, credentials) — then
+// overlays the registration's env entries.
 func childEnviron(extra map[string]string) []string {
-	blocked := make(map[string]struct{})
-	for _, k := range isolation.ExecdConfigEnvBlacklist() {
-		blocked[k] = struct{}{}
-	}
-	out := make([]string, 0, len(os.Environ())+len(extra))
-	for _, kv := range os.Environ() {
-		k, _, _ := strings.Cut(kv, "=")
-		if _, bad := blocked[k]; !bad {
-			out = append(out, kv)
-		}
-	}
-	return append(out, envSlice(extra)...)
+	return append(runtime.UserProcessEnvironment(), envSlice(extra)...)
 }
 
 // envSlice flattens an env map for exec.Cmd.

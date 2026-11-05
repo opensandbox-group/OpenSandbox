@@ -88,6 +88,6 @@ Idle SSE responses receive keepalive comment frames every `EXECD_MCP_SSE_KEEPALI
 
 - The execd access token never leaves execd: it is stripped before forwarding, while client `Authorization` headers pass through to the upstream.
 - Registered `headers` on an upstream override client-supplied values, which keeps upstream credentials inside the sandbox instead of flowing through every MCP call.
-- stdio subprocesses never inherit execd's own configuration environment (`EXECD_ACCESS_TOKEN`, `JUPYTER_TOKEN`, and the rest of the execd config env blacklist); only the registration's `env` overlay and the ordinary sandbox environment are passed down.
+- stdio subprocesses run through the same managed launch path as commands and PTYs: when the hardening floor is enabled they get capability dropping, `no_new_privs`, seccomp, and Landlock like every other workload, and their environment is the standard user-process environment (sandbox binding envs and `EXECD_ENVS` layered in, execd's own config env — `EXECD_ACCESS_TOKEN`, `JUPYTER_TOKEN`, and the rest of the blacklist — stripped) with the registration's `env` overlaid. A stdio MCP server never sees execd's credentials and never runs with the daemon's privileges.
 
 See the [execd architecture page](/architecture/data-plane/execd) for the bridge's design and how it fits into execd.
