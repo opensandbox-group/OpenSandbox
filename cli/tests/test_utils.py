@@ -22,11 +22,14 @@ from pathlib import Path
 
 import click
 import pytest
+from click.testing import CliRunner
 from pydantic import BaseModel, ValidationError, model_validator
 
+from opensandbox_cli.output import OutputFormatter
 from opensandbox_cli.utils import (
     DURATION,
     KEY_VALUE,
+    handle_errors,
     load_json_object,
     parse_duration,
     validation_message,
@@ -159,3 +162,21 @@ class TestValidationMessage:
         message = validation_message(exc_info.value)
         assert "names must be unique" in message
         assert message.index("Value error") == 0
+
+
+class TestHandleErrors:
+    @pytest.mark.parametrize("color", [True, False])
+    def test_unexpected_error_prints_message_as_is(self, color: bool) -> None:
+        @click.command()
+        @click.pass_context
+        @handle_errors
+        def fail(ctx: click.Context) -> None:
+            raise RuntimeError("cannot open /data/[old]/a[/]b")
+
+        obj = type("Obj", (), {"output": OutputFormatter("table", color=color)})()
+        result = CliRunner().invoke(fail, obj=obj)
+
+        assert result.exit_code == 1
+        assert "cannot open /data/[old]/a[/]b" in result.stderr
+        assert "Type: RuntimeError" in result.stderr
+        assert "[dim]" not in result.stderr

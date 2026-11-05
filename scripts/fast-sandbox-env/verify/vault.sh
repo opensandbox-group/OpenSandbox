@@ -62,6 +62,17 @@
 #   4. Pause/resume: the request keeps passing after checkpoint/restore —
 #      trust (baked CA in the rootfs) and vault travel with the snapshot.
 #
+# Stage 3: exchange resolver verify (OSEP-0025) — the full chain no other
+# fast-sandbox e2e carries end to end: server relay PUT (exchange credential
+# + typeless binding) -> fastlet relay -> egress -> per-request _resolve ->
+# the T6 stub resolver -> injected headers observed by the echo endpoint on
+# a guest request. The stub runs over a UDS inside every pool egress
+# container (guests have no filesystem path to it — R4 by construction).
+# Asserts: subject == CR name (D11), destination-bound signature (path
+# includes the query), fail-closed 407 with the static binding unaffected,
+# fresh resolve after recovery and after pause/resume (R12: the vault
+# travels as config, never material).
+#
 # The CA/echo material is provisioned by `up` (mitm_ca_up / mitm_echo_up):
 # this file reads the pinned fingerprint from $WORK/mitm-ca/fingerprint and
 # re-derives the echo endpoint's kind-network IP from the live container, so
@@ -397,6 +408,182 @@ mitm_ca_chain_verify() {
 	wait_for "mitm-ca sandbox deleted" 120 verify_sandbox_gone
 }
 
+# --- stage: exchange resolver verify (OSEP-0025: per-request dynamic headers) ----
+
+# The T6 stub (stdlib-only) delivered via kubectl cp into every pool egress
+# container; the stub enforces the production 0710/0660 UDS layout itself.
+EX_RESOLVER_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/components/egress/tests/resolver/resolver.py"
+EX_RESOLVER_DIR="/tmp/osep25-resolver"
+EX_RESOLVER_SOCK="$EX_RESOLVER_DIR/resolver.sock"
+EX_RESOLVER_SCRIPT="/tmp/osep25-resolver.py"
+
+exchange_pods=()
+
+exchange_resolver_start_all() {
+	local pod
+	exchange_pods=()
+	for pod in $(pool_pods); do
+		kubectl -n "$RESOURCE_NS" cp "$EX_RESOLVER_SRC" "$pod:$EX_RESOLVER_SCRIPT" -c egress >/dev/null 2>&1 \
+			|| fail "exchange verify: kubectl cp of the resolver stub failed on ${pod##*/}"
+		kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- sh -c \
+			"rm -f /tmp/osep25-resolver.log; nohup python3 $EX_RESOLVER_SCRIPT --uds $EX_RESOLVER_SOCK >/tmp/osep25-resolver.log 2>&1 &" \
+			>/dev/null 2>&1
+		exchange_pods+=("$pod")
+	done
+	[[ ${#exchange_pods[@]} -gt 0 ]] || fail "exchange verify: no pool pods found (run up first)"
+}
+
+exchange_resolver_ready_all() {
+	local pod
+	for pod in "${exchange_pods[@]}"; do
+		kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- \
+			grep -q "test resolver ready" /tmp/osep25-resolver.log >/dev/null 2>&1 || return 1
+	done
+}
+
+exchange_resolver_stop_all() {
+	local pod
+	for pod in ${exchange_pods[@]:-}; do
+		kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- \
+			pkill -f osep25-resolver.py >/dev/null 2>&1 || true
+	done
+}
+
+# Guest HTTPS GET to the echo, parameterized by path (the mitm-ca helpers
+# hardcode /echo); TLS verifies against the template-baked CA (no -k).
+exchange_guest_fetch() { # <path>
+	osb_api command run "$VERIFY_ID" -- \
+		curl -fsS -m 20 --resolve "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" \
+		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT$1" \
+		2>"$LOGS_DIR/exchange-guest-curl.err"
+}
+
+exchange_guest_header_is() { # <lowercase-key> <expected-value> <path>
+	local out line
+	out="$(exchange_guest_fetch "$3")" || return 1
+	while IFS= read -r line; do
+		[[ -n "$line" ]] || continue
+		printf '%s' "$line" | jq -e --arg k "$1" --arg v "$2" '.[$k] == $v' >/dev/null 2>&1 && return 0
+	done <<EOF
+$out
+EOF
+	return 1
+}
+
+# Buffered status, --http1.1: a fail-closed reply is a readable code, not
+# a killed H2 stream.
+exchange_guest_status() { # <path>
+	osb_api command run "$VERIFY_ID" -- \
+		curl -s --http1.1 -o /dev/null -w '%{http_code}' -m 20 \
+		--resolve "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" \
+		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT$1"
+}
+
+exchange_vault_status_is_407() {
+	[[ "$(exchange_guest_status "/vault/echo?x=1")" == "407" ]]
+}
+
+exchange_resolver_verify() {
+	# Optional template override (the overlaybd second pass); default native.
+	local template_id="${1:-$TEMPLATE_ID}"
+	load_mitm_echo_endpoint
+	prune_artifact_store
+
+	log "verify (exchange): starting the resolver stub in every pool egress container (UDS $EX_RESOLVER_SOCK)"
+	exchange_resolver_start_all
+	wait_for "resolver stub ready in every pool pod" 60 exchange_resolver_ready_all
+
+	local created sandbox_uid ack rev static_secret sig vault_body
+	jq -n --arg ip "$MITM_ECHO_IP" --arg domain "$MITM_ECHO_DOMAIN" \
+		'{defaultAction: "deny", egress: [{action: "allow", target: $ip}, {action: "allow", target: $domain}]}' \
+		> "$GEN_DIR/exchange-policy.json"
+	log "verify (exchange): creating a sandbox via the opensandbox CLI (templateId=$template_id)"
+	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
+		--metadata origin=fast-sandbox-env-exchange \
+		--network-policy-file "$GEN_DIR/exchange-policy.json" \
+		--skip-health-check -o json 2>/dev/null)" \
+		|| fail "exchange verify: sandbox create failed"
+	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
+	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "exchange verify: create response carried no id"
+	wait_for "exchange sandbox Running" 300 sandbox_running
+	sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$VERIFY_ID" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$sandbox_uid" ]] || fail "exchange verify: sandbox CR carried no uid"
+	wait_for "exchange subject registered on egress" 120 \
+		vault_log_contains "subject s-$sandbox_uid: data-plane-ready, policy active"
+
+	# 1) mixed vault over the server relay: typeless exchange on /vault/*,
+	#    static apiKey on /static/* (disjoint paths, same host).
+	static_secret="exchange-static-$(openssl rand -hex 8)"
+	vault_body="$(jq -n --arg domain "$MITM_ECHO_DOMAIN" --arg sock "unix://$EX_RESOLVER_SOCK" --arg v "$static_secret" \
+		'{credentials: [{name: "spi-signer", source: {type: "exchange", endpoint: $sock}},
+		  {name: "tok", source: {type: "inline", value: $v}}],
+		  bindings: [{name: "ex-api", match: {hosts: [$domain], paths: ["/vault/*"]}, auth: {credential: "spi-signer"}},
+		  {name: "ex-static", match: {hosts: [$domain], paths: ["/static/*"]}, auth: {type: "apiKey", name: "X-Api-Key", credential: "tok"}}]}')"
+	ack="$(server_api POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body")" \
+		|| fail "exchange verify: POST credential-vault (exchange) failed"
+	rev="$(printf '%s' "$ack" | jq -r '.revision // empty')"
+	[[ "$rev" =~ ^[0-9]+$ ]] || fail "exchange verify: exchange vault ack carried no revision: $(printf '%s' "$ack" | head -c 200)"
+	pass "exchange vault created over the relay (revision $rev; typeless auth + mixed static binding)"
+
+	# Oracle: subject == CR name (D11); the authority carries the port; the
+	# path is the full request target, query included.
+	sig="$(printf '%s' "$VERIFY_ID|spi-signer|ex-api|$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT|/vault/echo?x=1" \
+		| openssl dgst -sha256 | awk '{print $NF}')"
+
+	# 2) happy path: fresh headers observed by the echo, outside the sandbox.
+	wait_for "guest HTTPS reflects the resolver subject (== CR name)" 120 \
+		exchange_guest_header_is "x-test-subject" "$VERIFY_ID" "/vault/echo?x=1"
+	wait_for "guest HTTPS reflects the destination-bound signature" 120 \
+		exchange_guest_header_is "x-test-signature" "$sig" "/vault/echo?x=1"
+	wait_for "guest HTTPS reflects the fresh resolver credential" 120 \
+		exchange_guest_header_is "authorization" "Bearer test-spi-signer" "/vault/echo?x=1"
+	pass "exchange happy path (subject == $VERIFY_ID, bound signature, fresh headers)"
+
+	# 3) off-scope path on the same host: static credential only.
+	wait_for "off-scope static path injects the static credential" 120 \
+		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
+	local static_out
+	static_out="$(exchange_guest_fetch "/static/echo")" || fail "exchange verify: static probe failed"
+	if printf '%s' "$static_out" | grep -qi 'x-test-subject'; then
+		fail "exchange verify: resolver-derived header on the off-scope static path"
+	fi
+	pass "off-scope path stays static (resolver engaged only on /vault/*)"
+
+	# 4) fail-closed: resolver down in every pod -> 407 on the exchange
+	#    path while the static binding keeps flowing.
+	exchange_resolver_stop_all
+	wait_for "resolver outage fails closed with 407 on the exchange path" 60 exchange_vault_status_is_407
+	wait_for "static binding unaffected by the resolver outage" 120 \
+		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
+	pass "resolver outage fails closed (407) while the static binding flows"
+
+	# 5) recovery: the next resolve is fresh (a failure never poisons the
+	#    following request).
+	exchange_resolver_start_all
+	wait_for "resolver stub restarted in every pool pod" 60 exchange_resolver_ready_all
+	wait_for "post-outage resolve is fresh and correct again" 120 \
+		exchange_guest_header_is "x-test-signature" "$sig" "/vault/echo?x=1"
+	pass "no pollution after resolver recovery (same deterministic signature)"
+
+	# 6) pause/resume: the vault travels the bundle as config (R12 —
+	#    material never exists); revision preserved, restore resolves fresh.
+	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 || fail "exchange verify: pause failed"
+	wait_for "exchange sandbox Paused (checkpoint durable)" 240 sandbox_paused
+	osb_api sandbox resume "$VERIFY_ID" --skip-health-check >/dev/null 2>&1 || fail "exchange verify: resume failed"
+	wait_for "exchange sandbox Running (restored)" 240 sandbox_running
+	wait_for "restored exchange subject re-registered on egress" 120 \
+		vault_log_contains "subject s-$sandbox_uid: vault reloaded from file"
+	wait_for "exchange revision preserved across pause/resume" 120 vault_revision_is "$rev"
+	wait_for "restored sandbox resolves fresh (config traveled; material never existed)" 180 \
+		exchange_guest_header_is "x-test-signature" "$sig" "/vault/echo?x=1"
+	pass "exchange vault survived pause/resume (revision $rev, fresh resolve)"
+
+	osb_api sandbox kill "$VERIFY_ID" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill failed; remove $VERIFY_ID manually"
+	wait_for "exchange sandbox deleted" 120 verify_sandbox_gone
+	exchange_resolver_stop_all
+}
+
 # --- standalone entry ----------------------------------------------------------------
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -405,4 +592,5 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	trap 'on_error vault-verify' ERR
 	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 	run_stage "MITM CA chain verify (baked CA -> injection -> pinning)" mitm_ca_chain_verify
+	run_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" exchange_resolver_verify
 fi

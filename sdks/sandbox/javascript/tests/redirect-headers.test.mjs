@@ -276,6 +276,24 @@ test("the overall redirect deadline bounds the first URL-input hop", async () =>
   assert.equal(signals[0].aborted, true);
 });
 
+test("a non-finite or negative overall deadline disables it", async () => {
+  // ConnectionConfig treats requestTimeoutSeconds <= 0 or Infinity as "no
+  // timeout"; the redirect guard must not turn that into an immediate abort.
+  for (const overallTimeoutMs of [Infinity, -1000]) {
+    const baseFetch = async (input, init) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (init?.signal?.aborted) throw init.signal.reason;
+      return new Response("ok", { status: 200 });
+    };
+    const safeFetch = createRedirectSafeFetch("http://a.test", baseFetch, { overallTimeoutMs });
+
+    const res = await safeFetch("http://a.test/start", {
+      headers: { "OPEN-SANDBOX-API-KEY": "tenant-secret" },
+    });
+    assert.equal(await res.text(), "ok", `overallTimeoutMs=${overallTimeoutMs}`);
+  }
+});
+
 test("303 and POST 301/302 convert to GET and drop entity headers", async () => {
   const calls = [];
   const baseFetch = async (input, init) => {

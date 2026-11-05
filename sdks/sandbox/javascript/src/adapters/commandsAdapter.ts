@@ -52,6 +52,15 @@ interface StreamingExecutionSpec<TBody> {
   fallbackErrorMessage: string;
 }
 
+function toTimeoutMilliseconds(timeoutSeconds: number): number {
+  const milliseconds = timeoutSeconds * 1000;
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0 || !Number.isFinite(milliseconds)) {
+    throw new Error("timeoutSeconds must be finite, non-negative, and representable in milliseconds");
+  }
+  // Zero selects the server default, so never round a positive timeout down to zero.
+  return timeoutSeconds > 0 ? Math.max(1, Math.round(milliseconds)) : 0;
+}
+
 function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts): ApiRunCommandRequest {
   if (opts?.gid != null && opts.uid == null) {
     throw new Error("uid is required when gid is provided");
@@ -63,7 +72,7 @@ function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts):
     background: !!opts?.background,
   };
   if (opts?.timeoutSeconds != null) {
-    body.timeout = Math.round(opts.timeoutSeconds * 1000);
+    body.timeout = toTimeoutMilliseconds(opts.timeoutSeconds);
   }
   if (opts?.uid != null) {
     body.uid = opts.uid;
@@ -88,7 +97,7 @@ function toRunInSessionRequest(
     body.cwd = opts.workingDirectory;
   }
   if (opts?.timeoutSeconds != null) {
-    body.timeout = Math.round(opts.timeoutSeconds * 1000);
+    body.timeout = toTimeoutMilliseconds(opts.timeoutSeconds);
   }
   return body;
 }

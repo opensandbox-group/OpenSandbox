@@ -70,6 +70,11 @@ type SandboxSnapshotReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache. It is required when a cached read can be stale (for example the
+	// commit Pod status that lags behind the commit Job status).
+	APIReader client.Reader
+
 	// ImageCommitterImage is the image used for commit and unpause Jobs.
 	ImageCommitterImage string
 
@@ -169,6 +174,9 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.SandboxSnapshot{}).
 		Owns(&batchv1.Job{}).

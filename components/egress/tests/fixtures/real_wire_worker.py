@@ -25,6 +25,7 @@ Usage: ``real_wire_worker.py {ech-parse|h1-parse}``
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -91,6 +92,15 @@ class _ClientConn:
         self.state = "open"
 
 
+def _drive_async_hook(hook):
+    """Run the async requestheaders hook synchronously, like mitmproxy."""
+
+    def run(*args, **kwargs):
+        return asyncio.run(hook(*args, **kwargs))
+
+    return run
+
+
 def _load_system_module() -> object:
     spec = importlib.util.spec_from_file_location(
         "opensandbox_wire_system", MITMSCRIPTS / "system.py"
@@ -98,6 +108,7 @@ def _load_system_module() -> object:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module.requestheaders = _drive_async_hook(module.requestheaders)
     return module
 
 
@@ -159,7 +170,8 @@ def _live_system(hosts: list[str] | None = None) -> tuple[object, object]:
 def _hello_data(client_hello: object, conn: _ClientConn) -> object:
     return types.SimpleNamespace(
         client_hello=client_hello,
-        context=types.SimpleNamespace(client=conn),
+        context=types.SimpleNamespace(
+            client=conn, server=types.SimpleNamespace(address=("192.0.2.1", 443))),
         ignore_connection=False,
     )
 
@@ -208,7 +220,7 @@ def run_ech_parse() -> int:
 
 def _admitted_conn(runtime: object, sni: str) -> _ClientConn:
     conn = _ClientConn(sni)
-    result = runtime.admit_tls(sni)
+    result = runtime.admit_tls(sni, destination_port=443)
     assert result.token is not None, f"admission refused for {sni}"
     assert runtime.track(result.token, conn)
     return conn

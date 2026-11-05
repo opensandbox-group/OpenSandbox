@@ -87,3 +87,35 @@ func TestInitFlagsDefaultsGracefulShutdownTimeout(t *testing.T) {
 
 	require.Equal(t, 200*time.Millisecond, ApiGracefulShutdownTimeout)
 }
+
+func TestInitFlagsDefaultsSseLegacyCompat(t *testing.T) {
+	previousArgs := os.Args
+	previousCommandLine := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{previousArgs[0]}
+	t.Cleanup(func() {
+		os.Args = previousArgs
+		flag.CommandLine = previousCommandLine
+	})
+	t.Setenv(sseLegacyCompatEnv, "")
+
+	InitFlags()
+
+	require.False(t, SseLegacyCompat)
+}
+
+func TestInitFlagsSseLegacyCompatFromEnv(t *testing.T) {
+	previousArgs := os.Args
+	previousCommandLine := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{previousArgs[0]}
+	t.Cleanup(func() {
+		os.Args = previousArgs
+		flag.CommandLine = previousCommandLine
+	})
+	t.Setenv(sseLegacyCompatEnv, "true")
+
+	InitFlags()
+
+	require.True(t, SseLegacyCompat)
+}

@@ -66,9 +66,21 @@ const maxPolicyRelayBodyBytes = policy.MaxPolicyBodyBytes + 1<<10
 
 // handlePolicyRelay serves /policy/{sandboxUid} for all relay verbs.
 func (s *fastSandboxPolicyServer) handlePolicyRelay(w http.ResponseWriter, r *http.Request) {
-	uid := strings.TrimPrefix(r.URL.Path, constants.PolicyRelayPathPrefix)
+	prefix := constants.PolicyRelayPathPrefix
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		prefix = constants.ActionsV2PolicyRelayPathPrefix
+	}
+	uid := strings.TrimPrefix(r.URL.Path, prefix)
 	if !validVaultSubjectID(uid) {
 		http.Error(w, "missing or invalid sandbox uid in path", http.StatusBadRequest)
+		return
+	}
+	if s.actionsAPIVersion == constants.ActionsAPIVersionV2 {
+		ownerLock := s.ownerLock(subject.FromSandboxUID(uid))
+		ownerLock.RLock()
+		defer ownerLock.RUnlock()
+	}
+	if !s.validateRelayOwner(w, r, uid) {
 		return
 	}
 	subj := subject.FromSandboxUID(uid)

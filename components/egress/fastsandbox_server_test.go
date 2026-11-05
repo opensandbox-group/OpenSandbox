@@ -431,6 +431,21 @@ func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 }
 
+// TestActionsDataPlaneReadyReplayIsIdempotent: hooks are delivered
+// at-least-once, so a data-plane-ready retried after a lost ack must succeed
+// and leave the subject active under the same policy.
+func TestActionsDataPlaneReadyReplayIsIdempotent(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
+	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
+
+	rec := doAction(t, srv, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("other.com"))
+}
+
 func TestActionsDataPlaneReadyWithoutPendingPolicyFailsClosed(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID(testUID)

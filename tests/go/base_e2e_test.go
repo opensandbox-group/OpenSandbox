@@ -323,13 +323,6 @@ func brokenConnectionConfig() opensandbox.ConnectionConfig {
 	}
 }
 
-func newPoolManager(t *testing.T) *opensandbox.SandboxManager {
-	t.Helper()
-	mgr := opensandbox.NewSandboxManager(getConnectionConfig(t))
-	t.Cleanup(func() { mgr.Close() })
-	return mgr
-}
-
 func snapshotIdle(pool *opensandbox.DefaultSandboxPool) int {
 	snap, err := pool.Snapshot(context.Background())
 	if err != nil {

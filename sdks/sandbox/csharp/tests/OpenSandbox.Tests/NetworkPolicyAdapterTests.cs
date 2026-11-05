@@ -248,6 +248,73 @@ public class NetworkPolicyAdapterTests
         bindings[0].Name.Should().Be("b");
     }
 
+    [Fact]
+    public async Task CreateVaultAsync_ShouldRejectIllegalMixedShapesBeforeReachingTheWire()
+    {
+        // Mirrors the EgressAdapter guard tests: the lifecycle-routed vault
+        // transport shares the fail-fast shape gate, so illegal inputs never
+        // leave the process on either path.
+        var handler = new CapturingHandler("""{"revision":1,"credentials":[],"bindings":[]}""");
+        var adapter = CreateAdapter(handler, "fsb-1");
+        var match = new CredentialMatch { Hosts = ["*.internal.example.com"] };
+
+        var exchangeWithValue = new Credential
+        {
+            Name = "spi-signer",
+            Source = new CredentialSource { Type = "exchange", Endpoint = "unix:///run/spi/spi.sock", Value = "secret" }
+        };
+        var act = () => adapter.CreateAsync([exchangeWithValue], []);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        var whitespaceInlineValue = new Credential
+        {
+            Name = "tok",
+            Source = new CredentialSource { Type = "inline", Value = "   " }
+        };
+        act = () => adapter.CreateAsync([whitespaceInlineValue], []);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        var missingSource = new Credential { Name = "tok", Source = null! };
+        act = () => adapter.CreateAsync([missingSource], []);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        var typelessWithName = new CredentialBinding
+        {
+            Name = "internal-api",
+            Match = match,
+            Auth = new CredentialAuth { Credential = "spi-signer", Name = "X-Api-Key" }
+        };
+        act = () => adapter.CreateAsync([], [typelessWithName]);
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        handler.Method.Should().BeNull("illegal shapes must fail before reaching the wire");
+    }
+
+    [Fact]
+    public async Task PatchVaultAsync_ShouldRejectIllegalMixedShapesBeforeReachingTheWire()
+    {
+        var handler = new CapturingHandler("""{"revision":2,"credentials":[],"bindings":[]}""");
+        var adapter = CreateAdapter(handler, "fsb-1");
+
+        var act = () => adapter.PatchAsync(new CredentialVaultPatchRequest
+        {
+            Credentials = new CredentialMutationSet
+            {
+                Replace =
+                [
+                    new Credential
+                    {
+                        Name = "corp-resolver",
+                        Source = new ExchangeCredentialSource { Endpoint = " " }
+                    }
+                ]
+            }
+        });
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        handler.Method.Should().BeNull("illegal shapes must fail before reaching the wire");
+    }
+
     private static NetworkPolicyAdapter CreateAdapter(CapturingHandler handler, string sandboxId)
     {
         var client = new HttpClient(handler);

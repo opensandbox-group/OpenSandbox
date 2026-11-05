@@ -410,23 +410,33 @@ internal sealed class HttpClientWrapper
         return await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
     }
 
-    private static async Task<byte[]> ReadContentBytesAsync(HttpContent content, CancellationToken cancellationToken)
+    internal static async Task<byte[]> ReadContentBytesAsync(HttpContent content, CancellationToken cancellationToken)
     {
-        using var source = await content.ReadAsStreamAsync().ConfigureAwait(false);
-        // Preallocate from a declared Content-Length so a large download does not pay the
-        // doubling growth (and the transient copies it produces) of an unbounded MemoryStream;
-        // an unknown or out-of-range length keeps the default growth.
-        var declaredLength = content.Headers.ContentLength;
-        using var buffer = new MemoryStream(
-            declaredLength is > 0 and <= int.MaxValue ? (int)declaredLength.Value : 0);
-        var chunk = new byte[81920];
-        int read;
-        while ((read = await source.ReadAsync(chunk, 0, chunk.Length, cancellationToken).ConfigureAwait(false)) > 0)
+        // Stream acquisition can buffer custom HttpContent before any cancellable read.
+        using var registration = cancellationToken.Register(content.Dispose);
+        try
         {
-            buffer.Write(chunk, 0, read);
-        }
+            using var source = await content.ReadAsStreamAsync().ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            // Preallocate from a declared Content-Length so a large download does not pay the
+            // doubling growth (and the transient copies it produces) of an unbounded MemoryStream;
+            // an unknown or out-of-range length keeps the default growth.
+            var declaredLength = content.Headers.ContentLength;
+            using var buffer = new MemoryStream(
+                declaredLength is > 0 and <= int.MaxValue ? (int)declaredLength.Value : 0);
+            var chunk = new byte[81920];
+            int read;
+            while ((read = await source.ReadAsync(chunk, 0, chunk.Length, cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                buffer.Write(chunk, 0, read);
+            }
 
-        return buffer.ToArray();
+            return buffer.ToArray();
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
     }
 
     /// <summary>
@@ -599,7 +609,7 @@ internal sealed class HttpClientWrapper
     /// connection request timeout.
     /// </para>
     /// </summary>
-    private async Task<HttpResponseMessage> SendWithWakeRetryAsync(
+    internal async Task<HttpResponseMessage> SendWithWakeRetryAsync(
         Func<HttpRequestMessage> requestFactory,
         CancellationToken cancellationToken,
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? sender = null)
@@ -724,7 +734,7 @@ internal sealed class HttpClientWrapper
         }
     }
 
-    private async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    internal async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         if (!response.IsSuccessStatusCode)
         {

@@ -341,6 +341,7 @@ mgr := opensandbox.NewSandboxManager(config)
 tpl, err := mgr.CreateTemplate(ctx, opensandbox.CreateTemplateRequest{
     Image:   "python:3.11",
     Publish: "s3://bucket/templates/py311",
+    Format:  opensandbox.TemplateFormatNative,
     ResourceLimits: map[string]string{
         "cpu": "1", "memory": "512Mi", "disk": "2Gi",
     },
@@ -490,6 +491,7 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `UploadFile(ctx, file, opts)` | Upload a file to the sandbox |
 | `UploadFiles(ctx, entries)` | Upload multiple files to the sandbox |
 | `DownloadFile(ctx, remotePath, rangeHeader, opts...)` | Download a file from the sandbox (optional `DownloadFileOptions` reads by line) |
+| `DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)` | Download a file with HTTP status and range metadata |
 
 **Directory Operations:**
 | Method | Description |

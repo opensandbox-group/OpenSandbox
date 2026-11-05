@@ -823,6 +823,24 @@ func (r *SandboxSnapshotReconciler) updateSnapshotStatusFromSucceededCommitJob(c
 				latest.Status.Containers[i].ImageDigest = digest
 			}
 		}
+		// resume restores rootfs-v1 containers exclusively by digest, so a
+		// snapshot published without them can never be resumed once
+		// completePause has deleted the pods. The commit result is the only
+		// source of those digests and lives only in the commit pod.
+		if latest.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatRootfsV1 &&
+			latest.Status.Phase != sandboxv1alpha1.SandboxSnapshotPhaseSucceed {
+			if missing := containersWithoutDigest(latest.Status.Containers); len(missing) > 0 {
+				reason := "CommitResultIncomplete"
+				message := fmt.Sprintf("commit job succeeded without image digests for containers: %s", strings.Join(missing, ", "))
+				if !found {
+					reason = "CommitResultUnavailable"
+					message = fmt.Sprintf("commit job succeeded but its result is no longer available; image digests were not recorded for containers: %s", strings.Join(missing, ", "))
+				}
+				latest.Status.Phase = sandboxv1alpha1.SandboxSnapshotPhaseFailed
+				applySnapshotPhaseConditions(&latest.Status, reason, message)
+				return r.Status().Update(ctx, latest)
+			}
+		}
 		if latest.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatQEMUV1 {
 			if !found || result.VirtualMachine == nil {
 				return fmt.Errorf("successful QEMU commit job did not report virtualMachine result")
@@ -853,10 +871,36 @@ func (r *SandboxSnapshotReconciler) updateSnapshotStatusFromSucceededCommitJob(c
 	})
 }
 
+func containersWithoutDigest(containers []sandboxv1alpha1.ContainerSnapshot) []string {
+	var missing []string
+	for _, container := range containers {
+		if container.ImageDigest == "" {
+			missing = append(missing, container.ContainerName)
+		}
+	}
+	return missing
+}
+
 func (r *SandboxSnapshotReconciler) getCommitJobResult(ctx context.Context, namespace, jobName string) (*commitJobResult, bool, error) {
+	result, found, err := findCommitJobResult(ctx, r.Client, namespace, jobName)
+	if err != nil || found {
+		return result, found, err
+	}
+	// The informer cache can lag behind the commit Job status: a Job is
+	// reported Succeeded only after its Pod reached a terminal state, but the
+	// Pod update may not have reached the cache yet. Reading the Pod from the
+	// API server keeps a cache miss from being mistaken for a lost result,
+	// which would be an unrecoverable pause failure.
+	if r.APIReader == nil {
+		return nil, false, nil
+	}
+	return findCommitJobResult(ctx, r.APIReader, namespace, jobName)
+}
+
+func findCommitJobResult(ctx context.Context, reader client.Reader, namespace, jobName string) (*commitJobResult, bool, error) {
 	for _, labelKey := range []string{"job-name", "batch.kubernetes.io/job-name"} {
 		podList := &corev1.PodList{}
-		if err := r.List(ctx, podList,
+		if err := reader.List(ctx, podList,
 			client.InNamespace(namespace),
 			client.MatchingLabels{labelKey: jobName},
 		); err != nil {

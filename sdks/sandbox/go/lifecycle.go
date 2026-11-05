@@ -361,17 +361,35 @@ func (c *LifecycleClient) PatchSandboxMetadata(ctx context.Context, id string, p
 // DeleteSandbox requests irreversible sandbox termination.
 // Returns when deletion is accepted; runtime cleanup may continue afterward.
 func (c *LifecycleClient) DeleteSandbox(ctx context.Context, id string) error {
-	return c.doRequest(ctx, "DELETE", "/sandboxes/"+url.PathEscape(id), nil, nil)
+	if err := c.doRequest(ctx, "DELETE", "/sandboxes/"+url.PathEscape(id), nil, nil); err != nil {
+		return err
+	}
+	if c.cache != nil {
+		c.cache.Invalidate(id)
+	}
+	return nil
 }
 
 // PauseSandbox pauses a running sandbox while preserving its state.
 func (c *LifecycleClient) PauseSandbox(ctx context.Context, id string) error {
-	return c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/pause", nil, nil)
+	if err := c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/pause", nil, nil); err != nil {
+		return err
+	}
+	if c.cache != nil {
+		c.cache.Invalidate(id)
+	}
+	return nil
 }
 
 // ResumeSandbox resumes a paused sandbox.
 func (c *LifecycleClient) ResumeSandbox(ctx context.Context, id string) error {
-	return c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/resume", nil, nil)
+	if err := c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/resume", nil, nil); err != nil {
+		return err
+	}
+	if c.cache != nil {
+		c.cache.Invalidate(id)
+	}
+	return nil
 }
 
 // RenewExpiration renews the sandbox's absolute expiration time.
@@ -391,6 +409,10 @@ func (c *LifecycleClient) RenewExpiration(ctx context.Context, id string, expire
 // on the specified port inside the sandbox. Results are cached with LRU+TTL
 // and deduplicated via singleflight. If useServerProxy is non-nil,
 // the server proxy query parameter is included.
+//
+// The useServerProxy option is deprecated: the server-proxied data path is in
+// maintenance mode and only receives security fixes and bug fixes. Route
+// data-plane traffic through the ingress gateway instead.
 func (c *LifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*Endpoint, error) {
 	if c.cache == nil {
 		return c.getEndpointFromServer(ctx, sandboxID, port, useServerProxy)
@@ -402,11 +424,12 @@ func (c *LifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, por
 		useServerProxy: useServerProxy != nil && *useServerProxy,
 	}
 
-	// The shared fetch uses a background context so one caller's deadline
-	// doesn't cancel the request for all waiters. Each caller's ctx is
-	// respected via DoChan select in GetOrFetch.
-	return c.cache.GetOrFetch(ctx, key, func() (*Endpoint, error) {
-		return c.getEndpointFromServer(context.Background(), sandboxID, port, useServerProxy)
+	// The shared fetch uses the cache's flight context rather than ctx so one
+	// caller's deadline doesn't cancel the request for all waiters. It is
+	// cancelled once every waiter has left. Each caller's ctx is respected via
+	// DoChan select in GetOrFetch.
+	return c.cache.GetOrFetch(ctx, key, func(fetchCtx context.Context) (*Endpoint, error) {
+		return c.getEndpointFromServer(fetchCtx, sandboxID, port, useServerProxy)
 	})
 }
 

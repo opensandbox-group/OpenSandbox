@@ -322,7 +322,8 @@ await using var manager = SandboxManager.Create(new SandboxManagerOptions
 var template = await manager.CreateTemplateAsync(new CreateTemplateRequest
 {
     Image = "python:3.11",
-    Publish = "s3://bucket/publish"
+    Publish = "s3://bucket/publish",
+    Format = "native"
 });
 
 while (template.Status.Phase != TemplatePhases.Succeeded)
@@ -536,6 +537,29 @@ await sandbox.CreateCredentialVaultAsync(
                 Name = "x-api-key",
                 Credential = "api-token"
             }
+        }
+    });
+```
+
+Exchange-sourced credentials (OSEP-0025) carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form.
+
+```csharp
+await sandbox.CreateCredentialVaultAsync(
+    new[]
+    {
+        new Credential
+        {
+            Name = "spi-signer",
+            Source = new ExchangeCredentialSource("unix:///run/spi/spi.sock")
+        }
+    },
+    new[]
+    {
+        new CredentialBinding
+        {
+            Name = "internal-api",
+            Match = new CredentialMatch { Hosts = new[] { "*.internal.example.com" } },
+            Auth = CredentialAuth.Exchange("spi-signer")
         }
     });
 ```

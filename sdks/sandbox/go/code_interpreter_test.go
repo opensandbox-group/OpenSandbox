@@ -17,6 +17,7 @@ package opensandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -342,5 +343,49 @@ func TestExecution_Text_CommandPathsKeepLineSeparators(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCodeInterpreter_RejectsUnsuccessfulRuntimeProbe(t *testing.T) {
+	for _, response := range []string{"", "data: {\"type\":\"init\",\"text\":\"probe\"}\n\n", "data: {\"type\":\"stdout\",\"text\":\"partial\"}\n\n", "data: {\"type\":\"execution_complete\",\"exit_code\":1}\n\n"} {
+		t.Run(fmt.Sprintf("response=%q", response), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/command" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, response)
+				}
+			}))
+			defer srv.Close()
+			ci := newTestCodeInterpreter(t, srv.URL)
+			if ci.IsHealthy(context.Background()) {
+				t.Error("a runtime probe without confirmed success must not report healthy")
+			}
+			err := ci.waitRuntimeReady(context.Background(), 30*time.Millisecond, time.Millisecond)
+			var timeout *SandboxReadyTimeoutError
+			if !errors.As(err, &timeout) {
+				t.Errorf("expected readiness timeout for unsuccessful probes, got %v", err)
+			}
+		})
+	}
+}
+
+func TestCodeInterpreter_WaitsForConfirmedRuntimeProbe(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&calls, 1) == 1 {
+			fmt.Fprint(w, "data: {\"type\":\"init\",\"text\":\"probe\"}\n\n")
+			return
+		}
+		// Older servers omit exit_code; the confirmed completion still means success.
+		fmt.Fprint(w, "data: {\"type\":\"execution_complete\"}\n\n")
+	}))
+	defer srv.Close()
+	ci := newTestCodeInterpreter(t, srv.URL)
+	if err := ci.waitRuntimeReady(context.Background(), time.Second, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("expected a second, confirmed probe; got %d calls", got)
 	}
 }

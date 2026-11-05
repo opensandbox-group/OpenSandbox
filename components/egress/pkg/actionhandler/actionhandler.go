@@ -43,6 +43,7 @@ import (
 
 // APIVersion is the only accepted protocol version.
 const APIVersion = "sandbox.fast.io/actions/v1"
+const APIVersionV2 = "sandbox.fast.io/actions/v2"
 
 // Operation is the action operation code.
 type Operation string
@@ -89,6 +90,31 @@ type Revision struct {
 	RuntimeInstanceID string `json:"runtimeInstanceId"`
 	AttachmentID      string `json:"attachmentId"`
 	RouteGeneration   uint64 `json:"routeGeneration"`
+}
+
+// Owner is the complete platform-validated runtime fence carried by Actions
+// v2. It prevents delayed operations from being reinterpreted for a new slot
+// occupant; it is not caller authentication.
+type Owner struct {
+	SandboxUID         string `json:"sandboxUid"`
+	FastletPodUID      string `json:"fastletPodUid"`
+	RuntimeInstanceID  string `json:"runtimeInstanceId"`
+	InstanceGeneration int64  `json:"instanceGeneration"`
+	AssignmentAttempt  int64  `json:"assignmentAttempt"`
+	RouteGeneration    int64  `json:"routeGeneration"`
+	AttachmentID       string `json:"attachmentId"`
+}
+
+func (o Owner) Valid() bool {
+	return o.SandboxUID != "" && o.FastletPodUID != "" && o.RuntimeInstanceID != "" &&
+		o.InstanceGeneration > 0 && o.AssignmentAttempt > 0 && o.RouteGeneration > 0 && o.AttachmentID != ""
+}
+
+func (o Owner) Matches(other Owner) bool { return o == other }
+
+type OwnerObservation struct {
+	State string `json:"state"`
+	Owner Owner  `json:"owner"`
 }
 
 // NetworkAttachment is the network identity material the egress consumes:
@@ -178,11 +204,13 @@ func (b *Binding) InputString() (string, error) {
 
 // Envelope is the full request body of POST /_fastlet/v1/actions.
 type Envelope struct {
+	Mode         string            `json:"mode,omitempty"`
 	APIVersion   string            `json:"apiVersion"`
 	Operation    Operation         `json:"operation"`
 	InvocationID string            `json:"invocationId"`
 	Sandbox      SandboxRef        `json:"sandbox"`
 	Revision     Revision          `json:"revision"`
+	Owner        *Owner            `json:"owner,omitempty"`
 	Attachment   *Attachment       `json:"attachment,omitempty"`
 	Hook         *Hook             `json:"hook,omitempty"`
 	Binding      *Binding          `json:"binding,omitempty"`
@@ -193,11 +221,19 @@ type Envelope struct {
 // the message is not a well-formed, understood action; the caller must fail
 // closed (HTTP 400).
 func ParseEnvelope(body []byte) (*Envelope, error) {
+	return ParseEnvelopeVersion(body, APIVersion)
+}
+
+func ParseEnvelopeV2(body []byte) (*Envelope, error) {
+	return ParseEnvelopeVersion(body, APIVersionV2)
+}
+
+func ParseEnvelopeVersion(body []byte, version string) (*Envelope, error) {
 	var e Envelope
 	if err := json.Unmarshal(body, &e); err != nil {
 		return nil, fmt.Errorf("invalid action envelope: %w", err)
 	}
-	if err := e.Validate(); err != nil {
+	if err := e.ValidateVersion(version); err != nil {
 		return nil, err
 	}
 	return &e, nil
@@ -206,11 +242,27 @@ func ParseEnvelope(body []byte) (*Envelope, error) {
 // Validate checks the protocol-level invariants. Field-level semantics (fence
 // matching, registration state) are the caller's responsibility.
 func (e *Envelope) Validate() error {
-	if e.APIVersion != APIVersion {
-		return fmt.Errorf("unsupported apiVersion %q (want %q)", e.APIVersion, APIVersion)
+	return e.ValidateVersion(APIVersion)
+}
+
+func (e *Envelope) ValidateVersion(version string) error {
+	if e.APIVersion != version {
+		return fmt.Errorf("unsupported apiVersion %q (want %q)", e.APIVersion, version)
 	}
 	if e.Sandbox.UID == "" {
 		return fmt.Errorf("sandbox.uid is required")
+	}
+	if version == APIVersionV2 {
+		if e.Mode != "legacy" {
+			return fmt.Errorf("Actions v2 requires explicit legacy mode; other modes are unsupported")
+		}
+		if e.Owner == nil || !e.Owner.Valid() || e.Owner.SandboxUID != e.Sandbox.UID ||
+			e.Owner.RuntimeInstanceID != e.Revision.RuntimeInstanceID || e.Owner.AttachmentID != e.Revision.AttachmentID ||
+			uint64(e.Owner.RouteGeneration) != e.Revision.RouteGeneration {
+			return fmt.Errorf("Actions v2 requires an owner matching the sandbox and revision")
+		}
+	} else if e.Owner != nil {
+		return fmt.Errorf("Actions v1 must not carry an Actions v2 owner")
 	}
 	switch e.Operation {
 	case OperationSetBinding:
@@ -286,9 +338,10 @@ func (e *Envelope) Fencing() (runtimeInstanceID, attachmentID string) {
 // The MitmCa* fields are additive observability (OSEP-0022 pinned CA):
 // consumers unaware of them ignore the extra JSON keys.
 type StatusResponse struct {
-	APIVersion string `json:"apiVersion"`
-	Ready      bool   `json:"ready"`
-	InstanceID string `json:"instanceId"`
+	APIVersion  string `json:"apiVersion"`
+	Ready       bool   `json:"ready"`
+	InstanceID  string `json:"instanceId"`
+	OwnerStatus bool   `json:"ownerStatus,omitempty"`
 	// MitmCaFingerprint is the pinned MITM CA's SHA-256 fingerprint
 	// (lowercase hex over the DER); empty when MITM is disabled or no CA is
 	// provisioned.

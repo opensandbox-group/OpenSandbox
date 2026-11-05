@@ -16,8 +16,30 @@ import os
 import stat
 
 import pytest
+from fastapi import HTTPException
 
+from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.docker.ossfs_mixin import OSSFSMixin
+
+
+@pytest.mark.parametrize("bucket", ["abc", "my-bucket-01", "a" * 63])
+def test_validate_bucket_name_accepts_valid_names(bucket) -> None:
+    OSSFSMixin._validate_bucket_name(bucket)
+
+
+@pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\t", " "])
+def test_validate_bucket_name_rejects_trailing_whitespace(whitespace) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        OSSFSMixin._validate_bucket_name("my-bucket" + whitespace)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+
+
+@pytest.mark.parametrize("bucket", ["my bucket", "my-bucket\nx", "My-Bucket"])
+def test_validate_bucket_name_rejects_invalid_characters(bucket) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        OSSFSMixin._validate_bucket_name(bucket)
+    assert exc_info.value.status_code == 400
 
 
 def test_write_ossfs_private_config_file_writes_content(tmp_path) -> None:

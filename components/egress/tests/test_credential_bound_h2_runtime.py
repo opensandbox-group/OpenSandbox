@@ -1217,7 +1217,6 @@ def case_go_early_notice(harness, binary, required_version):
         row = harness.wait_connection(lambda state: bool(state["active"]))
         assert_attached(row)
         old_stream = row["active"][0]["stream_id"]
-        old_connection_serial = row["connection_serial"]
         harness.install(2, None, retry=True)
         harness.wait_connection(lambda state: state["fenced"] and state["frozen"] == old_stream)
 

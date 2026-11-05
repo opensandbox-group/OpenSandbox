@@ -65,7 +65,7 @@ class ProductionObserverTests(unittest.TestCase):
         context.client.alpn = b"h2"
         context.client.sni = "example.test"
         context.server.address = ("example.test", 443)
-        token = self.live.admit_tls("example.test").token
+        token = self.live.admit_tls("example.test", destination_port=443).token
         self.live.track(token, context.client)
         root = layers.HttpLayer(context, layers.HTTPMode.transparent)
         adapter = BoundH2Server(context.fork(), self.live, root, token)

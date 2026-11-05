@@ -47,6 +47,7 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Split(splitSSELines())
 	// Do not cap the line length: execd writes each stdout/stderr line of a
 	// command as one event line of unbounded size, and the event is kept in
 	// memory by the handler anyway. The buffer starts at 64KiB and grows.
@@ -130,5 +131,34 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 		case "id":
 			current.ID = value
 		}
+	}
+}
+
+// splitSSELines recognizes LF, CRLF, and CR as required by the SSE format.
+// Dispatch a line as soon as CR arrives; waiting for a possible LF would stall
+// a complete event when the server keeps the stream open without more data.
+func splitSSELines() bufio.SplitFunc {
+	skipLF := false
+	return func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		start := 0
+		if skipLF && len(data) > 0 {
+			skipLF = false
+			if data[0] == '\n' {
+				start = 1
+			}
+		}
+		for i := start; i < len(data); i++ {
+			switch data[i] {
+			case '\r':
+				skipLF = true
+				return i + 1, data[start:i], nil
+			case '\n':
+				return i + 1, data[start:i], nil
+			}
+		}
+		if atEOF && len(data) > start {
+			return len(data), data[start:], nil
+		}
+		return start, nil, nil
 	}
 }

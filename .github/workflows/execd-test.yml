@@ -202,6 +202,21 @@ jobs:
           chmod +x components/execd/tests/init_container.sh
           bash components/execd/tests/init_container.sh
 
+      - name: Mount tracefs
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # The ubuntu-24.04 runner image 20261025.353.x is inconsistent:
+          # some VMs leave tracefs unmounted, others mount it root-owned
+          # 0700 so the runner user cannot stat through it. The smoke
+          # script's host-side precheck stats /sys/kernel/tracing/events
+          # as the runner user (the container reads tracefs as root), so
+          # ensure it is mounted and traversable either way.
+          if [ ! -e /sys/kernel/tracing/events ]; then
+            sudo mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
+          fi
+          sudo chmod 0755 /sys/kernel/tracing
+          [ -e /sys/kernel/tracing/events ]
+
       - name: Execd eBPF bare-container smoke
         if: matrix.os != 'windows-latest'
         shell: bash

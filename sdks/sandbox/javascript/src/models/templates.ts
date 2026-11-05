@@ -53,7 +53,7 @@ export interface TemplateStatus extends Record<string, unknown> {
    */
   phase: TemplatePhase;
   /**
-   * S3 manifest reference of the published artifacts; present when the phase is `Succeeded`.
+   * Published S3 manifest reference or immutable OCI reference; present when the phase is `Succeeded`.
    */
   manifestRef?: string;
   /**
@@ -68,7 +68,7 @@ export interface CreateTemplateRequest extends Record<string, unknown> {
    */
   image: string;
   /**
-   * S3-compatible publish target for the built artifacts, e.g. `s3://bucket/publish`.
+   * Publish destination: `s3://bucket/publish` (native) or `oci://registry/repository` (overlaybd, no tag or digest).
    */
   publish: string;
   /**
@@ -111,7 +111,7 @@ export interface TemplateInfo extends Record<string, unknown> {
    */
   image: string;
   /**
-   * S3-compatible publish target.
+   * S3-compatible or repository-only OCI publish target.
    */
   publish: string;
   /**

@@ -15,7 +15,7 @@ from credential_bound_h2 import BoundH2Server, dependency_versions_supported
 from revision_receiver import Revision
 from mitmproxy import connection, http
 from mitmproxy.addons.proxyserver import Proxyserver
-from mitmproxy.proxy import commands, events, server, server_hooks
+from mitmproxy.proxy import commands, server, server_hooks
 from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.layers import http as layers
 import h2.config
@@ -45,7 +45,7 @@ class WakeupTests(unittest.TestCase):
         context.client.sni = 'example.test'
         context.server.address = ('example.test', 443)
         context.server.tls = True
-        token = self.runtime.admit_tls('example.test').token
+        token = self.runtime.admit_tls('example.test', destination_port=443).token
         self.runtime.track(token, context.client)
         self.root = layers.HttpLayer(context, layers.HTTPMode.transparent)
         self.adapter = BoundH2Server(context.fork(), self.runtime, self.root, token)

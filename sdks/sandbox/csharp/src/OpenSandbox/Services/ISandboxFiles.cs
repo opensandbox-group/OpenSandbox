@@ -192,6 +192,22 @@ public interface ISandboxFiles
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>Optional filesystem capability for HTTP download response metadata.</summary>
+public interface IDownloadSandboxFiles : ISandboxFiles
+{
+    /// <summary>Reads a file as bytes together with HTTP response metadata.</summary>
+    Task<ReadBytesResponse<byte[]>> ReadBytesDetailedAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Reads a file as a byte stream together with HTTP response metadata.</summary>
+    Task<ReadBytesResponse<IAsyncReadBytesStream>> ReadBytesStreamDetailedAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default);
+}
+
 /// <summary>Filesystem capability for explicit execution identities.</summary>
 public interface IIdentitySandboxFiles : ISandboxFiles
 {

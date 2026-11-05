@@ -65,6 +65,12 @@ class TestSandboxHelp:
 
 
 class TestTemplateAndSnapshotHelp:
+    def test_template_create_help_describes_oci_destination(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["template", "create", "--help"])
+        assert result.exit_code == 0
+        assert "oci://registry/repository" in result.output
+        assert "no tag or digest" in " ".join(result.output.split())
+
     @pytest.mark.parametrize("group", ["template", "snapshot"])
     def test_group_help_lists_subcommands(self, runner: CliRunner, group: str) -> None:
         result = runner.invoke(cli, [group, "--help"])

@@ -91,8 +91,21 @@ func (m *SandboxPoolManager) Destroy(ctx context.Context, poolName string, optio
 	drained := 0
 	killed := 0
 	deadline := time.Now().Add(drainTimeout)
+	drainCtx := ctx
+	if drainTimeout > 0 {
+		var cancelDrain context.CancelFunc
+		drainCtx, cancelDrain = context.WithDeadline(ctx, deadline)
+		defer cancelDrain()
+	}
 	for {
-		sandboxID, err := m.stateStore.TryTakeIdle(ctx, poolName)
+		if err := drainCtx.Err(); err != nil {
+			return nil, &PoolDestroyIncompleteError{
+				PoolName: poolName,
+				Reason:   fmt.Sprintf("drain interrupted after %d idle sandboxes drained", drained),
+				Cause:    err,
+			}
+		}
+		sandboxID, err := m.stateStore.TryTakeIdle(drainCtx, poolName)
 		if err != nil {
 			return nil, &PoolDestroyIncompleteError{
 				PoolName: poolName,

@@ -43,7 +43,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `POST /sandboxes/{sandboxId}/resume` - Resume a paused sandbox
 - `POST /sandboxes/{sandboxId}/renew-expiration` - Set the absolute sandbox expiration time
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
-- `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint and required headers; supports `use_server_proxy` and signed-endpoint `expires` parameters
+- `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint and required headers; supports the signed-endpoint `expires` parameter
 - `GET/PUT/PATCH/DELETE /sandboxes/{sandboxId}/networkpolicy` - Inspect and manage the sandbox egress network policy (Fsb persists intent on the Sandbox CR; other backends proxy the sandbox-side egress service)
 - `POST/GET/PATCH/DELETE /sandboxes/{sandboxId}/credential-vault` (+ sanitized `credentials` / `bindings` reads) - Manage the sandbox Credential Vault (fsb relays to the egress-held vault over FastPath; other backends proxy the sandbox-side egress service; values are write-only and never returned)
 - `POST /templates` - Create a fsb template (asynchronous golden-image build)
