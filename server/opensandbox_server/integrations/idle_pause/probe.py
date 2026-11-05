@@ -23,6 +23,8 @@ explicit not-active lets the pause proceed, everything else drops the sweep.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -45,6 +47,9 @@ PROBE_OUTCOME_ERROR = "error"
 
 # Cap on the application-supplied ``message`` carried into the audit line.
 MAX_PROBE_MESSAGE_CHARS = 256
+# Cap on the probe response body; the answer is ``{"active": bool,
+# "message": str}``, so anything larger is not a valid answer.
+MAX_PROBE_BODY_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -85,7 +90,14 @@ class ActivityProber:
         self._client = client or httpx.AsyncClient()
 
     async def probe(self, candidate: SandboxCandidate) -> ProbeVerdict:
-        """Probe one candidate; never raises (every failure is a verdict)."""
+        """Probe one candidate; never raises (every failure is a verdict).
+
+        The sandbox controls the response, so ``timeout_seconds`` bounds the
+        whole exchange (httpx applies a timeout per read, which a slow drip
+        never trips), the body is capped, and any failure while reading or
+        decoding it is an error verdict rather than an exception that would
+        abort the sweep.
+        """
         policy = candidate.policy
         assert policy is not None and policy.active_probe is not None
         probe = policy.active_probe
@@ -96,22 +108,18 @@ class ActivityProber:
             url = _probe_target_url(endpoint, probe.path)
             headers = dict(endpoint.headers or {})
             headers[SKIP_ACTIVITY_HEADER] = SKIP_ACTIVITY_VALUE
-            response = await self._client.get(
-                url, headers=headers, timeout=probe.timeout_seconds
+            body = await asyncio.wait_for(
+                self._fetch_answer(url, headers, probe.timeout_seconds),
+                probe.timeout_seconds,
             )
+            payload = json.loads(body) if body is not None else None
         except Exception as exc:
             logger.debug(
                 f"idle_pause probe request failed sandbox_id={candidate.sandbox_id} "
-                f"error={exc}"
+                f"error={exc!r}"
             )
             return ProbeVerdict(PROBE_OUTCOME_ERROR)
 
-        if response.status_code != 200:
-            return ProbeVerdict(PROBE_OUTCOME_ERROR)
-        try:
-            payload = response.json()
-        except ValueError:
-            return ProbeVerdict(PROBE_OUTCOME_ERROR)
         if not isinstance(payload, dict):
             return ProbeVerdict(PROBE_OUTCOME_ERROR)
         active = payload.get("active")
@@ -124,12 +132,30 @@ class ActivityProber:
             return ProbeVerdict(PROBE_OUTCOME_NOT_ACTIVE, message[:MAX_PROBE_MESSAGE_CHARS])
         return ProbeVerdict(PROBE_OUTCOME_NOT_ACTIVE)
 
+    async def _fetch_answer(
+        self, url: str, headers: dict[str, str], timeout: float
+    ) -> Optional[bytes]:
+        """Return the body of a 200 answer, or None for any other status or
+        a body over ``MAX_PROBE_BODY_BYTES``."""
+        async with self._client.stream(
+            "GET", url, headers=headers, timeout=timeout
+        ) as response:
+            if response.status_code != 200:
+                return None
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body += chunk
+                if len(body) > MAX_PROBE_BODY_BYTES:
+                    return None
+            return bytes(body)
+
     async def aclose(self) -> None:
         if self._client is not None:
             await self._client.aclose()
 
 
 __all__ = [
+    "MAX_PROBE_BODY_BYTES",
     "MAX_PROBE_MESSAGE_CHARS",
     "SKIP_ACTIVITY_HEADER",
     "SKIP_ACTIVITY_VALUE",

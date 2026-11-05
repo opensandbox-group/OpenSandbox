@@ -14,6 +14,8 @@
 
 """ActivityProber tests: routing, sentinel header, and verdict mapping."""
 
+import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -26,6 +28,7 @@ from opensandbox_server.integrations.idle_pause.policy import (
     validate_idle_policy,
 )
 from opensandbox_server.integrations.idle_pause.probe import (
+    MAX_PROBE_BODY_BYTES,
     MAX_PROBE_MESSAGE_CHARS,
     SKIP_ACTIVITY_HEADER,
     SKIP_ACTIVITY_VALUE,
@@ -36,7 +39,7 @@ from opensandbox_server.integrations.idle_pause.probe import (
 )
 
 
-def _candidate() -> SandboxCandidate:
+def _candidate(timeout_seconds: int = 2) -> SandboxCandidate:
     return SandboxCandidate(
         sandbox_id="fsb_x",
         namespace="ns1",
@@ -47,7 +50,9 @@ def _candidate() -> SandboxCandidate:
         policy=validate_idle_policy(
             idle_timeout_seconds=300,
             on_idle="pause",
-            active_probe=ActivityProbe(port=8080, path="/active", timeout_seconds=2),
+            active_probe=ActivityProbe(
+                port=8080, path="/active", timeout_seconds=timeout_seconds
+            ),
         ),
     )
 
@@ -168,6 +173,14 @@ async def test_not_active_carries_capped_message():
         httpx.Response(200, json=["active"]),
         httpx.Response(200, json={"active": "yes"}),
         httpx.Response(200, json={}),
+        # The sandbox controls the body: nesting deep enough to exhaust the
+        # JSON decoder's recursion while staying under the size cap, and a
+        # body over the size cap.
+        httpx.Response(200, content=b"[" * (MAX_PROBE_BODY_BYTES - 96)),
+        httpx.Response(
+            200,
+            json={"active": False, "message": "x" * MAX_PROBE_BODY_BYTES},
+        ),
     ],
 )
 async def test_invalid_answers_are_errors(response):
@@ -209,3 +222,28 @@ async def test_endpoint_builder_failure_is_error():
         await prober.aclose()
 
     assert verdict.outcome == PROBE_OUTCOME_ERROR
+
+
+class _DripStream(httpx.AsyncByteStream):
+    """A 200 body that sends one byte at a time, each within the timeout."""
+
+    async def __aiter__(self):
+        while True:
+            yield b" "
+            await asyncio.sleep(0.2)
+
+
+@pytest.mark.asyncio
+async def test_timeout_bounds_the_whole_probe():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_DripStream())
+
+    prober = _prober(handler, Endpoint(endpoint="https://gateway.example.com"))
+    started = time.monotonic()
+    try:
+        verdict = await asyncio.wait_for(prober.probe(_candidate(timeout_seconds=1)), 5)
+    finally:
+        await prober.aclose()
+
+    assert verdict.outcome == PROBE_OUTCOME_ERROR
+    assert time.monotonic() - started < 2
