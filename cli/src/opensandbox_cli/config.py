@@ -123,6 +123,11 @@ def resolve_config(
       - default_image, default_timeout (str like "10m")
     """
     file_cfg = load_config_file(config_path)
+    for section in ("connection", "output", "defaults"):
+        if section in file_cfg and not isinstance(file_cfg[section], dict):
+            raise click.ClickException(
+                f"Config section '{section}' must be a TOML table (use [{section}])."
+            )
     conn = file_cfg.get("connection", {})
     output_cfg = file_cfg.get("output", {})
     defaults = file_cfg.get("defaults", {})
