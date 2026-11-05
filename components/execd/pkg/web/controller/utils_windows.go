@@ -165,6 +165,9 @@ func MakeDir(dir string, perm model.Permission) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectStagingPath(abs); err != nil {
+		return err
+	}
 
 	_, statErr := os.Stat(abs)
 	existed := statErr == nil

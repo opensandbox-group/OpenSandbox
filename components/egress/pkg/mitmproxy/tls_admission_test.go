@@ -111,7 +111,7 @@ func TestTLSAdmissionPythonOutputReachesOTLP(t *testing.T) {
 		Valid []struct{ Decision, Reason string }
 	}
 	require.NoError(t, json.Unmarshal(fixtureBytes, &fixture))
-	require.Len(t, fixture.Valid, 14)
+	require.Len(t, fixture.Valid, 15)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, python, "-c", `

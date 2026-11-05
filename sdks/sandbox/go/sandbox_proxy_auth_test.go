@@ -392,3 +392,61 @@ func TestResolveEgressProxyModeKeepsConfigProxyKey(t *testing.T) {
 		})
 	}
 }
+
+// Endpoint headers must take precedence using HTTP's case-insensitive names.
+func TestDataPlaneHeadersEndpointPrecedenceIgnoresCase(t *testing.T) {
+	for _, proxy := range []bool{false, true} {
+		config := ConnectionConfig{
+			UseServerProxy: proxy,
+			Headers: map[string]string{
+				"x-routing-hint": "stale",
+				"X-ROUTING-HINT": "also-stale",
+				"X-Custom":       "preserved",
+			},
+		}
+		endpoint := map[string]string{"X-Routing-Hint": "resolved"}
+		headers := config.dataPlaneHeaders(endpoint)
+		if got := countHeaderFold(headers, "X-Routing-Hint"); got != 1 {
+			t.Fatalf("proxy=%v: got %d routing header entries, want 1", proxy, got)
+		}
+		if headers["X-Routing-Hint"] != "resolved" || headers["X-Custom"] != "preserved" {
+			t.Fatalf("proxy=%v: unexpected merged headers: %v", proxy, headers)
+		}
+		if len(config.Headers) != 3 || config.Headers["x-routing-hint"] != "stale" || len(endpoint) != 1 {
+			t.Fatal("merging mutated input headers")
+		}
+	}
+}
+
+func TestDataPlaneClientsUseEndpointHeaderWithDifferentCase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Routing-Hint"); got != "resolved" {
+			t.Errorf("%s: routing header = %q, want resolved", r.URL.Path, got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	config := ConnectionConfig{Headers: map[string]string{"x-routing-hint": "stale"}}
+	endpoint := map[string]string{"X-Routing-Hint": "resolved"}
+	if err := config.execdClient(server.URL, endpoint).Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.egressClient(server.URL, endpoint).GetPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDataPlaneEndpointProxyKeyPrecedenceAndDirectStripping(t *testing.T) {
+	for _, proxy := range []bool{false, true} {
+		config := ConnectionConfig{UseServerProxy: proxy, Headers: map[string]string{"open-sandbox-api-key": "configured"}}
+		headers := config.dataPlaneHeaders(map[string]string{"OPEN-SANDBOX-API-KEY": "endpoint"})
+		if proxy {
+			if countHeaderFold(headers, serverProxyAuthHeader) != 1 || headers[serverProxyAuthHeader] != "endpoint" {
+				t.Fatalf("proxy headers = %v", headers)
+			}
+		} else if countHeaderFold(headers, serverProxyAuthHeader) != 0 {
+			t.Fatal("direct mode retained tenant key")
+		}
+	}
+}

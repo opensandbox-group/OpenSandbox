@@ -137,13 +137,22 @@ func (ci *CodeInterpreter) IsHealthy(ctx context.Context) bool {
 		return false
 	}
 	exec, err := ci.Sandbox.RunCommand(ctx, CodeInterpreterRuntimeCheckCommand, nil)
-	return err == nil && exec != nil && exec.Error == nil
+	return err == nil && runtimeProbeSucceeded(exec)
+}
+
+// runtimeProbeSucceeded requires a confirmed successful foreground execution.
+// A stream ending after init or output alone does not prove Jupyter is ready.
+// RunCommand infers exit code 0 from completion events on older servers too.
+func runtimeProbeSucceeded(exec *Execution) bool {
+	return exec != nil && exec.Error == nil && exec.ExitCode != nil && *exec.ExitCode == 0
 }
 
 // waitRuntimeReady polls the runtime check until it passes or the timeout
 // expires.
 func (ci *CodeInterpreter) waitRuntimeReady(ctx context.Context, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	probeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	var lastErr error
 
 	for time.Now().Before(deadline) {
@@ -151,12 +160,19 @@ func (ci *CodeInterpreter) waitRuntimeReady(ctx context.Context, timeout, interv
 			return ctx.Err()
 		}
 
-		exec, err := ci.Sandbox.RunCommand(ctx, CodeInterpreterRuntimeCheckCommand, nil)
+		exec, err := ci.Sandbox.RunCommand(probeCtx, CodeInterpreterRuntimeCheckCommand, nil)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if probeCtx.Err() != nil {
+			lastErr = fmt.Errorf("code interpreter runtime (jupyter) readiness probe: %w", probeCtx.Err())
+			break
+		}
 		switch {
-		case err == nil && (exec == nil || exec.Error == nil):
+		case err == nil && runtimeProbeSucceeded(exec):
 			return nil
 		case err != nil:
-			lastErr = err
+			lastErr = fmt.Errorf("code interpreter runtime (jupyter) readiness probe: %w", err)
 		default:
 			lastErr = fmt.Errorf("code interpreter runtime (jupyter) is not serving")
 		}

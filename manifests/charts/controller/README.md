@@ -82,6 +82,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.metrics.enabled | bool | `false` | Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`) |
 | controller.metrics.port | int | `8080` | Port for the metrics endpoint |
 | controller.metrics.secure | bool | `false` | Serve metrics over HTTPS with authn/authz (`--metrics-secure`). Set to false to serve plain HTTP for scraping without TLS/RBAC (e.g. PodMonitoring). |
+| controller.namespaces | list | `[]` | Namespaces used to scope the controller informer cache (`--namespaces`). Empty (default) watches the whole cluster. On large shared clusters, list the namespaces holding Pool/BatchSandbox workloads to shrink the cache and avoid startup OOMs. Every watched namespace (CRs and their Pods/Jobs) must be listed; multi-tenant deployments spread across many namespaces should keep this empty. |
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
@@ -94,10 +95,10 @@ The following table lists the configurable parameters of the chart and their def
 | controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration. Shares the health-probe port with livenessProbe. |
 | controller.replicaCount | int | `1` | Number of controller replicas |
 | controller.resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource requests and limits for the controller |
-| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.0","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
+| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.1","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
 | controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs |
 | controller.snapshot.containerdSocketPath | string | `""` | Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag. |
-| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.0"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.2.0 |
+| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.1"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.2.1-rc.1 |
 | controller.snapshot.imageCommitterPodTemplate | object | `{}` | PodTemplateSpec overlay for image-committer commit Job Pods. |
 | controller.snapshot.imageCommitterPullSecret | string | `""` | Secret name for pulling the image-committer image in commit Jobs. Required when imageCommitterImage is stored in a private registry. |
 | controller.snapshot.imageURITemplate | string | `""` | Go named-field template for snapshot image URIs. Empty preserves default naming. |

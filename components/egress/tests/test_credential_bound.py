@@ -161,7 +161,8 @@ class _ClientHelloData:
     ) -> None:
         self.client_hello = _ClientHello(sni, extensions)
         client = client_conn if client_conn is not None else _ClientConn(sni)
-        self.context = types.SimpleNamespace(client=client)
+        self.context = types.SimpleNamespace(
+            client=client, server=types.SimpleNamespace(address=("192.0.2.1", 443)))
         self.ignore_connection = False
 
     @property
@@ -538,12 +539,12 @@ class CredentialBoundRequestTest(unittest.TestCase):
 
     def test_plain_http_is_untouched(self) -> None:
         conn = _ClientConn(sni="api.example.com")
-        data = _ClientHelloData("api.example.com", conn)
-        self.system.tls_clienthello(data)
         flow = _Flow(client_conn=conn)
         flow.request.scheme = "http"
         flow.request.port = 80
-        self.system.requestheaders(flow)
+        with mock.patch.object(self.runtime, "admit_tls") as admit:
+            self.system.requestheaders(flow)
+            admit.assert_not_called()
         self.assertNotIn("Authorization", flow.request.headers)
         self.assertIsNone(flow.response)
 

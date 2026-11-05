@@ -346,6 +346,9 @@ class ECHOpaqueRuntimeTest(unittest.TestCase):
                 "--set", "connection_strategy=lazy",
                 "--set", "flow_detail=0",
                 "--set", "ssl_verify_upstream_trusted_ca=" + str(self.root / "origin.pem"),
+                # The non-ECH control models canonical TLS admission while the
+                # loopback origin uses a high port; this is not 443/nft E2E.
+                "-s", str(Path(__file__).resolve().parent / "fixtures" / "canonical_port_443.py"),
                 "-s", str(MITMSCRIPTS / "system.py"),
             ],
             env=env,

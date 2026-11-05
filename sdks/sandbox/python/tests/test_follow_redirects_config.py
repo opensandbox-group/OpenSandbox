@@ -18,11 +18,15 @@ import pytest
 
 from opensandbox.adapters.command_adapter import CommandsAdapter
 from opensandbox.adapters.health_adapter import HealthAdapter
+from opensandbox.adapters.network_policy_adapter import NetworkPolicyAdapter
 from opensandbox.adapters.sandboxes_adapter import SandboxesAdapter
 from opensandbox.config import ConnectionConfig, ConnectionConfigSync
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
 from opensandbox.sync.adapters.health_adapter import HealthAdapterSync
+from opensandbox.sync.adapters.network_policy_adapter import (
+    NetworkPolicyAdapterSync,
+)
 from opensandbox.sync.adapters.sandboxes_adapter import SandboxesAdapterSync
 
 CapturedRequest = tuple[
@@ -566,3 +570,176 @@ def test_sync_sse_client_follows_redirects_from_config() -> None:
     assert response.status_code == 204
     assert [response.status_code for response in response.history] == [307]
     assert transport.paths == ["/start", "/final"]
+
+
+class _NpRedirectTransport(httpx.BaseTransport):
+    """Redirect transport for adapters whose base URL carries the /v1 prefix."""
+
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.paths.append(request.url.path)
+        if request.url.path.endswith("/start"):
+            return httpx.Response(
+                307,
+                headers={"Location": "/final"},
+                request=request,
+            )
+        return httpx.Response(204, request=request)
+
+
+class _NpAsyncRedirectTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.paths.append(request.url.path)
+        if request.url.path.endswith("/start"):
+            return httpx.Response(
+                307,
+                headers={"Location": "/final"},
+                request=request,
+            )
+        return httpx.Response(204, request=request)
+
+
+@pytest.mark.asyncio
+async def test_async_network_policy_adapter_honors_redirect_config() -> None:
+    transport = _NpAsyncRedirectTransport()
+    cfg = ConnectionConfig(protocol="http", transport=transport, follow_redirects=True)
+    adapter = NetworkPolicyAdapter(cfg, "sandbox-1")
+
+    assert adapter._client._follow_redirects is True
+    assert adapter._httpx_client.follow_redirects is True
+
+    response = await adapter._httpx_client.get("/start")
+    await adapter._httpx_client.aclose()
+
+    assert response.status_code == 204
+    assert [response.status_code for response in response.history] == [307]
+    assert transport.paths == ["/v1/start", "/final"]
+
+
+@pytest.mark.asyncio
+async def test_async_network_policy_adapter_does_not_follow_redirects_by_default() -> (
+    None
+):
+    transport = _NpAsyncRedirectTransport()
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    adapter = NetworkPolicyAdapter(cfg, "sandbox-1")
+
+    assert adapter._client._follow_redirects is False
+    assert adapter._httpx_client.follow_redirects is False
+
+    response = await adapter._httpx_client.get("/start")
+    await adapter._httpx_client.aclose()
+
+    assert response.status_code == 307
+    assert response.history == []
+    assert transport.paths == ["/v1/start"]
+
+
+@pytest.mark.asyncio
+async def test_async_network_policy_event_hooks_are_preserved_and_strip_hook_runs_last() -> (
+    None
+):
+    transport = _AsyncCrossOriginRedirectTransport()
+    request_hosts: list[str | None] = []
+
+    async def request_hook(request: httpx.Request) -> None:
+        request_hosts.append(request.url.host)
+        request.headers["OPEN-SANDBOX-API-KEY"] = "hook-secret"
+
+    cfg = ConnectionConfig(
+        api_key="secret",
+        domain="sandbox.local:8080",
+        protocol="http",
+        transport=transport,
+        follow_redirects=True,
+        event_hooks={"request": [request_hook]},
+    )
+    adapter = NetworkPolicyAdapter(cfg, "sandbox-1")
+
+    hooks = adapter._httpx_client.event_hooks["request"]
+    assert hooks[0] is request_hook
+    assert len(hooks) == 2
+
+    response = await adapter._httpx_client.get("/start")
+    await adapter._httpx_client.aclose()
+
+    assert response.status_code == 204
+    assert request_hosts == ["sandbox.local", "redirect.local"]
+    assert transport.requests == [
+        ("sandbox.local", "/v1/start", "hook-secret", None, None, None),
+        ("redirect.local", "/final", None, None, None, None),
+    ]
+
+
+def test_sync_network_policy_adapter_honors_redirect_config() -> None:
+    transport = _NpRedirectTransport()
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=transport, follow_redirects=True
+    )
+    adapter = NetworkPolicyAdapterSync(cfg, "sandbox-1")
+
+    assert adapter._client._follow_redirects is True
+    assert adapter._httpx_client.follow_redirects is True
+
+    response = adapter._httpx_client.get("/start")
+    adapter._httpx_client.close()
+
+    assert response.status_code == 204
+    assert [response.status_code for response in response.history] == [307]
+    assert transport.paths == ["/v1/start", "/final"]
+
+
+def test_sync_network_policy_adapter_does_not_follow_redirects_by_default() -> None:
+    transport = _NpRedirectTransport()
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    adapter = NetworkPolicyAdapterSync(cfg, "sandbox-1")
+
+    assert adapter._client._follow_redirects is False
+    assert adapter._httpx_client.follow_redirects is False
+
+    response = adapter._httpx_client.get("/start")
+    adapter._httpx_client.close()
+
+    assert response.status_code == 307
+    assert response.history == []
+    assert transport.paths == ["/v1/start"]
+
+
+def test_sync_network_policy_event_hooks_are_preserved_and_strip_hook_runs_last() -> (
+    None
+):
+    transport = _CrossOriginRedirectTransport()
+    request_hosts: list[str | None] = []
+
+    def request_hook(request: httpx.Request) -> None:
+        request_hosts.append(request.url.host)
+        request.headers["OPEN-SANDBOX-API-KEY"] = "hook-secret"
+
+    cfg = ConnectionConfigSync(
+        api_key="secret",
+        domain="sandbox.local:8080",
+        protocol="http",
+        transport=transport,
+        follow_redirects=True,
+        event_hooks={"request": [request_hook]},
+    )
+    adapter = NetworkPolicyAdapterSync(cfg, "sandbox-1")
+
+    hooks = adapter._httpx_client.event_hooks["request"]
+    assert hooks[0] is request_hook
+    assert len(hooks) == 2
+
+    response = adapter._httpx_client.get("/start")
+    adapter._httpx_client.close()
+
+    assert response.status_code == 204
+    assert request_hosts == ["sandbox.local", "redirect.local"]
+    assert transport.requests == [
+        ("sandbox.local", "/v1/start", "hook-secret", None, None, None),
+        ("redirect.local", "/final", None, None, None, None),
+    ]

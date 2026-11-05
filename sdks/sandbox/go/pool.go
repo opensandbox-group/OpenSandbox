@@ -75,7 +75,11 @@ func (p *DefaultSandboxPool) Start(ctx context.Context) error {
 	if p.lifecycleState == PoolLifecycleStopped && p.shutdownDone != nil {
 		ch := p.shutdownDone
 		p.mu.Unlock()
-		<-ch
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		p.mu.Lock()
 		// Re-check after re-acquiring lock — another goroutine may have started or shutdown initiated.
 		if p.lifecycleState == PoolLifecycleRunning || p.lifecycleState == PoolLifecycleStarting {
@@ -180,9 +184,8 @@ func (p *DefaultSandboxPool) reconcileLoop(ctx context.Context) {
 		case <-p.done:
 			return
 		case <-p.ticker.C:
-			if p.reconciler.shouldBackoff() {
-				continue
-			}
+			// Backoff gates creation inside reconcileTick, not maintenance:
+			// keep observing destroy fences, reaping, and shrinking idle entries.
 			// Do not use ReconcileInterval as context timeout — the interval
 			// controls how often ticks fire, not how long each tick may run.
 			// Sandbox creation has its own timeouts (WarmupReadyTimeout).
@@ -759,7 +762,11 @@ func (p *DefaultSandboxPool) Shutdown(ctx context.Context, graceful bool) error 
 		ch := p.shutdownDone
 		p.mu.Unlock()
 		if ch != nil {
-			<-ch
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		return nil
 	}

@@ -49,6 +49,21 @@ spec:
         # (falling back to the built-in catalog would inject /usr/local/bin
         # asset paths the node readiness loop never installs).
         - --runtime-environment-namespace={{ include "fast-sandbox.namespace" . }}
+        # Informer-cache scoping and API-client tuning (opt-in; empty/0 keeps
+        # cluster-wide watching and the client-go defaults). Upstream requires
+        # kubeClientQPS and kubeClientBurst as a pair and a namespaces set
+        # that covers every namespace holding SandboxPool/Sandbox objects
+        # plus the runtime environment namespace; the controller refuses to
+        # start when either is violated.
+        {{- with .Values.controller.namespaces }}
+        - --namespaces={{ join "," . }}
+        {{- end }}
+        {{- if gt (.Values.controller.kubeClientQPS | float64) 0.0 }}
+        - --kube-client-qps={{ .Values.controller.kubeClientQPS }}
+        {{- end }}
+        {{- if gt (.Values.controller.kubeClientBurst | int) 0 }}
+        - --kube-client-burst={{ .Values.controller.kubeClientBurst }}
+        {{- end }}
         env:
         - name: FAST_SANDBOX_ROUTE_SIGNING_PRIVATE_KEY
           valueFrom:

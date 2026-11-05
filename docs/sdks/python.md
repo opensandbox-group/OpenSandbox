@@ -249,6 +249,8 @@ manual = await Sandbox.create(
 
 Resolving an endpoint confirms that a route exists; it does not confirm that the application on that port is healthy. For service readiness, make a bounded request to the application's health endpoint and include the returned endpoint headers.
 
+Endpoint-cache invalidation is scoped to the affected sandbox. An in-flight lookup for a different sandbox can still populate the cache; a lookup invalidated for its own sandbox cannot repopulate it with an older endpoint. This applies to both the synchronous and asynchronous Python clients.
+
 With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
@@ -560,15 +562,14 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 | `event_hooks`     | Additional httpx hooks for adapter clients | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry); custom transports must honor request timeouts  | SDK-created per instance     | -                      |
 | `retry_policy`    | Automatic retry policy; streaming requests only get its wake retry (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
-| `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
 | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `False` | - |
 
-The Python Code Interpreter inherits the sandbox's connection configuration. With `use_server_proxy=True`, context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
+The Python Code Interpreter inherits the sandbox's connection configuration. With the deprecated `use_server_proxy=True` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
 When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
 
-File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. This applies to both direct chunked uploads and uploads through the server proxy. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
+File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 
 `ConnectionConfig.event_hooks` accepts async httpx hooks, while `ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured request hooks run before the SDK safety hook, so they cannot re-add protected OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors `follow_redirects` and the SDK safety hook, but does not invoke configured user hooks.
 

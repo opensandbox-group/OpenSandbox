@@ -102,7 +102,6 @@ def main() -> None:
     cfg = ConnectionConfigSync(
         domain=BASE_URL,
         api_key=API_KEY or None,
-        use_server_proxy=True,
     )
 
     sbx = None

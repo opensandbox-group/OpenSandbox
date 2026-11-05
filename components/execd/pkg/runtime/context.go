@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"k8s.io/client-go/util/retry"
@@ -34,27 +35,13 @@ import (
 
 // CreateContext provisions a kernel-backed session and returns its ID.
 // Bash language uses Jupyter kernel like other languages; for pipe-based bash sessions use CreateBashSession (session API).
-func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
+// It keeps retrying while Jupyter starts, until ctx is done.
+func (c *Controller) CreateContext(ctx context.Context, req *CreateContextRequest) (string, error) {
 	if c.baseURL == "" || len(c.jupyterTokens()) == 0 {
 		return "", errJupyterNotConfigured
 	}
 
-	var (
-		client  *jupyter.Client
-		session *jupytersession.Session
-		err     error
-	)
-
-	err = retry.OnError(kernelWaitingBackoff, func(err error) bool {
-		if errors.Is(err, errJupyterNotConfigured) {
-			return false
-		}
-		log.Error("jupyter: create session failed, retrying: %v", err)
-		return err != nil
-	}, func() error {
-		client, session, err = c.createJupyterContext(*req)
-		return err
-	})
+	client, session, err := c.waitForJupyterContext(ctx, *req)
 	if err != nil {
 		return "", err
 	}
@@ -160,30 +147,7 @@ func (c *Controller) createDefaultLanguageJupyterContext(ctx context.Context, la
 		return errJupyterNotConfigured
 	}
 
-	var (
-		client  *jupyter.Client
-		session *jupytersession.Session
-		err     error
-	)
-	err = retry.OnError(kernelWaitingBackoff, func(err error) bool {
-		if ctx != nil && ctx.Err() != nil {
-			return false
-		}
-		if errors.Is(err, errJupyterNotConfigured) {
-			return false
-		}
-		log.Error("jupyter: create default context failed, retrying: %v", err)
-		return err != nil
-	}, func() error {
-		if ctx != nil && ctx.Err() != nil {
-			return ctx.Err()
-		}
-		client, session, err = c.createJupyterContext(CreateContextRequest{
-			Language: language,
-			Cwd:      "",
-		})
-		return err
-	})
+	client, session, err := c.waitForJupyterContext(ctx, CreateContextRequest{Language: language})
 	if err != nil {
 		return err
 	}
@@ -195,6 +159,30 @@ func (c *Controller) createDefaultLanguageJupyterContext(ctx context.Context, la
 		language: language,
 	})
 	return nil
+}
+
+// waitForJupyterContext retries createJupyterContext while Jupyter starts. It
+// stops on success, on missing configuration, or once ctx is done.
+func (c *Controller) waitForJupyterContext(ctx context.Context, req CreateContextRequest) (*jupyter.Client, *jupytersession.Session, error) {
+	var (
+		client  *jupyter.Client
+		session *jupytersession.Session
+	)
+	err := retry.OnError(kernelWaitingBackoff, func(err error) bool {
+		if ctx.Err() != nil || errors.Is(err, errJupyterNotConfigured) {
+			return false
+		}
+		log.Error("jupyter: create context failed, retrying: %v", err)
+		return true
+	}, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var err error
+		client, session, err = c.createJupyterContext(req)
+		return err
+	})
+	return client, session, err
 }
 
 // createJupyterContext performs the actual context creation workflow.
@@ -232,23 +220,28 @@ func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyte
 		return nil, nil, err
 	}
 
-	kernels, err := client.ListKernels()
-	if err != nil {
+	if err := kernelListed(client, jupyterSession.Kernel.ID); err != nil {
+		// The caller retries with a new session; do not leave this one behind.
+		if deleteErr := client.DeleteSession(jupyterSession.ID); deleteErr != nil {
+			log.Warn("jupyter: delete session %s after failed create: %v", jupyterSession.ID, deleteErr)
+		}
 		return nil, nil, err
 	}
 
-	found := false
+	return client, jupyterSession, nil
+}
+
+func kernelListed(client *jupyter.Client, kernelID string) error {
+	kernels, err := client.ListKernels()
+	if err != nil {
+		return err
+	}
 	for _, k := range kernels {
-		if k.ID == jupyterSession.Kernel.ID {
-			found = true
-			break
+		if k.ID == kernelID {
+			return nil
 		}
 	}
-	if !found {
-		return nil, nil, errors.New("kernel not found")
-	}
-
-	return client, jupyterSession, nil
+	return errors.New("kernel not found")
 }
 
 func (c *Controller) storeJupyterKernel(sessionID string, kernel *jupyterKernel) {
@@ -259,8 +252,15 @@ func (c *Controller) jupyterClient() *jupyter.Client {
 	return c.jupyterClientWithToken(c.jupyterToken())
 }
 
+// jupyterRequestTimeout bounds each Jupyter REST call so a server that accepts
+// connections but never answers cannot stall context creation. It leaves room
+// for POST /api/sessions, which starts the kernel. Kernel execution uses a
+// websocket and is not affected.
+var jupyterRequestTimeout = 30 * time.Second
+
 func (c *Controller) jupyterClientWithToken(token string) *jupyter.Client {
 	httpClient := &http.Client{
+		Timeout: jupyterRequestTimeout,
 		Transport: &jupyter.AuthTransport{
 			Token: token,
 			Base:  http.DefaultTransport,

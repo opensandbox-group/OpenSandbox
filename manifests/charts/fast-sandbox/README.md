@@ -56,10 +56,13 @@ The following table lists the configurable parameters of the chart and their def
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
 | controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.0"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.1-rc.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
 | controller.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
+| controller.kubeClientBurst | int | `0` | API-server client burst budget for the rate limiter (upstream "--kube-client-burst" flag). Must be set together with kubeClientQPS; 0 keeps the client-go default. |
+| controller.kubeClientQPS | int | `0` | API-server client rate limit in queries per second for the shared controller client (upstream "--kube-client-qps" flag; speeds up the initial cache-sync LISTs on large clusters; watches are exempt). Must be set together with kubeClientBurst; 0 keeps the client-go default. |
+| controller.namespaces | list | `[]` | Namespaces the controller informer cache watches; empty watches the whole cluster (upstream "--namespaces" flag, introduced at the f44561a pin). When set, the list must cover every namespace holding SandboxPool/Sandbox/SandboxTemplate objects plus systemNamespace (the runtime environment ConfigMap); the controller refuses to start otherwise. Keep empty for multi-tenant deployments where sandboxes span many namespaces (the OpenSandbox default); scope it only when this control plane shares a large cluster with unrelated workloads and the cluster-wide initial cache sync is too heavy. |
 | controller.nodeSelector | object | `{}` | Node selector for the controller pod. |
 | controller.podAnnotations | object | `{}` | Extra annotations merged into the controller pod template annotations. |
 | controller.podLabels | object | `{}` | Extra labels merged into the controller pod template labels. |

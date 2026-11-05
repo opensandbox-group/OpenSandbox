@@ -386,7 +386,7 @@ class Fixture:
         self.ctx.server.tls = upstream_tls
         self.handler = handler_type(self.ctx, None)
         self.handler.runtime = self.process
-        admitted = self.process.admit_tls("example.test")
+        admitted = self.process.admit_tls("example.test", destination_port=443)
         assert admitted.token is not None
         assert self.process.track(admitted.token, self.ctx.client)
         self.handler.connected_gate = self.sched.loop.create_future()
@@ -726,7 +726,7 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
                     elif changed == "current_io_missing":
                         removed = f.handler.transports.pop(f.item.connection)
                     elif changed == "runtime_token":
-                        new = f.process.admit_tls("example.test").token
+                        new = f.process.admit_tls("example.test", destination_port=443).token
                         self.assertTrue(f.process.track(new, f.ctx.client))
                     elif changed == "runtime_adapter":
                         f.process._h2[id(f.ctx.client)] = (
@@ -949,7 +949,7 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
         other = connection.Client(
             peername=("127.0.0.1", 1), sockname=("127.0.0.1", 443)
         )
-        other_token = f.process.admit_tls("example.test").token
+        other_token = f.process.admit_tls("example.test", destination_port=443).token
         self.assertTrue(f.process.track(other_token, other))
         with (
             mock.patch.object(
@@ -1064,7 +1064,7 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
         context.client.sni = "example.test"
         context.server.address = ("example.test", 443)
         context.server.tls = True
-        admission = runtime.admit_tls("example.test")
+        admission = runtime.admit_tls("example.test", destination_port=443)
         self.assertTrue(runtime.track(admission.token, context.client))
         addons = {"nextlayer": NextLayerSelector(), "proxyserver": proxyserver}
         master = SimpleNamespace(addons=SimpleNamespace(get=addons.get))

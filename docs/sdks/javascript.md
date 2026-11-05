@@ -232,6 +232,8 @@ Execute commands and handle output streams in real-time.
 
 Command and code-interpreter event streams accept LF, CRLF, and CR line endings, including when a line ending is split across network chunks.
 
+`timeoutSeconds` on `commands.run()` and `commands.runInSession()` is rounded to the nearest whole millisecond, with a minimum of 1 ms for positive values, so a positive sub-millisecond timeout cannot disable the timeout. Omitted timeouts and explicit zero retain the server defaults. Negative or non-finite values, including values that overflow the millisecond conversion, are rejected before a request is sent.
+
 ```ts
 import type { ExecutionHandlers } from "@alibaba-group/opensandbox";
 
@@ -505,7 +507,6 @@ An explicit `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `apiKey` a
 | `requestTimeoutSeconds` | Request timeout applied to SDK HTTP calls                                                                    | `30`             | -                      |
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
-| `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
 | `enableTracing` | Enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing) | `false` | - |
 | `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
@@ -557,7 +558,7 @@ credential replay. Node.js is unaffected.
 :::
 
 The JavaScript Code Interpreter SDK inherits the sandbox's connection
-configuration. With `useServerProxy: true`, context requests and streamed code
+configuration. With the deprecated `useServerProxy: true` (maintenance mode), context requests and streamed code
 execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server
 authentication. In direct mode, the SDK does not attach this key to code
 execution requests.

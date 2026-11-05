@@ -22,6 +22,10 @@
     },
     {
       "decision": "deny",
+      "reason": "non_canonical_port"
+    },
+    {
+      "decision": "deny",
       "reason": "unknown_identity"
     },
     {

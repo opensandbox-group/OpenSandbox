@@ -973,7 +973,13 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    /** @description Whether to return a server-proxied URL. Cannot be combined with `expires`. */
+                    /**
+                     * @deprecated
+                     * @description Deprecated: the server-proxied data path is in maintenance mode and only
+                     *     receives security fixes and bug fixes; data-plane traffic should be served by
+                     *     the ingress gateway. When true, returns a server-proxied URL. Cannot be
+                     *     combined with `expires`.
+                     */
                     use_server_proxy?: boolean;
                     /**
                      * @description Optional. When set, the server **issues a signed** access route (OSEP-0011). The value
