@@ -110,7 +110,7 @@ func (c *subjectIPCClient) post(ctx context.Context, path string, body []byte) (
 
 // SubjectUnixTransport binds a Transport to one session and exact subject. It
 // does not register the target and cannot be retargeted after construction.
-// This v2 adapter is installation-only; no production launch uses it.
+// This v2 adapter is installation-only; it never enables admission.
 type SubjectUnixTransport struct {
 	ipc       *subjectIPCClient
 	control   string
@@ -123,6 +123,17 @@ var _ Transport = (*SubjectUnixTransport)(nil)
 
 func (*SubjectUnixTransport) String() string   { return "revision.SubjectUnixTransport" }
 func (*SubjectUnixTransport) GoString() string { return "revision.SubjectUnixTransport{}" }
+
+// SubjectTransportRejection carries a confirmed v2 error outcome. Error text
+// remains bounded and credential-free; callers must classify Outcome against a
+// closed vocabulary before logging it. Existing errors.Is checks are unchanged.
+type SubjectTransportRejection struct {
+	Outcome string
+}
+
+func (*SubjectTransportRejection) Error() string    { return ErrTransportRejected.Error() }
+func (*SubjectTransportRejection) GoString() string { return "revision.SubjectTransportRejection{}" }
+func (*SubjectTransportRejection) Unwrap() error    { return ErrTransportRejected }
 
 // NewSubjectUnixTransport constructs a transport without dialing. The server
 // must have the same control generation, token, and snapshot limit.
@@ -211,6 +222,12 @@ func (t *SubjectUnixTransport) do(ctx context.Context, path string, value any) (
 		return nil, err
 	}
 	if status != http.StatusOK {
+		var outcome string
+		if validSubjectJSON(data) && decodeStrictObject(data, map[string]func(*json.Decoder) error{
+			"error": subjectField(&outcome),
+		}) == nil && outcome != "" {
+			return nil, &SubjectTransportRejection{Outcome: outcome}
+		}
 		return nil, ErrTransportRejected
 	}
 	response, err := decodeSubjectRevisionResponse(data)

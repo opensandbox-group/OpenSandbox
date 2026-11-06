@@ -671,6 +671,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		log.Errorf("subject %s: binding policy commit failed: %v", subj, err)
 		return http.StatusInternalServerError, fmt.Errorf("binding policy commit: %w", err)
 	}
+	s.recordBindingSnapshot(subj, fence)
 	s.finishRebind(subj, token)
 	policyCommit := time.Since(policyStarted)
 	log.Infof("subject %s: SET_BINDING applied (state=%s) total=%dms denyFirstInstall=%dms policyCommit=%dms",

@@ -16,11 +16,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"math"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
@@ -39,29 +43,38 @@ type fastSandboxSubjectDrain struct {
 	// Unbounded: action intents are recorded only inside the serial actionGate,
 	// so growth is limited by action rate; stale intents are dropped before send.
 	// Child publication replaces the queue with the current replay set.
-	queue    []fastSandboxSubjectIntent
-	degraded map[string]bool
-	deadline time.Duration
-	fences   map[subject.Subject]subject.Fencing // successful registrations minus actual retirements; observation only
+	queue     []fastSandboxSubjectIntent
+	degraded  map[string]bool
+	deadline  time.Duration
+	snapshots map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
+	fences    map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
 }
 
 type fastSandboxSubjectEpoch struct {
-	client *revision.SubjectLifecycleClient
-	ctx    context.Context
-	cancel context.CancelFunc
+	client  *revision.SubjectLifecycleClient
+	handoff mitmproxy.SubjectRevisionIPCConfig
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 type fastSandboxSubjectIntent struct {
-	subj   subject.Subject
-	fence  subject.Fencing
-	target revision.SubjectTarget
-	unload bool
+	subj     subject.Subject
+	fence    subject.Fencing
+	target   revision.SubjectTarget
+	unload   bool
+	epoch    *fastSandboxSubjectEpoch
+	snapshot *fastSandboxSubjectSnapshot
+}
+
+type fastSandboxSubjectSnapshot struct {
+	payload                    []byte
+	vaultRevision, policyEpoch int64
 }
 
 func (s *fastSandboxPolicyServer) startSubjectDrain() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, fences: make(map[subject.Subject]subject.Fencing)}
+	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool)}
 	for subj, fence := range s.subjFence {
 		d.fences[subj] = fence
 	}
@@ -80,7 +93,7 @@ func (d *fastSandboxSubjectDrain) signal() {
 // Publication and replay are one mu transaction, so later SETs follow replay.
 // fences mirrors successful registrations and actual Unregister/eviction,
 // independently of best-effort file purges. No registry lock is needed here.
-func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectLifecycleClient) {
+func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectLifecycleClient, handoff mitmproxy.SubjectRevisionIPCConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.subjectDrain
@@ -91,7 +104,7 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 		d.current.cancel()
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	d.current = &fastSandboxSubjectEpoch{client: client, ctx: ctx, cancel: cancel}
+	d.current = &fastSandboxSubjectEpoch{client: client, handoff: handoff, ctx: ctx, cancel: cancel}
 	d.queue = nil // old process intents cannot apply to the new sequence owner
 	d.degraded = make(map[string]bool)
 	subjects := make([]subject.Subject, 0, len(d.fences))
@@ -101,6 +114,9 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 	sort.Slice(subjects, func(i, j int) bool { return subjects[i] < subjects[j] })
 	for _, subj := range subjects {
 		s.recordSubjectIntentLocked(subj, d.fences[subj], false)
+		if snapshot := d.snapshots[subj]; snapshot != nil {
+			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot})
+		}
 	}
 	d.signal()
 }
@@ -133,14 +149,108 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 		return
 	} // invalid/failed registrations have no IPC target
 	if unload {
+		d.dropInstallsLocked(target)
 		if current, ok := d.fences[subj]; ok && current.Matches(fence) {
 			delete(d.fences, subj)
+			delete(d.snapshots, subj)
 		}
 	} else {
+		if old, exists := d.fences[subj]; exists && !old.Matches(fence) {
+			d.dropInstallsLocked(mustSubjectTarget(subj, old))
+			delete(d.snapshots, subj)
+		}
 		d.fences[subj] = fence
 	}
-	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload})
+	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload, epoch: d.current})
 	d.signal()
+}
+
+// Targets here have already passed recordSubjectIntentLocked validation.
+func mustSubjectTarget(subj subject.Subject, fence subject.Fencing) revision.SubjectTarget {
+	target, _ := fastSandboxSubjectTarget(strings.TrimPrefix(string(subj), "s-"), fence)
+	return target
+}
+
+// Called after the binding policy commits, while policyCommitMu is still held.
+// ActiveSnapshot returns an owned clone of the Store's committed render cache.
+// Marshal stays under s.mu so the payload, revisions and fence freeze together;
+// no registry lookup, resolver, or IPC is performed here.
+func (s *fastSandboxPolicyServer) recordBindingSnapshot(subj subject.Subject, fence subject.Fencing) {
+	if s.subjectDrain == nil { // set once at attach, before handlers start
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.subjectDrain
+	if current, ok := d.fences[subj]; !ok || !current.Matches(fence) {
+		return
+	}
+	// The registry itself has no capacity cap. Bound the observation mirror
+	// independently to the receiver's subject budget without failing SET.
+	if d.snapshots[subj] == nil && len(d.snapshots) >= fastSandboxRevisionMaxSubjects {
+		d.degradeLocked("subject_capacity_exhausted")
+		return
+	}
+	var snapshot credentialvault.ActiveSnapshot
+	var err error
+	if entry, ok := s.vaults[subj]; ok && entry.store != nil {
+		snapshot, err = entry.store.ActiveSnapshot()
+	}
+	if err != nil && !errors.Is(err, credentialvault.ErrNotFound) {
+		d.degradeLocked("subject_snapshot_invalid")
+		return
+	}
+	var policyEpoch int64
+	if entry := s.policies[subj]; entry != nil {
+		policyEpoch = entry.revision
+	}
+	payload, err := credentialvault.MarshalDecisionSnapshot(snapshot, policyEpoch)
+	if err != nil {
+		d.degradeLocked("subject_snapshot_invalid")
+		return
+	}
+	if len(payload) > defaultRevisionMaxSnapshotSize {
+		d.degradeLocked("subject_snapshot_too_large")
+		return
+	}
+	frozen := &fastSandboxSubjectSnapshot{payload: payload, vaultRevision: snapshot.Revision, policyEpoch: policyEpoch}
+	d.snapshots[subj] = frozen
+	d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: fence, target: mustSubjectTarget(subj, fence), epoch: d.current, snapshot: frozen})
+}
+
+func (d *fastSandboxSubjectDrain) dropInstallsLocked(target revision.SubjectTarget) {
+	kept := d.queue[:0]
+	for _, intent := range d.queue {
+		if intent.snapshot == nil || intent.target != target {
+			kept = append(kept, intent)
+		}
+	}
+	clear(d.queue[len(kept):])
+	d.queue = kept
+}
+
+func (d *fastSandboxSubjectDrain) enqueueInstallLocked(next fastSandboxSubjectIntent) {
+	for i, intent := range d.queue {
+		if intent.snapshot == nil || intent.subj != next.subj {
+			continue
+		}
+		if intent.target == next.target && intent.epoch == next.epoch {
+			d.queue[i] = next // same generation and child: preserve FIFO position
+			d.signal()
+			return
+		}
+		d.dropInstallsLocked(intent.target)
+		break // different generation/epoch: append after its Register
+	}
+	d.queue = append(d.queue, next)
+	d.signal()
+}
+
+func (d *fastSandboxSubjectDrain) degradeLocked(reason string) {
+	if !d.degraded[reason] {
+		log.Warnf("subject lifecycle degraded: %s", reason)
+	}
+	d.degraded[reason] = true
 }
 
 func (s *fastSandboxPolicyServer) subjectIntentCurrentLocked(intent fastSandboxSubjectIntent) bool {
@@ -197,10 +307,7 @@ func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandb
 	if reason != "subject_ipc_unavailable" && !s.subjectIntentCurrentLocked(intent) {
 		return
 	}
-	if !d.degraded[reason] {
-		log.Warnf("subject lifecycle degraded: %s", reason)
-	}
-	d.degraded[reason] = true
+	d.degradeLocked(reason)
 }
 
 func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyServer) {
@@ -212,6 +319,15 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		}
 		s.mu.Unlock()
 	}()
+	var owner *fastSandboxSubjectEpoch
+	installers := make(map[revision.SubjectTarget]*fastSandboxSubjectInstaller)
+	retired := make(map[revision.SubjectTarget]bool)
+	epochs := make(map[subject.Subject]*int64)
+	defer func() {
+		for _, installer := range installers {
+			installer.coordinator.Close()
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -220,6 +336,15 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		epoch := d.current
 		if epoch == nil || len(d.queue) == 0 {
 			s.mu.Unlock()
+			if owner != epoch {
+				for _, installer := range installers {
+					installer.coordinator.Close()
+				}
+				installers = make(map[revision.SubjectTarget]*fastSandboxSubjectInstaller)
+				retired = make(map[revision.SubjectTarget]bool)
+				epochs = make(map[subject.Subject]*int64)
+				owner = epoch
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -230,10 +355,39 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		intent := d.queue[0]
 		d.queue[0] = fastSandboxSubjectIntent{}
 		d.queue = d.queue[1:]
-		valid := s.subjectIntentCurrentLocked(intent)
+		valid := s.subjectIntentCurrentLocked(intent) && (intent.epoch == nil || intent.epoch == epoch)
+		if !valid && !intent.unload {
+			d.dropInstallsLocked(intent.target)
+		}
 		s.mu.Unlock()
+		if owner != epoch {
+			for _, installer := range installers {
+				installer.coordinator.Close()
+			}
+			installers = make(map[revision.SubjectTarget]*fastSandboxSubjectInstaller)
+			retired = make(map[revision.SubjectTarget]bool)
+			epochs = make(map[subject.Subject]*int64)
+			owner = epoch
+		}
 		if !valid {
 			continue
+		}
+		if intent.snapshot != nil {
+			if installer := installers[intent.target]; installer != nil && !retired[intent.target] {
+				if !d.install(ctx, s, epoch, intent, installer) {
+					installer.coordinator.Close()
+					delete(installers, intent.target)
+					retired[intent.target] = true
+				}
+			}
+			continue
+		}
+		if intent.unload {
+			if installer := installers[intent.target]; installer != nil {
+				installer.coordinator.Close()
+			}
+			delete(installers, intent.target)
+			delete(retired, intent.target)
 		}
 		// Cancellation on shutdown or replacement bounds even a pending old
 		// command; each send/reconcile gets a fresh independent deadline.
@@ -273,9 +427,192 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 			if confirmed != nil {
 				receipt = *confirmed
 			}
-			d.recordResult(ctx, s, epoch, intent, receipt, reconcileErr)
+			err = reconcileErr
+			d.recordResult(ctx, s, epoch, intent, receipt, err)
+		}
+		if !intent.unload && epoch.ctx.Err() == nil && ctx.Err() == nil {
+			if err != nil {
+				s.mu.Lock()
+				if d.current == epoch {
+					d.dropInstallsLocked(intent.target)
+				}
+				s.mu.Unlock()
+				if installer := installers[intent.target]; installer != nil {
+					installer.coordinator.Close()
+				}
+				delete(installers, intent.target)
+				retired[intent.target] = true
+			} else if installers[intent.target] == nil && !retired[intent.target] {
+				counter := epochs[intent.subj]
+				if counter == nil {
+					counter = new(int64)
+					epochs[intent.subj] = counter
+				}
+				installer, makeErr := newFastSandboxSubjectInstaller(epoch.handoff, intent.target, counter)
+				if makeErr == nil {
+					installers[intent.target] = installer
+				} else {
+					s.mu.Lock()
+					if d.current == epoch && s.subjectIntentCurrentLocked(intent) {
+						d.degradeLocked("subject_snapshot_invalid")
+						d.dropInstallsLocked(intent.target)
+					}
+					s.mu.Unlock()
+					retired[intent.target] = true
+				}
+			}
 		}
 		// A confirmed non-200 receipt consumes its sequence and is never
 		// automatically resubmitted. Only Reconcile can retry a pending send.
+	}
+}
+
+// Only the drain goroutine uses these fields. The wrapper preserves the generic
+// Coordinator's conservative sidecar semantics while exposing v2 confirmed
+// rejections to this installation-only owner. After rejection, Abort is local:
+// no further command may target that failed generation during this transaction.
+type fastSandboxSubjectInstaller struct {
+	coordinator *revision.Coordinator
+	transport   *fastSandboxInstallTransport
+}
+
+type fastSandboxInstallTransport struct {
+	revision.Transport
+	rejection *revision.SubjectTransportRejection
+	// The Coordinator owns local epochs; the wire offset preserves monotonic
+	// decisionEpoch for this subject across generations in the same child.
+	base int64
+	last *int64
+}
+
+func (t *fastSandboxInstallTransport) observe(err error) error {
+	var rejection *revision.SubjectTransportRejection
+	if errors.As(err, &rejection) {
+		t.rejection = rejection
+	}
+	return err
+}
+
+func (t *fastSandboxInstallTransport) Prepare(ctx context.Context, id revision.Identity, payload []byte) (revision.Identity, error) {
+	if id.DecisionEpoch > math.MaxInt64-t.base {
+		return revision.Identity{}, t.observe(&revision.SubjectTransportRejection{Outcome: "decision_epoch_exhausted"})
+	}
+	id.DecisionEpoch += t.base
+	*t.last = id.DecisionEpoch
+	ack, err := t.Transport.Prepare(ctx, id, payload)
+	return t.localIdentity(ack), t.observe(err)
+}
+func (t *fastSandboxInstallTransport) Commit(ctx context.Context, id revision.Identity) (revision.Identity, error) {
+	id.DecisionEpoch += t.base
+	ack, err := t.Transport.Commit(ctx, id)
+	return t.localIdentity(ack), t.observe(err)
+}
+func (t *fastSandboxInstallTransport) Abort(ctx context.Context, id revision.Identity) (revision.Identity, error) {
+	if t.rejection != nil {
+		return revision.Identity{}, t.rejection
+	}
+	id.DecisionEpoch += t.base
+	ack, err := t.Transport.Abort(ctx, id)
+	return t.localIdentity(ack), t.observe(err)
+}
+func (t *fastSandboxInstallTransport) Readback(ctx context.Context) (*revision.Identity, error) {
+	ack, err := t.Transport.Readback(ctx)
+	if ack != nil {
+		local := t.localIdentity(*ack)
+		ack = &local
+	}
+	return ack, t.observe(err)
+}
+
+func (t *fastSandboxInstallTransport) localIdentity(id revision.Identity) revision.Identity {
+	if id.DecisionEpoch <= t.base {
+		return revision.Identity{}
+	}
+	id.DecisionEpoch -= t.base
+	return id
+}
+
+func newFastSandboxSubjectInstaller(h mitmproxy.SubjectRevisionIPCConfig, target revision.SubjectTarget, last *int64) (*fastSandboxSubjectInstaller, error) {
+	transport, err := revision.NewSubjectUnixTransport(h.SocketPath, h.SessionToken, h.ControlGeneration, target, h.MaxSnapshotBytes)
+	if err != nil {
+		return nil, err
+	}
+	observed := &fastSandboxInstallTransport{Transport: transport, base: *last, last: last}
+	coordinator, err := revision.New(h.ControlGeneration, target.SubjectGeneration, observed, h.MaxSnapshotBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &fastSandboxSubjectInstaller{coordinator: coordinator, transport: observed}, nil
+}
+
+func subjectInstallReason(installer *fastSandboxSubjectInstaller, err error) string {
+	if rejection := installer.transport.rejection; rejection != nil {
+		switch rejection.Outcome {
+		case "subject_unknown", "subject_generation_mismatch", "subject_failed", "control_generation_mismatch", "invalid_target":
+			return rejection.Outcome
+		case "revision_rejected":
+			return "subject_prepare_rejected"
+		default:
+			return "subject_install_rejected"
+		}
+	}
+	if errors.Is(err, revision.ErrPrepareRejected) {
+		return "subject_prepare_rejected"
+	}
+	if errors.Is(err, revision.ErrInvalid) {
+		return "subject_snapshot_invalid"
+	}
+	return "subject_ipc_unavailable"
+}
+
+// install returns false only for confirmed failure. An uncertain operation owns
+// the FIFO until exact Readback/Abort reconciliation or child cancellation; it
+// never calls Apply again or allocates a second decision epoch for the attempt.
+func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, installer *fastSandboxSubjectInstaller) bool {
+	commandCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
+	stop := context.AfterFunc(ctx, cancel)
+	_, err := installer.coordinator.Apply(commandCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
+	stop()
+	cancel()
+	for {
+		if ctx.Err() != nil || epoch.ctx.Err() != nil {
+			return true
+		}
+		reason := subjectInstallReason(installer, err)
+		terminal := installer.transport.rejection != nil || errors.Is(err, revision.ErrPrepareRejected) || errors.Is(err, revision.ErrInvalid)
+		s.mu.Lock()
+		if d.current == epoch {
+			if err == nil || terminal {
+				delete(d.degraded, "subject_ipc_unavailable")
+			}
+			if err != nil && (reason == "subject_ipc_unavailable" || s.subjectIntentCurrentLocked(intent)) {
+				d.degradeLocked(reason)
+			}
+			if terminal {
+				d.dropInstallsLocked(intent.target)
+			}
+		}
+		s.mu.Unlock()
+		if terminal {
+			return false
+		}
+		if err == nil {
+			return true
+		}
+		timer := time.NewTimer(subjectLifecycleRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return true
+		case <-epoch.ctx.Done():
+			timer.Stop()
+			return true
+		case <-timer.C:
+		}
+		reconcileCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
+		stop := context.AfterFunc(ctx, cancel)
+		_, err = installer.coordinator.Reconcile(reconcileCtx)
+		stop()
+		cancel()
 	}
 }

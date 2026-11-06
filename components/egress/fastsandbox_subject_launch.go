@@ -278,7 +278,7 @@ func (o *fastSandboxSubjectLaunchOwner) attach(s *fastSandboxPolicyServer, runni
 	defer o.mu.Unlock()
 	o.server = s
 	if session := o.sessions[running]; session != nil {
-		s.publishSubjectClient(session.client)
+		s.publishSubjectClient(session.client, session.handoff)
 	}
 }
 
@@ -293,7 +293,7 @@ func (o *fastSandboxSubjectLaunchOwner) published(running *mitmproxy.Running) {
 	defer o.mu.Unlock()
 	if o.server != nil {
 		if session := o.sessions[running]; session != nil {
-			o.server.publishSubjectClient(session.client)
+			o.server.publishSubjectClient(session.client, session.handoff)
 		}
 	}
 }
