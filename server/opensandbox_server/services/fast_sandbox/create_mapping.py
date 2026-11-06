@@ -179,6 +179,8 @@ def map_template_create_request(
     fastpath_resource_pool: str = "default-pool",
     now: Optional[datetime] = None,
     expires_at_unix_seconds: Optional[int] = None,
+    template_machine: Optional[dict] = None,
+    pool_is_resource_aware: bool = False,
 ) -> pb2.CreateSandboxRequest:
     """Map a template-mode CreateSandboxRequest to FastPath v2.
 
@@ -187,6 +189,10 @@ def map_template_create_request(
     becomes the FastPath ``image`` and the template's recorded entrypoint
     becomes the guest command. Idempotency and metadata rules match
     :func:`map_create_request`.
+
+    OSEP-0026: on a ResourceAware pool the recorded effective machine shape
+    (``template_machine``) is forwarded verbatim as per-sandbox
+    ``resources.limits``; any other pool mode leaves the field unset.
     """
     _reject_unsupported_fields(request)
     if request.timeout is None:
@@ -227,7 +233,39 @@ def map_template_create_request(
 
     _validate_metadata(create.metadata)
 
+    if pool_is_resource_aware:
+        _apply_template_resources(create, template_machine)
+
     return create
+
+
+def _apply_template_resources(
+    create: pb2.CreateSandboxRequest, machine: Optional[dict]
+) -> None:
+    """Fail-fast validation + verbatim forwarding; FastPath stays
+    authoritative for budget checks."""
+    cpu = str((machine or {}).get("cpu") or "")
+    memory = str((machine or {}).get("memory") or "")
+    try:
+        cpu_quantity = _canonical_quantity(cpu)
+        memory_quantity = _canonical_quantity(memory)
+    except Exception:
+        raise UnsupportedFieldError(
+            "templateMachine",
+            f"template machine shape is not a valid quantity pair: cpu={cpu!r}, memory={memory!r}",
+        ) from None
+    if cpu_quantity <= 0 or memory_quantity <= 0:
+        raise UnsupportedFieldError(
+            "templateMachine",
+            f"template machine shape must be positive: cpu={cpu!r}, memory={memory!r}",
+        )
+    if cpu_quantity < decimal.Decimal("0.01"):
+        raise UnsupportedFieldError(
+            "templateMachine",
+            f"template machine cpu {cpu!r} is below the FastPath minimum of 10m",
+        )
+    create.resources.limits.cpu = cpu
+    create.resources.limits.memory = memory
 
 
 def _validate_resource_limits(request: CreateSandboxRequest, pool_resources: dict) -> None:
@@ -286,7 +324,13 @@ def _quantities_equal(a: str, b: str) -> bool:
 
 
 def _canonical_quantity(value: str) -> decimal.Decimal:
+    # Covers the Kubernetes quantity grammar (see config's
+    # _KUBERNETES_QUANTITY_RE), including the sub-integer n/u suffixes.
     value = value.strip()
+    if value.endswith("n"):
+        return decimal.Decimal(value[:-1]) / 10**9
+    if value.endswith("u"):
+        return decimal.Decimal(value[:-1]) / 10**6
     if value.endswith("m"):
         return decimal.Decimal(value[:-1]) / 1000
     for suffix, exponent in _BINARY_QUANTITY_SUFFIXES.items():
