@@ -324,7 +324,13 @@ def _quantities_equal(a: str, b: str) -> bool:
 
 
 def _canonical_quantity(value: str) -> decimal.Decimal:
+    # Covers the Kubernetes quantity grammar (see config's
+    # _KUBERNETES_QUANTITY_RE), including the sub-integer n/u suffixes.
     value = value.strip()
+    if value.endswith("n"):
+        return decimal.Decimal(value[:-1]) / 10**9
+    if value.endswith("u"):
+        return decimal.Decimal(value[:-1]) / 10**6
     if value.endswith("m"):
         return decimal.Decimal(value[:-1]) / 1000
     for suffix, exponent in _BINARY_QUANTITY_SUFFIXES.items():

@@ -246,5 +246,5 @@ None beyond stub regeneration. E2E needs a `ResourceAware` `SandboxPool` fixture
 1. **Phase 0 — stubs:** regenerate; no behavior change.
 2. **Phase 1 — recording:** persist `spec_json.machine` on new templates; no create-time change.
 3. **Phase 2 — pool-mode-gated forwarding:** enable forwarding for template creates and snapshot-restore replay; the pool profile is the only switch — operators roll out by deploying `ResourceAware` pools and roll back by serving new sandboxes from a `LegacySlot` pool (no server-side config flag).
-4. **Rollback:** flag off (or pin prior server version); the field is omitted and pool defaults resume — the recorded `machine` key is inert when forwarding is off.
+4. **Rollback:** pin the prior server version or serve new sandboxes from a `LegacySlot` pool; the field is omitted and pool defaults resume — the recorded `machine` key is inert on non-`ResourceAware` pools.
 5. **Docs:** update `docs/architecture/fast-sandbox/templates.md` and `scheduling.md` (ResourceAware nuance: the template's shape, not only pool capacity, shapes the sandbox); OSEP-0007's template-mode restriction stands.

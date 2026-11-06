@@ -288,14 +288,19 @@ def test_map_create_request_rejects_undefinted_pool_resource_key():
 
 
 def test_map_create_request_compares_quantities_canonically():
-    # Same quantity expressed differently must not be rejected.
+    # Same quantity expressed differently must not be rejected, including
+    # the sub-integer Kubernetes suffixes n/u.
     request = _base_request(resource_limits=ResourceLimits(root={"cpu": "0.5", "memory": "1Gi"}))
     create = map_create_request(
         request,
         "sbx-1",
         "ns-1",
         now=NOW,
-        pool_resources={"cpu": "500m", "memory": "1024Mi", "pids": "256"},
+        pool_resources={
+            "cpu": "500000000n",
+            "memory": "1073741824000000u",
+            "pids": "256",
+        },
     )
     assert create.image == "python:3.11"
 
@@ -462,6 +467,18 @@ def test_map_template_forwards_machine_verbatim_when_gate_passes():
     assert create.HasField("resources")
     assert create.resources.limits.cpu == "2"
     assert create.resources.limits.memory == "1Gi"
+
+
+def test_map_template_accepts_sub_integer_quantity_suffixes():
+    # Kubernetes quantity grammar allows n/u; the fail-fast parser must not
+    # reject a shape fast-sandbox itself would accept.
+    create = _map_template(
+        _template_request(),
+        template_machine={"cpu": "2000000000n", "memory": "1073741824000000u"},
+        pool_is_resource_aware=True,
+    )
+    assert create.resources.limits.cpu == "2000000000n"
+    assert create.resources.limits.memory == "1073741824000000u"
 
 
 def test_map_template_rejects_machine_below_fastpath_minimum():
