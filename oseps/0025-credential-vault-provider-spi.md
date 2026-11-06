@@ -25,7 +25,7 @@ status: implementing
   - [Usage Demos](#usage-demos)
   - [Request Handling](#request-handling)
   - [Resolver Contract](#resolver-contract)
-  - [Resolver Caller Authentication (D5)](#resolver-caller-authentication-d5)
+  - [Resolver Caller Authentication](#resolver-caller-authentication)
   - [Example Instantiations](#example-instantiations)
   - [Fast Sandbox Profile](#fast-sandbox-profile)
   - [Observability](#observability)
@@ -111,7 +111,7 @@ Declared out of v1 by the scope note; none of them changes the contracts in this
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Sandbox calls the resolver directly and mints credentials | Full policy bypass | `unix://` socket permissions; for `https://`, no boundary until D5 caller authentication lands (deferred — known R4 gap under transparent interception) |
+| Sandbox calls the resolver directly and mints credentials | Full policy bypass | `unix://` socket permissions; for `https://`, no boundary until caller authentication lands (deferred — known R4 gap under transparent interception) |
 | Client forges subject identity | Cross-subject credential use | Subject never accepted from the addon protocol; resolved from client IP with the existing authoritative mapping |
 | Exchanged values leak through reads or diagnostics | Credential exposure | Resolution output exists per request only; redacted by name and value; never persisted |
 | Resolver outage breaks exchange-bound traffic | Availability regression | Documented as fail-closed semantics; operators monitor resolver health; static bindings are unaffected |
@@ -348,9 +348,9 @@ Hard requirements on a resolver endpoint, none of which dictate an implementatio
 | Per-request semantics | input includes request context; output differs per request |
 | Absent/unreachable = denial | no fallback to uncredentialed pass-through |
 
-Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: designed, not yet implemented** — the adopted design (an Ed25519 JWT minted by the egress and verified offline against a server-published JWKS) is specified in [Resolver Caller Authentication (D5)](#resolver-caller-authentication-d5); until it lands, resolver dials carry no caller credential and the egress exposes no auth configuration. Interim posture: `unix://` endpoints (socket permissions) are the only resolver transport with an egress-only trust boundary; network-level scoping of `https://` resolvers (UID-scoped exclusions) unblocks the egress's own dials under default-deny but does **not** isolate the resolver from the sandbox, because transparent interception re-originates sandbox dials from the same uid. Treat `https://` resolvers as sandbox-reachable until D5 lands.
+Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: designed, not yet implemented** — the adopted design (an Ed25519 JWT minted by the egress and verified offline against a server-published JWKS) is specified in [Resolver Caller Authentication](#resolver-caller-authentication); until it lands, resolver dials carry no caller credential and the egress exposes no auth configuration. Interim posture: `unix://` endpoints (socket permissions) are the only resolver transport with an egress-only trust boundary; network-level scoping of `https://` resolvers (UID-scoped exclusions) unblocks the egress's own dials under default-deny but does **not** isolate the resolver from the sandbox, because transparent interception re-originates sandbox dials from the same uid. Treat `https://` resolvers as sandbox-reachable until caller authentication lands.
 
-### Resolver Caller Authentication (D5)
+### Resolver Caller Authentication
 
 Caller authentication for `https://` resolvers is a self-contained Ed25519 JWT minted by the egress and verified offline against a JWKS endpoint published by the lifecycle server. The credential proves "this resolve call originated from the egress process" without distributing any secret material to resolvers, applies uniformly to both profiles, and closes the R4 gap for `https://` resolvers at the application layer. `unix://` dials are unchanged: socket permissions remain their boundary, and the credential is attached to `https://` dials only.
 
@@ -503,7 +503,7 @@ Callers would run their own refresh loops and re-POST values. This reintroduces 
 
 - Egress: `exchange` source type, typeless auth form, resolver proxy (UDS and HTTPS clients), and response envelope enforcement — no new component or image.
 - Lifecycle server and spec: extend the `Credential.source` schema (today fixed to inline) and the binding auth union (today requires `type`) for the fast-sandbox relay path, including sanitization, server-side merge, and regenerated SDKs.
-- Operator configuration surface for the resolution timeout, resolver caller-authentication key provisioning and JWKS publication ([Resolver Caller Authentication (D5)](#resolver-caller-authentication-d5)), and the egress-side exchange capability gate.
+- Operator configuration surface for the resolution timeout, resolver caller-authentication key provisioning and JWKS publication ([Resolver Caller Authentication](#resolver-caller-authentication)), and the egress-side exchange capability gate.
 - Documentation and one example per transport.
 
 No new required external service is introduced by this proposal.
