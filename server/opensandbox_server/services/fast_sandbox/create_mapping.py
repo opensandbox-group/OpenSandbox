@@ -68,6 +68,8 @@ def map_create_request(
     now: Optional[datetime] = None,
     expires_at_unix_seconds: Optional[int] = None,
     pool_resources: Optional[dict] = None,
+    snapshot_limits: Optional[dict] = None,
+    pool_is_resource_aware: bool = False,
 ) -> pb2.CreateSandboxRequest:
     """Map the accepted request subset to a FastPath v2 CreateSandboxRequest.
 
@@ -83,13 +85,18 @@ def map_create_request(
     Pool compatibility: ``pool_resources`` is the selected SandboxPool profile
     (e.g. {"cpu": "500m", "memory": "512Mi", "pids": "256"}). When provided,
     request ``resource_limits`` must match the pool for every key the pool
-    defines and must not declare keys the pool does not define; FastPath has
-    no per-sandbox resource field, so incompatible limits are rejected rather
-    than silently ignored.
+    defines and must not declare keys the pool does not define.
+
+    Snapshot restores (OSEP-0026): ``snapshot_limits`` carries the recorded
+    source-sandbox limits; the equality baseline moves from the pool profile
+    to the recorded shape, and on a ResourceAware pool the recorded shape is
+    replayed as per-sandbox ``resources.limits``.
     """
     _reject_unsupported_fields(request)
 
-    if pool_resources is not None:
+    if snapshot_limits is not None:
+        _validate_recorded_limits(request, snapshot_limits)
+    elif pool_resources is not None:
         _validate_resource_limits(request, pool_resources)
 
     image = request.image
@@ -166,6 +173,9 @@ def map_create_request(
     # get a clear error instead of a confusing gRPC rejection.
     _validate_metadata(create.metadata)
 
+    if snapshot_limits is not None and pool_is_resource_aware:
+        _set_resource_limits(create, snapshot_limits, "snapshotLimits")
+
     return create
 
 
@@ -234,13 +244,13 @@ def map_template_create_request(
     _validate_metadata(create.metadata)
 
     if pool_is_resource_aware:
-        _apply_template_resources(create, template_machine)
+        _set_resource_limits(create, template_machine, "templateMachine")
 
     return create
 
 
-def _apply_template_resources(
-    create: pb2.CreateSandboxRequest, machine: Optional[dict]
+def _set_resource_limits(
+    create: pb2.CreateSandboxRequest, machine: Optional[dict], field: str
 ) -> None:
     """Fail-fast validation + verbatim forwarding; FastPath stays
     authoritative for budget checks."""
@@ -251,21 +261,42 @@ def _apply_template_resources(
         memory_quantity = _canonical_quantity(memory)
     except Exception:
         raise UnsupportedFieldError(
-            "templateMachine",
-            f"template machine shape is not a valid quantity pair: cpu={cpu!r}, memory={memory!r}",
+            field,
+            f"recorded shape is not a valid quantity pair: cpu={cpu!r}, memory={memory!r}",
         ) from None
     if cpu_quantity <= 0 or memory_quantity <= 0:
         raise UnsupportedFieldError(
-            "templateMachine",
-            f"template machine shape must be positive: cpu={cpu!r}, memory={memory!r}",
+            field,
+            f"recorded shape must be positive: cpu={cpu!r}, memory={memory!r}",
         )
     if cpu_quantity < decimal.Decimal("0.01"):
         raise UnsupportedFieldError(
-            "templateMachine",
-            f"template machine cpu {cpu!r} is below the FastPath minimum of 10m",
+            field,
+            f"recorded cpu {cpu!r} is below the FastPath minimum of 10m",
         )
     create.resources.limits.cpu = cpu
     create.resources.limits.memory = memory
+
+
+def _validate_recorded_limits(request: CreateSandboxRequest, recorded: dict) -> None:
+    """Snapshot restores fix the shape to the recorded source limits; caller
+    ``resource_limits`` must match them (the baseline moves off the pool)."""
+    if request.resource_limits is None:
+        return
+    limits = request.resource_limits.root
+    for key, value in limits.items():
+        if key not in recorded:
+            raise UnsupportedFieldError(
+                "resourceLimits",
+                f"{key!r} is not part of the snapshot's recorded shape; "
+                "resources are fixed by the source sandbox",
+            )
+        if not _quantities_equal(recorded[key], value):
+            raise UnsupportedFieldError(
+                "resourceLimits",
+                f"{key!r}={value!r} does not match the snapshot's recorded "
+                f"{key!r}={recorded[key]!r}; resources are fixed by the source sandbox",
+            )
 
 
 def _validate_resource_limits(request: CreateSandboxRequest, pool_resources: dict) -> None:

@@ -219,7 +219,26 @@ class FastSandboxSnapshotRuntime:
                 "completion is observed via watch."
             ),
             backend=_BACKEND_FSB,
+            resource_limits=self._source_sandbox_limits(ns, sandbox_id),
         )
+
+    def _source_sandbox_limits(self, namespace: str, sandbox_id: str) -> Optional[dict]:
+        """OSEP-0026: the source sandbox's per-sandbox limits (SandboxInfo
+        field 10), or None when unset (pool-default shaped source) or the
+        read fails (preflight already gated existence)."""
+        try:
+            info = self._fastpath.get_sandbox(namespace, sandbox_id).sandbox
+            requirements = getattr(info, "resources", None)
+            limits = getattr(requirements, "limits", None) if requirements is not None else None
+            if limits is None or not (limits.cpu and limits.memory):
+                return None
+            return {"cpu": limits.cpu, "memory": limits.memory}
+        except FastPathError as exc:
+            logger.warning(
+                f"Could not read resource limits of sandbox {namespace}/{sandbox_id} "
+                f"for snapshot replay: {exc}"
+            )
+            return None
 
     def _source_sandbox_image(self, namespace: str, sandbox_id: str) -> Optional[str]:
         """The source Sandbox CR's image, or None when unreadable."""
