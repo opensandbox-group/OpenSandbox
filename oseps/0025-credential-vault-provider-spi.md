@@ -354,7 +354,7 @@ Authentication material for `https://` resolvers is provisioned through operator
 
 Caller authentication for `https://` resolvers is a self-contained Ed25519 JWT minted by the egress and verified offline against a JWKS endpoint published by the lifecycle server. The credential proves "this resolve call originated from the egress process" without distributing any secret material to resolvers, applies uniformly to both profiles, and closes the R4 gap for `https://` resolvers at the application layer. `unix://` dials are unchanged: socket permissions remain their boundary, and the credential is attached to `https://` dials only.
 
-Every `https://` resolve dial carries one header, `X-OpenSandbox-Egress-Credential: <compact JWT>`, with claims `iss` (the platform), `aud: "credential-resolver"`, `sub` (the egress-authoritative sandboxId — the same subject carried in the resolve document), `iat`, `exp` (`iat` + 3600s at most), and `jti` (a per-credential nonce). Resolvers verify the signature, `iss`/`aud`, and `exp` (±30s leeway) with standard JWT libraries; a resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
+Every `https://` resolve dial carries one header, `OpenSandbox-Egress-Credential: <compact JWT>`, with claims `iss` (the platform), `aud: "credential-resolver"`, `sub` (the egress-authoritative sandboxId — the same subject carried in the resolve document), `iat`, `exp` (`iat` + 3600s at most), and `jti` (a per-credential nonce). Resolvers verify the signature, `iss`/`aud`, and `exp` (±30s leeway) with standard JWT libraries; a resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
 
 Rejected alternatives, recorded with reasons: per-origin static bearer tokens (secret distribution to resolvers — the original sketch); HMAC over the egress token verified by server introspection (per-credential online dependency on the control plane plus hand-rolled caching glue); credentials embedded in the endpoint URI (tenant-readable through vault read-back; breaks R4 and R6); and reuse of `OPENSANDBOX_EGRESS_TOKEN` or revision session tokens (both grant policy-plane powers far beyond resolver authentication — capability confusion).
 
@@ -388,7 +388,7 @@ sequenceDiagram
 
     Note over Egr: Background timer mints the JWT at startup<br/>and again at 80% of the TTL — no request meets an expired credential.
 
-    Egr->>Res: POST /resolve<br/>X-OpenSandbox-Egress-Credential: <jwt>
+    Egr->>Res: POST /resolve<br/>OpenSandbox-Egress-Credential: <jwt>
     Res->>SDK: decode unverified header, take kid
     alt kid cached
         SDK->>SDK: verify Ed25519 signature, iss/aud, exp (±30s leeway)
