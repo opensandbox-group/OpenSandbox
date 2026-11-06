@@ -311,9 +311,6 @@ def test_map_create_request_skips_pool_check_when_profile_unknown():
     assert create.image == "python:3.11"
 
 
-# -- status mapping -----------------------------------------------------------
-
-
 def _info(
     *,
     runtime_state=pb2.RUNTIME_STATE_READY,

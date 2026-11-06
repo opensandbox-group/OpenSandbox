@@ -700,9 +700,6 @@ def test_resolve_restarts_watch_for_non_terminal_rows(service, crs, repo):
     assert "ns-1" in service._watched_namespaces
 
 
-# -- overlaybd (OCI publication) ------------------------------------------------
-
-
 def _overlaybd_config(**overrides) -> KubernetesRuntimeConfig:
     return KubernetesRuntimeConfig(
         namespace="ns-1",
