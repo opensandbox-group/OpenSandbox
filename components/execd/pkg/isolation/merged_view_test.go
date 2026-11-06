@@ -285,6 +285,50 @@ func TestMergedView_DeletedLowerEntryCannotBeRenamedOrChmodded(t *testing.T) {
 	assertNotInView(t, mv, "moved.txt")
 }
 
+// A directory recreated under a deleted one shows none of the lower entries
+// that were deleted with it, so renaming it must not bring them back.
+func TestMergedView_Rename_UnderDeletedDirectoryLeavesLowerBehind(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "sub", "old.txt"), []byte("old"), 0o644))
+	require.NoError(t, mv.RemoveAll("d"))
+	require.NoError(t, mv.WriteFile(filepath.Join("d", "sub", "new.txt"), []byte("new"), 0o644))
+
+	require.NoError(t, mv.Rename(filepath.Join("d", "sub"), "e"))
+
+	assertNotInView(t, mv, filepath.Join("e", "old.txt"))
+	data, err := mv.ReadFile(filepath.Join("e", "new.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(data))
+}
+
+// A copy-up that fails leaves nothing in upper: the lower file stays visible
+// instead of an unfinished copy shadowing it.
+func TestMergedView_FailedCopyUpLeavesLowerVisible(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root can chown to any UID")
+	}
+	mv := newTestMergedView(t, WorkspaceRW)
+	mv.Uid = uint32(os.Getuid()) + 1
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "f.txt"), []byte("lower"), 0o644))
+
+	assert.Error(t, mv.Rename("f.txt", "g.txt"))
+	assert.Error(t, mv.Chmod("f.txt", 0o600))
+	assert.Error(t, mv.Rename("d", "e"))
+
+	for _, rel := range []string{"f.txt", "d", "g.txt", "e"} {
+		_, err := os.Lstat(filepath.Join(mv.UpperDir, rel))
+		assert.ErrorIs(t, err, fs.ErrNotExist, "upper %s", rel)
+	}
+	entries, err := os.ReadDir(mv.UpperDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+	data, err := mv.ReadFile("f.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "lower", string(data))
+}
+
 func TestMergedView_Chmod_LowerDirectory(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))

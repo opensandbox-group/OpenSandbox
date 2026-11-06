@@ -516,11 +516,13 @@ func (m *MergedView) Rename(oldPath, newPath string) error {
 	oldUpper := m.resolveUpper(oldRel)
 	newUpper := m.resolveUpper(newRel)
 
-	if !inUpper(oldUpper) && m.lowerHidden(oldRel) {
+	// A hidden lower entry, at oldRel or above it, shows nothing to copy up.
+	lowerHidden := m.lowerHidden(oldRel)
+	if lowerHidden && !inUpper(oldUpper) {
 		return &os.PathError{Op: "rename", Path: oldPath, Err: os.ErrNotExist}
 	}
 	// In rw mode upper is lower, so there is nothing to copy.
-	if m.UpperDir != m.LowerDir {
+	if !lowerHidden && m.UpperDir != m.LowerDir {
 		if err := m.copyUpTree(oldRel); err != nil {
 			return err
 		}
@@ -540,8 +542,9 @@ func (m *MergedView) Rename(oldPath, newPath string) error {
 }
 
 // copyUpTree copies into upper every lower entry the view shows at or below
-// rel, so that renaming the upper entry moves all of it. Lower entries that
-// upper replaces or deletes are left behind. Each copy keeps its lower mode.
+// rel, so that renaming the upper entry moves all of it. The caller has
+// checked that nothing above rel hides lower. Lower entries that upper
+// replaces or deletes are left behind. Each copy keeps its lower mode.
 func (m *MergedView) copyUpTree(rel string) error {
 	if m.hidesLowerAt(rel) {
 		return nil
@@ -564,34 +567,44 @@ func (m *MergedView) copyUpTree(rel string) error {
 		return err
 	}
 
+	var walkErr error
 	if info.IsDir() {
-		entries, err := os.ReadDir(lowerPath)
-		if err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if isStagingName(e.Name()) {
-				continue
-			}
-			if err := m.copyUpTree(filepath.Join(rel, e.Name())); err != nil {
-				return err
-			}
-		}
+		walkErr = m.copyUpEntries(rel, lowerPath)
 	}
 
 	// A directory gets its mode only once filled, as a read-only one would
-	// refuse its own entries otherwise.
+	// refuse its own entries otherwise. It gets it even when that failed: a
+	// retry finds the directory in upper and would not set it again.
 	if !copied || info.Mode()&os.ModeSymlink != 0 {
-		return nil
+		return walkErr
 	}
-	return os.Chmod(m.resolveUpper(rel), info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
+	err = os.Chmod(m.resolveUpper(rel), info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
+	return errors.Join(walkErr, err)
+}
+
+// copyUpEntries runs copyUpTree on each entry of the lower directory at rel.
+func (m *MergedView) copyUpEntries(rel, lowerPath string) error {
+	entries, err := os.ReadDir(lowerPath)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if isStagingName(e.Name()) {
+			continue
+		}
+		if err := m.copyUpTree(filepath.Join(rel, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // copyUp copies the lower entry at rel, described by info, into upper so it
 // can change there without touching lower: a file keeps its content, a
-// symlink its target, and a directory is created empty. The copy belongs to
-// the session's UID/GID, like every write through this view, and is private
-// to that owner until the caller sets its mode.
+// symlink its target, and a directory is created empty and private to its
+// owner until the caller sets its mode. The copy belongs to the session's
+// UID/GID, like every write through this view. A copy that fails leaves
+// nothing in upper, so lower stays visible and a retry starts over.
 func (m *MergedView) copyUp(rel string, info os.FileInfo) error {
 	lowerPath := m.resolveLower(rel)
 	upperPath := m.resolveUpper(rel)
@@ -601,9 +614,14 @@ func (m *MergedView) copyUp(rel string, info os.FileInfo) error {
 
 	switch {
 	case info.Mode().IsRegular():
-		if err := copyFileContent(lowerPath, upperPath); err != nil {
+		in, err := os.Open(lowerPath)
+		if err != nil {
 			return err
 		}
+		defer in.Close()
+		// Staged, so the file appears in upper only once fully copied.
+		_, err = writeReaderStaged(upperPath, in, info.Mode().Perm(), false, newFileOwner(m.Uid, m.Gid))
+		return err
 	case info.IsDir():
 		if err := os.Mkdir(upperPath, 0o700); err != nil {
 			return err
@@ -619,26 +637,11 @@ func (m *MergedView) copyUp(rel string, info os.FileInfo) error {
 	default:
 		return fmt.Errorf("cannot copy up %s: unsupported file type %s", rel, info.Mode().Type())
 	}
-	return os.Lchown(upperPath, int(m.Uid), int(m.Gid))
-}
-
-// copyFileContent copies the content of the regular file src into dst, which
-// must not exist yet.
-func copyFileContent(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
+	if err := os.Lchown(upperPath, int(m.Uid), int(m.Gid)); err != nil {
+		_ = os.Remove(upperPath)
 		return err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
+	return nil
 }
 
 // Chmod changes permissions on a path. Copy-up from lower if needed

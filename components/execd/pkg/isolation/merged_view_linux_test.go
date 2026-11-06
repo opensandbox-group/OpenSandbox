@@ -85,3 +85,18 @@ func TestMergedView_RenameOfKernelWhiteoutIsNotFound(t *testing.T) {
 	assertNotInView(t, mv, "f.txt")
 	assertNotInView(t, mv, "g.txt")
 }
+
+// A directory whose copy-up stops partway still gets its lower mode, since a
+// retry finds it in upper and does not set the mode again.
+func TestMergedView_PartialDirectoryCopyUpKeepsMode(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o751))
+	require.NoError(t, os.Chmod(filepath.Join(mv.LowerDir, "d"), 0o751))
+	require.NoError(t, unix.Mkfifo(filepath.Join(mv.LowerDir, "d", "pipe"), 0o644))
+
+	assert.Error(t, mv.Rename("d", "e"))
+
+	info, err := mv.Stat("d")
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o751), info.Mode().Perm())
+}
