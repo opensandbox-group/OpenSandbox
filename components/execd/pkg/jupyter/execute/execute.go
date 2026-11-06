@@ -44,6 +44,7 @@ type Client struct {
 	// onConnectionLost is called when the kernel connection fails while it is
 	// still in use, i.e. not after Disconnect.
 	onConnectionLost func(error)
+	onDisconnect     func()
 
 	session string
 
@@ -89,6 +90,10 @@ func (c *Client) Disconnect() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.onDisconnect != nil {
+		c.onDisconnect()
+		c.onDisconnect = nil
+	}
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
@@ -108,6 +113,7 @@ type streamExecutionState struct {
 	executeDone  bool
 	executeMutex sync.Mutex
 	resultMutex  sync.Mutex
+	cancelled    chan struct{}
 
 	// Protected by resultMutex. An execute_result is output, not an execute_reply.
 	replyReceived bool
@@ -125,6 +131,7 @@ type streamExecutionState struct {
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
 	return &streamExecutionState{
 		startTime: startTime,
+		cancelled: make(chan struct{}),
 		result: &ExecutionResult{
 			Status:        "ok",
 			Stream:        make([]*StreamOutput, 0),
@@ -133,7 +140,7 @@ func newStreamExecutionState(startTime time.Time) *streamExecutionState {
 	}
 }
 
-// trySend delivers notify on resultChan unless the channel has already been closed. Nonterminal
+// trySend delivers notify on resultChan unless cancelled or already closed. Nonterminal
 // sends use this guard; closeResultChan holds the exclusive lock for the terminal send and close.
 func (state *streamExecutionState) trySend(resultChan chan *ExecutionResult, notify *ExecutionResult) {
 	state.chanMutex.RLock()
@@ -141,7 +148,15 @@ func (state *streamExecutionState) trySend(resultChan chan *ExecutionResult, not
 	if state.closed {
 		return
 	}
-	resultChan <- notify
+	select {
+	case <-state.cancelled:
+		return
+	default:
+	}
+	select {
+	case resultChan <- notify:
+	case <-state.cancelled:
+	}
 }
 
 // closeResultChan waits for in-flight sends, sends an optional terminal result last, and closes
@@ -150,8 +165,16 @@ func (state *streamExecutionState) closeResultChan(resultChan chan *ExecutionRes
 	state.chanMutex.Lock()
 	defer state.chanMutex.Unlock()
 	state.closed = true
+	select {
+	case <-state.cancelled:
+		terminal = nil
+	default:
+	}
 	if terminal != nil {
-		resultChan <- terminal
+		select {
+		case resultChan <- terminal:
+		case <-state.cancelled:
+		}
 	}
 	close(resultChan)
 }
@@ -235,6 +258,13 @@ func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, 
 			EName:  "KernelConnectionLost",
 			EValue: err.Error(),
 		})
+	}
+	c.onDisconnect = func() {
+		close(state.cancelled)
+		// Let in-flight sends stop before Disconnect returns. Only the finalizer
+		// closes resultChan, so cancellation cannot cause a second close.
+		state.chanMutex.Lock()
+		state.chanMutex.Unlock()
 	}
 	c.mu.Unlock()
 }
@@ -393,7 +423,12 @@ func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan 
 		if done {
 			break
 		}
-		time.Sleep(pollInterval)
+		select {
+		case <-state.cancelled:
+			state.closeResultChan(resultChan, nil)
+			return
+		case <-time.After(pollInterval):
+		}
 	}
 
 	// Normal completion requires both the matching IOPub idle and execute_reply,
@@ -530,6 +565,7 @@ func (c *Client) clearTemporaryHandlers() {
 	defer c.mu.Unlock()
 	c.handlers = make(map[MessageType]func(*Message))
 	c.onConnectionLost = nil
+	c.onDisconnect = nil
 	c.registerDefaultHandlers()
 }
 

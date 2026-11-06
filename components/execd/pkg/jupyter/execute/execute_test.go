@@ -424,6 +424,77 @@ func TestExecuteCodeStreamDisconnectIsNotReportedAsLostConnection(t *testing.T) 
 	}
 }
 
+func TestExecuteCodeStreamDisconnectAfterIdleStopsFinalizer(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		blockedOutput bool
+		replyReceived bool
+	}{
+		{name: "waiting for reply"},
+		{name: "blocked output", blockedOutput: true},
+		{name: "blocked terminal", replyReceived: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("", nil)
+			state := newStreamExecutionState(time.Now())
+			state.requestID = "request"
+			parent := Header{MessageID: state.requestID}
+			results := make(chan *ExecutionResult)
+			client.registerExecuteCodeStreamHandlers(state, results)
+
+			dispatchTestKernelMessage(t, client, MsgError, ErrorOutput{EName: "ValueError", EValue: "failed cell"}, parent)
+			if tc.replyReceived {
+				dispatchTestKernelMessage(t, client, MsgExecuteReply, ExecuteReply{Status: "error"}, parent)
+			}
+			dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, parent)
+			state.executeMutex.Lock()
+			finalizing := state.executeDone
+			state.executeMutex.Unlock()
+			require.True(t, finalizing, "matching idle must launch the finalizer")
+
+			var outputDone chan struct{}
+			if tc.blockedOutput {
+				outputDone = make(chan struct{})
+				go func() {
+					state.trySend(results, &ExecutionResult{Stream: []*StreamOutput{{Name: StreamStdout, Text: "pending\n"}}})
+					close(outputDone)
+				}()
+			}
+			if tc.blockedOutput || tc.replyReceived {
+				require.Eventually(t, func() bool {
+					if state.chanMutex.TryLock() {
+						state.chanMutex.Unlock()
+						return false
+					}
+					return true
+				}, time.Second, time.Millisecond, "sender must be blocked on the undrained channel")
+			}
+
+			disconnected := make(chan struct{})
+			go func() {
+				client.Disconnect()
+				close(disconnected)
+			}()
+			select {
+			case <-disconnected:
+			case <-time.After(time.Second):
+				t.Fatal("Disconnect blocked on an undrained channel")
+			}
+			client.Disconnect()
+			require.Empty(t, collectUntilClosed(t, results, time.Second), "disconnect must not emit a terminal result or pending output")
+			if outputDone != nil {
+				select {
+				case <-outputDone:
+				case <-time.After(time.Second):
+					t.Fatal("output sender did not stop after Disconnect")
+				}
+			}
+			dispatchTestKernelMessage(t, client, MsgStream, StreamOutput{Name: StreamStdout, Text: "late\n"}, parent)
+			dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, parent)
+		})
+	}
+}
+
 func sendExecuteReply(conn *websocket.Conn, executionCount int, parent Header) {
 	content, _ := json.Marshal(ExecuteReply{ExecutionCount: executionCount, Status: "ok"})
 	_ = conn.WriteJSON(Message{
