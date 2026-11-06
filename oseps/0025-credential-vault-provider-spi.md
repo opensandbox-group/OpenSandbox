@@ -3,7 +3,7 @@ title: Credential Vault Exchange and Delegated Header Resolution
 authors:
   - "@Pangjiping"
 creation-date: 2026-10-28
-last-updated: 2026-11-03
+last-updated: 2026-11-06
 status: implementing
 ---
 
@@ -25,6 +25,7 @@ status: implementing
   - [Usage Demos](#usage-demos)
   - [Request Handling](#request-handling)
   - [Resolver Contract](#resolver-contract)
+  - [Resolver Caller Authentication (D5)](#resolver-caller-authentication-d5)
   - [Example Instantiations](#example-instantiations)
   - [Fast Sandbox Profile](#fast-sandbox-profile)
   - [Observability](#observability)
@@ -347,7 +348,92 @@ Hard requirements on a resolver endpoint, none of which dictate an implementatio
 | Per-request semantics | input includes request context; output differs per request |
 | Absent/unreachable = denial | no fallback to uncredentialed pass-through |
 
-Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: deferred** — caller authentication is not implemented yet; resolver dials carry no Authorization header and the egress exposes no auth configuration. Interim posture: `unix://` endpoints (socket permissions) are the only resolver transport with an egress-only trust boundary; network-level scoping of `https://` resolvers (UID-scoped exclusions) unblocks the egress's own dials under default-deny but does **not** isolate the resolver from the sandbox, because transparent interception re-originates sandbox dials from the same uid. Treat `https://` resolvers as sandbox-reachable until D5 lands.
+Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: designed, not yet implemented** — the adopted design (an Ed25519 JWT minted by the egress and verified offline against a server-published JWKS) is specified in [Resolver Caller Authentication (D5)](#resolver-caller-authentication-d5); until it lands, resolver dials carry no caller credential and the egress exposes no auth configuration. Interim posture: `unix://` endpoints (socket permissions) are the only resolver transport with an egress-only trust boundary; network-level scoping of `https://` resolvers (UID-scoped exclusions) unblocks the egress's own dials under default-deny but does **not** isolate the resolver from the sandbox, because transparent interception re-originates sandbox dials from the same uid. Treat `https://` resolvers as sandbox-reachable until D5 lands.
+
+### Resolver Caller Authentication (D5)
+
+Caller authentication for `https://` resolvers is a self-contained Ed25519 JWT minted by the egress and verified offline against a JWKS endpoint published by the lifecycle server. The credential proves "this resolve call originated from the egress process" without distributing any secret material to resolvers, applies uniformly to both profiles, and closes the R4 gap for `https://` resolvers at the application layer. `unix://` dials are unchanged: socket permissions remain their boundary, and the credential is attached to `https://` dials only.
+
+Every `https://` resolve dial carries one header, `X-OpenSandbox-Egress-Credential: <compact JWT>`, with claims `iss` (the platform), `aud: "credential-resolver"`, `sub` (the egress-authoritative sandboxId — the same subject carried in the resolve document), `iat`, `exp` (`iat` + 3600s at most), and `jti` (a per-credential nonce). Resolvers verify the signature, `iss`/`aud`, and `exp` (±30s leeway) with standard JWT libraries; a resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
+
+Rejected alternatives, recorded with reasons: per-origin static bearer tokens (secret distribution to resolvers — the original sketch); HMAC over the egress token verified by server introspection (per-credential online dependency on the control plane plus hand-rolled caching glue); credentials embedded in the endpoint URI (tenant-readable through vault read-back; breaks R4 and R6); and reuse of `OPENSANDBOX_EGRESS_TOKEN` or revision session tokens (both grant policy-plane powers far beyond resolver authentication — capability confusion).
+
+#### Key Provisioning: Server Cooperation per Profile
+
+| | Sidecar | Fast Sandbox |
+|---|---|---|
+| Signer granularity | one keypair per sandbox; dies with the sandbox | one keypair per pool; shared by the pool's egress instances |
+| Generation | server, at sandbox creation | ops-runbook, as a versioned Secret `opensandbox-egress-signing-<v>` |
+| Private-key delivery | env injection — the same channel as `OPENSANDBOX_EGRESS_TOKEN` | read-only Secret volume projected into the egress container (`signing.key` entry only; `OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR`) |
+| Public-key registration | sibling workload annotation / container label, written next to the egress-token entry | server reads `signing.pub` from the same Secret through an independent `secretRef` |
+| JWKS shape | per-kid lookup; `kid` = sandboxId (+incarnation) | flat JWKS of pool keys; `kid` = Secret version |
+| Key retention | server discards the private key after injection | server never touches any private key |
+
+The fast-sandbox signing Secret is a separate object from the MITM CA seed (`opensandbox-mitm-ca-<v>`): independent version lines, rotation cadences, reader sets, and failure domains — entries are never bundled and no reference covers both. A missing or unloadable key fails only the exchange gate (vaults containing exchange bindings are rejected at write time); inline-only vaults, static bindings, and MITM keep serving in both profiles.
+
+Provisioning is create-time only: the design adds zero new runtime interaction between server and egress. The only new runtime edge in the system is resolver → server JWKS fetch, once per key lifetime.
+
+#### Interaction
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Srv as 🖥️ lifecycle server
+    participant Egr as ⚙️ egress (sidecar / fast-sandbox)
+    participant Res as 🔀 resolver (https://)
+    participant SDK as 🧰 resolver SDK (JWKS cache)
+
+    Note over Srv,Egr: Provisioning — create time only, no runtime channel.<br/>Sidecar: server generates the per-sandbox keypair, injects the private key<br/>through the OPENSANDBOX_EGRESS_TOKEN env channel, records the public key<br/>in the workload annotation / container label, and discards the private key.
+    Note over Srv,Egr: Fast Sandbox: ops-runbook versioned Secret;<br/>egress mounts signing.key read-only, server reads signing.pub via secretRef.
+
+    Note over Egr: Background timer mints the JWT at startup<br/>and again at 80% of the TTL — no request meets an expired credential.
+
+    Egr->>Res: POST /resolve<br/>X-OpenSandbox-Egress-Credential: <jwt>
+    Res->>SDK: decode unverified header, take kid
+    alt kid cached
+        SDK->>SDK: verify Ed25519 signature, iss/aud, exp (±30s leeway)
+    else unknown kid
+        SDK->>Srv: GET /jwks/{kid}
+        Srv-->>SDK: JWK — public key only
+        SDK->>SDK: verify and cache the key
+    end
+    Note over Res: sub is the egress-attested subject;<br/>per-sandbox authorization happens here if the resolver wants it.
+    Res-->>Egr: 200 {headers, redactions}
+
+    alt missing / invalid / expired credential
+        Res--xEgr: 401
+        Note over Egr: a 401 is a resolver rejection: per-request denial<br/>(407 non-streamed · kill streamed), never pass-through.
+    end
+```
+
+#### Performance
+
+- The resolve hot path adds one offline Ed25519 verification — tens of microseconds, zero network hops.
+- Key fetch is once per key lifetime: per sandbox incarnation (sidecar) or per pool key version (fast-sandbox). The first resolution of a new sandbox pays one JWKS read; steady state without churn pays zero — with 10k active subjects and no recreation, the server sees no calls.
+- The server is never on the resolve path; an internal 30–60s cache in front of annotation/label reads absorbs first-contact bursts.
+- Server unavailability does not deny resolution for known keys — verification is offline. Only first-contact fetches fail, fail-closed for those subjects alone.
+- Minting is a background timer per signer: one Ed25519 signature every ~48 minutes.
+
+#### Rotation
+
+- Credential: TTL 1h; the egress re-mints at 80% of the window (48min) so no request meets an expired credential. The superseded credential stays valid until its own `exp` (the 12min overlap bounds the replay surface of a captured credential); an egress restart mints a fresh `jti` immediately.
+- Sidecar keys: sandbox recreation replaces the keypair; the annotation/label — and with it the JWKS entry — disappears with the workload. There is no cleanup path to forget.
+- Fast-sandbox keys: rotation is the versioned-Secret runbook — create `-(v+1)`, update the template reference and the server `secretRef`, roll the pool; JWKS serves both kids through the grace window.
+- TTL bounds replay of a captured credential (≤1h). It does not bound signer-key compromise — that is remediated only by rotation; resolver 401 spikes should page whoever owns the keys.
+
+#### Security Properties
+
+- R4 for `https://` resolvers closes at the application layer in both profiles: a sandbox process dialing the resolver directly cannot mint a credential and receives 401. The egress-only boundary no longer rests on network scoping alone.
+- R6 unchanged: `sub` is the egress-derived sandboxId — attested by the signature instead of merely asserted by the protocol.
+- No secret material reaches a resolver (public keys only); resolvers gain no platform capability; the vault API carries no authentication material, unchanged from OSEP-0012 invariants.
+
+#### Test Additions
+
+- Happy path on both profiles (annotation-backed and Secret-backed keys); unknown-kid fetch and cache; expired credential denied with leeway honored.
+- Recreated sandbox invalidates the old kid (sidecar); dual-kid grace window across a version bump (fast-sandbox).
+- Missing or unloadable signing key rejects exchange vaults at write time while inline-only vaults, static bindings, and MITM keep serving.
+- A sandbox process dialing the resolver directly receives 401 (R4 closure).
+- Independence assertions: the signing Secret is distinct from `opensandbox-mitm-ca-*`, with no cross-mounts.
 
 ### Example Instantiations
 
@@ -417,7 +503,7 @@ Callers would run their own refresh loops and re-POST values. This reintroduces 
 
 - Egress: `exchange` source type, typeless auth form, resolver proxy (UDS and HTTPS clients), and response envelope enforcement — no new component or image.
 - Lifecycle server and spec: extend the `Credential.source` schema (today fixed to inline) and the binding auth union (today requires `type`) for the fast-sandbox relay path, including sanitization, server-side merge, and regenerated SDKs.
-- Operator configuration surface for the resolution timeout, per-origin resolver caller authentication, and the egress-side exchange capability gate.
+- Operator configuration surface for the resolution timeout, resolver caller-authentication key provisioning and JWKS publication ([Resolver Caller Authentication (D5)](#resolver-caller-authentication-d5)), and the egress-side exchange capability gate.
 - Documentation and one example per transport.
 
 No new required external service is introduced by this proposal.
