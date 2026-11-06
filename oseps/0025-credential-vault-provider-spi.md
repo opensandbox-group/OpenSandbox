@@ -406,6 +406,23 @@ sequenceDiagram
     end
 ```
 
+#### JWKS Endpoint Security
+
+The JWKS edge needs authentication in exactly one direction. The resolver does not authenticate itself to the server: JWKS serves public keys only, so the endpoint is public by design — the same posture as every OIDC provider's `/.well-known/jwks.json` — and requires only rate limiting. Requiring resolver registration here would reintroduce the static credential this design eliminates.
+
+The direction that matters is the resolver authenticating the server, because a forged JWKS is a key-injection attack: feed a resolver your public key, then mint the matching JWTs. Three rules, all mandatory for SDK implementations:
+
+- JWKS fetch runs over HTTPS with standard server-certificate verification, never disabled; deployments may additionally pin the platform CA.
+- The JWKS base URL comes from operator configuration only, never from token contents; per-kid URLs are constructed solely from `kid`, which is a platform-controlled identifier (sandboxId or Secret version).
+- The JWT header carries only `alg` and `kid`; `jku`, `x5u`, and embedded `jwk` header parameters are rejected on sight. Keys come from the configured endpoint and nowhere else.
+
+| Attack | Defense |
+|---|---|
+| MITM feeds the resolver a forged JWKS | TLS server verification |
+| Token carries `jku` pointing at an attacker key service | header restricted to `alg` + `kid` |
+| Enumerating other sandboxes' public keys | per-kid lookup requires the identifier, and public keys are not sensitive |
+| JWKS endpoint flooding | rate limiting plus the server's internal cache |
+
 #### Performance
 
 - The resolve hot path adds one offline Ed25519 verification — tens of microseconds, zero network hops.
