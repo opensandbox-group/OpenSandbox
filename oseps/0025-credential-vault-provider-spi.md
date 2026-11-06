@@ -78,7 +78,7 @@ Declared out of v1 by the scope note; none of them changes the contracts in this
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| R1 | A new `exchange` credential source carries a resolver endpoint URI (`unix://` or `https://`); `inline` behavior is unchanged; unknown types are rejected | Must Have |
+| R1 | A new `exchange` credential source carries a resolver endpoint URI (`unix://`, `https://`, or `http://` loopback-only); `inline` behavior is unchanged; unknown types are rejected | Must Have |
 | R2 | Binding auth that omits `type` and references an exchange credential resolves headers per request through that credential's resolver | Must Have |
 | R3 | Auth with a static `type` binds only to static sources; typeless auth binds only to exchange sources; cross-references are rejected at validation | Must Have |
 | R4 | Resolution runs only inside the egress process trust boundary; sandboxes must not be able to obtain credential material by calling the resolver directly | Must Have |
@@ -174,7 +174,7 @@ Schema delta:
 Validation rules:
 
 - Auth objects that declare a `type` (`bearer`, `basic`, `apiKey`, `customHeaders`) must reference static sources; auth objects without `type` are exchange references and must reference exchange sources. Cross-references fail with 400. `type` is omitted for exchange because the resolver produces the complete header set — there is no render shape to select, and the referenced credential's source already determines the behavior.
-- The endpoint URI scheme must be `unix://` or `https://`; other schemes fail with 400.
+- The endpoint URI scheme must be `unix://`, `https://`, or `http://`; an `http://` endpoint must name a loopback authority (`localhost`, `127.0.0.1`, `[::1]`) and fails with 400 otherwise. Other schemes fail with 400.
 - Header names returned by a resolver pass the same hop-by-hop rejection set as static injection.
 - All existing rules apply unchanged: egress allow coverage, ambiguity fail-closed, `expectedRevision` optimistic concurrency, sanitized read responses.
 
@@ -306,9 +306,9 @@ Failure semantics: non-200 and timeout are per-request denials. Invalidation is 
 
 ### Resolver Contract
 
-The same JSON-over-HTTP contract applies to both transports: HTTP over a Unix socket for `unix://`, plain HTTPS for `https://`. This is the only surface a resolver implements.
+The same JSON-over-HTTP contract applies to all transports: HTTP over a Unix socket for `unix://`, plain HTTPS for `https://`, and plain HTTP over loopback for `http://` (loopback authority only). This is the only surface a resolver implements.
 
-HTTP framing: both transports issue `POST` with `Content-Type: application/json`. The request target is fixed at `/resolve`; an `https://` endpoint URI may carry a path prefix (for example `https://resolver.internal/egress`), in which case the request target is that prefix joined with `/resolve` and `Host` is the endpoint authority. For `unix://` endpoints the request target is `/resolve` and `Host` is the literal `localhost`, which resolvers ignore. This removes route ambiguity between independent egress and resolver implementations.
+HTTP framing: all transports issue `POST` with `Content-Type: application/json`. The request target is fixed at `/resolve`; an `https://` or `http://` endpoint URI may carry a path prefix (for example `https://resolver.internal/egress`), in which case the request target is that prefix joined with `/resolve` and `Host` is the endpoint authority. For `unix://` endpoints the request target is `/resolve` and `Host` is the literal `localhost`, which resolvers ignore. This removes route ambiguity between independent egress and resolver implementations.
 
 ```jsonc
 // egress → resolver
@@ -352,7 +352,7 @@ Authentication material for `https://` resolvers is provisioned through operator
 
 ### Resolver Caller Authentication
 
-Caller authentication for `https://` resolvers is a self-contained Ed25519 JWT minted by the egress and verified offline against a JWKS endpoint published by the lifecycle server. The credential proves "this resolve call originated from the egress process" without distributing any secret material to resolvers, applies uniformly to both profiles, and closes the R4 gap for `https://` resolvers at the application layer. `unix://` dials are unchanged: socket permissions remain their boundary, and the credential is attached to `https://` dials only.
+Caller authentication for `https://` resolvers is a self-contained Ed25519 JWT minted by the egress and verified offline against a JWKS endpoint published by the lifecycle server. The credential proves "this resolve call originated from the egress process" without distributing any secret material to resolvers, applies uniformly to both profiles, and closes the R4 gap for `https://` resolvers at the application layer. `unix://` dials are unchanged: socket permissions remain their boundary. `http://` is accepted only for loopback authorities and follows the `https://` rule — the credential is attached to every TCP dial. This matters most in the sidecar profile, where the sandbox shares the egress's network namespace and a loopback resolver is sandbox-reachable: there the caller credential is the resolver's only boundary. In fast-sandbox the egress pod's loopback is not sandbox-reachable and the credential is defense in depth.
 
 Every `https://` resolve dial carries one header, `OpenSandbox-Egress-Credential: <compact JWT>`, with claims `iss` (the platform), `aud` (the resolver origin the credential is valid at — the endpoint authority from the credential source, for example `credential-resolver@resolver.internal`), `sub` (the egress-authoritative sandboxId), `iat`, `exp` (`iat` + 3600s at most), and `jti` (a per-credential nonce). Resolvers verify the signature, `iss`/`aud`, and `exp` (±30s leeway) with standard JWT libraries, and enforce two bindings: `aud` must name the resolver's own origin, so a credential observed by one resolver cannot be replayed to another; and JWT `sub` must equal the resolve document's `subject` — on mismatch the request is rejected with 401, and the attested `sub` is the sole authoritative subject for identity selection, never the body value alone. A resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
 
