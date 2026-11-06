@@ -439,7 +439,7 @@ func TestFastSandboxSubjectDrainFailureReceiptsAreNotRetried(t *testing.T) {
 				}
 				require.NoError(t, json.Unmarshal(raw, &command))
 				targets = append(targets, command.Target)
-				digest := sha256.Sum256(append([]byte("opensandbox.subject-lifecycle.v2\x00register"), raw...))
+				digest := sha256.Sum256(append([]byte("opensandbox.subject-lifecycle.v2\x00register\x00"), raw...))
 				result := revision.LifecycleResult{HTTPStatus: 200, Outcome: "registered"}
 				if len(targets) == 1 {
 					result.HTTPStatus = 503
