@@ -120,10 +120,8 @@ _POLICY_LOCK_SHARDS = 64
 
 logger = logging.getLogger(__name__)
 
-#: TTL for the pool-mode cache (OSEP-0026 gate). spec.sandboxResources is
-#: immutable for a pool's lifetime, so the mode only changes through a
-#: same-name delete-and-recreate; 15 minutes bounds that rare window while
-#: keeping the create hot path free of a GetPool round trip in steady state.
+#: Pool mode is immutable for a pool's lifetime (spec.sandboxResources), so
+#: only a same-name delete-and-recreate can invalidate a cached entry.
 _POOL_MODE_CACHE_TTL_SECONDS = 15 * 60
 
 
@@ -349,9 +347,8 @@ class FastSandboxService(SandboxService, ExtensionService):
 
     @staticmethod
     def _pool_is_resource_aware(pool: pb2.PoolInfo) -> bool:
-        """OSEP-0026 gate: only an explicitly reported ResourceAware profile
-        may receive per-sandbox resources. LegacySlot, unspecified, and
-        unreported (older FastPath) profiles all fail safe to False."""
+        """Only an explicitly reported ResourceAware profile passes; legacy,
+        unspecified, and unreported (older FastPath) fail safe to False."""
         profile = pool.sandbox_resource_profile
         return (
             profile is not None
@@ -359,16 +356,9 @@ class FastSandboxService(SandboxService, ExtensionService):
         )
 
     def _pool_is_resource_aware_cached(self, namespace: str, pool_ref: str) -> bool:
-        """Pool-mode read for the OSEP-0026 gate, TTL-cached per pool.
-
-        ``spec.sandboxResources`` is immutable for a pool's lifetime, so the
-        mode is a pool-lifetime constant; the only invalidation is a
-        delete-and-recreate under the same name with a different mode. The
-        stale window is bounded by the TTL and fails safe in both
-        directions: stale-aware is rejected by FastPath with a clear 400,
-        stale-legacy forwards no resources (today's behavior). Only
-        successful lookups are cached; a missing pool keeps 404ing.
-        """
+        """Pool-mode gate read, TTL-cached per pool. Only successful lookups
+        are cached; stale entries fail safe (FastPath rejects stale-aware,
+        stale-legacy forwards no resources)."""
         key = (namespace, pool_ref)
         now = time.monotonic()
         with self._pool_mode_cache_lock:
@@ -439,14 +429,8 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
-            # OSEP-0026: pool-mode-gated forwarding. The pool profile is the
-            # single switch — ResourceAware pools receive the recorded
-            # machine shape as per-sandbox limits, every other mode (legacy,
-            # unspecified, unreported by older FastPath) keeps today's
-            # pool-fixed behavior. The mode read is TTL-cached (immutable
-            # pool spec), so steady-state creates pay no extra round trip.
-            # The second map reuses request_id and the first absolute expiry
-            # so a transport retry stays idempotent.
+            # OSEP-0026: pool mode is the forwarding gate; the second map
+            # reuses request_id and the first absolute expiry (idempotency).
             try:
                 create_request = map_template_create_request(
                     request,

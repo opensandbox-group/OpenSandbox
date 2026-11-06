@@ -190,11 +190,9 @@ def map_template_create_request(
     becomes the guest command. Idempotency and metadata rules match
     :func:`map_create_request`.
 
-    OSEP-0026 resource forwarding: when the selected pool reports
-    ResourceAware mode, the template's recorded effective machine shape
+    OSEP-0026: on a ResourceAware pool the recorded effective machine shape
     (``template_machine``) is forwarded verbatim as per-sandbox
-    ``resources.limits``; requests stay pool-derived. Any other pool mode
-    leaves the field unset — byte-identical to pre-OSEP-0026 requests.
+    ``resources.limits``; any other pool mode leaves the field unset.
     """
     _reject_unsupported_fields(request)
     if request.timeout is None:
@@ -244,13 +242,8 @@ def map_template_create_request(
 def _apply_template_resources(
     create: pb2.CreateSandboxRequest, machine: Optional[dict]
 ) -> None:
-    """Fail-fast validation + verbatim forwarding of the template machine.
-
-    The shape is a pure function of the immutable template row
-    (``effective_machine``), so these checks guard writer-side invariants
-    (unparseable/non-positive/undersized quantities) rather than caller
-    input; FastPath stays authoritative for budget checks.
-    """
+    """Fail-fast validation + verbatim forwarding; FastPath stays
+    authoritative for budget checks."""
     cpu = str((machine or {}).get("cpu") or "")
     memory = str((machine or {}).get("memory") or "")
     try:
@@ -267,7 +260,6 @@ def _apply_template_resources(
             f"template machine shape must be positive: cpu={cpu!r}, memory={memory!r}",
         )
     if cpu_quantity < decimal.Decimal("0.01"):
-        # FastPath's enforced minimum for Linux CFS enforcement (10m).
         raise UnsupportedFieldError(
             "templateMachine",
             f"template machine cpu {cpu!r} is below the FastPath minimum of 10m",

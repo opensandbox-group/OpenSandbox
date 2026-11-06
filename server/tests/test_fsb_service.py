@@ -1671,9 +1671,7 @@ def test_fsb_list_excludes_old_prefix(persisted_fsb):
 
 
 def test_pool_is_resource_aware_requires_explicit_resource_aware_profile():
-    """The gate fails safe: unreported (older FastPath), unspecified, and
-    LegacySlot profiles are all non-ResourceAware; only an explicit
-    RESOURCE_AWARE mode passes."""
+    """The gate fails safe: only an explicit RESOURCE_AWARE mode passes."""
     assert not FastSandboxService._pool_is_resource_aware(
         pb2.PoolInfo(namespace="ns-1", name="p")
     )

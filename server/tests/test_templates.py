@@ -974,9 +974,8 @@ class _StubFastPath:
         return self._response
 
     def get_pool(self, namespace, pool_ref):
-        # OSEP-0026: no sandbox_resource_profile reported — older FastPath
-        # shape, so the template resource gate stays closed.
         self.get_pool_calls += 1
+        # No sandbox_resource_profile: older FastPath shape, gate stays closed.
         return pb2.PoolInfo(namespace=namespace, name=pool_ref)
 
     def close(self):
@@ -1022,8 +1021,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
 
 
 def test_template_mode_pool_mode_cache_serves_repeated_creates(service, crs):
-    """OSEP-0026: the pool-mode gate reads GetPool once per TTL window, not
-    per create — spec.sandboxResources is immutable for a pool's lifetime."""
+    """GetPool is read once per TTL window, not per create."""
     import asyncio
 
     from opensandbox_server.services.fast_sandbox.service import (

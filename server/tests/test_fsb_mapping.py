@@ -439,7 +439,7 @@ def _map_template(request, **kwargs):
 
 
 def test_map_template_omits_resources_by_default():
-    """Regression guard: non-ResourceAware pool → field unset, identical to today."""
+    """Non-ResourceAware pool → field unset, identical to today."""
     create = _map_template(_template_request())
     assert not create.HasField("resources")
 
@@ -487,8 +487,7 @@ def test_map_template_rejects_invalid_machine(machine):
 
 
 def test_map_template_remap_is_byte_identical_with_same_inputs():
-    """Idempotency: retry with the same request_id/expiry/machine serializes
-    to the identical CreateSandboxRequest (limits are CRD-immutable)."""
+    """A retry with the same inputs serializes to the identical request."""
     request = _template_request()
     first = _map_template(
         request,
