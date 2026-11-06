@@ -354,7 +354,7 @@ Authentication material for `https://` resolvers is provisioned through operator
 
 Caller authentication for `https://` resolvers is a self-contained Ed25519 JWT minted by the egress and verified offline against a JWKS endpoint published by the lifecycle server. The credential proves "this resolve call originated from the egress process" without distributing any secret material to resolvers, applies uniformly to both profiles, and closes the R4 gap for `https://` resolvers at the application layer. `unix://` dials are unchanged: socket permissions remain their boundary, and the credential is attached to `https://` dials only.
 
-Every `https://` resolve dial carries one header, `OpenSandbox-Egress-Credential: <compact JWT>`, with claims `iss` (the platform), `aud: "credential-resolver"`, `sub` (the egress-authoritative sandboxId — the same subject carried in the resolve document), `iat`, `exp` (`iat` + 3600s at most), and `jti` (a per-credential nonce). Resolvers verify the signature, `iss`/`aud`, and `exp` (±30s leeway) with standard JWT libraries; a resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
+Every `https://` resolve dial carries one header, `OpenSandbox-Egress-Credential: <compact JWT>`, with claims `iss` (the platform), `aud` (the resolver origin the credential is valid at — the endpoint authority from the credential source, for example `credential-resolver@resolver.internal`), `sub` (the egress-authoritative sandboxId), `iat`, `exp` (`iat` + 3600s at most), and `jti` (a per-credential nonce). Resolvers verify the signature, `iss`/`aud`, and `exp` (±30s leeway) with standard JWT libraries, and enforce two bindings: `aud` must name the resolver's own origin, so a credential observed by one resolver cannot be replayed to another; and JWT `sub` must equal the resolve document's `subject` — on mismatch the request is rejected with 401, and the attested `sub` is the sole authoritative subject for identity selection, never the body value alone. A resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
 
 Rejected alternatives, recorded with reasons: per-origin static bearer tokens (secret distribution to resolvers — the original sketch); HMAC over the egress token verified by server introspection (per-credential online dependency on the control plane plus hand-rolled caching glue); credentials embedded in the endpoint URI (tenant-readable through vault read-back; breaks R4 and R6); and reuse of `OPENSANDBOX_EGRESS_TOKEN` or revision session tokens (both grant policy-plane powers far beyond resolver authentication — capability confusion).
 
@@ -366,7 +366,7 @@ Rejected alternatives, recorded with reasons: per-origin static bearer tokens (s
 | Generation | server, at sandbox creation | ops-runbook, as a versioned Secret `opensandbox-egress-signing-<v>` |
 | Private-key delivery | env injection — the same channel as `OPENSANDBOX_EGRESS_TOKEN` | read-only Secret volume projected into the egress container (`signing.key` entry only; `OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR`) |
 | Public-key registration | sibling workload annotation / container label, written next to the egress-token entry | server reads `signing.pub` from the same Secret through an independent `secretRef` |
-| JWKS shape | per-kid lookup; `kid` = sandboxId (+incarnation) | flat JWKS of pool keys; `kid` = Secret version |
+| JWKS shape | per-kid lookup; `kid` = sandboxId (+incarnation) | flat JWKS of pool keys; `kid` = `<pool>/<version>`, globally unique across pools |
 | Key retention | server discards the private key after injection | server never touches any private key |
 
 The fast-sandbox signing Secret is a separate object from the MITM CA seed (`opensandbox-mitm-ca-<v>`): independent version lines, rotation cadences, reader sets, and failure domains — entries are never bundled and no reference covers both. A missing or unloadable key fails only the exchange gate (vaults containing exchange bindings are rejected at write time); inline-only vaults, static bindings, and MITM keep serving in both profiles.
@@ -386,7 +386,7 @@ sequenceDiagram
     Note over Srv,Egr: Provisioning — create time only, no runtime channel.<br/>Sidecar: server generates the per-sandbox keypair, injects the private key<br/>through the OPENSANDBOX_EGRESS_TOKEN env channel, records the public key<br/>in the workload annotation / container label, and discards the private key.
     Note over Srv,Egr: Fast Sandbox: ops-runbook versioned Secret,<br/>egress mounts signing.key read-only, server reads signing.pub via secretRef.
 
-    Note over Egr: Background timer mints the JWT at startup<br/>and again at 80% of the TTL — no request meets an expired credential.
+    Note over Egr: Background timer mints one JWT per subject<br/>at startup and again at 80% of the TTL —<br/>no request meets an expired credential.
 
     Egr->>Res: POST /resolve<br/>OpenSandbox-Egress-Credential: JWT
     Res->>SDK: decode unverified header, take kid
@@ -397,7 +397,7 @@ sequenceDiagram
         Srv-->>SDK: JWK — public key only
         SDK->>SDK: verify and cache the key
     end
-    Note over Res: sub is the egress-attested subject —<br/>per-sandbox authorization happens here if the resolver wants it.
+    Note over Res: sub is the egress-attested subject and must<br/>equal the body subject — per-sandbox authorization happens here.
     Res-->>Egr: 200 {headers, redactions}
 
     alt missing / invalid / expired credential
@@ -410,11 +410,12 @@ sequenceDiagram
 
 The JWKS edge needs authentication in exactly one direction. The resolver does not authenticate itself to the server: JWKS serves public keys only, so the endpoint is public by design — the same posture as every OIDC provider's `/.well-known/jwks.json` — and requires only rate limiting. Requiring resolver registration here would reintroduce the static credential this design eliminates.
 
-The direction that matters is the resolver authenticating the server, because a forged JWKS is a key-injection attack: feed a resolver your public key, then mint the matching JWTs. Three rules, all mandatory for SDK implementations:
+The direction that matters is the resolver authenticating the server, because a forged JWKS is a key-injection attack: feed a resolver your public key, then mint the matching JWTs. Four rules, all mandatory for SDK implementations:
 
 - JWKS fetch runs over HTTPS with standard server-certificate verification, never disabled; deployments may additionally pin the platform CA.
-- The JWKS base URL comes from operator configuration only, never from token contents; per-kid URLs are constructed solely from `kid`, which is a platform-controlled identifier (sandboxId or Secret version).
+- The JWKS base URL comes from operator configuration only, never from token contents; per-kid URLs are constructed solely from `kid`, which is a platform-controlled identifier (sandboxId, or `<pool>/<version>`). A `kid` that does not match the platform identifier grammar is rejected locally, before any fetch.
 - The JWT header carries only `alg` and `kid`; `jku`, `x5u`, and embedded `jwk` header parameters are rejected on sight. Keys come from the configured endpoint and nowhere else.
+- Unknown-but-well-formed kids get a bounded negative cache with per-peer fetch rate limiting: an unauthenticated caller spraying random kids must not amplify into lifecycle-server lookups.
 
 | Attack | Defense |
 |---|---|
@@ -422,6 +423,7 @@ The direction that matters is the resolver authenticating the server, because a 
 | Token carries `jku` pointing at an attacker key service | header restricted to `alg` + `kid` |
 | Enumerating other sandboxes' public keys | per-kid lookup requires the identifier, and public keys are not sensitive |
 | JWKS endpoint flooding | rate limiting plus the server's internal cache |
+| Spraying random `kid` values to force JWKS lookups | `kid` grammar rejected locally, negative cache, per-peer fetch limits |
 
 #### Performance
 
@@ -429,13 +431,13 @@ The direction that matters is the resolver authenticating the server, because a 
 - Key fetch is once per key lifetime: per sandbox incarnation (sidecar) or per pool key version (fast-sandbox). The first resolution of a new sandbox pays one JWKS read; steady state without churn pays zero — with 10k active subjects and no recreation, the server sees no calls.
 - The server is never on the resolve path; an internal 30–60s cache in front of annotation/label reads absorbs first-contact bursts.
 - Server unavailability does not deny resolution for known keys — verification is offline. Only first-contact fetches fail, fail-closed for those subjects alone.
-- Minting is a background timer per signer: one Ed25519 signature every ~48 minutes.
+- Minting is per subject, not per signer: the sidecar signer is one-to-one with its sandbox, and a fast-sandbox pool mints and caches one JWT per active subject — lazily on first resolve, refreshed at 80% of the TTL. A pool hosting N subjects performs N signatures every ~48 minutes, still µs-scale work.
 
 #### Rotation
 
 - Credential: TTL 1h; the egress re-mints at 80% of the window (48min) so no request meets an expired credential. The superseded credential stays valid until its own `exp` (the 12min overlap bounds the replay surface of a captured credential); an egress restart mints a fresh `jti` immediately.
 - Sidecar keys: sandbox recreation replaces the keypair; the annotation/label — and with it the JWKS entry — disappears with the workload. There is no cleanup path to forget.
-- Fast-sandbox keys: rotation is the versioned-Secret runbook — create `-(v+1)`, update the template reference and the server `secretRef`, roll the pool; JWKS serves both kids through the grace window.
+- Fast-sandbox keys: rotation is the versioned-Secret runbook — create `-(v+1)`, add it to the server's signing-key reference list, update the template reference, roll the pool. The server references the current and previous versions concurrently and serves both kids in JWKS; the previous version is retired only after the rollout completes and `TTL + leeway` has passed, so credentials minted by not-yet-rolled instances stay verifiable throughout.
 - TTL bounds replay of a captured credential (≤1h). It does not bound signer-key compromise — that is remediated only by rotation; resolver 401 spikes should page whoever owns the keys.
 
 #### Security Properties
@@ -447,7 +449,8 @@ The direction that matters is the resolver authenticating the server, because a 
 #### Test Additions
 
 - Happy path on both profiles (annotation-backed and Secret-backed keys); unknown-kid fetch and cache; expired credential denied with leeway honored.
-- Recreated sandbox invalidates the old kid (sidecar); dual-kid grace window across a version bump (fast-sandbox).
+- Recreated sandbox invalidates the old kid (sidecar); dual-kid grace window across a version bump (fast-sandbox), with the previous key retained until rollout plus `TTL + leeway`.
+- Binding rules: a credential minted for resolver A's origin is rejected at resolver B (`aud` origin binding); JWT `sub` not equal to the resolve document's `subject` is a 401; a `kid` off the platform grammar is rejected locally with no JWKS fetch; sprayed unknown kids hit the negative cache and per-peer fetch limits.
 - Missing or unloadable signing key rejects exchange vaults at write time while inline-only vaults, static bindings, and MITM keep serving.
 - A sandbox process dialing the resolver directly receives 401 (R4 closure).
 - Independence assertions: the signing Secret is distinct from `opensandbox-mitm-ca-*`, with no cross-mounts.
