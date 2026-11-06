@@ -179,6 +179,9 @@ def map_template_create_request(
     fastpath_resource_pool: str = "default-pool",
     now: Optional[datetime] = None,
     expires_at_unix_seconds: Optional[int] = None,
+    template_machine: Optional[dict] = None,
+    pool_is_resource_aware: bool = False,
+    forward_resources: bool = False,
 ) -> pb2.CreateSandboxRequest:
     """Map a template-mode CreateSandboxRequest to FastPath v2.
 
@@ -187,6 +190,13 @@ def map_template_create_request(
     becomes the FastPath ``image`` and the template's recorded entrypoint
     becomes the guest command. Idempotency and metadata rules match
     :func:`map_create_request`.
+
+    OSEP-0026 resource forwarding: when ``forward_resources`` is on and the
+    selected pool reports ResourceAware mode, the template's recorded
+    effective machine shape (``template_machine``) is forwarded verbatim as
+    per-sandbox ``resources.limits``; requests stay pool-derived. Any other
+    combination leaves the field unset — byte-identical to pre-OSEP-0026
+    requests.
     """
     _reject_unsupported_fields(request)
     if request.timeout is None:
@@ -227,7 +237,45 @@ def map_template_create_request(
 
     _validate_metadata(create.metadata)
 
+    if forward_resources and pool_is_resource_aware:
+        _apply_template_resources(create, template_machine)
+
     return create
+
+
+def _apply_template_resources(
+    create: pb2.CreateSandboxRequest, machine: Optional[dict]
+) -> None:
+    """Fail-fast validation + verbatim forwarding of the template machine.
+
+    The shape is a pure function of the immutable template row
+    (``effective_machine``), so these checks guard writer-side invariants
+    (unparseable/non-positive/undersized quantities) rather than caller
+    input; FastPath stays authoritative for budget checks.
+    """
+    cpu = str((machine or {}).get("cpu") or "")
+    memory = str((machine or {}).get("memory") or "")
+    try:
+        cpu_quantity = _canonical_quantity(cpu)
+        memory_quantity = _canonical_quantity(memory)
+    except Exception:
+        raise UnsupportedFieldError(
+            "templateMachine",
+            f"template machine shape is not a valid quantity pair: cpu={cpu!r}, memory={memory!r}",
+        ) from None
+    if cpu_quantity <= 0 or memory_quantity <= 0:
+        raise UnsupportedFieldError(
+            "templateMachine",
+            f"template machine shape must be positive: cpu={cpu!r}, memory={memory!r}",
+        )
+    if cpu_quantity < decimal.Decimal("0.01"):
+        # FastPath's enforced minimum for Linux CFS enforcement (10m).
+        raise UnsupportedFieldError(
+            "templateMachine",
+            f"template machine cpu {cpu!r} is below the FastPath minimum of 10m",
+        )
+    create.resources.limits.cpu = cpu
+    create.resources.limits.memory = memory
 
 
 def _validate_resource_limits(request: CreateSandboxRequest, pool_resources: dict) -> None:

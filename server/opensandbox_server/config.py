@@ -811,6 +811,15 @@ class KubernetesRuntimeConfig(BaseModel):
         default="default-pool",
         description="Default fast-sandbox SandboxPool when extensions.poolRef is unset.",
     )
+    fastpath_forward_template_resources: bool = Field(
+        default=False,
+        description=(
+            "OSEP-0026: forward the template's recorded effective machine "
+            "shape as per-sandbox resources.limits to FastPath. Effective "
+            "only on ResourceAware pools; LegacySlot pools and older "
+            "FastPath builds keep pool-fixed behavior."
+        ),
+    )
     template_s3_publish_secret: str = Field(
         default="sandbox-oss-credentials",
         min_length=1,

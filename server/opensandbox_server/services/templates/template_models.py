@@ -43,7 +43,7 @@ class FastSandboxTemplateRecord:
     template_id: str
     namespace: str
     crd_name: str
-    spec: dict  # normalized build intent (image, entrypoint, resourceLimits, readiness, publish, format)
+    spec: dict  # normalized build intent (image, entrypoint, resourceLimits, machine, readiness, publish, format)
     metadata: dict[str, str] = field(default_factory=dict)
     phase: FastSandboxTemplatePhase = FastSandboxTemplatePhase.PENDING
     manifest_ref: Optional[str] = None

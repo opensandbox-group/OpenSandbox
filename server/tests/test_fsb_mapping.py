@@ -37,6 +37,7 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
+    map_template_create_request,
 )
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -412,3 +413,111 @@ def test_map_reason(runtime, data_plane, ready, expected):
         map_reason(_info(runtime_state=runtime, data_plane_state=data_plane, ready=ready))
         == expected
     )
+
+
+# -- OSEP-0026: gated template resource forwarding ------------------------------
+
+
+def _template_request(**overrides):
+    from opensandbox_server.api.schema import CreateSandboxRequest
+
+    payload = {"template_id": "tpl-1", "timeout": 3600}
+    payload.update(overrides)
+    return CreateSandboxRequest(**payload)
+
+
+def _map_template(request, **kwargs):
+    defaults = dict(
+        sandbox_id="sbx-1",
+        namespace="ns-1",
+        image_ref="oci://reg/t@sha256:" + "a" * 64,
+        entrypoint=["tail", "-f", "/dev/null"],
+        now=NOW,
+    )
+    defaults.update(kwargs)
+    return map_template_create_request(request, **defaults)
+
+
+def test_map_template_omits_resources_by_default():
+    """Regression guard: no gate inputs → field unset, identical to today."""
+    create = _map_template(_template_request())
+    assert not create.HasField("resources")
+
+
+def test_map_template_omits_resources_when_flag_off_even_on_resource_aware_pool():
+    create = _map_template(
+        _template_request(),
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+        forward_resources=False,
+    )
+    assert not create.HasField("resources")
+
+
+def test_map_template_omits_resources_on_legacy_pool_even_with_flag_on():
+    create = _map_template(
+        _template_request(),
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=False,
+        forward_resources=True,
+    )
+    assert not create.HasField("resources")
+
+
+def test_map_template_forwards_machine_verbatim_when_gate_passes():
+    create = _map_template(
+        _template_request(),
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+        forward_resources=True,
+    )
+    assert create.HasField("resources")
+    assert create.resources.limits.cpu == "2"
+    assert create.resources.limits.memory == "1Gi"
+
+
+def test_map_template_rejects_machine_below_fastpath_minimum():
+    with pytest.raises(UnsupportedFieldError, match="10m"):
+        _map_template(
+            _template_request(),
+            template_machine={"cpu": "5m", "memory": "1Gi"},
+            pool_is_resource_aware=True,
+            forward_resources=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "machine",
+    [None, {}, {"cpu": "abc", "memory": "1Gi"}, {"cpu": "0", "memory": "1Gi"}],
+)
+def test_map_template_rejects_invalid_machine(machine):
+    with pytest.raises(UnsupportedFieldError):
+        _map_template(
+            _template_request(),
+            template_machine=machine,
+            pool_is_resource_aware=True,
+            forward_resources=True,
+        )
+
+
+def test_map_template_remap_is_byte_identical_with_same_inputs():
+    """Idempotency: retry with the same request_id/expiry/machine serializes
+    to the identical CreateSandboxRequest (limits are CRD-immutable)."""
+    request = _template_request()
+    first = _map_template(
+        request,
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+        forward_resources=True,
+    )
+    second = _map_template(
+        request,
+        sandbox_id=first.request_id,
+        expires_at_unix_seconds=first.expires_at_unix_seconds,
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+        forward_resources=True,
+    )
+    assert second.request_id == first.request_id
+    assert second.expires_at_unix_seconds == EXPECTED_EXPIRY
+    assert second.SerializeToString() == first.SerializeToString()

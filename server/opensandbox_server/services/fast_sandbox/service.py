@@ -324,10 +324,10 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         return self._k8s.namespace or "default"
 
-    def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
-        """Return the resource profile declared by the selected SandboxPool."""
+    def _pool_info(self, namespace: str, pool_ref: str) -> pb2.PoolInfo:
+        """Fetch the selected SandboxPool via FastPath GetPool."""
         try:
-            pool = self._fastpath.get_pool(namespace, pool_ref)
+            return self._fastpath.get_pool(namespace, pool_ref)
         except FastPathNotFound:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -338,6 +338,21 @@ class FastSandboxService(SandboxService, ExtensionService):
             )
         except FastPathError as exc:
             raise self._fastpath_http_error(exc) from exc
+
+    @staticmethod
+    def _pool_is_resource_aware(pool: pb2.PoolInfo) -> bool:
+        """OSEP-0026 gate: only an explicitly reported ResourceAware profile
+        may receive per-sandbox resources. LegacySlot, unspecified, and
+        unreported (older FastPath) profiles all fail safe to False."""
+        profile = pool.sandbox_resource_profile
+        return (
+            profile is not None
+            and profile.mode == pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+        )
+
+    def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
+        """Return the resource profile declared by the selected SandboxPool."""
+        pool = self._pool_info(namespace, pool_ref)
         resources: dict = {}
         if pool.sandbox_cpu:
             resources["cpu"] = pool.sandbox_cpu
@@ -372,8 +387,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
         if (request.template_id or "").strip():
-            # OSEP-0026: machine shape awaits gated FastPath forwarding.
-            image_ref, template_entrypoint, _template_machine = (
+            image_ref, template_entrypoint, template_machine = (
                 self.resolve_template_service().resolve_template_artifact(
                     request.template_id.strip()
                 )
@@ -395,6 +409,34 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
+            # OSEP-0026 gated forwarding: only when the server flag is on do
+            # we spend a GetPool and re-map with the recorded machine shape
+            # (flag off keeps template mode byte-identical, zero extra RPC).
+            # The second map reuses request_id and the first absolute expiry
+            # so a transport retry stays idempotent.
+            if self._k8s.fastpath_forward_template_resources:
+                pool = self._pool_info(create_request.namespace, create_request.pool_ref)
+                try:
+                    create_request = map_template_create_request(
+                        request,
+                        sandbox_id=create_request.request_id,
+                        namespace=create_request.namespace,
+                        image_ref=image_ref,
+                        entrypoint=template_entrypoint,
+                        fastpath_resource_pool=self._k8s.fastpath_resource_pool,
+                        expires_at_unix_seconds=create_request.expires_at_unix_seconds,
+                        template_machine=template_machine,
+                        pool_is_resource_aware=self._pool_is_resource_aware(pool),
+                        forward_resources=True,
+                    )
+                except UnsupportedFieldError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": SandboxErrorCodes.INVALID_PARAMETER,
+                            "message": str(exc),
+                        },
+                    ) from exc
         else:
             try:
                 create_request = map_create_request(
