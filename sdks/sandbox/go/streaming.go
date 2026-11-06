@@ -56,6 +56,7 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 	var current StreamEvent
 	var dataLines []string
 	eventCount := 0
+	firstLine := true
 
 	for {
 		select {
@@ -83,6 +84,12 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 		}
 
 		line := scanner.Text()
+		if firstLine {
+			// SSE permits one UTF-8 BOM at the start of the response. Scanner
+			// assembles the line even when the BOM spans multiple body reads.
+			line = strings.TrimPrefix(line, "\ufeff")
+			firstLine = false
+		}
 
 		// Empty line signals end of an event block.
 		if line == "" {

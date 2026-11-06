@@ -771,6 +771,8 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 
 The stream parser accepts LF, CRLF, and CR line endings for both standard SSE and execd's legacy bare-JSON frames, including when a line ending is split across network reads.
 
+One leading UTF-8 byte order mark (BOM) is ignored at the start of each response, including when its bytes arrive in separate reads. A BOM inside event data or later in the stream is preserved.
+
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 
 ```go
