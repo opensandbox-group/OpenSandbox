@@ -16,6 +16,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -148,7 +150,7 @@ type lifecycleFaultProxy struct {
 	client   *http.Client
 }
 
-func startLifecycleFaultProxy(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig) (*lifecycleFaultProxy, string) {
+func startLifecycleFaultProxy(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, beforeConsume bool) (*lifecycleFaultProxy, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "fl-")
 	require.NoError(t, err)
@@ -182,6 +184,11 @@ func startLifecycleFaultProxy(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfi
 			lost = len(f.commands) == 1
 			f.mu.Unlock()
 		}
+		if lost && beforeConsume {
+			f.once.Do(func() { close(f.consumed) })
+			<-r.Context().Done()
+			return
+		}
 		request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://addon"+r.URL.Path, strings.NewReader(string(raw)))
 		if err != nil {
 			return
@@ -211,6 +218,16 @@ func startLifecycleFaultProxy(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfi
 }
 
 func TestFastSandboxSubjectDrainSlowIPCAndReconcile(t *testing.T) {
+	for _, beforeConsume := range []bool{false, true} {
+		name := "consumed-reply-lost"
+		if beforeConsume {
+			name = "unconsumed-exact-retry"
+		}
+		t.Run(name, func(t *testing.T) { testSubjectDrainSlowIPC(t, beforeConsume) })
+	}
+}
+
+func testSubjectDrainSlowIPC(t *testing.T, beforeConsume bool) {
 	s, reg, _ := fastSandboxTestServer(t)
 	o := subjectTestOwner(t)
 	launch, configs := subjectAddonLauncher(t, o)
@@ -220,7 +237,7 @@ func TestFastSandboxSubjectDrainSlowIPCAndReconcile(t *testing.T) {
 	require.NoError(t, err)
 	defer o.stop(child)
 	h := (*configs)[0].SubjectRevisionIPC
-	fault, path := startLifecycleFaultProxy(t, h)
+	fault, path := startLifecycleFaultProxy(t, h, beforeConsume)
 	client, err := revision.NewSubjectLifecycleClient(path, h.SessionToken, h.ControlGeneration)
 	require.NoError(t, err)
 	s.startSubjectDrain()
@@ -242,6 +259,7 @@ func TestFastSandboxSubjectDrainSlowIPCAndReconcile(t *testing.T) {
 	actionsDone := make(chan struct{})
 	go func() {
 		defer close(actionsDone)
+		require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, vaultAllowPolicy())).Code)
 		require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookRuntimeReady)).Code)
 		require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
 		require.True(t, s.actionStatusResponse().Ready)
@@ -258,7 +276,7 @@ func TestFastSandboxSubjectDrainSlowIPCAndReconcile(t *testing.T) {
 	s.mu.Lock()
 	queued := len(s.subjectDrain.queue)
 	s.mu.Unlock()
-	require.Equal(t, 2, queued, "Unload and Register must remain queued during Reconcile")
+	require.Equal(t, 3, queued, "duplicate SET, Unload and Register must remain queued during Reconcile")
 	fault.mu.Lock()
 	require.Len(t, fault.commands, 1)
 	fault.mu.Unlock()
@@ -271,15 +289,21 @@ func TestFastSandboxSubjectDrainSlowIPCAndReconcile(t *testing.T) {
 	waitLifecycleIdle(t, s, h, 3)
 	fault.mu.Lock()
 	defer fault.mu.Unlock()
-	require.Len(t, fault.commands, 3, "lost acknowledgement must not allocate a new sequence or repeat consumed command")
-	for i, raw := range fault.commands {
+	commands := fault.commands
+	if beforeConsume {
+		require.Len(t, commands, 4)
+		require.Equal(t, commands[0], commands[1], "unconsumed command must retry frozen bytes at the same sequence")
+		commands = commands[1:]
+	}
+	require.Len(t, commands, 3, "lost acknowledgement must not allocate a new sequence or repeat consumed command")
+	for i, raw := range commands {
 		var command struct {
 			Sequence int `json:"lifecycleSequence"`
 		}
 		require.NoError(t, json.Unmarshal(raw, &command))
 		require.Equal(t, i+1, command.Sequence)
 	}
-	require.Empty(t, s.subjectLifecycleDegraded())
+	require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) == 0 }, time.Second, 10*time.Millisecond)
 }
 
 func TestFastSandboxSubjectDrainConfirmedFailures(t *testing.T) {
@@ -343,4 +367,108 @@ func TestFastSandboxSubjectDrainDisabledAndStaleIntents(t *testing.T) {
 	s.subjectDrain.signal()
 	s.mu.Unlock()
 	waitLifecycleIdle(t, s, h, 1)
+}
+
+func TestFastSandboxSubjectDrainReplacePending(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	o := subjectTestOwner(t)
+	launch, configs := subjectAddonLauncher(t, o)
+	firstChild, err := o.launch(context.Background(), mitmproxy.Config{}, launch)
+	require.NoError(t, err)
+	defer o.stop(firstChild)
+	first := (*configs)[0].SubjectRevisionIPC
+	fault, path := startLifecycleFaultProxy(t, first, false)
+	oldClient, err := revision.NewSubjectLifecycleClient(path, first.SessionToken, first.ControlGeneration)
+	require.NoError(t, err)
+	s.startSubjectDrain()
+	defer func() { s.subjectDrain.cancel(); <-s.subjectDrain.done }()
+	s.publishSubjectClient(oldClient)
+	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, nil)).Code)
+	select {
+	case <-fault.consumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old command not consumed")
+	}
+	// The old send is still blocked. Switching clients cancels it and never
+	// waits for its mutex or an acknowledgement before recording replay.
+	nextChild, err := o.launch(context.Background(), mitmproxy.Config{}, launch)
+	require.NoError(t, err)
+	defer o.stop(nextChild)
+	next := (*configs)[1].SubjectRevisionIPC
+	s.publishSubjectClient(o.sessions[nextChild].client)
+	require.Equal(t, 200, doAction(t, s, bindBody(t, "later", "10.0.0.9", "r2", "a2", 1, nil)).Code)
+	waitSubjectKnown(t, next, lifecycleTarget(t, testUID, testFenceR, testFenceA), true)
+	waitSubjectKnown(t, next, lifecycleTarget(t, "later", "r2", "a2"), true)
+	waitLifecycleIdle(t, s, next, 2)
+	require.Empty(t, s.subjectLifecycleDegraded(), "old canceled result cannot degrade new session")
+	fault.mu.Lock()
+	defer fault.mu.Unlock()
+	require.Len(t, fault.commands, 1, "replacement must abandon only the old process command")
+}
+
+// Fault-injected Unix peer confirms terminal receiver failures. This tests the
+// worker/client boundary; the Python capacity test above exercises a real owner.
+func TestFastSandboxSubjectDrainFailureReceiptsAreNotRetried(t *testing.T) {
+	for _, outcome := range []string{"subject_conflict", "subject_failed"} {
+		t.Run(outcome, func(t *testing.T) {
+			s, _, _ := fastSandboxTestServer(t)
+			o := subjectTestOwner(t)
+			path := filepath.Join(o.cfg.parent, "peer.sock")
+			listener, err := net.Listen("unix", path)
+			require.NoError(t, err)
+			token, err := revision.NewSessionToken()
+			require.NoError(t, err)
+			var mu sync.Mutex
+			var targets []revision.SubjectTarget
+			var receipt revision.LifecycleReceipt
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				require.Equal(t, "Bearer "+token, r.Header.Get("Authorization"))
+				if strings.HasSuffix(r.URL.Path, "lifecycle-status") {
+					raw, _ := json.Marshal(receipt)
+					_, _ = w.Write([]byte(strings.Replace(string(raw), `"lifecycleSequence":`, `"lastSequence":`, 1)))
+					return
+				}
+				raw, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				var command struct {
+					Sequence int64                  `json:"lifecycleSequence"`
+					Target   revision.SubjectTarget `json:"target"`
+				}
+				require.NoError(t, json.Unmarshal(raw, &command))
+				targets = append(targets, command.Target)
+				digest := sha256.Sum256(append([]byte("opensandbox.subject-lifecycle.v2\x00register"), raw...))
+				result := revision.LifecycleResult{HTTPStatus: 200, Outcome: "registered"}
+				if len(targets) == 1 {
+					result.HTTPStatus = 503
+					result.Outcome = outcome
+					if outcome == "subject_conflict" {
+						result.HTTPStatus = 409
+					}
+				}
+				receipt = revision.LifecycleReceipt{LifecycleSequence: command.Sequence, Operation: "register", CommandDigest: hex.EncodeToString(digest[:]), Result: result}
+				w.WriteHeader(result.HTTPStatus)
+				require.NoError(t, json.NewEncoder(w).Encode(receipt))
+			})}
+			go func() { _ = server.Serve(listener) }()
+			defer server.Close()
+			client, err := revision.NewSubjectLifecycleClient(path, token, "control-test")
+			require.NoError(t, err)
+			s.startSubjectDrain()
+			defer func() { s.subjectDrain.cancel(); <-s.subjectDrain.done }()
+			s.publishSubjectClient(client)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, nil)).Code)
+			require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) == 1 }, time.Second, 10*time.Millisecond)
+			require.Equal(t, []string{outcome}, s.subjectLifecycleDegraded())
+			require.Equal(t, 200, doAction(t, s, bindBody(t, "next", "10.0.0.9", "r2", "a2", 1, nil)).Code)
+			require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return receipt.LifecycleSequence == 2 }, time.Second, 10*time.Millisecond)
+			require.True(t, s.actionStatusResponse().Ready)
+			mu.Lock()
+			require.Len(t, targets, 2)
+			require.Equal(t, "s-next", targets[1].SubjectKey, "next intent must run after a confirmed failure")
+			mu.Unlock()
+		})
+	}
 }
