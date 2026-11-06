@@ -2,6 +2,7 @@
 title: Multi-Sandbox Egress Control Plane
 authors:
   - "@Pangjiping"
+  - "@hpliStartAgain"
 creation-date: 2026-08-21
 last-updated: 2026-10-19
 status: implementing
