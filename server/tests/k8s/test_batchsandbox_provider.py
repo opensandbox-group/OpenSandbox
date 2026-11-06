@@ -1432,7 +1432,10 @@ spec:
         assert result["state"] == "Running"
         assert result["reason"] == "RUNNING"
 
-    def test_get_status_returns_failed_when_pod_unschedulable(self):
+    # The controller keeps phase Pending while no pod is ready; older
+    # BatchSandboxes may carry no phase at all.
+    @pytest.mark.parametrize("phase", [None, "Pending"])
+    def test_get_unschedulable_status_returns_failed_when_pod_unschedulable(self, phase):
         mock_k8s_client = MagicMock()
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.return_value = [
@@ -1466,21 +1469,33 @@ spec:
                 "replicas": 1,
                 "ready": 0,
                 "allocated": 0,
-                "selector": "app=sandbox",
             },
             "metadata": {
+                "name": "sandbox-1",
                 "namespace": "test-ns",
                 "creationTimestamp": "2025-12-24T10:00:00Z",
             },
         }
+        if phase is not None:
+            workload["status"]["phase"] = phase
 
-        result = provider.get_status(workload)
+        # get_status serves every read, so it never lists pods.
+        assert provider.get_status(workload)["state"] == "Pending"
+        mock_k8s_client.list_pods.assert_not_called()
 
+        result = provider.get_unschedulable_status(workload)
+
+        assert result is not None
         assert result["state"] == "Failed"
         assert result["reason"] == "POD_PLATFORM_UNSCHEDULABLE"
         assert "didn't match Pod's node affinity" in result["message"]
+        # The controller labels its pods with the BatchSandbox name.
+        mock_k8s_client.list_pods.assert_called_once_with(
+            namespace="test-ns",
+            label_selector="batch-sandbox.sandbox.opensandbox.io/name=sandbox-1",
+        )
 
-    def test_get_status_keeps_pending_for_generic_failed_scheduling(self):
+    def test_get_unschedulable_status_is_none_for_generic_failed_scheduling(self):
         mock_k8s_client = MagicMock()
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.return_value = [
@@ -1504,20 +1519,17 @@ spec:
                 "replicas": 1,
                 "ready": 0,
                 "allocated": 0,
-                "selector": "app=sandbox",
             },
             "metadata": {
+                "name": "sandbox-1",
                 "namespace": "test-ns",
                 "creationTimestamp": "2025-12-24T10:00:00Z",
             },
         }
 
-        result = provider.get_status(workload)
+        assert provider.get_unschedulable_status(workload) is None
 
-        assert result["state"] == "Pending"
-        assert result["reason"] == "BATCHSANDBOX_PENDING"
-
-    def test_get_status_keeps_pending_when_non_platform_affinity_mismatch(self):
+    def test_get_unschedulable_status_is_none_when_non_platform_affinity_mismatch(self):
         mock_k8s_client = MagicMock()
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.return_value = [
@@ -1552,20 +1564,18 @@ spec:
                 "replicas": 1,
                 "ready": 0,
                 "allocated": 0,
-                "selector": "app=sandbox",
             },
             "metadata": {
+                "name": "sandbox-1",
                 "namespace": "test-ns",
                 "creationTimestamp": "2025-12-24T10:00:00Z",
             },
         }
 
-        result = provider.get_status(workload)
+        assert provider.get_unschedulable_status(workload) is None
+        mock_k8s_client.list_pods.assert_called_once()
 
-        assert result["state"] == "Pending"
-        assert result["reason"] == "BATCHSANDBOX_PENDING"
-
-    def test_get_status_keeps_pending_for_mixed_capacity_and_affinity_message(self):
+    def test_get_unschedulable_status_is_none_for_mixed_capacity_and_affinity_message(self):
         mock_k8s_client = MagicMock()
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.return_value = [
@@ -1602,18 +1612,16 @@ spec:
                 "replicas": 1,
                 "ready": 0,
                 "allocated": 0,
-                "selector": "app=sandbox",
             },
             "metadata": {
+                "name": "sandbox-1",
                 "namespace": "test-ns",
                 "creationTimestamp": "2025-12-24T10:00:00Z",
             },
         }
 
-        result = provider.get_status(workload)
-
-        assert result["state"] == "Pending"
-        assert result["reason"] == "BATCHSANDBOX_PENDING"
+        assert provider.get_unschedulable_status(workload) is None
+        mock_k8s_client.list_pods.assert_called_once()
 
     # ===== Endpoint Information Tests =====
 

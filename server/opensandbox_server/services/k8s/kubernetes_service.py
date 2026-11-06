@@ -130,6 +130,11 @@ logger = logging.getLogger(__name__)
 # this short, so back off flat (not exponential) and say so once per window.
 _CLUSTER_LOOKUP_FORBIDDEN_BACKOFF_SECONDS = 600.0
 
+# How often the create wait loop asks the provider whether a Pending sandbox
+# can never be scheduled; the check may list pods. The first check waits one
+# interval too, since the controller has usually not created a pod yet.
+_UNSCHEDULABLE_PROBE_INTERVAL_SECONDS = 5.0
+
 
 #: Upper bound on the extra time a create timeout spends reading Pod details.
 _STARTUP_DETAILS_TIMEOUT_SECONDS = 5.0
@@ -369,6 +374,7 @@ class KubernetesSandboxService(
         start_time = time.monotonic()
         last_state = None
         last_message = None
+        next_unschedulable_probe_at = start_time + _UNSCHEDULABLE_PROBE_INTERVAL_SECONDS
         pool_capacity_started_at: float | None = None
         pool_capacity_blocked_seconds = 0.0
         if pool_acquisition_timeout_seconds is None:
@@ -473,9 +479,22 @@ class KubernetesSandboxService(
                         continue
                     last_workload = workload
 
+                    # Some providers list pods to report a status.
                     status_info = _normalize_create_status(
-                        self.workload_provider.get_status(workload)
+                        await asyncio.to_thread(self.workload_provider.get_status, workload)
                     )
+                    if (
+                        status_info["state"] == "Pending"
+                        and time.monotonic() >= next_unschedulable_probe_at
+                    ):
+                        next_unschedulable_probe_at = (
+                            time.monotonic() + _UNSCHEDULABLE_PROBE_INTERVAL_SECONDS
+                        )
+                        unschedulable_status = await asyncio.to_thread(
+                            self.workload_provider.get_unschedulable_status, workload
+                        )
+                        if unschedulable_status is not None:
+                            status_info = _normalize_create_status(unschedulable_status)
                     current_state = status_info["state"]
                     current_reason = status_info["reason"]
                     current_message = status_info["message"]

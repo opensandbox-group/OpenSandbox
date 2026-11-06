@@ -215,6 +215,8 @@ def k8s_service(k8s_app_config):
         mock_k8s_client_cls.return_value = mock_k8s_client
 
         mock_provider = MagicMock()
+        # Like the base WorkloadProvider: no unschedulable verdict.
+        mock_provider.get_unschedulable_status.return_value = None
         mock_create_provider.return_value = mock_provider
 
         from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
