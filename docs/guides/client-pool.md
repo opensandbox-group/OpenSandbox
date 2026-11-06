@@ -258,6 +258,8 @@ try {
 
 When a Go `Start(ctx)` restart or concurrent `Shutdown(ctx, ...)` waits for an earlier shutdown to finish, cancelling its context stops only that wait and returns the context error. It does not interrupt or mark the earlier cleanup complete.
 
+The Go shutdown owner also observes its context while gracefully waiting for in-flight acquires to drain. Cancellation ends that drain wait, marks the pool `STOPPED`, signals shutdown completion, and returns the context error. It does not cancel the independently owned acquire calls. This applies to the drain phase after reconciliation has stopped; custom reconciliation callbacks must still honor their own cancellation.
+
 Inside a function returning `error`, with `ctx` and the usual `context`, `fmt`, `time`, and `opensandbox` imports:
 
 ```go
