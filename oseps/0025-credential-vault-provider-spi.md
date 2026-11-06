@@ -354,7 +354,41 @@ Authentication material for `https://` resolvers is provisioned through operator
 
 Caller authentication for `https://` resolvers is a self-contained Ed25519 JWT minted by the egress and verified offline against a JWKS endpoint published by the lifecycle server. The credential proves "this resolve call originated from the egress process" without distributing any secret material to resolvers, applies uniformly to both profiles, and closes the R4 gap for `https://` resolvers at the application layer. `unix://` dials are unchanged: socket permissions remain their boundary. `http://` is accepted only for loopback authorities and follows the `https://` rule — the credential is attached to every TCP dial. This matters most in the sidecar profile, where the sandbox shares the egress's network namespace and a loopback resolver is sandbox-reachable: there the caller credential is the resolver's only boundary. In fast-sandbox the egress pod's loopback is not sandbox-reachable and the credential is defense in depth.
 
-Every `https://` resolve dial carries one header, `OpenSandbox-Egress-Credential: <compact JWT>`, with claims `iss` (the platform), `aud` (the resolver origin the credential is valid at — the endpoint authority from the credential source, for example `credential-resolver@resolver.internal`), `sub` (the egress-authoritative sandboxId), `iat`, `exp` (`iat` + 3600s at most), and `jti` (a per-credential nonce). Resolvers verify the signature, `iss`/`aud`, and `exp` (±30s leeway) with standard JWT libraries, and enforce two bindings: `aud` must name the resolver's own origin, so a credential observed by one resolver cannot be replayed to another; and JWT `sub` must equal the resolve document's `subject` — on mismatch the request is rejected with 401, and the attested `sub` is the sole authoritative subject for identity selection, never the body value alone. A resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
+Every TCP resolve dial carries one header, `OpenSandbox-Egress-Credential: <compact JWT>`. Resolvers verify with standard JWT libraries and enforce two bindings: `aud` must name the resolver's own origin, so a credential observed by one resolver cannot be replayed to another; and JWT `sub` must equal the resolve document's `subject` — on mismatch the request is rejected with 401, and the attested `sub` is the sole authoritative subject for identity selection, never the body value alone. A resolver-side SDK utility wraps key fetch and caching so that integration is a few lines.
+
+#### Credential Format
+
+```jsonc
+// header — only these parameters are legal; anything else is rejected
+{ "alg": "EdDSA", "typ": "JWT", "kid": "pool-a:v2" }
+// kid: sandboxId (+incarnation) in the sidecar profile, <pool>:<version> in fast-sandbox
+
+// payload — six claims, no more
+{
+  "iss": "opensandbox",                            // platform identifier, matched against SDK config
+  "aud": "credential-resolver@resolver.internal",  // valid at exactly this resolver origin
+  "sub": "sbx-7f3a2c",                             // egress-authoritative sandboxId
+  "iat": 1790000000,
+  "exp": 1790003600,                               // iat + 3600 at most
+  "jti": "kX9sT2vZ8qLm4NpR6wYb3A"                  // fresh 128-bit nonce on every mint
+}
+```
+
+| Field | Rule |
+|---|---|
+| `alg` | pinned to `EdDSA`; the SDK hardcodes it and rejects anything else (including `none` and HMAC confusion) — no algorithm negotiation |
+| `typ` | not required; if present it must be `JWT` |
+| `kid` | must match the platform identifier grammar; off-grammar kids are rejected locally with no fetch |
+| `iss` | must equal the SDK's configured issuer |
+| `aud` | must equal the verifying resolver's own origin — cross-resolver replay dies here |
+| `sub` | must equal the resolve document's `subject`; the attested claim is the sole authoritative identity |
+| `iat`/`exp` | `exp - iat ≤ 3600`; `now ≤ exp + 30s`; `iat` more than the leeway in the future is rejected |
+| `jti` | no resolver-side dedup — one credential is legitimately reused across its whole window; `jti` distinguishes mint windows inside the 12-minute rotation overlap |
+| extras | unknown header parameters are rejected; unknown payload claims are ignored |
+
+Deliberate omissions, recorded so nobody "helpfully" adds them later: no `nbf` (`iat` + `exp` + leeway already bound the window — one fewer clock comparison); no `scope`/`role`/tenant claims (authorization is the resolver operator's domain keyed on `sub`, per Non-Goals — roles in the token would move policy into the credential); and `jti` is not a replay defense (replay is bounded by `exp` and `aud`).
+
+Serial form is the compact JWS: three base64url segments, ~250–300 bytes total (the Ed25519 signature is a fixed 64 bytes), carried in the single header. The resolver SDK needs exactly three configuration values: `jwks_base`, `expected_issuer`, and `expected_aud` (its own origin).
 
 Rejected alternatives, recorded with reasons: per-origin static bearer tokens (secret distribution to resolvers — the original sketch); HMAC over the egress token verified by server introspection (per-credential online dependency on the control plane plus hand-rolled caching glue); credentials embedded in the endpoint URI (tenant-readable through vault read-back; breaks R4 and R6); and reuse of `OPENSANDBOX_EGRESS_TOKEN` or revision session tokens (both grant policy-plane powers far beyond resolver authentication — capability confusion).
 
@@ -453,6 +487,7 @@ The direction that matters is the resolver authenticating the server, because a 
 - Recreated sandbox invalidates the old kid (sidecar); dual-kid grace window across a version bump (fast-sandbox), with the previous key retained until rollout plus `TTL + leeway`.
 - Binding rules: a credential minted for resolver A's origin is rejected at resolver B (`aud` origin binding); JWT `sub` not equal to the resolve document's `subject` is a 401; a `kid` off the platform grammar is rejected locally with no JWKS fetch; sprayed unknown kids hit the negative cache and per-peer fetch limits.
 - Key cache: a cached JWK older than the max age is re-fetched on next use; a retired `kid` rejects credentials once its refresh window passes — rotation revokes within the bounded window.
+- Format matrix: `alg` other than EdDSA, a wrong `typ`, off-grammar `kid`, and unknown header parameters are rejected; unknown payload claims are ignored.
 - Missing or unloadable signing key rejects exchange vaults at write time while inline-only vaults, static bindings, and MITM keep serving.
 - A sandbox process dialing the resolver directly receives 401 (R4 closure).
 - Independence assertions: the signing Secret is distinct from `opensandbox-mitm-ca-*`, with no cross-mounts.
