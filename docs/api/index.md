@@ -221,6 +221,8 @@ Code execution and command execution interfaces use SSE for real-time streaming 
 - `execution_count` - Execution count
 - `error` - Error information
 
+For Jupyter-backed `POST /code` executions, `execution_complete` is a success-only terminal event sent after the execution's output and result events. Failed executions report `error` without `execution_complete`. Read the stream through its terminal event; an earlier status update or the end of a connection alone does not establish success.
+
 ### Resource Limits
 
 Supports flexible resource configuration (similar to Kubernetes):

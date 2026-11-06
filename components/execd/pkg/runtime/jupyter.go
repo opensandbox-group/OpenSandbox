@@ -130,16 +130,6 @@ func dispatchExecutionResultHooks(request *ExecuteCodeRequest, result *execute.E
 		request.Hooks.OnExecuteStatus(result.Status)
 	}
 
-	if result.Error != nil {
-		request.Hooks.OnExecuteError(result.Error)
-	}
-
-	// Treat completion as success-only terminal signal. For failed executions,
-	// error should be the terminal event to avoid losing error delivery.
-	if result.ExecutionTime > 0 && result.Error == nil {
-		request.Hooks.OnExecuteComplete(result.ExecutionTime)
-	}
-
 	for _, stream := range result.Stream {
 		switch stream.Name {
 		case execute.StreamStdout:
@@ -147,6 +137,16 @@ func dispatchExecutionResultHooks(request *ExecuteCodeRequest, result *execute.E
 		case execute.StreamStderr:
 			request.Hooks.OnExecuteStderr(stream.Text)
 		}
+	}
+
+	if result.Error != nil {
+		request.Hooks.OnExecuteError(result.Error)
+	}
+
+	// Treat completion as success-only terminal signal, after all output. For failed
+	// executions, error should be the terminal event to avoid losing error delivery.
+	if result.ExecutionTime > 0 && result.Error == nil {
+		request.Hooks.OnExecuteComplete(result.ExecutionTime)
 	}
 }
 
