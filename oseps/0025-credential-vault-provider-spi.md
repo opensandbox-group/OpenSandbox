@@ -384,11 +384,11 @@ sequenceDiagram
     participant SDK as 🧰 resolver SDK (JWKS cache)
 
     Note over Srv,Egr: Provisioning — create time only, no runtime channel.<br/>Sidecar: server generates the per-sandbox keypair, injects the private key<br/>through the OPENSANDBOX_EGRESS_TOKEN env channel, records the public key<br/>in the workload annotation / container label, and discards the private key.
-    Note over Srv,Egr: Fast Sandbox: ops-runbook versioned Secret;<br/>egress mounts signing.key read-only, server reads signing.pub via secretRef.
+    Note over Srv,Egr: Fast Sandbox: ops-runbook versioned Secret,<br/>egress mounts signing.key read-only, server reads signing.pub via secretRef.
 
     Note over Egr: Background timer mints the JWT at startup<br/>and again at 80% of the TTL — no request meets an expired credential.
 
-    Egr->>Res: POST /resolve<br/>OpenSandbox-Egress-Credential: <jwt>
+    Egr->>Res: POST /resolve<br/>OpenSandbox-Egress-Credential: JWT
     Res->>SDK: decode unverified header, take kid
     alt kid cached
         SDK->>SDK: verify Ed25519 signature, iss/aud, exp (±30s leeway)
@@ -397,7 +397,7 @@ sequenceDiagram
         Srv-->>SDK: JWK — public key only
         SDK->>SDK: verify and cache the key
     end
-    Note over Res: sub is the egress-attested subject;<br/>per-sandbox authorization happens here if the resolver wants it.
+    Note over Res: sub is the egress-attested subject —<br/>per-sandbox authorization happens here if the resolver wants it.
     Res-->>Egr: 200 {headers, redactions}
 
     alt missing / invalid / expired credential
