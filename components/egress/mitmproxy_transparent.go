@@ -76,6 +76,7 @@ func (m *mitmTransparent) publishRunning(
 	m.revisionSession = session
 	m.currentGen = gen
 	m.launchGen, m.pending = 0, nil
+	m.subjectOwner.published(r)
 	return true
 }
 
@@ -116,6 +117,7 @@ func (m *mitmTransparent) stopChild(running *mitmproxy.Running, timeout time.Dur
 func (m *mitmTransparent) shutdown(timeout time.Duration) {
 	running, session := m.claimForShutdown()
 	m.signalShutdown()
+	m.subjectOwner.stopDrain()
 	m.stopChild(running, timeout)
 	if err := m.subjectOwner.close(running); err != nil {
 		log.Errorf("[mitmproxy] subject session cleanup failed: %v", err)

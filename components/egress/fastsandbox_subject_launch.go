@@ -46,7 +46,7 @@ type fastSandboxSubjectSession struct {
 	parentInfo, directoryInfo os.FileInfo
 	cfg                       fastSandboxSubjectSessionConfig
 	handoff                   mitmproxy.SubjectRevisionIPCConfig
-	client                    *revision.SubjectLifecycleClient // reserved for the B1b drain worker
+	client                    *revision.SubjectLifecycleClient // used exclusively by the drain worker after publication
 }
 
 func newFastSandboxSubjectSession(cfg fastSandboxSubjectSessionConfig) (*fastSandboxSubjectSession, error) {
@@ -191,6 +191,7 @@ type fastSandboxSubjectLaunchOwner struct {
 	cfg      fastSandboxSubjectSessionConfig
 	mu       sync.Mutex
 	sessions map[*mitmproxy.Running]*fastSandboxSubjectSession
+	server   *fastSandboxPolicyServer
 	stop     func(*mitmproxy.Running)
 }
 
@@ -264,5 +265,48 @@ func (o *fastSandboxSubjectLaunchOwner) close(running *mitmproxy.Running) error 
 		return nil
 	}
 	delete(o.sessions, running)
+	if o.server != nil {
+		o.server.detachSubjectClient(session.client)
+	}
 	return session.close()
+}
+
+// attach is called once after initial launch, before the watcher/actions start.
+func (o *fastSandboxSubjectLaunchOwner) attach(s *fastSandboxPolicyServer, running *mitmproxy.Running) {
+	s.startSubjectDrain()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.server = s
+	if session := o.sessions[running]; session != nil {
+		s.publishSubjectClient(session.client)
+	}
+}
+
+// published follows the existing child publication seam. It only records
+// session/replay state under s.mu and never waits for the client mutex.
+// Lock order is m.mu -> o.mu -> s.mu; never acquire these locks in reverse.
+func (o *fastSandboxSubjectLaunchOwner) published(running *mitmproxy.Running) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.server != nil {
+		if session := o.sessions[running]; session != nil {
+			o.server.publishSubjectClient(session.client)
+		}
+	}
+}
+
+func (o *fastSandboxSubjectLaunchOwner) stopDrain() {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	s := o.server
+	o.mu.Unlock()
+	if s != nil {
+		s.subjectDrain.cancel()
+		<-s.subjectDrain.done
+	}
 }
