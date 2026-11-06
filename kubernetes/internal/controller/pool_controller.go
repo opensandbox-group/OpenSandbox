@@ -398,15 +398,19 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 		}
 
 		// 5. Handle pool scale
-		toDeletePods := append(updateResult.ToDeletePods, schedResult.ToDelete...)
+		// The update's deletions are passed apart from the recycle handler's
+		// (previously both were merged into toDeletePods): scalePool only
+		// deletes the update's ready pods while scale-up can start their
+		// replacements, whereas recycle deletions always go ahead.
 		args := &scaleArgs{
-			updateRevision: updateResult.UpdateRevision,
-			pods:           schedulePods,
-			totalPodCnt:    totalPodCnt,
-			allocatedCnt:   int32(len(schedResult.LatestAllocation)),
-			idlePods:       updateResult.IdlePods,
-			toDeletePods:   toDeletePods,
-			supplyCnt:      schedResult.SupplyCnt + updateResult.SupplyUpdateRevision,
+			updateRevision:   updateResult.UpdateRevision,
+			pods:             schedulePods,
+			totalPodCnt:      totalPodCnt,
+			allocatedCnt:     int32(len(schedResult.LatestAllocation)),
+			idlePods:         updateResult.IdlePods,
+			toDeletePods:     schedResult.ToDelete,
+			updateDeletePods: updateResult.ToDeletePods,
+			supplyCnt:        schedResult.SupplyCnt + updateResult.SupplyUpdateRevision,
 		}
 
 		scalePending, err := r.scalePool(ctx, latestPool, args)
@@ -1123,7 +1127,12 @@ type scaleArgs struct {
 	allocatedCnt   int32
 	supplyCnt      int32 // to create
 	idlePods       []string
-	toDeletePods   []string
+	toDeletePods   []string // deleted unconditionally (e.g. recycle handler decisions)
+	// updateDeletePods are the old-revision idle pods the template update
+	// wants to recreate. Unready ones are deleted unconditionally; ready ones
+	// only while the scale-up rate limit leaves room to start replacements,
+	// see keepBackfillableUpdateDeletes.
+	updateDeletePods []string
 }
 
 type scheduleResult struct {
@@ -1164,7 +1173,6 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	totalPodCnt := args.totalPodCnt
 	allocatedCnt := args.allocatedCnt
 	supplyCnt := args.supplyCnt
-	toDeletePods := args.toDeletePods
 	bufferCnt := r.countReadyIdlePods(pods, args.idlePods)
 
 	// Calculate desired buffer cnt.
@@ -1174,6 +1182,33 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	desiredSchedulableCnt := max(allocatedCnt+supplyCnt+desiredBufferCnt, pool.Spec.CapacitySpec.PoolMin)
 	// Enforce PoolMax: limit new pods based on total running pods (including evicting).
 	maxNewPods := max(pool.Spec.CapacitySpec.PoolMax-totalPodCnt, 0)
+
+	// The scale-up rate limit, hoisted out of the scale-up branch below (the
+	// values are unchanged) because the template update's deletions now
+	// depend on it too: createRoom is how many more pods may be starting at
+	// once under scaleStrategy.maxUnavailable. Unready pods of every kind,
+	// allocated ones included, use it up.
+	scaleMaxUnavailable := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
+	notReadyCnt := r.countNotReadyPods(pods)
+	createRoom := max(scaleMaxUnavailable-notReadyCnt, 0)
+
+	// Without this gate, an update kept deleting ready idle pods while
+	// scale-up could not start their replacements: the update's own budget
+	// only sees idle pods that exist, so every round found the same budget
+	// free again and deleted another ready pod until the warm buffer was
+	// empty. PoolMax headroom is deliberately not part of createRoom: the
+	// deletions themselves free it, and delete expectations hold the next
+	// round until the pod is gone, so a full pool still rolls forward.
+	// supplyCnt above still counts deferred pods; that only raises the
+	// desired count, and creation stays capped by the same createRoom.
+	updateDeletePods := keepBackfillableUpdateDeletes(pods, args.updateDeletePods, createRoom)
+	if deferred := len(args.updateDeletePods) - len(updateDeletePods); deferred > 0 {
+		log.Info("Deferring update deletions until scale-up can start replacements", "pool", pool.Name,
+			"deferred", deferred, "createRoom", createRoom, "scaleMaxUnavailable", scaleMaxUnavailable, "notReadyCnt", notReadyCnt)
+	}
+	// Update deletions go first, as they did when reconcilePool merged the
+	// two lists, so the maxDeleteCnt truncation below keeps its old order.
+	toDeletePods := append(updateDeletePods, args.toDeletePods...)
 
 	log.Info("Scale pool decision", "pool", pool.Name,
 		"totalPodCnt", totalPodCnt, "schedulableCnt", schedulableCnt,
@@ -1185,8 +1220,8 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	// Scale-up: create new pods if needed and allowed by PoolMax
 	if desiredSchedulableCnt > schedulableCnt && maxNewPods > 0 {
 		createCnt := min(desiredSchedulableCnt-schedulableCnt, maxNewPods)
-		scaleMaxUnavailable := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
-		notReadyCnt := r.countNotReadyPods(pods)
+		// scaleMaxUnavailable and notReadyCnt are computed above, before the
+		// update deletions are gated on them; same values as before.
 		limitedCreateCnt := scaleMaxUnavailable - notReadyCnt
 		createCnt = max(0, min(createCnt, limitedCreateCnt))
 		if createCnt > 0 {
@@ -1208,7 +1243,9 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 		scaleIn = schedulableCnt - desiredSchedulableCnt
 	}
 	if scaleIn > 0 || len(toDeletePods) > 0 {
-		podsToDelete := r.pickPodsToDelete(pods, args.idlePods, args.toDeletePods, scaleIn)
+		// toDeletePods (gated update deletions + recycle deletions), not
+		// args.toDeletePods, which now holds the recycle deletions only.
+		podsToDelete := r.pickPodsToDelete(pods, args.idlePods, toDeletePods, scaleIn)
 		maxDeleteCnt := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
 		if int32(len(podsToDelete)) > maxDeleteCnt {
 			podsToDelete = podsToDelete[:maxDeleteCnt]
@@ -1321,6 +1358,33 @@ func (r *PoolReconciler) pickPodsToDelete(pods []*corev1.Pod, idlePodNames []str
 		scaleIn -= 1
 	}
 	return podsToDelete
+}
+
+// keepBackfillableUpdateDeletes returns the template update's deletions to
+// carry out this round, in their original order. Unready pods serve no
+// allocation, so they are always kept. Ready pods are kept only up to
+// createRoom, the number of replacements scale-up may still start: a ready pod
+// deleted beyond that leaves a gap the update's budget cannot see next round
+// (it counts only idle pods that exist), so the update would delete another
+// ready pod every round and drain the warm buffer. Dropped pods stay idle and
+// are picked again by a later round, once replacements can be started.
+func keepBackfillableUpdateDeletes(pods []*corev1.Pod, updateDeletePods []string, createRoom int32) []string {
+	podMap := make(map[string]*corev1.Pod, len(pods))
+	for _, pod := range pods {
+		podMap[pod.Name] = pod
+	}
+	kept := make([]string, 0, len(updateDeletePods))
+	for _, name := range updateDeletePods {
+		// A name missing from pods is kept as is; pickPodsToDelete skips it.
+		if pod, ok := podMap[name]; ok && utils.IsPodReady(pod) {
+			if createRoom <= 0 {
+				continue
+			}
+			createRoom--
+		}
+		kept = append(kept, name)
+	}
+	return kept
 }
 
 func desiredBufferCount(readyBufferCnt, bufferMin, bufferMax int32) int32 {

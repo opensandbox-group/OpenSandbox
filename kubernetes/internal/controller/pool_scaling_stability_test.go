@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/algorithm"
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
 	controllerutils "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/controller"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/expectations"
 )
@@ -355,4 +357,270 @@ func TestReconcilePoolUpdatesStatusWhileScaleIsPending(t *testing.T) {
 	if updated.Status.ObservedGeneration != pool.Generation {
 		t.Fatalf("ObservedGeneration = %d, want %d", updated.Status.ObservedGeneration, pool.Generation)
 	}
+}
+
+// TestKeepBackfillableUpdateDeletes checks the gate on the template update's
+// deletions: unready pods always go, ready pods only up to createRoom, and the
+// order chosen by the update strategy is preserved.
+func TestKeepBackfillableUpdateDeletes(t *testing.T) {
+	now := time.Now()
+	pods := []*corev1.Pod{
+		stabilityTestPod("ready-1", true, now),
+		stabilityTestPod("unready", false, now),
+		stabilityTestPod("ready-2", true, now),
+		stabilityTestPod("ready-3", true, now),
+	}
+	updateDeletePods := []string{"ready-1", "unready", "ready-2", "ready-3", "missing"}
+	tests := []struct {
+		name       string
+		createRoom int32
+		want       []string
+	}{
+		// No room: every ready pod waits; the unready pod and a name that is
+		// no longer listed (pickPodsToDelete skips it) pass through.
+		{name: "no room", createRoom: 0, want: []string{"unready", "missing"}},
+		{name: "partial room", createRoom: 2, want: []string{"ready-1", "unready", "ready-2", "missing"}},
+		{name: "enough room", createRoom: 5, want: updateDeletePods},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := keepBackfillableUpdateDeletes(pods, updateDeletePods, tt.createRoom)
+			if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Fatalf("keepBackfillableUpdateDeletes(room=%d) = %v, want %v", tt.createRoom, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScalePoolGatesOnlyUpdateDeletes: with the scale-up rate limit used up
+// (3 unready pods against maxUnavailable 3), the update's ready pod is kept,
+// while the update's unready pod and the recycle handler's ready pod are still
+// deleted.
+func TestScalePoolGatesOnlyUpdateDeletes(t *testing.T) {
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
+
+	now := time.Now()
+	pods := []*corev1.Pod{
+		stabilityTestPod("alloc-unready-1", false, now),
+		stabilityTestPod("alloc-unready-2", false, now),
+		stabilityTestPod("update-ready", true, now),
+		stabilityTestPod("update-unready", false, now),
+		stabilityTestPod("recycled-ready", true, now),
+	}
+	objects := make([]client.Object, 0, len(pods))
+	for _, pod := range pods {
+		objects = append(objects, pod)
+	}
+	r := stabilityTestReconciler(t, objects...)
+	pool := stabilityTestPool(intstr.FromInt(3))
+
+	_, err := r.scalePool(context.Background(), pool, &scaleArgs{
+		pods: pods, totalPodCnt: int32(len(pods)), allocatedCnt: 2, supplyCnt: 2,
+		updateDeletePods: []string{"update-ready", "update-unready"},
+		toDeletePods:     []string{"recycled-ready"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := map[string]bool{}
+	var podList corev1.PodList
+	if err := r.List(context.Background(), &podList); err != nil {
+		t.Fatal(err)
+	}
+	for _, pod := range podList.Items {
+		remaining[pod.Name] = true
+	}
+	if !remaining["update-ready"] {
+		t.Error("update-ready was deleted although scale-up had no room to replace it")
+	}
+	if remaining["update-unready"] || remaining["recycled-ready"] {
+		t.Errorf("ungated deletions did not happen, remaining pods: %v", remaining)
+	}
+}
+
+// updateRoundsRevision is the template revision the rollout tests move to;
+// their pods start on "v1" (see makePod).
+const updateRoundsRevision = "v2"
+
+// runPoolUpdateRounds drives a template update the way reconcilePool does
+// (update strategy Compute, then scalePool) for the given number of rounds
+// against the fake client. Pods labeled allocated=true by makePod count as
+// allocated. Between rounds it observes creates and deletes as Reconcile does,
+// and with readyNew it marks newly created pods ready, standing in for the
+// kubelet. It returns the idle pods afterwards: ready on the old revision,
+// ready on the new revision, and still starting.
+func runPoolUpdateRounds(t *testing.T, r *PoolReconciler, pool *sandboxv1alpha1.Pool, rounds int, readyNew bool) (readyOld, readyNewCnt, starting int) {
+	t.Helper()
+	ctx := context.Background()
+	controllerKey := controllerutils.GetControllerKey(pool)
+	listPods := func() []*corev1.Pod {
+		var podList corev1.PodList
+		if err := r.List(ctx, &podList); err != nil {
+			t.Fatal(err)
+		}
+		pods := make([]*corev1.Pod, 0, len(podList.Items))
+		for i := range podList.Items {
+			pods = append(pods, &podList.Items[i])
+		}
+		return pods
+	}
+	for range rounds {
+		pods := listPods()
+		names := make(map[string]struct{}, len(pods))
+		idle := make([]string, 0, len(pods))
+		allocated := int32(0)
+		for _, pod := range pods {
+			names[pod.Name] = struct{}{}
+			poolScaleExpectations.ObserveScale(controllerKey, expectations.Create, pod.Name)
+			if pod.Labels["allocated"] == "true" {
+				allocated++
+				continue
+			}
+			idle = append(idle, pod.Name)
+		}
+		observeDeletedPods(controllerKey, names)
+
+		res := (&recreateUpdateStrategy{pool: pool}).Compute(ctx, updateRoundsRevision, pods, idle)
+		if _, err := r.scalePool(ctx, pool, &scaleArgs{
+			updateRevision: updateRoundsRevision, pods: pods, totalPodCnt: int32(len(pods)),
+			allocatedCnt: allocated, idlePods: res.IdlePods,
+			updateDeletePods: res.ToDeletePods, supplyCnt: res.SupplyUpdateRevision,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		if readyNew {
+			for _, pod := range listPods() {
+				if pod.Labels[labelPoolRevision] == updateRoundsRevision && !utils.IsPodReady(pod) {
+					setPodReady(t, r, pod, true)
+				}
+			}
+		}
+	}
+	for _, pod := range listPods() {
+		if pod.Labels["allocated"] == "true" {
+			continue
+		}
+		switch {
+		case !utils.IsPodReady(pod):
+			starting++
+		case pod.Labels[labelPoolRevision] == updateRoundsRevision:
+			readyNewCnt++
+		default:
+			readyOld++
+		}
+	}
+	return readyOld, readyNewCnt, starting
+}
+
+// setPodReady flips a pod's readiness in the fake client. Pods have a status
+// subresource there, so the change must go through Status().Update.
+func setPodReady(t *testing.T, r *PoolReconciler, pod *corev1.Pod, ready bool) {
+	t.Helper()
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: status}}
+	if err := r.Status().Update(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newUpdateRoundsReconciler seeds the fake client with allocated pods (the
+// first unreadyAllocated of them unready) and ready idle pods, all on the old
+// revision, and returns a pool with bufferMin = bufferMax = idle.
+func newUpdateRoundsReconciler(t *testing.T, allocatedCnt, unreadyAllocated, idle int, scaleMax, updateMax intstr.IntOrString) (*PoolReconciler, *sandboxv1alpha1.Pool) {
+	t.Helper()
+	poolScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
+	resetPodCounter()
+
+	objects := make([]client.Object, 0, allocatedCnt+idle)
+	for i := range allocatedCnt {
+		pod := makePod(fmt.Sprintf("alloc-%d", i), "v1", i >= unreadyAllocated, false)
+		pod.Namespace = "default"
+		objects = append(objects, pod)
+	}
+	for i := range idle {
+		pod := makePod(fmt.Sprintf("idle-%d", i), "v1", true, true)
+		pod.Namespace = "default"
+		objects = append(objects, pod)
+	}
+	r := stabilityTestReconciler(t, objects...)
+	// A recorder without a channel drops events; the default buffered one
+	// would block once a multi-round rollout emits more than 20 events.
+	r.Recorder = &record.FakeRecorder{}
+	pool := stabilityTestPool(scaleMax)
+	pool.Spec.CapacitySpec.BufferMin = int32(idle)
+	pool.Spec.CapacitySpec.BufferMax = int32(idle)
+	pool.Spec.UpdateStrategy = &sandboxv1alpha1.UpdateStrategy{MaxUnavailable: &updateMax}
+	pool.Spec.Template = &corev1.PodTemplateSpec{}
+	return r, pool
+}
+
+// TestPoolUpdateWaitsWhileScaleUpIsRateLimited is the regression test for the
+// warm buffer being drained by an update whose replacements cannot be started.
+// With defaults (25% / 25%), 2 unready allocated pods use up the scale-up rate
+// limit (25% of 7 desired = 2). The update's own budget ignores allocated
+// pods, so without the gate it deleted one ready idle pod per round and none
+// came back: 4 -> 0. Now it waits, and resumes once the allocated pods are
+// ready again.
+func TestPoolUpdateWaitsWhileScaleUpIsRateLimited(t *testing.T) {
+	r, pool := newUpdateRoundsReconciler(t, 2, 2, 4, intstr.FromString("25%"), intstr.FromString("25%"))
+
+	readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 4, true)
+	if readyOld != 4 || readyNew != 0 || starting != 0 {
+		t.Fatalf("while rate limited: readyOld=%d readyNew=%d starting=%d, want 4/0/0 (buffer kept)", readyOld, readyNew, starting)
+	}
+
+	for _, name := range []string{"alloc-0", "alloc-1"} {
+		pod := &corev1.Pod{}
+		if err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, pod); err != nil {
+			t.Fatal(err)
+		}
+		setPodReady(t, r, pod, true)
+	}
+	readyOld, readyNew, starting = runPoolUpdateRounds(t, r, pool, 8, true)
+	if readyOld != 0 || readyNew != 4 || starting != 0 {
+		t.Fatalf("after allocated pods recover: readyOld=%d readyNew=%d starting=%d, want 0/4/0 (rollout done)", readyOld, readyNew, starting)
+	}
+}
+
+// TestPoolUpdateDoesNotOutrunScaleUp: the update budget (50% of 8 idle = 4) is
+// larger than the scale-up rate limit (1). Only one ready pod may be out while
+// its replacement is starting; before the gate, one more ready pod was
+// deleted every round while that replacement was still starting.
+func TestPoolUpdateDoesNotOutrunScaleUp(t *testing.T) {
+	r, pool := newUpdateRoundsReconciler(t, 0, 0, 8, intstr.FromInt(1), intstr.FromString("50%"))
+
+	// New pods never become ready here: the replacement stays starting.
+	readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 4, false)
+	if readyOld != 7 || readyNew != 0 || starting != 1 {
+		t.Fatalf("readyOld=%d readyNew=%d starting=%d, want 7/0/1", readyOld, readyNew, starting)
+	}
+}
+
+// TestPoolUpdateProgressesWhenScaleUpHasRoom covers the cases the gate must not
+// stall: a busy pool where one unready allocated pod still leaves scale-up
+// room (25% of 21 desired = 6, minus 1), and a pool at PoolMax, where the
+// update's own deletions free the slots its replacements need.
+func TestPoolUpdateProgressesWhenScaleUpHasRoom(t *testing.T) {
+	t.Run("unready allocated pod on a busy pool", func(t *testing.T) {
+		r, pool := newUpdateRoundsReconciler(t, 16, 1, 4, intstr.FromString("25%"), intstr.FromString("25%"))
+		readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 8, true)
+		if readyOld != 0 || readyNew != 4 || starting != 0 {
+			t.Fatalf("readyOld=%d readyNew=%d starting=%d, want 0/4/0", readyOld, readyNew, starting)
+		}
+	})
+	t.Run("pool at PoolMax", func(t *testing.T) {
+		r, pool := newUpdateRoundsReconciler(t, 2, 0, 4, intstr.FromString("25%"), intstr.FromString("25%"))
+		pool.Spec.CapacitySpec.PoolMax = 6
+		readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 10, true)
+		if readyOld != 0 || readyNew != 4 || starting != 0 {
+			t.Fatalf("readyOld=%d readyNew=%d starting=%d, want 0/4/0", readyOld, readyNew, starting)
+		}
+	})
 }
