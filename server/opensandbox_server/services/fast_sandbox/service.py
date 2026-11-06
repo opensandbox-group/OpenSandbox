@@ -372,7 +372,8 @@ class FastSandboxService(SandboxService, ExtensionService):
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
         if (request.template_id or "").strip():
-            image_ref, template_entrypoint = (
+            # OSEP-0026: machine shape awaits gated FastPath forwarding.
+            image_ref, template_entrypoint, _template_machine = (
                 self.resolve_template_service().resolve_template_artifact(
                     request.template_id.strip()
                 )
