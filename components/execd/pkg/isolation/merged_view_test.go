@@ -166,6 +166,143 @@ func TestMergedView_Rename_LowerToUpper(t *testing.T) {
 	assert.Equal(t, []byte("from-lower"), data)
 }
 
+func TestMergedView_Rename_LowerFileKeepsMode(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "run.sh"), []byte("#!/bin/sh"), 0o755))
+
+	require.NoError(t, mv.Rename("run.sh", "start.sh"))
+
+	info, err := mv.Stat("start.sh")
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+}
+
+func TestMergedView_Rename_LowerDirectory(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d", "sub"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "a.txt"), []byte("a"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "sub", "b.txt"), []byte("b"), 0o600))
+
+	require.NoError(t, mv.Rename("d", "e"))
+
+	assertNotInView(t, mv, "d")
+	info, err := mv.Stat("e")
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+	assert.Equal(t, os.FileMode(0o750), info.Mode().Perm())
+	data, err := mv.ReadFile(filepath.Join("e", "a.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "a", string(data))
+	info, err = mv.Stat(filepath.Join("e", "sub", "b.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+// A directory present in both layers moves with the lower entries it shows,
+// but not with the ones that were deleted from it.
+func TestMergedView_Rename_MergedDirectoryKeepsLowerEntries(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "lower.txt"), []byte("lower"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "gone.txt"), []byte("gone"), 0o644))
+	require.NoError(t, mv.WriteFile(filepath.Join("d", "upper.txt"), []byte("upper"), 0o644))
+	require.NoError(t, mv.Remove(filepath.Join("d", "gone.txt")))
+
+	require.NoError(t, mv.Rename("d", "e"))
+
+	assertNotInView(t, mv, "d")
+	assertNotInView(t, mv, filepath.Join("e", "gone.txt"))
+	entries, err := mv.ReadDir("e")
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	assert.Equal(t, []string{"lower.txt", "upper.txt"}, names)
+	data, err := mv.ReadFile(filepath.Join("e", "lower.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "lower", string(data))
+}
+
+func TestMergedView_Rename_ReadOnlyLowerDirectory(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	dir := filepath.Join(mv.LowerDir, "ro")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Chmod(dir, 0o555))
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o755)
+		_ = os.Chmod(filepath.Join(mv.UpperDir, "moved"), 0o755)
+	})
+
+	require.NoError(t, mv.Rename("ro", "moved"))
+
+	info, err := mv.Stat("moved")
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o555), info.Mode().Perm())
+	data, err := mv.ReadFile(filepath.Join("moved", "x.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+func TestMergedView_Rename_LowerSymlinkStaysSymlink(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.Symlink("/etc/hostname", filepath.Join(mv.LowerDir, "link")))
+
+	require.NoError(t, mv.Rename("link", "moved"))
+
+	target, err := os.Readlink(filepath.Join(mv.UpperDir, "moved"))
+	require.NoError(t, err)
+	assert.Equal(t, "/etc/hostname", target)
+}
+
+func TestMergedView_Chmod_LowerSymlinkDenied(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	target := filepath.Join(t.TempDir(), "outside.txt")
+	require.NoError(t, os.WriteFile(target, []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(target, filepath.Join(mv.LowerDir, "link")))
+
+	assert.Error(t, mv.Chmod("link", 0o777))
+
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+}
+
+func TestMergedView_DeletedLowerEntryCannotBeRenamedOrChmodded(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "f.txt"), []byte("f"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, mv.Remove("f.txt"))
+	require.NoError(t, mv.RemoveAll("d"))
+
+	for _, rel := range []string{"f.txt", filepath.Join("d", "x.txt")} {
+		assert.ErrorIs(t, mv.Rename(rel, "moved.txt"), fs.ErrNotExist, "Rename(%s)", rel)
+		assert.ErrorIs(t, mv.Chmod(rel, 0o600), fs.ErrNotExist, "Chmod(%s)", rel)
+		assertNotInView(t, mv, rel)
+	}
+	assertNotInView(t, mv, "moved.txt")
+}
+
+func TestMergedView_Chmod_LowerDirectory(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "x.txt"), []byte("x"), 0o644))
+
+	require.NoError(t, mv.Chmod("d", 0o700))
+
+	info, err := mv.Stat("d")
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	data, err := mv.ReadFile(filepath.Join("d", "x.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+	lowerInfo, err := os.Stat(filepath.Join(mv.LowerDir, "d"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), lowerInfo.Mode().Perm())
+}
+
 func TestMergedView_Chmod(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 	require.NoError(t, mv.WriteFile("perm.txt", []byte("x"), 0o600))

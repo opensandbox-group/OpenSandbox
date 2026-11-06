@@ -493,8 +493,8 @@ func (m *MergedView) MkdirAll(path string, perm os.FileMode) error {
 	return os.Chown(upperPath, int(m.Uid), int(m.Gid))
 }
 
-// Rename moves a file within upper, or copies lower→upper then creates
-// a whiteout to hide the lower source.
+// Rename moves an entry within upper, copying up first whatever of it the
+// view shows from lower, then creates a whiteout to hide the lower source.
 func (m *MergedView) Rename(oldPath, newPath string) error {
 	if m.Mode == WorkspaceRO {
 		return fmt.Errorf("rename denied: workspace is read-only")
@@ -516,19 +516,14 @@ func (m *MergedView) Rename(oldPath, newPath string) error {
 	oldUpper := m.resolveUpper(oldRel)
 	newUpper := m.resolveUpper(newRel)
 
-	copiedUp := false
-	if _, err := os.Stat(oldUpper); os.IsNotExist(err) {
-		data, err := os.ReadFile(m.resolveLower(oldRel))
-		if err != nil {
+	if !inUpper(oldUpper) && m.lowerHidden(oldRel) {
+		return &os.PathError{Op: "rename", Path: oldPath, Err: os.ErrNotExist}
+	}
+	// In rw mode upper is lower, so there is nothing to copy.
+	if m.UpperDir != m.LowerDir {
+		if err := m.copyUpTree(oldRel); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(oldUpper), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(oldUpper, data, 0o644); err != nil { //nolint:gosec
-			return err
-		}
-		copiedUp = true
 	}
 
 	if err := os.MkdirAll(filepath.Dir(newUpper), 0o755); err != nil {
@@ -538,15 +533,112 @@ func (m *MergedView) Rename(oldPath, newPath string) error {
 		return err
 	}
 
-	// If source existed in lower (either copied-up or both layers),
-	// create whiteout to hide the lower source.
-	if copiedUp {
-		return m.createWhiteout(oldRel)
-	}
-	if _, err := os.Stat(m.resolveLower(oldRel)); err == nil {
+	if _, err := os.Lstat(m.resolveLower(oldRel)); err == nil {
 		return m.createWhiteout(oldRel)
 	}
 	return nil
+}
+
+// copyUpTree copies into upper every lower entry the view shows at or below
+// rel, so that renaming the upper entry moves all of it. Lower entries that
+// upper replaces or deletes are left behind. Each copy keeps its lower mode.
+func (m *MergedView) copyUpTree(rel string) error {
+	if m.hidesLowerAt(rel) {
+		return nil
+	}
+	lowerPath := m.resolveLower(rel)
+	info, err := os.Lstat(lowerPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	copied := false
+	if _, err := os.Lstat(m.resolveUpper(rel)); errors.Is(err, fs.ErrNotExist) {
+		if err := m.copyUp(rel, info); err != nil {
+			return err
+		}
+		copied = true
+	} else if err != nil {
+		return err
+	}
+
+	if info.IsDir() {
+		entries, err := os.ReadDir(lowerPath)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if isStagingName(e.Name()) {
+				continue
+			}
+			if err := m.copyUpTree(filepath.Join(rel, e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+
+	// A directory gets its mode only once filled, as a read-only one would
+	// refuse its own entries otherwise.
+	if !copied || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	return os.Chmod(m.resolveUpper(rel), info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
+}
+
+// copyUp copies the lower entry at rel, described by info, into upper so it
+// can change there without touching lower: a file keeps its content, a
+// symlink its target, and a directory is created empty. The copy belongs to
+// the session's UID/GID, like every write through this view, and is private
+// to that owner until the caller sets its mode.
+func (m *MergedView) copyUp(rel string, info os.FileInfo) error {
+	lowerPath := m.resolveLower(rel)
+	upperPath := m.resolveUpper(rel)
+	if err := os.MkdirAll(filepath.Dir(upperPath), 0o755); err != nil {
+		return err
+	}
+
+	switch {
+	case info.Mode().IsRegular():
+		if err := copyFileContent(lowerPath, upperPath); err != nil {
+			return err
+		}
+	case info.IsDir():
+		if err := os.Mkdir(upperPath, 0o700); err != nil {
+			return err
+		}
+	case info.Mode()&os.ModeSymlink != 0:
+		target, err := os.Readlink(lowerPath)
+		if err != nil {
+			return err
+		}
+		if err := os.Symlink(target, upperPath); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("cannot copy up %s: unsupported file type %s", rel, info.Mode().Type())
+	}
+	return os.Lchown(upperPath, int(m.Uid), int(m.Gid))
+}
+
+// copyFileContent copies the content of the regular file src into dst, which
+// must not exist yet.
+func copyFileContent(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // Chmod changes permissions on a path. Copy-up from lower if needed
@@ -563,22 +655,28 @@ func (m *MergedView) Chmod(path string, mode os.FileMode) error {
 
 	if m.UpperDir != "" {
 		upperPath := m.resolveUpper(rel)
-		if _, err := os.Stat(upperPath); err == nil {
-			return os.Chmod(upperPath, mode)
-		}
-		// File only in lower — copy-up first to avoid mutating original.
-		lowerPath := m.resolveLower(rel)
-		data, err := os.ReadFile(lowerPath)
-		if err != nil {
+		if err := m.rejectSymlink(upperPath); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(upperPath), 0o755); err != nil {
-			return err
+		if !inUpper(upperPath) {
+			if m.lowerHidden(rel) {
+				return &os.PathError{Op: "chmod", Path: path, Err: os.ErrNotExist}
+			}
+			// Only in lower: copy up first to avoid mutating the original.
+			info, err := os.Lstat(m.resolveLower(rel))
+			if err != nil {
+				return err
+			}
+			// chmod follows a symlink, and on the host its target is not
+			// the namespace path it names.
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("symlink target denied: %s", path)
+			}
+			if err := m.copyUp(rel, info); err != nil {
+				return err
+			}
 		}
-		if err := os.WriteFile(upperPath, data, mode); err != nil {
-			return err
-		}
-		return os.Chown(upperPath, int(m.Uid), int(m.Gid))
+		return os.Chmod(upperPath, mode)
 	}
 
 	if m.Mode == WorkspaceRW {
