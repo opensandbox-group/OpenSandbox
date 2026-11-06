@@ -109,6 +109,7 @@ class CompositeSnapshotRuntime:
             snapshot_id,
             image,
             namespace=namespace,
+            source_sandbox_id=source_sandbox_id,
         )
 
     def inspect_snapshot(
@@ -123,6 +124,7 @@ class CompositeSnapshotRuntime:
             snapshot_id,
             image,
             namespace=namespace,
+            source_sandbox_id=source_sandbox_id,
         )
 
     def start_status_watch(
