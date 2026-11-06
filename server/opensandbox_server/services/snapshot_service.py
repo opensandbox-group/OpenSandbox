@@ -746,7 +746,9 @@ class PersistedSnapshotService(SnapshotService):
                 restore_config=SnapshotRestoreConfig(
                     image=runtime_status.image,
                     backend=runtime_status.backend or record.restore_config.backend,
-                    limits=record.restore_config.limits,
+                    # Fill-if-missing: a transient source read at creation may
+                    # have dropped the limits; terminal transition retries.
+                    limits=record.restore_config.limits or runtime_status.resource_limits,
                 ),
                 status=SnapshotStatusRecord(
                     state=SnapshotState.READY,

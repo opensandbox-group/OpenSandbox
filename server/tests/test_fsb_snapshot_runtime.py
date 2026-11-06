@@ -557,3 +557,42 @@ def test_close_stops_informers_when_client_supports_it() -> None:
     runtime.close()
 
     assert k8s.stopped == 1
+
+
+def test_inspect_ready_attaches_source_limits_for_retry() -> None:
+    fastpath = FakeFastPathClient()
+    snapshot_name = build_public_snapshot_name(SNAPSHOT_ID)
+    fastpath.get_by_name[("tenant-a", snapshot_name)] = _Response(
+        _Info(
+            pb2.SNAPSHOT_PHASE_SUCCEEDED,
+            manifest_ref="s3://bucket/manifests/abc.json",
+            template_name=snapshot_name,
+        )
+    )
+    fastpath.sandbox_limits = ("2", "1Gi")
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(
+        SNAPSHOT_ID, namespace="tenant-a", source_sandbox_id=SANDBOX_ID
+    )
+
+    assert status.state == SnapshotState.READY
+    assert status.resource_limits == {"cpu": "2", "memory": "1Gi"}
+
+
+def test_inspect_in_progress_does_not_read_source_limits() -> None:
+    fastpath = FakeFastPathClient()
+    snapshot_name = build_public_snapshot_name(SNAPSHOT_ID)
+    fastpath.get_by_name[("tenant-a", snapshot_name)] = _Response(
+        _Info(pb2.SNAPSHOT_PHASE_PENDING)
+    )
+    fastpath.sandbox_limits = ("2", "1Gi")
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(
+        SNAPSHOT_ID, namespace="tenant-a", source_sandbox_id=SANDBOX_ID
+    )
+
+    assert status.state == SnapshotState.CREATING
+    assert status.resource_limits is None
+    assert fastpath.get_sandbox_calls == []

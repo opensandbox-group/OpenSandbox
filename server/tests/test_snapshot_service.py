@@ -1442,3 +1442,63 @@ def test_snapshot_service_ready_convergence_preserves_recorded_limits(tmp_path) 
 
     assert converged.restore_config.limits == {"cpu": "2", "memory": "1Gi"}
     assert converged.restore_config.image == "registry.example.com/fsb/snap:index"
+
+
+def test_snapshot_service_ready_fill_recovers_dropped_limits(tmp_path) -> None:
+    """A transient source read failure at creation loses the limits; the
+    terminal transition must fill them from the retried inspect."""
+    service = PersistedSnapshotService(
+        SQLiteSnapshotRepository(tmp_path / "snapshots.db"),
+        StubSandboxService(),
+        snapshot_runtime=StubSnapshotRuntime(),
+        snapshot_executor=ImmediateExecutor(),
+    )
+    record = SnapshotRecord(
+        id="snap-dropped",
+        source_sandbox_id="fsb-001",
+        restore_config=snapshot_service_module.SnapshotRestoreConfig(
+            image=None, backend="fsb"
+        ),
+        status=SnapshotStatusRecord(state=SnapshotState.CREATING),
+    )
+
+    converged = service._build_runtime_status_record(
+        record,
+        SnapshotRuntimeStatus(
+            state=SnapshotState.READY,
+            image="registry.example.com/fsb/snap:index",
+            backend="fsb",
+            resource_limits={"cpu": "2", "memory": "1Gi"},
+        ),
+    )
+
+    assert converged.restore_config.limits == {"cpu": "2", "memory": "1Gi"}
+
+
+def test_snapshot_service_ready_keeps_persisted_limits_over_status(tmp_path) -> None:
+    service = PersistedSnapshotService(
+        SQLiteSnapshotRepository(tmp_path / "snapshots.db"),
+        StubSandboxService(),
+        snapshot_runtime=StubSnapshotRuntime(),
+        snapshot_executor=ImmediateExecutor(),
+    )
+    record = SnapshotRecord(
+        id="snap-kept",
+        source_sandbox_id="fsb-001",
+        restore_config=snapshot_service_module.SnapshotRestoreConfig(
+            image=None, backend="fsb", limits={"cpu": "4", "memory": "2Gi"}
+        ),
+        status=SnapshotStatusRecord(state=SnapshotState.CREATING),
+    )
+
+    converged = service._build_runtime_status_record(
+        record,
+        SnapshotRuntimeStatus(
+            state=SnapshotState.READY,
+            image="registry.example.com/fsb/snap:index",
+            backend="fsb",
+            resource_limits={"cpu": "1", "memory": "512Mi"},
+        ),
+    )
+
+    assert converged.restore_config.limits == {"cpu": "4", "memory": "2Gi"}
