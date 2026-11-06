@@ -239,6 +239,8 @@ func (d *fastSandboxSubjectDrain) enqueueInstallLocked(next fastSandboxSubjectIn
 			d.signal()
 			return
 		}
+		// At most one generation per subject has queued installs: a
+		// generation change drops the old target first, so one drop suffices.
 		d.dropInstallsLocked(intent.target)
 		break // different generation/epoch: append after its Register
 	}
@@ -454,7 +456,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 				} else {
 					s.mu.Lock()
 					if d.current == epoch && s.subjectIntentCurrentLocked(intent) {
-						d.degradeLocked("subject_snapshot_invalid")
+						d.degradeLocked("subject_installer_invalid")
 						d.dropInstallsLocked(intent.target)
 					}
 					s.mu.Unlock()
