@@ -148,6 +148,8 @@ Defines interfaces for executing code, commands, and file operations within sand
 - `POST /files/upload` - Upload files (multipart)
 - `GET /files/download` - Download files (supports range requests)
 
+On Linux, `GET /files/info`, `GET /files/search`, and `GET /directories/list` use the entry's birth time for `created_at` when `statx` reports `STATX_BTIME`; symbolic links report the link's own timestamp. If birth time is unavailable or the lookup fails, execd preserves its legacy fallback: inode change time when available, otherwise modification time. These fallback timestamps are not true creation times and can change after metadata or content updates.
+
 `GET /files/download`, its `/v1/filesystem/{uid}/{gid}/files/download` variant, and `/v1/isolated/session/{sessionId}/files/download` reject an opened directory with `400 INVALID_REQUEST_BODY` and `path is a directory: <path>` before serving whole-file, byte-range, or line-based content. This also covers a symlink to a directory wherever the route's existing path resolution follows it. Use the corresponding `directories/list` route to list entries.
 
 A `Range` header rejected by the download handler returns `416` with JSON code `UNKNOWN` and message `invalid Range header: <header>`. A well-formed range starting past the end of a file retains the existing plain-text `416` response.
