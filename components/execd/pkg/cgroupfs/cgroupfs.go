@@ -22,7 +22,6 @@ package cgroupfs
 import (
 	"errors"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -104,7 +103,7 @@ func V1RelPath(entries []Entry, names ...string) string {
 // the mount point unchanged.
 func Dir(mountinfo []byte, mountPoint, cgroupPath string) string {
 	if root, ok := mountRoot(mountinfo, mountPoint); ok && root != "/" {
-		cgroupPath = path.Clean(cgroupPath)
+		cgroupPath = cleanSlash(cgroupPath)
 		if cgroupPath == root {
 			return mountPoint
 		}
@@ -131,10 +130,15 @@ func mountRoot(mountinfo []byte, mountPoint string) (string, bool) {
 			continue
 		}
 		if slices.Contains(targets, unescapeMountField(fields[4])) {
-			root, found = path.Clean(unescapeMountField(fields[3])), true
+			root, found = cleanSlash(unescapeMountField(fields[3])), true
 		}
 	}
 	return root, found
+}
+
+// cleanSlash cleans a slash-separated cgroup or mount root path.
+func cleanSlash(p string) string {
+	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(p)))
 }
 
 // unescapeMountField decodes the octal escapes (\040 for space, \134 for
