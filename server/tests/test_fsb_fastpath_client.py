@@ -307,13 +307,13 @@ def test_resolve_endpoint_matches_shared_wire_fixture():
     fixture = json.loads(fixture_path.read_text())
     request = pb2.ResolveEndpointRequest(
         sandbox=namespaced_reference("tenant-a", "sandbox-123"),
-        target=port_target(44772),
+        target=port_target(8080),
         access_mode=pb2.DIRECT_FASTLET_PROXY,
     )
     response = pb2.ResolveEndpointResponse(
         sandbox_uid="uid-123",
-        endpoint=pb2.ResolvedEndpoint(protocol="HTTP", port=44772),
-        proxy_endpoint="http://fastlet:5780/v1/sandboxes/uid-123/ports/44772",
+        endpoint=pb2.ResolvedEndpoint(protocol="HTTP", port=8080),
+        proxy_endpoint="http://fastlet:5780/v1/sandboxes/uid-123/ports/8080",
         required_headers={"X-Fast-Sandbox-Route-Credential": "issued-credential"},
         route_generation=7,
         expires_at_unix_seconds=2000000060,
