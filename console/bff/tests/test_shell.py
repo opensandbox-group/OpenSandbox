@@ -19,10 +19,13 @@ import threading
 
 import httpx
 import pytest
+import websockets
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
+from websockets.frames import Close
+
 from app.session import admin_session, encode_session, tenant_session
 from app.shell import (
     ShellError,
@@ -276,3 +279,25 @@ def test_admin_shell_requires_tenant(shell_client: TestClient):
 
     assert message["code"] == "TENANT_REQUIRED"
     assert shell_client.lifecycle_calls == []
+
+
+class DroppedExecdSocket(FakeExecdSocket):
+    async def __anext__(self) -> bytes:
+        if not self._announced:
+            self._announced = True
+            return b"\x01hi"
+        raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+
+
+def test_dropped_execd_connection_is_reported_as_lost(
+    shell_client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    monkeypatch.setattr("app.shell.connect_execd", lambda url, headers: DroppedExecdSocket())
+    cookies = _cookie(tenant_session("acme", "acme-ns"))
+    with shell_client.websocket_connect("/api/sandboxes/sbx-1/shell/ws", cookies=cookies) as ws:
+        assert ws.receive_bytes() == b"\x01hi"
+        message = ws.receive_json()
+
+    assert message["code"] == "SHELL_DISCONNECTED"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert shell_client.deleted == ["pty-1"]

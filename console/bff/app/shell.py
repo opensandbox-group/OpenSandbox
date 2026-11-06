@@ -181,14 +181,19 @@ async def bridge_pty(browser: WebSocket, execd_ws) -> None:
                 return
 
     async def execd_to_browser() -> None:
-        async for payload in execd_ws:
-            try:
-                if isinstance(payload, str):
-                    await browser.send_text(payload)
-                else:
-                    await browser.send_bytes(payload)
-            except Exception:
-                return
+        try:
+            async for payload in execd_ws:
+                try:
+                    if isinstance(payload, str):
+                        await browser.send_text(payload)
+                    else:
+                        await browser.send_bytes(payload)
+                except Exception:
+                    return
+        except websockets.ConnectionClosedError as exc:
+            # The shell was open; execd went away (sandbox paused, killed,
+            # or the network dropped) without a normal close.
+            raise ShellError("SHELL_DISCONNECTED", "Lost the connection to the sandbox shell") from exc
 
     tasks = {
         asyncio.create_task(browser_to_execd()),
