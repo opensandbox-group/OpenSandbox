@@ -66,6 +66,12 @@
 #   EXECD_RUN_AS_INIT    OSEP-0018 execd-as-init (default true); false =
 #                    classic topology (the init-mode verify stage fails)
 #   POOL_MIN / POOL_MAX  pool capacity           (default 2/2; auto 1/1 when KIND_SINGLE=1)
+#   POOL_MODE            SandboxPool profile: legacy (default, LegacySlot
+#                    accounting, firecracker-egress-pool) or resource-aware
+#                    (OSEP-0026 T4 fixture: sandboxResources.mode
+#                    ResourceAware + cpu/memory overcommitRatio,
+#                    firecracker-egress-resource-aware-pool); POOL_NAME and
+#                    the server's fastpath_resource_pool follow the profile
 #   MAX_SANDBOXES_PER_POD per-fastlet sandbox capacity (default 8)
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
 #   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
@@ -142,7 +148,22 @@ EXECD_RUN_AS_INIT="${EXECD_RUN_AS_INIT:-true}"
 # is the on-demand first-sandbox pull through DART.
 WARM_IMAGES="${WARM_IMAGES:-0}"
 
-POOL_NAME="${POOL_NAME:-firecracker-egress-pool}"
+# Pool profile (OSEP-0026 T4): legacy = LegacySlot accounting on the default
+# pool; resource-aware = the ResourceAware + overcommitRatio fixture. The
+# manifest basename and the default POOL_NAME follow the profile (the server
+# config's fastpath_resource_pool renders from POOL_NAME, so everything
+# downstream — selectors, waits, server routing — switches with it).
+POOL_MODE="${POOL_MODE:-legacy}"
+case "$POOL_MODE" in
+	legacy)
+		POOL_PROFILE="firecracker-egress-pool" ;;
+	resource-aware)
+		POOL_PROFILE="firecracker-egress-resource-aware-pool" ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: POOL_MODE must be legacy or resource-aware (got: %s)\n' "$POOL_MODE" >&2
+		exit 1 ;;
+esac
+POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -375,7 +396,7 @@ failure_dump() {
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
+		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -2150,8 +2171,8 @@ ublk_probe_or_heal() {
 	done
 }
 
-render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
-	local src="$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml" out="$GEN_DIR/firecracker-egress-pool.yaml"
+render_pool() { # > $GEN_DIR/$POOL_PROFILE.yaml
+	local src="$MANIFESTS_DIR/pool/$POOL_PROFILE.yaml" out="$GEN_DIR/$POOL_PROFILE.yaml"
 	mkdir -p "$GEN_DIR"
 	# Quoted tokens in the template keep rendered scalars' natural types
 	# (poolMin stays an integer); awk for sed portability.
@@ -2232,8 +2253,8 @@ pool_up() {
 	load_mitm_ca_fingerprint
 	[[ -n "$MITM_CA_FINGERPRINT" ]] || die "no pinned MITM CA fingerprint at $MITM_CA_FINGERPRINT_FILE (run up first; mitm_ca_up stores it there)"
 	render_pool
-	log "applying SandboxPool $POOL_NAME (runtime=firecracker, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
-	kubectl apply -f "$GEN_DIR/firecracker-egress-pool.yaml" >/dev/null
+	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
+	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
 	wait_for "fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
 	wait_for "egress container ready in every fastlet pod" 180 egress_containers_ready
 	wait_for "pool condition RuntimeReady=True" 120 pool_condition_true RuntimeReady
@@ -3948,7 +3969,7 @@ env_summary() {
 	printf '  %-22s %s\n' "kind cluster" "$KIND_CLUSTER ($(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ') nodes)"
 	printf '  %-22s %s\n' "fast-sandbox" "pinned $(git -C "$FSB_DIR" rev-parse --short HEAD 2>/dev/null || echo "$FSB_COMMIT") ($FSB_DIR)"
 	printf '  %-22s %s\n' "RustFS endpoint" "$RUSTFS_ENDPOINT"
-	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
+	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
 	# The echo endpoint line is conditional: the standalone pool action
 	# loads the fingerprint pin but never re-derives the echo container IP.
 	local mitm_echo_at=""
@@ -4037,7 +4058,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|down
   up       initialize the environment: fast-sandbox@pinned-commit images,
            two-node kind cluster (KVM), RustFS, control plane, firecracker
            runtime readiness + DART (P2P), the native SandboxTemplate golden
-           image, firecracker-egress-pool (egress attached), and the
+           image, the SandboxPool (firecracker-egress-pool, or the
+           firecracker-egress-resource-aware-pool OSEP-0026 fixture with
+           POOL_MODE=resource-aware), and the
            source-built OpenSandbox server + ingress gateway. With
            IDLE_PAUSE=1: Redis + server [automation.idle_pause] + gateway
            activity/wake flags.
@@ -4067,7 +4090,8 @@ Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
 FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
 when the host cannot reach module VCS hosts directly),
-IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, WARM_IMAGES=1, SBX_IMAGE, EXECD,
+IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, POOL_MODE=resource-aware (OSEP-0026
+ResourceAware pool fixture), WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,
 IDLE_PAUSE=1 (OSEP-0024 idle-pause/wake profile; REDIS_IMAGE overrides the
 Redis image), OCI_STACK=0 (disable the OverlayBD OCI registry + node stack;
@@ -4103,7 +4127,7 @@ case "$ACTION" in
 			docker --version
 			echo "cluster=$KIND_CLUSTER single=$KIND_SINGLE rustfs=$RUSTFS_IMAGE port=$RUSTFS_PORT bucket=$RUSTFS_BUCKET"
 			echo "sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES ociStack=$OCI_STACK registry=$([[ "$OCI_STACK" == 1 ]] && echo "$OCI_REGISTRY_HOST" || echo off)"
-			echo "pool=$POOL_NAME poolMin=$POOL_MIN egress=$IMG_EGRESS"
+			echo "pool=$POOL_NAME mode=$POOL_MODE poolMin=$POOL_MIN egress=$IMG_EGRESS"
 			echo "server=$IMG_SERVER ingress=$IMG_INGRESS fastpath=$FASTPATH_ENDPOINT"
 			echo "images: controller=$IMG_CONTROLLER runtime=$IMG_RUNTIME"
 		} > "$LOGS_DIR/environment.txt" 2>&1 || true
