@@ -523,7 +523,7 @@ def test_map_template_remap_is_byte_identical_with_same_inputs():
     assert second.SerializeToString() == first.SerializeToString()
 
 
-# -- OSEP-0026: snapshot restore replay -----------------------------------------
+# -- snapshot restore replay ----------------------------------------------------
 
 
 def _snapshot_restore_request(limits):

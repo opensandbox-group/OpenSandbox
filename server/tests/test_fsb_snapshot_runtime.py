@@ -56,7 +56,7 @@ class FakeFastPathClient:
         self.create_error: Exception | None = None
         self.get_sandbox_error: Exception | None = None
         self.get_sandbox_calls: list[tuple[str, str]] = []
-        # OSEP-0026: per-sandbox limits reported by SandboxInfo.resources.
+        # Per-sandbox limits reported by SandboxInfo.resources.
         self.sandbox_limits: tuple[str, str] | None = None
 
     def get_sandbox(self, namespace: str, sandbox_name: str, *, expected_uid: str = ""):

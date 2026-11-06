@@ -481,8 +481,7 @@ class FastSandboxService(SandboxService, ExtensionService):
                     namespace=create_request.namespace,
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
                     expires_at_unix_seconds=create_request.expires_at_unix_seconds,
-                    # A snapshot restore fixes the shape to the recorded
-                    # source limits (OSEP-0026); otherwise the pool profile.
+                    # A snapshot restore fixes the shape to the recorded limits.
                     pool_resources=None if snapshot_limits else self._pool_resources_from_info(pool),
                     snapshot_limits=snapshot_limits,
                     pool_is_resource_aware=self._pool_is_resource_aware(pool),

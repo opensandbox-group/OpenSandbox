@@ -37,8 +37,7 @@ class SnapshotRuntimeStatus:
     # Backend marker persisted into restore_config on READY (e.g. "fsb") so
     # create-time routing can send restores to the owning backend.
     backend: Optional[str] = None
-    # OSEP-0026: the source sandbox's effective per-sandbox limits, persisted
-    # into restore_config and replayed on restore.
+    # Source sandbox's per-sandbox limits, persisted and replayed on restore.
     resource_limits: Optional[dict] = None
 
 

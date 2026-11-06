@@ -51,8 +51,7 @@ class SnapshotRestoreConfig:
 
     image: str | None = None
     backend: str | None = None
-    # OSEP-0026: source sandbox's effective per-sandbox limits ({"cpu",
-    # "memory"}), replayed as resources.limits on restore.
+    # Source sandbox's per-sandbox limits, replayed on restore.
     limits: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:

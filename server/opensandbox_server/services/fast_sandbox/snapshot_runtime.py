@@ -223,9 +223,8 @@ class FastSandboxSnapshotRuntime:
         )
 
     def _source_sandbox_limits(self, namespace: str, sandbox_id: str) -> Optional[dict]:
-        """OSEP-0026: the source sandbox's per-sandbox limits (SandboxInfo
-        field 10), or None when unset (pool-default shaped source) or the
-        read fails (preflight already gated existence)."""
+        """The source's per-sandbox limits (SandboxInfo field 10), or None
+        when unset (pool-default shaped) or the read fails."""
         try:
             info = self._fastpath.get_sandbox(namespace, sandbox_id).sandbox
             requirements = getattr(info, "resources", None)

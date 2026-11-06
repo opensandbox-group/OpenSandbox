@@ -985,8 +985,7 @@ class CreateSandboxRequest(BaseModel):
     # Internal routing hint: set by snapshot restore resolution to the backend
     # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
     _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
-    # OSEP-0026: the snapshot's recorded source limits, set by restore
-    # resolution; replayed as per-sandbox resources.limits on fsb.
+    # The snapshot's recorded source limits, set by restore resolution.
     _resolved_snapshot_limits: Optional[dict] = PrivateAttr(default=None)
 
     image: Optional[ImageSpec] = Field(

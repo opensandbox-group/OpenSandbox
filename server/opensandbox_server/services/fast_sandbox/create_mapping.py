@@ -87,10 +87,9 @@ def map_create_request(
     request ``resource_limits`` must match the pool for every key the pool
     defines and must not declare keys the pool does not define.
 
-    Snapshot restores (OSEP-0026): ``snapshot_limits`` carries the recorded
-    source-sandbox limits; the equality baseline moves from the pool profile
-    to the recorded shape, and on a ResourceAware pool the recorded shape is
-    replayed as per-sandbox ``resources.limits``.
+    Snapshot restores: ``snapshot_limits`` carries the recorded source
+    limits; caller ``resource_limits`` must match them (not the pool), and a
+    ResourceAware pool replays them as per-sandbox ``resources.limits``.
     """
     _reject_unsupported_fields(request)
 
@@ -279,8 +278,7 @@ def _set_resource_limits(
 
 
 def _validate_recorded_limits(request: CreateSandboxRequest, recorded: dict) -> None:
-    """Snapshot restores fix the shape to the recorded source limits; caller
-    ``resource_limits`` must match them (the baseline moves off the pool)."""
+    """Caller ``resource_limits`` must match the recorded source shape."""
     if request.resource_limits is None:
         return
     limits = request.resource_limits.root
