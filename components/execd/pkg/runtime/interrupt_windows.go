@@ -54,10 +54,10 @@ func (c *Controller) killPid(commandID string, pid int) error {
 	if err != nil {
 		return err
 	}
-	log.Warn("interrupt: command_id=%s terminating process pid=%d", commandID, pid)
+	log.WarnWithCommandID(commandID, "interrupt: terminating process %d", pid)
 
 	if err := process.Kill(); err != nil {
-		return fmt.Errorf("failed to kill process %d for command %s: %w", pid, commandID, err)
+		return fmt.Errorf("failed to kill process %d: %w", pid, err)
 	}
 
 	// Best-effort wait to reduce zombies; os.Process.Wait only works for child processes.
@@ -70,7 +70,7 @@ func (c *Controller) killPid(commandID string, pid int) error {
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		log.Warn("interrupt: command_id=%s process pid=%d kill wait timed out", commandID, pid)
+		log.WarnWithCommandID(commandID, "interrupt: process %d kill wait timed out", pid)
 	}
 
 	return nil

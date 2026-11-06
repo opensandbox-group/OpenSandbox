@@ -18,10 +18,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -39,28 +37,14 @@ const (
 
 var legacyCommandOutputPattern = regexp.MustCompile(`^[0-9a-f]{32}\.(stdout|stderr|output)$`)
 
-// newCommandID binds correlation before either platform can emit output.
-func (c *Controller) newCommandID(request *ExecuteCodeRequest, background bool) string {
+// newCommandID assigns correlation once, before all callbacks and goroutines.
+// Allocation does not emit init or commit response headers.
+func (c *Controller) newCommandID(request *ExecuteCodeRequest) string {
 	session := c.newContextID()
 	if request.Hooks.OnCommandAllocated != nil {
-		request.Hooks.OnCommandAllocated(session, background)
+		request.Hooks.OnCommandAllocated(session)
 	}
 	return session
-}
-
-// logCommandRunFailure reports observed process status, not the fallback code
-// used by command bookkeeping when Wait fails without an exit-status error.
-func logCommandRunFailure(commandID, mode string, cmd *exec.Cmd, startedAt time.Time, err error) {
-	var exitCode any = "unknown"
-	var exitCodeErr exitCoder
-	if errors.As(err, &exitCodeErr) {
-		// Init-mode waits provide their observed status through the error,
-		// without populating exec.Cmd.ProcessState.
-		exitCode = exitCodeErr.ExitCode()
-	} else if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
-	log.Error("command: command_id=%s mode=%s run failed pid=%d exit_code=%v elapsed_ms=%d: %v", commandID, mode, cmd.Process.Pid, exitCode, time.Since(startedAt).Milliseconds(), err)
 }
 
 // tailStdPipe streams appended log data until the process finishes.
@@ -109,7 +93,7 @@ func (c *Controller) stdLogDescriptor(session string) (io.WriteCloser, io.WriteC
 	stderr, err := openNewCommandOutput(c.stderrFileName(session))
 	if err != nil {
 		_ = stdout.Close()
-		removeCommandOutputFiles(c.stdoutFileName(session))
+		removeCommandOutputFilesWithID(session, c.stdoutFileName(session))
 		return nil, nil, err
 	}
 
@@ -141,6 +125,10 @@ func (c *Controller) combinedOutputFileName(session string) string {
 }
 
 func removeCommandOutputFiles(paths ...string) {
+	removeCommandOutputFilesWithID("", paths...)
+}
+
+func removeCommandOutputFilesWithID(commandID string, paths ...string) {
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		if path == "" {
@@ -150,21 +138,25 @@ func removeCommandOutputFiles(paths ...string) {
 			continue
 		}
 		seen[path] = struct{}{}
-		// Truncate before unlinking: forked children may outlive the command
-		// while still holding the output fd, so the unlinked inode's data
-		// blocks would stay allocated (invisible "(deleted)" growth) until the
-		// last holder exits. Truncation releases them immediately, without
-		// needing to track or kill grandchildren. The helper never follows
-		// symlinks: a workload can swap the entry between a directory scan and
-		// this call, and a following truncate would zero an arbitrary file
-		// where the remove below would only unlink the link.
-		// See opensandbox-group/OpenSandbox#2291.
-		if err := truncateCommandOutputFile(path); err != nil && !os.IsNotExist(err) {
-			log.Warn("command output: truncate %s: %v", path, err)
-		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Warn("command output: remove %s: %v", path, err)
-		}
+		removeCommandOutputFile(commandID, path)
+	}
+}
+
+func removeCommandOutputFile(commandID, path string) {
+	// Truncate before unlinking: forked children may outlive the command
+	// while still holding the output fd, so the unlinked inode's data
+	// blocks would stay allocated (invisible "(deleted)" growth) until the
+	// last holder exits. Truncation releases them immediately, without
+	// needing to track or kill grandchildren. The helper never follows
+	// symlinks: a workload can swap the entry between a directory scan and
+	// this call, and a following truncate would zero an arbitrary file
+	// where the remove below would only unlink the link.
+	// See opensandbox-group/OpenSandbox#2291.
+	if err := truncateCommandOutputFile(path); err != nil && !os.IsNotExist(err) {
+		log.WarnWithCommandID(commandID, "command output: truncate %s: %v", path, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.WarnWithCommandID(commandID, "command output: remove %s: %v", path, err)
 	}
 }
 
@@ -219,7 +211,7 @@ func (c *Controller) protectedCommandOutputPaths() map[string]struct{} {
 }
 
 func (c *Controller) cleanupFinishedCommands(cutoff time.Time) {
-	var paths []string
+	var outputs []struct{ commandID, path string }
 	c.mu.Lock()
 	c.commandClientMap.Range(func(key, value any) bool {
 		kernel, ok := value.(*commandKernel)
@@ -227,12 +219,25 @@ func (c *Controller) cleanupFinishedCommands(cutoff time.Time) {
 			return true
 		}
 
-		paths = append(paths, kernel.stdoutPath, kernel.stderrPath)
+		commandID, _ := key.(string)
+		for _, path := range []string{kernel.stdoutPath, kernel.stderrPath} {
+			outputs = append(outputs, struct{ commandID, path string }{commandID, path})
+		}
 		c.commandClientMap.Delete(key)
 		return true
 	})
 	c.mu.Unlock()
-	removeCommandOutputFiles(paths...)
+	seen := make(map[string]struct{}, len(outputs))
+	for _, output := range outputs {
+		if output.path == "" {
+			continue
+		}
+		if _, ok := seen[output.path]; ok {
+			continue
+		}
+		seen[output.path] = struct{}{}
+		removeCommandOutputFile(output.commandID, output.path)
+	}
 }
 
 func (c *Controller) cleanupOrphanedCommandOutputs(now time.Time) {

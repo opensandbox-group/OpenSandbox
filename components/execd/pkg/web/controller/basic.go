@@ -29,10 +29,8 @@ type basicController struct {
 	ctx          *gin.Context
 	sseSetupOnce sync.Once
 	chunkWriter  sync.Mutex
-	// SSE correlation is request-local and protected by chunkWriter.
-	sseSessionID string
-	commandID    string
-	commandMode  string
+	// Assigned once before all command callbacks/goroutines; immutable thereafter.
+	commandID string
 }
 
 func newBasicController(ctx *gin.Context) *basicController {

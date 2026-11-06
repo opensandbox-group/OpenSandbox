@@ -89,7 +89,7 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 	}
 
 	if cursor < 0 {
-		return nil, -1, fmt.Errorf("cursor cannot be negative for command %s", session)
+		return nil, -1, fmt.Errorf("cursor cannot be negative")
 	}
 
 	file, err := openCommandOutputForRead(kernel.stdoutPath)
@@ -108,17 +108,17 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 
 	_, err = file.Seek(cursor, 0)
 	if err != nil {
-		return nil, -1, fmt.Errorf("error seek file for command %s: %w", session, err)
+		return nil, -1, fmt.Errorf("error seek file: %w", err)
 	}
 
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return nil, -1, fmt.Errorf("error read file for command %s: %w", session, err)
+		return nil, -1, fmt.Errorf("error read file: %w", err)
 	}
 
 	currentPos, err := file.Seek(0, 1)
 	if err != nil {
-		return nil, -1, fmt.Errorf("error get current position for command %s: %w", session, err)
+		return nil, -1, fmt.Errorf("error get current position: %w", err)
 	}
 
 	return data, currentPos, nil

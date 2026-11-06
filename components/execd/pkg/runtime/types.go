@@ -24,9 +24,9 @@ import (
 
 // ExecuteResultHook groups execution callbacks.
 type ExecuteResultHook struct {
-	// OnCommandAllocated binds internal log correlation before any command output.
-	// It does not emit an init event or commit an SSE response.
-	OnCommandAllocated func(commandID string, background bool)
+	// OnCommandAllocated runs once before every other command callback or goroutine.
+	// It binds internal correlation without emitting init or committing headers.
+	OnCommandAllocated func(commandID string)
 	OnExecuteInit      func(context string)
 	OnExecuteResult    func(result map[string]any, count int)
 	OnExecuteStatus    func(status string)

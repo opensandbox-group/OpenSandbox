@@ -34,14 +34,11 @@ import (
 
 // runCommand executes shell commands and streams their output on Windows.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
-	session := c.newCommandID(request, false)
-	startAt := time.Now()
-	log.Info("command: command_id=%s mode=foreground received %v", session, log.SanitizeCommand(request.commandContent()))
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	stdout, stderr, err := c.stdLogDescriptor(session)
 	if err != nil {
-		log.Error("command: command_id=%s mode=foreground preparation failed elapsed_ms=%d: %v", session, time.Since(startAt).Milliseconds(), err)
 		return fmt.Errorf("failed to get stdlog descriptor: %w", err)
 	}
 	stdoutPath := c.stdoutFileName(session)
@@ -49,12 +46,13 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	defer func() {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		removeCommandOutputFiles(stdoutPath, stderrPath)
+		removeCommandOutputFilesWithID(session, stdoutPath, stderrPath)
 	}()
 
+	startAt := time.Now()
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
-		log.Error("command: command_id=%s mode=foreground preparation failed elapsed_ms=%d: %v", session, time.Since(startAt).Milliseconds(), err)
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
@@ -78,7 +76,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		close(done)
 		wg.Wait()
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
-		log.Error("command: command_id=%s mode=foreground start failed elapsed_ms=%d: %v", session, time.Since(startAt).Milliseconds(), err)
+		log.ErrorWithCommandID(session, "command: start failed: %v", err)
 		return nil
 	}
 
@@ -92,7 +90,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
-	log.Info("command: command_id=%s mode=foreground started pid=%d elapsed_ms=%d", session, cmd.Process.Pid, time.Since(startAt).Milliseconds())
 
 	err = cmd.Wait()
 	close(done)
@@ -123,11 +120,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			ExitCode:  exitCodePtr,
 		})
 
-		logCommandRunFailure(session, "foreground", cmd, startAt, err)
+		log.ErrorWithCommandID(session, "command: run failed: %v", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
-	log.Info("command: command_id=%s mode=foreground exited pid=%d exit_code=0 elapsed_ms=%d", session, cmd.Process.Pid, time.Since(startAt).Milliseconds())
 	c.markCommandFinished(session, 0, "")
 	request.Hooks.OnExecuteComplete(time.Since(startAt))
 	return nil
@@ -135,22 +131,20 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 // runBackgroundCommand executes shell commands in detached mode on Windows.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
-	session := c.newCommandID(request, true)
-	startAt := time.Now()
-	log.Info("command: command_id=%s mode=background received %v", session, log.SanitizeCommand(request.commandContent()))
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
 	if err != nil {
-		log.Error("command: command_id=%s mode=background preparation failed elapsed_ms=%d: %v", session, time.Since(startAt).Milliseconds(), err)
 		return fmt.Errorf("failed to get combined output descriptor: %w", err)
 	}
 	stdoutPath := c.combinedOutputFileName(session)
 	stderrPath := c.combinedOutputFileName(session)
 
+	startAt := time.Now()
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
-		log.Error("command: command_id=%s mode=background preparation failed elapsed_ms=%d: %v", session, time.Since(startAt).Milliseconds(), err)
 		pipe.Close() // best-effort
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
@@ -166,7 +160,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	// callers find the session immediately.
 	err = cmd.Start()
 	if err != nil {
-		log.Error("command: command_id=%s mode=background start failed elapsed_ms=%d: %v", session, time.Since(startAt).Milliseconds(), err)
+		log.ErrorWithCommandID(session, "command: start failed: %v", err)
 		pipe.Close() // best-effort
 		cancel()
 		return fmt.Errorf("failed to start commands: %w", err)
@@ -182,7 +176,6 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		isBackground: true,
 	}
 	c.storeCommandKernel(session, kernel)
-	log.Info("command: command_id=%s mode=background started pid=%d elapsed_ms=%d", session, cmd.Process.Pid, time.Since(startAt).Milliseconds())
 
 	safego.Go(func() {
 		<-ctx.Done()
@@ -198,16 +191,15 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		devNull.Close() // best-effort
 
 		if err != nil {
+			log.ErrorWithCommandID(session, "command: run failed: %v", err)
 			exitCode := 1
 			var exitError *exec.ExitError
 			if errors.As(err, &exitError) {
 				exitCode = exitError.ExitCode()
 			}
-			logCommandRunFailure(session, "background", cmd, startAt, err)
 			c.markCommandFinished(session, exitCode, err.Error())
 			return
 		}
-		log.Info("command: command_id=%s mode=background exited pid=%d exit_code=0 elapsed_ms=%d", session, cmd.Process.Pid, time.Since(startAt).Milliseconds())
 		c.markCommandFinished(session, 0, "")
 	})
 

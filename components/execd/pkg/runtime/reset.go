@@ -56,7 +56,7 @@ func (c *Controller) resetSessionProcesses() {
 		snapshot := c.commandSnapshot(sessionID)
 		if snapshot != nil && snapshot.running && snapshot.pid > 0 {
 			if err := c.killPid(sessionID, snapshot.pid); err != nil {
-				log.Warn("runtime init: kill command session %s (pid %d): %v", sessionID, snapshot.pid, err)
+				log.WarnWithCommandID(sessionID, "runtime init: kill command session %s (pid %d): %v", sessionID, snapshot.pid, err)
 			}
 		}
 		c.commandClientMap.Delete(key)

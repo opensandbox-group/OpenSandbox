@@ -98,21 +98,26 @@ func TestSSECommandRuntimeOutputBeforeInit(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, earlyOutput, "real command output must arrive before the init adapter runs")
 	require.NotEmpty(t, id)
-	data, err := os.ReadFile(logPath)
-	require.NoError(t, err)
-	text := string(data)
-	failure := strings.Index(text, "early command transport failure")
-	initLog := strings.Index(text, "sse: command_id="+id+" OnExecuteInit write")
-	require.GreaterOrEqual(t, failure, 0)
-	require.Greater(t, initLog, failure)
-	foundFailure := false
-	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "early command transport failure") {
-			foundFailure = true
-			require.Contains(t, line, "sse: command_id="+id+" OnExecuteStd")
+	records := correlationLogRecords(t, logPath)
+	failureIndex, initIndex := -1, -1
+	for i, record := range records {
+		if record["command_id"] != id {
+			continue
+		}
+		message := record["msg"].(string)
+		require.Len(t, record, 4)
+		if strings.Contains(message, ": early command transport failure") {
+			failureIndex = i
+			require.Equal(t, "error", record["level"])
+			require.True(t, strings.HasPrefix(message, "sse: OnExecuteStd"))
+		}
+		if message == "sse: OnExecuteInit write type=init text="+id {
+			initIndex = i
+			require.Equal(t, "info", record["level"])
 		}
 	}
-	require.True(t, foundFailure)
+	require.GreaterOrEqual(t, failureIndex, 0)
+	require.Greater(t, initIndex, failureIndex)
 	foundInit := false
 	for _, event := range correlationEvents(t, recorder) {
 		if event.Type == model.StreamEventTypeInit {
@@ -121,5 +126,4 @@ func TestSSECommandRuntimeOutputBeforeInit(t *testing.T) {
 		}
 	}
 	require.True(t, foundInit)
-	require.Contains(t, text, "command: command_id="+id+" mode=foreground exited")
 }
