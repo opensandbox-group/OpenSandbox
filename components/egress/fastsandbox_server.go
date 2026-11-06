@@ -86,7 +86,8 @@ type fastSandboxPolicyServer struct {
 	// The mirror is published after successful registration, and
 	// this in-lock comparison rejects requests whose pre-read went stale
 	// across a rebind.
-	subjFence map[subject.Subject]subject.Fencing
+	subjFence    map[subject.Subject]subject.Fencing
+	subjectDrain *fastSandboxSubjectDrain // nil outside experimental subject mode
 
 	// vaultFiles owns the per-subject vault files; nil keeps the vault
 	// memory-only (the default, and the sidecar posture).
@@ -791,6 +792,7 @@ func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att a
 func (s *fastSandboxPolicyServer) recordRegisteredFence(subj subject.Subject, fence subject.Fencing) {
 	s.mu.Lock()
 	s.subjFence[subj] = fence
+	s.recordSubjectIntentLocked(subj, fence, false)
 	s.mu.Unlock()
 }
 

@@ -196,6 +196,9 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 			log.Fatalf("fast-sandbox mitmproxy ports: %v", err)
 		}
 		fastSandboxSrv.SetMitm(mitmGate, mitm.port, dports)
+		if mitm.subjectOwner != nil {
+			mitm.subjectOwner.attach(fastSandboxSrv, mitm.running)
+		}
 		mitm.watchMitmproxy(ctx, mitmGate)
 		mitmGate.SetReady(true)
 		log.Infof("fast-sandbox mitmproxy watch started (shared listener, healthz-gated)")
