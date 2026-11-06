@@ -281,23 +281,74 @@ def test_admin_shell_requires_tenant(shell_client: TestClient):
     assert shell_client.lifecycle_calls == []
 
 
-class DroppedExecdSocket(FakeExecdSocket):
-    async def __anext__(self) -> bytes:
-        if not self._announced:
-            self._announced = True
-            return b"\x01hi"
+class DroppingExecdSocket(FakeExecdSocket):
+    """Sends frames, then drops without a close frame, on receive or on send."""
+
+    def __init__(self, frames: list[bytes | str], *, drop_on_send: bool = False) -> None:
+        super().__init__()
+        self._frames = list(frames)
+        self._drop_on_send = drop_on_send
+
+    async def send(self, data: bytes | str) -> None:
+        if self._drop_on_send:
+            raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+        await super().send(data)
+
+    async def __anext__(self) -> bytes | str:
+        if self._frames:
+            return self._frames.pop(0)
+        if self._drop_on_send:
+            await asyncio.sleep(3600)
         raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+
+
+CONNECTED_FRAME = '{"type":"connected","session_id":"pty-1"}'
+
+
+def _connect_dropping(shell_client: TestClient, monkeypatch: pytest.MonkeyPatch, socket: DroppingExecdSocket):
+    monkeypatch.setattr("app.shell.connect_execd", lambda url, headers: socket)
+    cookies = _cookie(tenant_session("acme", "acme-ns"))
+    return shell_client.websocket_connect("/api/sandboxes/sbx-1/shell/ws", cookies=cookies)
 
 
 def test_dropped_execd_connection_is_reported_as_lost(
     shell_client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    monkeypatch.setattr("app.shell.connect_execd", lambda url, headers: DroppedExecdSocket())
-    cookies = _cookie(tenant_session("acme", "acme-ns"))
-    with shell_client.websocket_connect("/api/sandboxes/sbx-1/shell/ws", cookies=cookies) as ws:
+    with _connect_dropping(shell_client, monkeypatch, DroppingExecdSocket([CONNECTED_FRAME, b"\x01hi"])) as ws:
+        assert ws.receive_text() == CONNECTED_FRAME
         assert ws.receive_bytes() == b"\x01hi"
         message = ws.receive_json()
 
     assert message["code"] == "SHELL_DISCONNECTED"
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
     assert shell_client.deleted == ["pty-1"]
+
+
+def test_execd_dropping_while_input_is_sent_is_reported_as_lost(
+    shell_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    socket = DroppingExecdSocket([CONNECTED_FRAME], drop_on_send=True)
+    with _connect_dropping(shell_client, monkeypatch, socket) as ws:
+        assert ws.receive_text() == CONNECTED_FRAME
+        ws.send_bytes(b"\x00ls\n")
+        message = ws.receive_json()
+
+    assert message["code"] == "SHELL_DISCONNECTED"
+
+
+def test_execd_start_error_is_not_replaced(shell_client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    start_error = '{"type":"error","code":"START_FAILED","error":"fork failed"}'
+    with _connect_dropping(shell_client, monkeypatch, DroppingExecdSocket([start_error])) as ws:
+        assert ws.receive_text() == start_error
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert shell_client.deleted == ["pty-1"]
+
+
+def test_execd_dropping_before_connected_is_a_failed_start(
+    shell_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    with _connect_dropping(shell_client, monkeypatch, DroppingExecdSocket([])) as ws:
+        message = ws.receive_json()
+
+    assert message["code"] == "SHELL_FAILED"
