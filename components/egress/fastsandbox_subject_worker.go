@@ -121,12 +121,15 @@ func (s *fastSandboxPolicyServer) detachSubjectClient(client *revision.SubjectLi
 // mutex acquisition is permitted here, even for a status probe.
 func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject, fence subject.Fencing, unload bool) {
 	d := s.subjectDrain
-	if d == nil {
+	// A zero fence names no registered generation: a retained rebind token
+	// whose registry entry was already removed carries one, and the earlier
+	// attempt already recorded the real Unload.
+	if d == nil || fence == (subject.Fencing{}) {
 		return
 	}
 	target, err := fastSandboxSubjectTarget(strings.TrimPrefix(string(subj), "s-"), fence)
 	if err != nil {
-		log.Warnf("subject lifecycle target encoding failed")
+		log.Warnf("subject %s: lifecycle target encoding failed", subj)
 		return
 	} // invalid/failed registrations have no IPC target
 	if unload {
@@ -173,10 +176,12 @@ func subjectLifecycleReason(receipt revision.LifecycleReceipt) string {
 	}
 }
 
-func (d *fastSandboxSubjectDrain) recordResult(s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error) {
+func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if d.current != epoch {
+	// Drain shutdown, like epoch replacement, cancels in-flight I/O; that is
+	// not a receiver outage.
+	if d.current != epoch || ctx.Err() != nil {
 		return
 	}
 	if err == nil || receipt.LifecycleSequence != 0 {
@@ -243,7 +248,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		}
 		stop()
 		cancel()
-		d.recordResult(s, epoch, intent, receipt, err)
+		d.recordResult(ctx, s, epoch, intent, receipt, err)
 		for epoch.client.Pending() && ctx.Err() == nil && epoch.ctx.Err() == nil {
 			// Keep the exact frozen command, even if its fence became stale
 			// after send: allocating a successor sequence would be unsafe.
@@ -268,7 +273,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 			if confirmed != nil {
 				receipt = *confirmed
 			}
-			d.recordResult(s, epoch, intent, receipt, reconcileErr)
+			d.recordResult(ctx, s, epoch, intent, receipt, reconcileErr)
 		}
 		// A confirmed non-200 receipt consumes its sequence and is never
 		// automatically resubmitted. Only Reconcile can retry a pending send.

@@ -470,6 +470,52 @@ func TestFastSandboxSubjectDrainStalePendingReportsIPCUnavailable(t *testing.T) 
 	}
 }
 
+func TestFastSandboxSubjectDrainIgnoresZeroFence(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	s.startSubjectDrain()
+	defer func() { s.subjectDrain.cancel(); <-s.subjectDrain.done }()
+	subj := subject.FromSandboxUID(testUID)
+	real := subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subjectDrain.fences[subj] = real
+	// A retained rebind token whose registry entry is already gone carries a
+	// zero old fence; it must not fabricate an Unload or touch the mirror.
+	s.recordSubjectIntentLocked(subj, subject.Fencing{}, true)
+	s.recordSubjectIntentLocked(subj, subject.Fencing{}, false)
+	require.Empty(t, s.subjectDrain.queue)
+	require.Equal(t, real, s.subjectDrain.fences[subj])
+}
+
+func TestFastSandboxSubjectDrainShutdownIsNotIPCOutage(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	o := subjectTestOwner(t)
+	launch, configs := subjectAddonLauncher(t, o)
+	child, err := o.launch(context.Background(), mitmproxy.Config{}, launch)
+	require.NoError(t, err)
+	defer o.stop(child)
+	h := (*configs)[0].SubjectRevisionIPC
+	fault, path := startLifecycleFaultProxy(t, h, true)
+	client, err := revision.NewSubjectLifecycleClient(path, h.SessionToken, h.ControlGeneration)
+	require.NoError(t, err)
+	s.startSubjectDrain()
+	// A deadline far longer than this test: only shutdown cancels the
+	// in-flight command.
+	s.mu.Lock()
+	s.subjectDrain.deadline = time.Minute
+	s.mu.Unlock()
+	s.publishSubjectClient(client)
+	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+	select {
+	case <-fault.consumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("command not consumed")
+	}
+	s.subjectDrain.cancel()
+	<-s.subjectDrain.done
+	require.Empty(t, s.subjectLifecycleDegraded())
+}
+
 func TestFastSandboxSubjectDrainConfirmedFailures(t *testing.T) {
 	// The production receiver confirms capacity exhaustion and conflict through
 	// lifecycle-status; these consume a sequence and must not auto-retry.
