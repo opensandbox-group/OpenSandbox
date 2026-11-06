@@ -553,12 +553,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 			s.reg.Unregister(subj)
 			s.mu.Lock()
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil { // preserve this exact token through C publication
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
 				return status, fmt.Errorf("subject reset purge: %w", err)
 			}
-			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.needsReset = false
 			token.oldRemoved = true
 			token.purged = true
@@ -566,12 +566,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		}
 		s.mu.Lock()
 		if !token.purged {
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil {
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
 				return status, fmt.Errorf("subject rebind purge: %w", err)
 			}
-			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.purged = true
 		}
 		removeOld := token.removeOld && !token.oldRemoved
@@ -802,12 +802,13 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 	s.mu.Lock()
 	if s.subjectDrain != nil {
 		// A pending rebind REMOVE may carry expectedNew while the actually
-		// unregistered owner is still old. Unload the actual registered fence.
-		unloadFence := fence
+		// unregistered owner is still old. If already absent, retire only an
+		// existing drain mirror, never the unregistered expectedNew fence.
 		if ok {
-			unloadFence = registeredFence
+			s.recordSubjectIntentLocked(subj, registeredFence, true)
+		} else if mirroredFence, exists := s.subjectDrain.fences[subj]; exists {
+			s.recordSubjectIntentLocked(subj, mirroredFence, true)
 		}
-		s.recordSubjectIntentLocked(subj, unloadFence, true)
 	}
 	if err := s.dropSubjectStateLocked(subj); err != nil {
 		status := s.vaultPurgeFailureStatusLocked(subj)

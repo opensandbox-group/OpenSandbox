@@ -86,8 +86,9 @@ type fastSandboxPolicyServer struct {
 	// The mirror is published after successful registration, and
 	// this in-lock comparison rejects requests whose pre-read went stale
 	// across a rebind.
-	subjFence    map[subject.Subject]subject.Fencing
-	subjectDrain *fastSandboxSubjectDrain // nil outside experimental subject mode
+	subjFence map[subject.Subject]subject.Fencing
+	// Set once during attach, then read-only; nil outside experimental subject mode.
+	subjectDrain *fastSandboxSubjectDrain
 
 	// vaultFiles owns the per-subject vault files; nil keeps the vault
 	// memory-only (the default, and the sidecar posture).

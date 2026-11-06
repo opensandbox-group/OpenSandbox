@@ -284,6 +284,7 @@ func (o *fastSandboxSubjectLaunchOwner) attach(s *fastSandboxPolicyServer, runni
 
 // published follows the existing child publication seam. It only records
 // session/replay state under s.mu and never waits for the client mutex.
+// Lock order is m.mu -> o.mu -> s.mu; never acquire these locks in reverse.
 func (o *fastSandboxSubjectLaunchOwner) published(running *mitmproxy.Running) {
 	if o == nil {
 		return

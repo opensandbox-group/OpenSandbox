@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 	"github.com/stretchr/testify/require"
@@ -135,6 +137,123 @@ func TestFastSandboxSubjectDrainLifecycleIntegration(t *testing.T) {
 	require.Equal(t, 200, doAction(t, s, bindBody(t, "later", "10.0.0.9", "r4", "a4", 1, nil)).Code)
 	waitSubjectKnown(t, second, lifecycleTarget(t, "later", "r4", "a4"), true)
 	waitLifecycleIdle(t, s, second, 2)
+}
+
+func TestFastSandboxSubjectDrainAbsentRemoveUsesMirror(t *testing.T) {
+	for _, mirrored := range []bool{false, true} {
+		name := "no-mirror"
+		if mirrored {
+			name = "old-mirror"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, reg, _ := fastSandboxTestServer(t)
+			s.startSubjectDrain()
+			defer func() { s.subjectDrain.cancel(); <-s.subjectDrain.done }()
+			subj := subject.FromSandboxUID(testUID)
+			old := subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA}
+			next := subject.Fencing{RuntimeInstanceID: "next", AttachmentID: "next-att"}
+			s.mu.Lock()
+			s.rebinds[subj] = &subjectRebind{old: old, expectedNew: next}
+			if mirrored {
+				s.subjectDrain.fences[subj] = old
+			}
+			s.mu.Unlock()
+			_, registered := reg.Fence(subj)
+			require.False(t, registered)
+			require.Equal(t, http.StatusOK, doAction(t, s, removeBody(t, testUID, next.RuntimeInstanceID, next.AttachmentID)).Code)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			require.NotContains(t, s.subjectDrain.fences, subj, "REMOVE clears the residual drain mirror")
+			require.NotContains(t, s.rebinds, subj)
+			if mirrored {
+				require.Len(t, s.subjectDrain.queue, 1)
+				intent := s.subjectDrain.queue[0]
+				require.True(t, intent.unload)
+				require.Equal(t, old, intent.fence)
+				require.Equal(t, lifecycleTarget(t, testUID, testFenceR, testFenceA), intent.target)
+			} else {
+				require.Empty(t, s.subjectDrain.queue, "never unload an unregistered expectedNew generation")
+			}
+		})
+	}
+}
+
+// The first lifecycle preflight succeeds; the purge-time snapshot and its
+// status recheck fail. This exercises the error before any file deletion.
+type subjectDrainPurgeFailure struct {
+	vaultFileStore
+	snapshots int
+}
+
+func (f *subjectDrainPurgeFailure) Snapshot() (*policy.PolicyFileSnapshot, error) {
+	f.snapshots++
+	if f.snapshots > 1 {
+		return nil, errors.New("injected purge snapshot failure")
+	}
+	return f.vaultFileStore.Snapshot()
+}
+
+func TestFastSandboxSubjectDrainPurgeFailureStillUnloads(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		name := "rebind"
+		if reset {
+			name = "needs-reset"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newVaultPersistHarness(t)
+			s := h.srv
+			o := subjectTestOwner(t)
+			launch, configs := subjectAddonLauncher(t, o)
+			m := &mitmTransparent{subjectOwner: o, restartCh: make(chan exitEvent, 64), shutdownCh: make(chan struct{})}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			deps := mitmLaunchDependencies{launch: launch, listen: func(context.Context, string, time.Duration) error { return nil }, retry: func(context.Context, <-chan struct{}, time.Duration) bool { t.Fatal("unexpected retry"); return false }}
+			require.NoError(t, m.startInitial(ctx, deps, func() error { return nil }))
+			o.attach(s, m.running)
+			defer m.shutdown(time.Second)
+			first := (*configs)[0].SubjectRevisionIPC
+			require.Equal(t, http.StatusOK, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, nil)).Code)
+			target := lifecycleTarget(t, testUID, testFenceR, testFenceA)
+			waitSubjectKnown(t, first, target, true)
+			waitLifecycleIdle(t, s, first, 1)
+			subj := subject.FromSandboxUID(testUID)
+			old, ok := h.reg.Fence(subj)
+			require.True(t, ok)
+			if reset {
+				s.mu.Lock()
+				s.rebinds[subj] = &subjectRebind{old: old, expectedNew: subject.Fencing{RuntimeInstanceID: "next", AttachmentID: "next-att"}, oldNetwork: s.subjAtt[subj], newNetwork: s.subjAtt[subj], needsReset: true}
+				s.mu.Unlock()
+			}
+			probe := &subjectDrainPurgeFailure{vaultFileStore: h.fileFor(testUID)}
+			h.vp.mu.Lock()
+			h.vp.files[subj] = probe
+			h.vp.mu.Unlock()
+			response := doAction(t, s, bindBody(t, testUID, testIP, "next", "next-att", 2, nil))
+			require.Equal(t, http.StatusServiceUnavailable, response.Code)
+			require.Contains(t, response.Body.String(), "purge")
+			require.Equal(t, 3, probe.snapshots, "preflight, failed purge, status recheck")
+			_, registered := h.reg.Fence(subj)
+			require.Equal(t, !reset, registered, "only needsReset unregisters before purge")
+			waitSubjectKnown(t, first, target, false)
+			waitLifecycleIdle(t, s, first, 2)
+			s.mu.Lock()
+			_, mirrored := s.subjectDrain.fences[subj]
+			s.mu.Unlock()
+			require.False(t, mirrored, "purge failure cannot retain the old replay entry")
+			o.stop(m.running)
+			m.closeRevisionSession(m.currentGen)
+			m.restartWithBackoffUsing(ctx, mitmproxy.NewHealthGate(), deps)
+			require.Len(t, *configs, 2)
+			second := (*configs)[1].SubjectRevisionIPC
+			require.NotEqual(t, first.ControlGeneration, second.ControlGeneration)
+			waitSubjectKnown(t, second, target, false)
+			waitLifecycleIdle(t, s, second, 0)
+			// A new command proves replay did not silently spend a sequence.
+			require.Equal(t, http.StatusOK, doAction(t, s, bindBody(t, "later", "10.0.0.9", "r3", "a3", 1, nil)).Code)
+			waitSubjectKnown(t, second, lifecycleTarget(t, "later", "r3", "a3"), true)
+			waitLifecycleIdle(t, s, second, 1)
+		})
+	}
 }
 
 // A real Unix HTTP fault proxy surrounds the production addon. It loses a

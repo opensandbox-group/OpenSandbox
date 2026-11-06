@@ -32,10 +32,13 @@ const subjectLifecycleRetryDelay = 100 * time.Millisecond
 // Only run uses client methods, including Pending: handlers never wait on its
 // mutex. Neither registry callbacks nor the worker acquire an action gate.
 type fastSandboxSubjectDrain struct {
-	wake     chan struct{}
-	done     chan struct{}
-	cancel   context.CancelFunc
-	current  *fastSandboxSubjectEpoch
+	wake    chan struct{}
+	done    chan struct{}
+	cancel  context.CancelFunc
+	current *fastSandboxSubjectEpoch
+	// Unbounded: action intents are recorded only inside the serial actionGate,
+	// so growth is limited by action rate; stale intents are dropped before send.
+	// Child publication replaces the queue with the current replay set.
 	queue    []fastSandboxSubjectIntent
 	degraded map[string]bool
 	deadline time.Duration
@@ -123,6 +126,7 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 	}
 	target, err := fastSandboxSubjectTarget(strings.TrimPrefix(string(subj), "s-"), fence)
 	if err != nil {
+		log.Warnf("subject lifecycle target encoding failed")
 		return
 	} // invalid/failed registrations have no IPC target
 	if unload {
