@@ -120,6 +120,12 @@ _POLICY_LOCK_SHARDS = 64
 
 logger = logging.getLogger(__name__)
 
+#: TTL for the pool-mode cache (OSEP-0026 gate). spec.sandboxResources is
+#: immutable for a pool's lifetime, so the mode only changes through a
+#: same-name delete-and-recreate; 15 minutes bounds that rare window while
+#: keeping the create hot path free of a GetPool round trip in steady state.
+_POOL_MODE_CACHE_TTL_SECONDS = 15 * 60
+
 
 class FastSandboxService(SandboxService, ExtensionService):
     """sandbox fsb runtime backed by the fast-sandbox FastPath v2 API."""
@@ -142,6 +148,8 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._tenant_provider = None  # type: ignore[assignment]
         self._k8s_client = k8s_client
         self._k8s_client_lock = Lock()
+        self._pool_mode_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+        self._pool_mode_cache_lock = Lock()
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
         self._template_service = template_service
         self._activity_recorder: Optional[ActivityRecorder] = None
@@ -350,6 +358,28 @@ class FastSandboxService(SandboxService, ExtensionService):
             and profile.mode == pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
         )
 
+    def _pool_is_resource_aware_cached(self, namespace: str, pool_ref: str) -> bool:
+        """Pool-mode read for the OSEP-0026 gate, TTL-cached per pool.
+
+        ``spec.sandboxResources`` is immutable for a pool's lifetime, so the
+        mode is a pool-lifetime constant; the only invalidation is a
+        delete-and-recreate under the same name with a different mode. The
+        stale window is bounded by the TTL and fails safe in both
+        directions: stale-aware is rejected by FastPath with a clear 400,
+        stale-legacy forwards no resources (today's behavior). Only
+        successful lookups are cached; a missing pool keeps 404ing.
+        """
+        key = (namespace, pool_ref)
+        now = time.monotonic()
+        with self._pool_mode_cache_lock:
+            cached = self._pool_mode_cache.get(key)
+        if cached is not None and now - cached[1] < _POOL_MODE_CACHE_TTL_SECONDS:
+            return cached[0]
+        aware = self._pool_is_resource_aware(self._pool_info(namespace, pool_ref))
+        with self._pool_mode_cache_lock:
+            self._pool_mode_cache[key] = (aware, time.monotonic())
+        return aware
+
     def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
         """Return the resource profile declared by the selected SandboxPool."""
         pool = self._pool_info(namespace, pool_ref)
@@ -413,9 +443,10 @@ class FastSandboxService(SandboxService, ExtensionService):
             # single switch — ResourceAware pools receive the recorded
             # machine shape as per-sandbox limits, every other mode (legacy,
             # unspecified, unreported by older FastPath) keeps today's
-            # pool-fixed behavior. The second map reuses request_id and the
-            # first absolute expiry so a transport retry stays idempotent.
-            pool = self._pool_info(create_request.namespace, create_request.pool_ref)
+            # pool-fixed behavior. The mode read is TTL-cached (immutable
+            # pool spec), so steady-state creates pay no extra round trip.
+            # The second map reuses request_id and the first absolute expiry
+            # so a transport retry stays idempotent.
             try:
                 create_request = map_template_create_request(
                     request,
@@ -426,7 +457,9 @@ class FastSandboxService(SandboxService, ExtensionService):
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
                     expires_at_unix_seconds=create_request.expires_at_unix_seconds,
                     template_machine=template_machine,
-                    pool_is_resource_aware=self._pool_is_resource_aware(pool),
+                    pool_is_resource_aware=self._pool_is_resource_aware_cached(
+                        create_request.namespace, create_request.pool_ref
+                    ),
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(

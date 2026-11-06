@@ -959,6 +959,7 @@ def test_template_mode_request_validation():
 class _StubFastPath:
     def __init__(self):
         self.last_create = None
+        self.get_pool_calls = 0
         info = pb2.SandboxInfo(
             identity=pb2.SandboxIdentity(uid="u-1", name="sbx", namespace="ns-1"),
             runtime=pb2.RuntimeInfo(state=pb2.RUNTIME_STATE_READY),
@@ -975,6 +976,7 @@ class _StubFastPath:
     def get_pool(self, namespace, pool_ref):
         # OSEP-0026: no sandbox_resource_profile reported — older FastPath
         # shape, so the template resource gate stays closed.
+        self.get_pool_calls += 1
         return pb2.PoolInfo(namespace=namespace, name=pool_ref)
 
     def close(self):
@@ -1017,6 +1019,47 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
     assert stub.last_create.pool_ref == "default-pool"
     assert response.id.startswith("fsb-")
     assert response.entrypoint == ["python", "app.py"]
+
+
+def test_template_mode_pool_mode_cache_serves_repeated_creates(service, crs):
+    """OSEP-0026: the pool-mode gate reads GetPool once per TTL window, not
+    per create — spec.sandboxResources is immutable for a pool's lifetime."""
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.service import (
+        FastSandboxService,
+        _POOL_MODE_CACHE_TTL_SECONDS,
+    )
+
+    record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    stub = _StubFastPath()
+    sandbox_service = FastSandboxService(
+        _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
+    )
+    try:
+        request = CreateSandboxRequest.model_validate(
+            {"templateId": record.template_id, "timeout": 3600}
+        )
+        asyncio.run(sandbox_service.create_sandbox(request))
+        asyncio.run(sandbox_service.create_sandbox(request))
+        assert stub.get_pool_calls == 1
+
+        # Force the cached entry past the TTL: the next create re-reads.
+        key = ("ns-1", "default-pool")
+        aware, fetched_at = sandbox_service._pool_mode_cache[key]
+        sandbox_service._pool_mode_cache[key] = (
+            aware,
+            fetched_at - _POOL_MODE_CACHE_TTL_SECONDS - 1,
+        )
+        asyncio.run(sandbox_service.create_sandbox(request))
+        assert stub.get_pool_calls == 2
+    finally:
+        sandbox_service.close()
 
 
 def test_template_mode_create_rejects_unknown_template(service):
