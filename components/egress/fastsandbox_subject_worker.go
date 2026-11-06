@@ -176,19 +176,26 @@ func subjectLifecycleReason(receipt revision.LifecycleReceipt) string {
 func (d *fastSandboxSubjectDrain) recordResult(s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if d.current != epoch || !s.subjectIntentCurrentLocked(intent) {
+	if d.current != epoch {
 		return
 	}
 	if err == nil || receipt.LifecycleSequence != 0 {
 		delete(d.degraded, "subject_ipc_unavailable")
 	}
-	if err != nil {
-		reason := subjectLifecycleReason(receipt)
-		if !d.degraded[reason] {
-			log.Warnf("subject lifecycle degraded: %s", reason)
-		}
-		d.degraded[reason] = true
+	if err == nil {
+		return
 	}
+	// IPC availability is session state: a pending command whose fence became
+	// stale still blocks the FIFO, so report it. Confirmed outcomes are fenced
+	// per subject.
+	reason := subjectLifecycleReason(receipt)
+	if reason != "subject_ipc_unavailable" && !s.subjectIntentCurrentLocked(intent) {
+		return
+	}
+	if !d.degraded[reason] {
+		log.Warnf("subject lifecycle degraded: %s", reason)
+	}
+	d.degraded[reason] = true
 }
 
 func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyServer) {

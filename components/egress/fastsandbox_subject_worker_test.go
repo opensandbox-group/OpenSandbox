@@ -425,6 +425,51 @@ func testSubjectDrainSlowIPC(t *testing.T, beforeConsume bool) {
 	require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) == 0 }, time.Second, 10*time.Millisecond)
 }
 
+func TestFastSandboxSubjectDrainStalePendingReportsIPCUnavailable(t *testing.T) {
+	for _, beforeConsume := range []bool{false, true} {
+		name := "consumed-reply-lost"
+		if beforeConsume {
+			name = "unconsumed-exact-retry"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, _, _ := fastSandboxTestServer(t)
+			o := subjectTestOwner(t)
+			launch, configs := subjectAddonLauncher(t, o)
+			child, err := o.launch(context.Background(), mitmproxy.Config{}, launch)
+			require.NoError(t, err)
+			defer o.stop(child)
+			h := (*configs)[0].SubjectRevisionIPC
+			fault, path := startLifecycleFaultProxy(t, h, beforeConsume)
+			client, err := revision.NewSubjectLifecycleClient(path, h.SessionToken, h.ControlGeneration)
+			require.NoError(t, err)
+			s.startSubjectDrain()
+			defer func() { s.subjectDrain.cancel(); <-s.subjectDrain.done }()
+			s.mu.Lock()
+			s.subjectDrain.deadline = 500 * time.Millisecond
+			s.mu.Unlock()
+			s.publishSubjectClient(client)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			select {
+			case <-fault.consumed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("command not consumed")
+			}
+			// Retire the fence while its Register is still pending: the FIFO is
+			// blocked by Reconcile, so the outage must stay observable.
+			require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
+			require.Eventually(t, func() bool {
+				reasons := s.subjectLifecycleDegraded()
+				return len(reasons) == 1 && reasons[0] == "subject_ipc_unavailable"
+			}, 3*time.Second, 10*time.Millisecond)
+			require.True(t, s.actionStatusResponse().Ready)
+			close(fault.release)
+			waitLifecycleIdle(t, s, h, 2)
+			waitSubjectKnown(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), false)
+			require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) == 0 }, 3*time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
 func TestFastSandboxSubjectDrainConfirmedFailures(t *testing.T) {
 	// The production receiver confirms capacity exhaustion and conflict through
 	// lifecycle-status; these consume a sequence and must not auto-retry.
