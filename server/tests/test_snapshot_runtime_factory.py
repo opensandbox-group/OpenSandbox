@@ -93,8 +93,8 @@ class _DispatchStubRuntime:
         self.name = name
         self.preflight: list[str] = []
         self.created: list[tuple[str, str, str | None]] = []
-        self.inspected: list[str] = []
-        self.deleted: list[str] = []
+        self.inspected: list[tuple[str, str | None]] = []
+        self.deleted: list[tuple[str, str | None]] = []
         self.watch_started = False
         self.closed = False
         self._synchronous = synchronous
@@ -126,7 +126,7 @@ class _DispatchStubRuntime:
         namespace: str | None = None,
         source_sandbox_id: str | None = None,
     ) -> None:
-        self.deleted.append(snapshot_id)
+        self.deleted.append((snapshot_id, source_sandbox_id))
 
     def inspect_snapshot(
         self,
@@ -136,7 +136,7 @@ class _DispatchStubRuntime:
         namespace: str | None = None,
         source_sandbox_id: str | None = None,
     ):
-        self.inspected.append(snapshot_id)
+        self.inspected.append((snapshot_id, source_sandbox_id))
 
     def start_status_watch(self, on_change, namespaces=()) -> None:
         self.watch_started = True
@@ -173,10 +173,10 @@ def test_composite_runtime_dispatches_by_source_sandbox_prefix() -> None:
     assert default.preflight == ["sbx-001"]
     assert [created[1] for created in fsb.created] == ["fsb-001"]
     assert [created[1] for created in default.created] == ["sbx-001"]
-    assert fsb.inspected == ["snap-1"]
-    assert default.inspected == ["snap-2"]
-    assert fsb.deleted == ["snap-1"]
-    assert default.deleted == ["snap-2"]
+    assert fsb.inspected == [("snap-1", "fsb-001")]
+    assert default.inspected == [("snap-2", "sbx-001")]
+    assert fsb.deleted == [("snap-1", "fsb-001")]
+    assert default.deleted == [("snap-2", "sbx-001")]
 
 
 def test_composite_runtime_fans_out_watch_and_close() -> None:
@@ -199,7 +199,7 @@ def test_composite_runtime_defaults_without_fsb_runtime() -> None:
     composite.inspect_snapshot("snap-1", source_sandbox_id="fsb-001")
 
     assert default.preflight == ["fsb-001"]
-    assert default.inspected == ["snap-1"]
+    assert default.inspected == [("snap-1", "fsb-001")]
 
 
 def test_composite_supports_synchronous_create_only_when_all_backends_do() -> None:

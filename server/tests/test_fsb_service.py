@@ -1667,9 +1667,6 @@ def test_fsb_list_excludes_old_prefix(persisted_fsb):
     assert [item["id"] for item in response.json()["items"]] == [sandbox_id]
 
 
-# -- OSEP-0026: pool-mode gate --------------------------------------------------
-
-
 def test_pool_is_resource_aware_requires_explicit_resource_aware_profile():
     """The gate fails safe: only an explicit RESOURCE_AWARE mode passes."""
     assert not FastSandboxService._pool_is_resource_aware(

@@ -311,9 +311,6 @@ def test_map_create_request_skips_pool_check_when_profile_unknown():
     assert create.image == "python:3.11"
 
 
-# -- status mapping -----------------------------------------------------------
-
-
 def _info(
     *,
     runtime_state=pb2.RUNTIME_STATE_READY,
@@ -420,9 +417,6 @@ def test_map_reason(runtime, data_plane, ready, expected):
     )
 
 
-# -- OSEP-0026: gated template resource forwarding ------------------------------
-
-
 def _template_request(**overrides):
     from opensandbox_server.api.schema import CreateSandboxRequest
 
@@ -521,3 +515,83 @@ def test_map_template_remap_is_byte_identical_with_same_inputs():
     assert second.request_id == first.request_id
     assert second.expires_at_unix_seconds == EXPECTED_EXPIRY
     assert second.SerializeToString() == first.SerializeToString()
+
+
+def _snapshot_restore_request(limits):
+    from opensandbox_server.api.schema import CreateSandboxRequest as _Request
+
+    payload = {
+        "image": ImageSpec(uri="registry.example.com/fsb/snap-001:index"),
+        "entrypoint": ["tail", "-f", "/dev/null"],
+        "timeout": 3600,
+    }
+    if limits is not None:
+        payload["resource_limits"] = ResourceLimits(root=limits)
+    else:
+        # resourceLimits is only optional when poolRef is present.
+        payload["extensions"] = {"poolRef": "ml-pool"}
+    return _Request(**payload)
+
+
+def test_map_create_replays_snapshot_limits_when_gate_passes():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    create = map_create_request(
+        request,
+        "sbx-1",
+        "ns-1",
+        now=NOW,
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    assert create.HasField("resources")
+    assert create.resources.limits.cpu == "2"
+    assert create.resources.limits.memory == "1Gi"
+
+
+def test_map_create_accepts_matching_snapshot_limits_on_legacy_pool():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    create = map_create_request(
+        request,
+        "sbx-1",
+        "ns-1",
+        now=NOW,
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=False,
+    )
+    assert not create.HasField("resources")
+
+
+def test_map_create_rejects_snapshot_limit_mismatch():
+    request = _snapshot_restore_request({"cpu": "1", "memory": "1Gi"})
+    with pytest.raises(UnsupportedFieldError, match="snapshot's recorded"):
+        map_create_request(
+            request,
+            "sbx-1",
+            "ns-1",
+            now=NOW,
+            snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        )
+
+
+def test_map_create_rejects_snapshot_restore_key_outside_recorded_shape():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "128"})
+    with pytest.raises(UnsupportedFieldError, match="not part of the snapshot"):
+        map_create_request(
+            request,
+            "sbx-1",
+            "ns-1",
+            now=NOW,
+            snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        )
+
+
+def test_map_create_snapshot_without_caller_limits_is_valid():
+    create = map_create_request(
+        _snapshot_restore_request(None),
+        "sbx-1",
+        "ns-1",
+        now=NOW,
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    assert create.resources.limits.cpu == "2"

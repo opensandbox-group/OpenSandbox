@@ -390,9 +390,6 @@ def test_create_maps_disk_resource_to_rootfs_size(service, crs):
     assert spec["machine"] == {"vcpu": "1", "memory": "512Mi"}
 
 
-# -- OSEP-0026: effective machine shape ----------------------------------------
-
-
 def test_effective_machine_declared():
     spec = {"resourceLimits": {"cpu": "2", "memory": "1Gi", "disk": "5Gi"}}
     assert effective_machine(spec) == {"cpu": "2", "memory": "1Gi"}
@@ -701,9 +698,6 @@ def test_resolve_restarts_watch_for_non_terminal_rows(service, crs, repo):
         service.resolve_template_artifact(record.template_id)
     assert excinfo.value.status_code == 404
     assert "ns-1" in service._watched_namespaces
-
-
-# -- overlaybd (OCI publication) ------------------------------------------------
 
 
 def _overlaybd_config(**overrides) -> KubernetesRuntimeConfig:
