@@ -439,27 +439,16 @@ def _map_template(request, **kwargs):
 
 
 def test_map_template_omits_resources_by_default():
-    """Regression guard: no gate inputs → field unset, identical to today."""
+    """Regression guard: non-ResourceAware pool → field unset, identical to today."""
     create = _map_template(_template_request())
     assert not create.HasField("resources")
 
 
-def test_map_template_omits_resources_when_flag_off_even_on_resource_aware_pool():
-    create = _map_template(
-        _template_request(),
-        template_machine={"cpu": "2", "memory": "1Gi"},
-        pool_is_resource_aware=True,
-        forward_resources=False,
-    )
-    assert not create.HasField("resources")
-
-
-def test_map_template_omits_resources_on_legacy_pool_even_with_flag_on():
+def test_map_template_omits_resources_on_legacy_pool():
     create = _map_template(
         _template_request(),
         template_machine={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=False,
-        forward_resources=True,
     )
     assert not create.HasField("resources")
 
@@ -469,7 +458,6 @@ def test_map_template_forwards_machine_verbatim_when_gate_passes():
         _template_request(),
         template_machine={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=True,
-        forward_resources=True,
     )
     assert create.HasField("resources")
     assert create.resources.limits.cpu == "2"
@@ -482,8 +470,7 @@ def test_map_template_rejects_machine_below_fastpath_minimum():
             _template_request(),
             template_machine={"cpu": "5m", "memory": "1Gi"},
             pool_is_resource_aware=True,
-            forward_resources=True,
-        )
+            )
 
 
 @pytest.mark.parametrize(
@@ -496,8 +483,7 @@ def test_map_template_rejects_invalid_machine(machine):
             _template_request(),
             template_machine=machine,
             pool_is_resource_aware=True,
-            forward_resources=True,
-        )
+            )
 
 
 def test_map_template_remap_is_byte_identical_with_same_inputs():
@@ -508,7 +494,6 @@ def test_map_template_remap_is_byte_identical_with_same_inputs():
         request,
         template_machine={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=True,
-        forward_resources=True,
     )
     second = _map_template(
         request,
@@ -516,7 +501,6 @@ def test_map_template_remap_is_byte_identical_with_same_inputs():
         expires_at_unix_seconds=first.expires_at_unix_seconds,
         template_machine={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=True,
-        forward_resources=True,
     )
     assert second.request_id == first.request_id
     assert second.expires_at_unix_seconds == EXPECTED_EXPIRY

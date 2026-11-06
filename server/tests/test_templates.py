@@ -972,6 +972,11 @@ class _StubFastPath:
         self.last_create = request
         return self._response
 
+    def get_pool(self, namespace, pool_ref):
+        # OSEP-0026: no sandbox_resource_profile reported — older FastPath
+        # shape, so the template resource gate stays closed.
+        return pb2.PoolInfo(namespace=namespace, name=pool_ref)
+
     def close(self):
         return None
 

@@ -409,34 +409,33 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
-            # OSEP-0026 gated forwarding: only when the server flag is on do
-            # we spend a GetPool and re-map with the recorded machine shape
-            # (flag off keeps template mode byte-identical, zero extra RPC).
-            # The second map reuses request_id and the first absolute expiry
-            # so a transport retry stays idempotent.
-            if self._k8s.fastpath_forward_template_resources:
-                pool = self._pool_info(create_request.namespace, create_request.pool_ref)
-                try:
-                    create_request = map_template_create_request(
-                        request,
-                        sandbox_id=create_request.request_id,
-                        namespace=create_request.namespace,
-                        image_ref=image_ref,
-                        entrypoint=template_entrypoint,
-                        fastpath_resource_pool=self._k8s.fastpath_resource_pool,
-                        expires_at_unix_seconds=create_request.expires_at_unix_seconds,
-                        template_machine=template_machine,
-                        pool_is_resource_aware=self._pool_is_resource_aware(pool),
-                        forward_resources=True,
-                    )
-                except UnsupportedFieldError as exc:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail={
-                            "code": SandboxErrorCodes.INVALID_PARAMETER,
-                            "message": str(exc),
-                        },
-                    ) from exc
+            # OSEP-0026: pool-mode-gated forwarding. The pool profile is the
+            # single switch — ResourceAware pools receive the recorded
+            # machine shape as per-sandbox limits, every other mode (legacy,
+            # unspecified, unreported by older FastPath) keeps today's
+            # pool-fixed behavior. The second map reuses request_id and the
+            # first absolute expiry so a transport retry stays idempotent.
+            pool = self._pool_info(create_request.namespace, create_request.pool_ref)
+            try:
+                create_request = map_template_create_request(
+                    request,
+                    sandbox_id=create_request.request_id,
+                    namespace=create_request.namespace,
+                    image_ref=image_ref,
+                    entrypoint=template_entrypoint,
+                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
+                    expires_at_unix_seconds=create_request.expires_at_unix_seconds,
+                    template_machine=template_machine,
+                    pool_is_resource_aware=self._pool_is_resource_aware(pool),
+                )
+            except UnsupportedFieldError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": str(exc),
+                    },
+                ) from exc
         else:
             try:
                 create_request = map_create_request(

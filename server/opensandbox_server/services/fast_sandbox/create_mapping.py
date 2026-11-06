@@ -181,7 +181,6 @@ def map_template_create_request(
     expires_at_unix_seconds: Optional[int] = None,
     template_machine: Optional[dict] = None,
     pool_is_resource_aware: bool = False,
-    forward_resources: bool = False,
 ) -> pb2.CreateSandboxRequest:
     """Map a template-mode CreateSandboxRequest to FastPath v2.
 
@@ -191,12 +190,11 @@ def map_template_create_request(
     becomes the guest command. Idempotency and metadata rules match
     :func:`map_create_request`.
 
-    OSEP-0026 resource forwarding: when ``forward_resources`` is on and the
-    selected pool reports ResourceAware mode, the template's recorded
-    effective machine shape (``template_machine``) is forwarded verbatim as
-    per-sandbox ``resources.limits``; requests stay pool-derived. Any other
-    combination leaves the field unset — byte-identical to pre-OSEP-0026
-    requests.
+    OSEP-0026 resource forwarding: when the selected pool reports
+    ResourceAware mode, the template's recorded effective machine shape
+    (``template_machine``) is forwarded verbatim as per-sandbox
+    ``resources.limits``; requests stay pool-derived. Any other pool mode
+    leaves the field unset — byte-identical to pre-OSEP-0026 requests.
     """
     _reject_unsupported_fields(request)
     if request.timeout is None:
@@ -237,7 +235,7 @@ def map_template_create_request(
 
     _validate_metadata(create.metadata)
 
-    if forward_resources and pool_is_resource_aware:
+    if pool_is_resource_aware:
         _apply_template_resources(create, template_machine)
 
     return create

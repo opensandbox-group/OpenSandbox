@@ -110,7 +110,7 @@ sequenceDiagram
     S->>S: resolve_template_artifact → artifact + machine
     S->>FP: GetPool(namespace, poolRef)
     FP-->>S: sandbox_resource_profile mode, limits, ratio
-    alt gate ON and mode RESOURCE_AWARE
+    alt mode RESOURCE_AWARE
         S->>S: fail-fast checks (positive, cpu ≥ 10m)
         S->>FP: CreateSandbox resources.limits = machine
         FP->>FP: derive request = ceil(limit / ratio), check sandboxRuntimeBudget
@@ -128,7 +128,7 @@ sequenceDiagram
             FP-->>S: SandboxInfo (resources echoed)
             S-->>C: 201 Created
         end
-    else gate OFF, LegacySlot, or profile unreported
+    else LegacySlot or profile unreported
         S->>FP: CreateSandbox (resources omitted)
         FP-->>S: SandboxInfo (pool default shape)
         S-->>C: 201 Created
@@ -156,7 +156,7 @@ sequenceDiagram
 
 ### Risks and Mitigations
 
-- **Rollout changes sandbox shape on `ResourceAware` pools** (the intended fix, but visible): mitigated by the config gate below and release notes; pool defaults remain the fallback.
+- **Rollout changes sandbox shape on `ResourceAware` pools** (the intended fix, but visible): rollout is controlled by when operators deploy `ResourceAware` pools (the pool mode is the only switch; `LegacySlot` pools keep today's behavior), plus release notes; pool defaults remain the fallback.
 - **Oversized templates fail at create, not build**: the create fails with a permanent 400 (`InvalidArgument`, FastPath reason preserved), which does not invite retrying an unchanged request; temporary capacity or admission exhaustion remains the retryable 429 path.
 - **Stub drift**: the checked-in stubs already predate fields 15/17; the mode gate makes stale stubs fail safe (feature off), and regeneration is a documented procedure (`server/DEVELOPMENT.md`).
 - **Idempotency**: limits are CRD-immutable, so a retry computing a different shape would conflict — impossible here because shape resolution is a pure function of the immutable row.
@@ -170,7 +170,7 @@ Single-fact rule: every parameter has exactly one authoritative producer; everyo
 | Participant | Owns / decides | Must not |
 | --- | --- | --- |
 | Template creator | Build-time guest machine: `resourceLimits.cpu` (vCPU count), `.memory`, `.disk` (artifact size) | Express requests, ratios, or per-create overrides (template mode rejects them) |
-| OpenSandbox server | Pin `spec_json.machine` at build; resolve deterministically at create; send gate (config + pool mode); fail-fast checks; error mapping | Derive/send requests; send ratios, pids, or disk; make budget/capacity decisions; send resources to a non-`ResourceAware` pool |
+| OpenSandbox server | Pin `spec_json.machine` at build; resolve deterministically at create; send gate (pool mode); fail-fast checks; error mapping | Derive/send requests; send ratios, pids, or disk; make budget/capacity decisions; send resources to a non-`ResourceAware` pool |
 | Pool operator | The whole overcommit policy: default limits, `overcommitRatio`, `maxSandboxesPerPod`, `pids`, runtime — in the immutable `sandboxResources` profile | Mutate `sandboxResources` after pool creation (fast-sandbox enforces) |
 | FastPath | Single overcommit authority: request derivation, per-sandbox ceiling (`sandboxRuntimeBudget`), placement, pool scaling | Accept caller-supplied requests (re-derives and rejects mismatches) |
 | Fastlet | Admission truth (ledger, pressure states); host cgroup enforcement | Admit on stale telemetry (fails closed: `UNKNOWN/TELEMETRY_*` blocks) |
@@ -184,7 +184,7 @@ Two consequences: the server's `GetPool` read is for **gating only** — it neve
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Client → server (template create) | `resourceLimits.{cpu,memory,disk}` | `cpu` decimal vCPU count; `memory`/`disk` Kubernetes quantities | Client-declared, guest-machine sizing | Existing: keys ⊆ `{cpu,memory,disk}`; positive values | 400 `INVALID_PARAMETER` (unchanged) |
 | 2 | Server → template store | `spec_json.machine = {cpu, memory}` | Effective shape after defaults (`1` / `512Mi`); identical to CRD `machine` projection | Written once at creation, immutable; pre-existing rows derive lazily via the same pure function | Create path: present and positive (total function; unreachable for server-built rows) | 500-class invariant error |
-| 3 | Server → FastPath (create) | `resources.limits.{cpu,memory}` (field 15) | Verbatim from `spec_json.machine`; `"N"` vCPUs ≡ quantity `N` cores | Set iff config gate on **and** mode is `RESOURCE_AWARE`; one `GetPool` per attempt; retries re-read the same immutable row | Server (fail-fast): positive, CPU ≥ `10m`. FastPath (authoritative): mode, both members, positivity, CPU ≥ `10m`, limit ≤ `sandboxRuntimeBudget` | Server: omit or reject pre-send. FastPath: over-budget → `InvalidArgument` → **400 (permanent)**; capacity/admission → existing **429 (retryable)** mapping |
+| 3 | Server → FastPath (create) | `resources.limits.{cpu,memory}` (field 15) | Verbatim from `spec_json.machine`; `"N"` vCPUs ≡ quantity `N` cores | Set iff the reported mode is `RESOURCE_AWARE` (the pool profile is the only switch — no server-side rollout flag); one `GetPool` per attempt; retries re-read the same immutable row | Server (fail-fast): positive, CPU ≥ `10m`. FastPath (authoritative): mode, both members, positivity, CPU ≥ `10m`, limit ≤ `sandboxRuntimeBudget` | Server: omit or reject pre-send. FastPath: over-budget → `InvalidArgument` → **400 (permanent)**; capacity/admission → existing **429 (retryable)** mapping |
 | 4 | FastPath → Fastlet (existing, unchanged) | `ResolvedSandboxResources{Requests, Limits}` | Requests derived as `ceil(limit/ratio)`, exact rational, rounded up to millicore/byte | Orchestrator resolves limits (override or pool default) and derives requests | Fastlet re-derives and requires equality (`ProfileMismatch`); then static ledger + pressure admission | Reject create; capacity rejections are retryable |
 | 5 | Snapshot restore: server → FastPath | recorded source limits → `resources.limits` (field 15) | Verbatim from the snapshot's recorded limits | Recorded at snapshot creation from `SandboxInfo.resources` (field 10) into the existing `restore_config` JSON column; replayed through the hop-3 gate on the image-mode restore create | Caller `resourceLimits` on a restore must be quantity-equal to the recorded values (otherwise the recorded values win with a 400 on mismatch) | Mismatch → 400. Legacy snapshots without recorded limits fall back to pool defaults and fail explicitly (400) if the snapshot machine exceeds them |
 
@@ -203,16 +203,15 @@ No conversion layer: the vCPU count string is a valid Kubernetes CPU quantity an
 
 ### Idempotency and retries
 
-A retried `request_id` carries byte-identical limits by construction: shape resolution is a pure function of the immutable template row, and the gate depends only on that row, the config flag, and the pool's immutable mode. Pool recreation or `request_id` reuse after reaping falls to FastPath's existing idempotent-create semantics; the server adds no new conflict handling.
+A retried `request_id` carries byte-identical limits by construction: shape resolution is a pure function of the immutable template row, and the gate depends only on that row and the pool's immutable mode. Pool recreation or `request_id` reuse after reaping falls to FastPath's existing idempotent-create semantics; the server adds no new conflict handling.
 
 ### Compatibility matrix
 
 | Server | FastPath / pool | Behavior |
 | --- | --- | --- |
-| New, gate on | New, `ResourceAware` pool | Limits forwarded; per-sandbox accounting and enforcement active (target state) |
-| New, gate on | New, `LegacySlot` pool | Limits omitted; legacy slot accounting (unchanged) |
-| New, gate on | Old (no field 17) | Limits omitted (mode unknown → fail safe) |
-| New, gate off | Any | Limits omitted (rollout / rollback position) |
+| New | New, `ResourceAware` pool | Limits forwarded; per-sandbox accounting and enforcement active (target state) |
+| New | New, `LegacySlot` pool | Limits omitted; legacy slot accounting (unchanged) |
+| New | Old (no field 17) | Limits omitted (mode unknown → fail safe) |
 | Old | New | Old stubs cannot set field 15; FastPath sees omission → pool defaults (unchanged) |
 
 ## Test Plan
@@ -246,6 +245,6 @@ None beyond stub regeneration. E2E needs a `ResourceAware` `SandboxPool` fixture
 
 1. **Phase 0 — stubs:** regenerate; no behavior change.
 2. **Phase 1 — recording:** persist `spec_json.machine` on new templates; no create-time change.
-3. **Phase 2 — gated forwarding:** add `fastpath_forward_template_resources` (default off), enable forwarding on `ResourceAware` pools for template creates and snapshot-restore replay, soak, then default on.
+3. **Phase 2 — pool-mode-gated forwarding:** enable forwarding for template creates and snapshot-restore replay; the pool profile is the only switch — operators roll out by deploying `ResourceAware` pools and roll back by serving new sandboxes from a `LegacySlot` pool (no server-side config flag).
 4. **Rollback:** flag off (or pin prior server version); the field is omitted and pool defaults resume — the recorded `machine` key is inert when forwarding is off.
 5. **Docs:** update `docs/architecture/fast-sandbox/templates.md` and `scheduling.md` (ResourceAware nuance: the template's shape, not only pool capacity, shapes the sandbox); OSEP-0007's template-mode restriction stands.
