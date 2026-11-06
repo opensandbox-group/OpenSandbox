@@ -33,6 +33,7 @@ import (
 
 const (
 	procCgroupFile     = "/proc/self/cgroup"
+	procMountinfoFile  = "/proc/self/mountinfo"
 	procDir            = "/proc"
 	procStatFile       = "/proc/stat"
 	cgroupV2DefaultDir = "/sys/fs/cgroup"
@@ -292,8 +293,10 @@ func newCgroupV1Source() (*oomSource, error) {
 		return nil, err
 	}
 	// v1 counters are per-cgroup: this is best-effort and does not cover
-	// descendant cgroups the way the v2 hierarchical counters do.
-	dir := filepath.Join(mount, filepath.FromSlash(cgroupPath))
+	// descendant cgroups the way the v2 hierarchical counters do. An
+	// unreadable mountinfo keeps the plain mount point + cgroup path join.
+	mountinfo, _ := os.ReadFile(procMountinfoFile)
+	dir := cgroupfs.Dir(mountinfo, mount, cgroupPath)
 	oomControl := filepath.Join(dir, "memory.oom_control")
 	if _, err := os.Stat(oomControl); err != nil {
 		return nil, fmt.Errorf("stat %s: %w", oomControl, err)

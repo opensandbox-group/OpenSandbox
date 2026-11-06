@@ -22,7 +22,10 @@ package cgroupfs
 import (
 	"errors"
 	"os"
+	"path"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -89,6 +92,69 @@ func V1RelPath(entries []Entry, names ...string) string {
 		}
 	}
 	return ""
+}
+
+// Dir resolves a /proc/self/cgroup path to its directory under the
+// controller hierarchy mounted at mountPoint. A cgroup v1 mount can expose a
+// subtree instead of the hierarchy root (Docker on v1 without a cgroup
+// namespace mounts the container's own cgroup, e.g. root "/docker/<id>"),
+// and the process path then already names the mount's top directory. The
+// mount root comes from the /proc/self/mountinfo data; when the mount is
+// absent there, or the path lies outside its root, the path is joined to
+// the mount point unchanged.
+func Dir(mountinfo []byte, mountPoint, cgroupPath string) string {
+	if root, ok := mountRoot(mountinfo, mountPoint); ok && root != "/" {
+		cgroupPath = path.Clean(cgroupPath)
+		if cgroupPath == root {
+			return mountPoint
+		}
+		if rel, found := strings.CutPrefix(cgroupPath, root+"/"); found {
+			return filepath.Join(mountPoint, filepath.FromSlash(rel))
+		}
+	}
+	return filepath.Join(mountPoint, filepath.FromSlash(cgroupPath))
+}
+
+// mountRoot returns the root field of the mountinfo entry mounted at
+// mountPoint. The last matching entry wins: it is the mount stacked on top.
+func mountRoot(mountinfo []byte, mountPoint string) (string, bool) {
+	targets := []string{filepath.Clean(mountPoint)}
+	if resolved, err := filepath.EvalSymlinks(mountPoint); err == nil && resolved != targets[0] {
+		targets = append(targets, resolved)
+	}
+	var root string
+	var found bool
+	for _, line := range strings.Split(string(mountinfo), "\n") {
+		// "id parent major:minor root mountpoint options ..."
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if slices.Contains(targets, unescapeMountField(fields[4])) {
+			root, found = path.Clean(unescapeMountField(fields[3])), true
+		}
+	}
+	return root, found
+}
+
+// unescapeMountField decodes the octal escapes (\040 for space, \134 for
+// backslash, ...) the kernel uses for paths in mount tables.
+func unescapeMountField(field string) string {
+	if !strings.Contains(field, "\\") {
+		return field
+	}
+	var b strings.Builder
+	for i := 0; i < len(field); i++ {
+		if field[i] == '\\' && i+4 <= len(field) {
+			if v, err := strconv.ParseUint(field[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(field[i])
+	}
+	return b.String()
 }
 
 // ScanMounts reads /proc/self/mounts and returns the mount point of the
