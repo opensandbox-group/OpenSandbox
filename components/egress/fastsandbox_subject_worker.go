@@ -48,6 +48,9 @@ type fastSandboxSubjectDrain struct {
 	deadline  time.Duration
 	snapshots map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
 	fences    map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
+
+	// Optional test observer, called under s.mu after acknowledged Unload.
+	epochCountForTest func(int)
 }
 
 type fastSandboxSubjectEpoch struct {
@@ -432,6 +435,28 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 			err = reconcileErr
 			d.recordResult(ctx, s, epoch, intent, receipt, err)
 		}
+		if intent.unload && err == nil {
+			s.mu.Lock()
+			if d.current == epoch {
+				_, registered := d.fences[intent.subj]
+				// Rebind can still be between old Unload and new publication.
+				// Its token and queued Register also reserve the counter.
+				registered = registered || s.rebinds[intent.subj] != nil
+				for _, queued := range d.queue {
+					if queued.subj == intent.subj && !queued.unload && queued.snapshot == nil && (queued.epoch == nil || queued.epoch == epoch) {
+						registered = true
+						break
+					}
+				}
+				if !registered {
+					delete(epochs, intent.subj)
+				}
+			}
+			if d.epochCountForTest != nil {
+				d.epochCountForTest(len(epochs))
+			}
+			s.mu.Unlock()
+		}
 		if !intent.unload && epoch.ctx.Err() == nil && ctx.Err() == nil {
 			if err != nil {
 				s.mu.Lock()
@@ -569,13 +594,15 @@ func subjectInstallReason(installer *fastSandboxSubjectInstaller, err error) str
 
 // install returns false only for confirmed failure. An uncertain operation owns
 // the FIFO until exact Readback/Abort reconciliation or child cancellation; it
-// never calls Apply again or allocates a second decision epoch for the attempt.
+// never resends an unconfirmed attempt. Only a confirmed Abort permits a fresh
+// Apply with the same payload and a new decision epoch.
 func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, installer *fastSandboxSubjectInstaller) bool {
 	commandCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
 	stop := context.AfterFunc(ctx, cancel)
-	_, err := installer.coordinator.Apply(commandCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
+	candidate, err := installer.coordinator.Apply(commandCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
 	stop()
 	cancel()
+	installed := err == nil
 	for {
 		if ctx.Err() != nil || epoch.ctx.Err() != nil {
 			return true
@@ -584,7 +611,7 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 		terminal := installer.transport.rejection != nil || errors.Is(err, revision.ErrPrepareRejected) || errors.Is(err, revision.ErrInvalid)
 		s.mu.Lock()
 		if d.current == epoch {
-			if err == nil || terminal {
+			if installed || terminal {
 				delete(d.degraded, "subject_ipc_unavailable")
 			}
 			if err != nil && (reason == "subject_ipc_unavailable" || s.subjectIntentCurrentLocked(intent)) {
@@ -594,11 +621,12 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				d.dropInstallsLocked(intent.target)
 			}
 		}
+		retry := err == nil && !installed && d.retryInstallLocked(s, epoch, intent)
 		s.mu.Unlock()
 		if terminal {
 			return false
 		}
-		if err == nil {
+		if err == nil && !retry {
 			return true
 		}
 		timer := time.NewTimer(subjectLifecycleRetryDelay)
@@ -613,8 +641,39 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 		}
 		reconcileCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
 		stop := context.AfterFunc(ctx, cancel)
-		_, err = installer.coordinator.Reconcile(reconcileCtx)
+		if retry {
+			// Actions may have superseded this intent during the retry delay.
+			s.mu.Lock()
+			current := d.retryInstallLocked(s, epoch, intent)
+			s.mu.Unlock()
+			if !current {
+				stop()
+				cancel()
+				return true
+			}
+			candidate, err = installer.coordinator.Apply(reconcileCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
+			installed = err == nil
+		} else {
+			var active *revision.Identity
+			active, err = installer.coordinator.Reconcile(reconcileCtx)
+			installed = err == nil && active != nil && *active == candidate
+		}
 		stop()
 		cancel()
 	}
+}
+
+// Called under s.mu only after the previous attempt has confirmed Abort.
+// Preserve a queued successor's FIFO position and let stale intents retire
+// without retiring the installer needed by that successor.
+func (d *fastSandboxSubjectDrain) retryInstallLocked(s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent) bool {
+	if d.current != epoch || !s.subjectIntentCurrentLocked(intent) {
+		return false
+	}
+	for _, queued := range d.queue {
+		if queued.snapshot != nil && queued.target == intent.target && queued.epoch == intent.epoch {
+			return false
+		}
+	}
+	return true
 }

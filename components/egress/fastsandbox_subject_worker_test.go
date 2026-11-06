@@ -806,10 +806,13 @@ type snapshotWireEvent struct {
 	Payload  []byte                 `json:"payload"`
 }
 type snapshotFault struct {
-	mu               sync.Mutex
-	events           []snapshotWireEvent
-	once             sync.Once
-	reached, release chan struct{}
+	mu                                       sync.Mutex
+	events                                   []snapshotWireEvent
+	once                                     sync.Once
+	reached, release                         chan struct{}
+	abortReached, retryReached, retryRelease chan struct{}
+	abortOnce, retryOnce                     sync.Once
+	prepareCount                             int
 }
 
 func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, outcome, failOperation string) (*snapshotFault, mitmproxy.SubjectRevisionIPCConfig) {
@@ -824,7 +827,7 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 		return (&net.Dialer{}).DialContext(ctx, "unix", h.SocketPath)
 	}}
 	client := &http.Client{Transport: transport}
-	fault := &snapshotFault{reached: make(chan struct{}), release: make(chan struct{})}
+	fault := &snapshotFault{reached: make(chan struct{}), release: make(chan struct{}), abortReached: make(chan struct{}), retryReached: make(chan struct{}), retryRelease: make(chan struct{})}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -837,8 +840,36 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 		event.Path = r.URL.Path
 		fault.mu.Lock()
 		fault.events = append(fault.events, event)
+		firstPrepare := false
+		if event.Target.SubjectKey == "s-"+testUID && strings.HasSuffix(event.Path, "/prepare") {
+			fault.prepareCount++
+			firstPrepare = fault.prepareCount == 1
+		}
 		fault.mu.Unlock()
 		isTarget := event.Target.SubjectKey == "s-"+testUID
+		if failOperation == "prepare-timeout" && isTarget {
+			switch event.Path {
+			case "/v2/revisions/prepare":
+				if firstPrepare {
+					fault.once.Do(func() { close(fault.reached) })
+					<-r.Context().Done() // force the Go command deadline, without forwarding
+					return
+				}
+				fault.retryOnce.Do(func() { close(fault.retryReached) })
+				select {
+				case <-fault.retryRelease:
+				case <-r.Context().Done():
+					return
+				}
+			case "/v2/revisions/abort":
+				fault.abortOnce.Do(func() { close(fault.abortReached) })
+				select {
+				case <-fault.release:
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
 		if isTarget && strings.HasSuffix(r.URL.Path, "/"+failOperation) && outcome != "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(409)
@@ -846,7 +877,7 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 			fault.once.Do(func() { close(fault.reached) })
 			return
 		}
-		if outcome == "" && isTarget && strings.HasSuffix(r.URL.Path, "/active") {
+		if outcome == "" && failOperation != "prepare-timeout" && isTarget && strings.HasSuffix(r.URL.Path, "/active") {
 			select {
 			case <-fault.release:
 			case <-r.Context().Done():
@@ -868,7 +899,7 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 			return
 		}
 		lose := false
-		if (outcome == "" || failOperation == "active") && isTarget && strings.HasSuffix(r.URL.Path, "/commit") {
+		if ((outcome == "" && failOperation != "prepare-timeout") || failOperation == "active") && isTarget && strings.HasSuffix(r.URL.Path, "/commit") {
 			fault.once.Do(func() { lose = true; close(fault.reached) })
 		}
 		if lose {
@@ -1192,4 +1223,168 @@ func TestFastSandboxSubjectSnapshotMirrorBudget(t *testing.T) {
 	require.Nil(t, s.subjectDrain.snapshots[subject.FromSandboxUID(testUID)])
 	s.mu.Unlock()
 	require.True(t, s.actionStatusResponse().Ready)
+}
+
+// Channels fence each protocol phase; timers only bound waits or exercise the
+// command deadline. No fixed delay determines when an action may run.
+func TestFastSandboxSubjectSnapshotPrepareTimeoutAbort(t *testing.T) {
+	for _, mode := range []string{"retry-same", "superseded", "stale"} {
+		t.Run(mode, func(t *testing.T) {
+			s, h, fault := snapshotFaultHarness(t, "", "prepare-timeout")
+			await := func(ch <-chan struct{}, phase string) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("%s not reached", phase)
+				}
+			}
+			set := func(generation uint64) {
+				require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, generation, vaultAllowPolicy())).Code)
+			}
+			set(1)
+			first := latestSubjectSnapshot(t, s, testUID)
+			await(fault.reached, "first Prepare")
+			await(fault.abortReached, "Abort")
+			require.Eventually(t, func() bool {
+				return len(s.subjectLifecycleDegraded()) > 0
+			}, time.Second, time.Millisecond)
+			require.Equal(t, []string{"subject_ipc_unavailable"}, s.subjectLifecycleDegraded())
+			latest := first
+			if mode == "superseded" {
+				require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
+				// Enqueue a same-key replacement directly at the existing
+				// producer seam, without an intervening lifecycle command.
+				s.policyCommitMu.Lock()
+				s.recordBindingSnapshot(subject.FromSandboxUID(testUID), subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+				s.policyCommitMu.Unlock()
+				latest = latestSubjectSnapshot(t, s, testUID)
+				require.NotEqual(t, first.payload, latest.payload)
+			} else if mode == "stale" {
+				require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
+			}
+			close(fault.release)
+			target := lifecycleTarget(t, testUID, testFenceR, testFenceA)
+			if mode == "stale" {
+				waitLifecycleIdle(t, s, h, 2)
+				waitSubjectKnown(t, h, target, false)
+			} else {
+				await(fault.retryReached, "successor Prepare")
+				// The receiver has confirmed Abort. Until the successor installs,
+				// the original outage must remain observable.
+				require.Equal(t, []string{"subject_ipc_unavailable"}, s.subjectLifecycleDegraded())
+				close(fault.retryRelease)
+				active := waitSubjectInstalled(t, h, target, latest)
+				require.Equal(t, int64(2), active.DecisionEpoch)
+				require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) == 0 }, time.Second, time.Millisecond)
+			}
+			fault.mu.Lock()
+			defer fault.mu.Unlock()
+			var prepares []snapshotWireEvent
+			for _, event := range fault.events {
+				if event.Path == "/v2/revisions/prepare" {
+					prepares = append(prepares, event)
+				}
+			}
+			if mode == "stale" {
+				require.Len(t, prepares, 1, "an expired intent must not retry")
+			} else {
+				require.Len(t, prepares, 2, "only the current payload gets a successor attempt")
+				require.Equal(t, first.payload, prepares[0].Payload)
+				require.Equal(t, latest.payload, prepares[1].Payload)
+				require.Greater(t, prepares[1].Revision.DecisionEpoch, prepares[0].Revision.DecisionEpoch)
+			}
+		})
+	}
+}
+
+func TestFastSandboxSubjectSnapshotEpochRetention(t *testing.T) {
+	s, _, _, _, configs := snapshotDrainHarness(t)
+	h := (*configs)[0].SubjectRevisionIPC
+	counts := make(chan int, 32)
+	s.mu.Lock()
+	s.subjectDrain.epochCountForTest = func(n int) { counts <- n }
+	s.mu.Unlock()
+	awaitCount := func(want int) {
+		t.Helper()
+		select {
+		case got := <-counts:
+			require.Equal(t, want, got, "actual worker epoch map after acknowledged Unload")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Unload observation not reached")
+		}
+	}
+	for i := 0; i < 12; i++ {
+		uid := "epoch-" + strconv.Itoa(i)
+		require.Equal(t, 200, doAction(t, s, bindBody(t, uid, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+		waitSubjectInstalled(t, h, lifecycleTarget(t, uid, testFenceR, testFenceA), latestSubjectSnapshot(t, s, uid))
+		require.Equal(t, 200, doAction(t, s, removeBody(t, uid, testFenceR, testFenceA)).Code)
+		awaitCount(0)
+	}
+	// Rebind queues old Unload before new Register. The mirror already names
+	// the new generation, so its first wire epoch must continue the old one.
+	set := func(r, a string, generation uint64) revision.Identity {
+		require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, r, a, generation, vaultAllowPolicy())).Code)
+		return waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, r, a), latestSubjectSnapshot(t, s, testUID))
+	}
+	set(testFenceR, testFenceA, 1)
+	old := set(testFenceR, testFenceA, 2)
+	next := set("new-r", "new-a", 3)
+	awaitCount(1)
+	require.Greater(t, next.DecisionEpoch, old.DecisionEpoch)
+	require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, "new-r", "new-a")).Code)
+	awaitCount(0)
+}
+
+func TestFastSandboxSubjectSnapshotEpochRebindGap(t *testing.T) {
+	s, _, _, _, configs := snapshotDrainHarness(t)
+	h := (*configs)[0].SubjectRevisionIPC
+	target := lifecycleTarget(t, testUID, testFenceR, testFenceA)
+	var old revision.Identity
+	for i := uint64(1); i <= 2; i++ {
+		require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, i, vaultAllowPolicy())).Code)
+		old = waitSubjectInstalled(t, h, target, latestSubjectSnapshot(t, s, testUID))
+	}
+	reached, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	s.nft = &transitionNft{fakeNft: s.nft.(*fakeNft), remove: func(subject.Subject) error {
+		close(reached)
+		<-release
+		return nil
+	}}
+	counts := make(chan int, 1)
+	s.mu.Lock()
+	s.subjectDrain.epochCountForTest = func(n int) { counts <- n }
+	s.mu.Unlock()
+	body := bindBody(t, testUID, "10.0.0.9", "gap-r", "gap-a", 3, vaultAllowPolicy())
+	result := transitionRequest(s, context.Background(), http.MethodPost, constants.ActionsDispatchPath, body)
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rebind gap not reached")
+	}
+	select {
+	case count := <-counts:
+		require.Equal(t, 1, count, "pending rebind retains the old counter before new Register")
+	case <-time.After(5 * time.Second):
+		t.Fatal("old Unload not acknowledged")
+	}
+	s.mu.Lock()
+	subj := subject.FromSandboxUID(testUID)
+	_, mirrored := s.subjectDrain.fences[subj]
+	pending := s.rebinds[subj] != nil
+	s.mu.Unlock()
+	require.False(t, mirrored, "new generation is deliberately not yet published")
+	require.True(t, pending)
+	unblock()
+	select {
+	case response := <-result:
+		require.Equal(t, 200, response.Code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("rebind did not finish")
+	}
+	next := waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, "gap-r", "gap-a"), latestSubjectSnapshot(t, s, testUID))
+	require.Greater(t, next.DecisionEpoch, old.DecisionEpoch)
 }
