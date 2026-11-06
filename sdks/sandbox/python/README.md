@@ -484,6 +484,43 @@ async with await SandboxManager.create(connection_config=config) as manager:
         await manager.kill_sandbox(info.id)
 ```
 
+### 8. Build reusable base images with templates
+
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them; sandboxes then boot from a `template_id` instead of a plain image:
+
+```python
+import asyncio
+from datetime import timedelta
+
+from opensandbox.manager import SandboxManager
+from opensandbox.models.templates import CreateTemplateRequest
+
+manager = await SandboxManager.create(connection_config=config)
+
+template = await manager.create_template(
+    CreateTemplateRequest(
+        image="python:3.11",
+        publish="s3://bucket/templates/py311",
+        format="native",
+    )
+)
+
+# Poll get_template until the build finishes (or fails).
+while template.status.phase not in ("Succeeded", "Failed"):
+    await asyncio.sleep(5)
+    template = await manager.get_template(template.template_id)
+if template.status.phase == "Failed":
+    raise RuntimeError(f"template build failed: {template.status.message}")
+
+sandbox = await Sandbox.create_from_template(
+    template.template_id,
+    connection_config=config,
+    timeout=timedelta(hours=1),
+)
+```
+
+`format` selects the snapshot storage encoding: `"native"` publishes to an S3-compatible target (`s3://bucket/publish`), `"overlaybd"` to an OCI repository (`oci://registry/repository`). It defaults to `"overlaybd"`.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -650,6 +687,30 @@ await sandbox.credential_vault.create(
                 "paths": ["/v1/*"],
             },
             auth={"type": "apiKey", "name": "x-api-key", "credential": "api-token"},
+        )
+    ],
+)
+```
+
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — an `auth` dict with only `"credential"` and no `"type"`.
+
+```python
+from opensandbox.models.sandboxes import Credential, CredentialBinding
+
+await sandbox.credential_vault.create(
+    credentials=[
+        Credential(
+            name="spi-signer",
+            source={"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+        )
+    ],
+    bindings=[
+        CredentialBinding(
+            name="internal-api",
+            match={"hosts": ["*.internal.example.com"]},
+            auth={"credential": "spi-signer"},
         )
     ],
 )

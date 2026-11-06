@@ -291,6 +291,31 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 })
 ```
 
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — a `CredentialAuth` with only `Credential` set (the static-only fields stay zero; the typeless form never emits a forced `"type"` key).
+
+```go
+_, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
+    Credentials: []opensandbox.Credential{
+        {
+            Name:   "spi-signer",
+            Source: opensandbox.CredentialSource{
+                Type:     opensandbox.CredentialSourceExchange,
+                Endpoint: "unix:///run/spi/spi.sock",
+            },
+        },
+    },
+    Bindings: []opensandbox.CredentialBinding{
+        {
+            Name:  "internal-api",
+            Match: opensandbox.CredentialMatch{Hosts: []string{"*.internal.example.com"}},
+            Auth:  opensandbox.CredentialAuth{Credential: "spi-signer"},
+        },
+    },
+})
+```
+
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.
 
 ### Work with files

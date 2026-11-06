@@ -350,6 +350,37 @@ console.log(list.items.map((s) => s.id));
 await manager.close();
 ```
 
+### 10. Build reusable base images with templates
+
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them; sandboxes then boot from a `templateId` instead of a plain image:
+
+```ts
+const manager = SandboxManager.create({ connectionConfig: config });
+
+let template = await manager.createTemplate({
+  image: "python:3.11",
+  publish: "s3://bucket/templates/py311",
+  format: "native",
+});
+
+// Poll getTemplate until the build finishes (or fails).
+while (template.status.phase !== "Succeeded" && template.status.phase !== "Failed") {
+  await new Promise((r) => setTimeout(r, 5000));
+  template = await manager.getTemplate(template.templateId);
+}
+if (template.status.phase === "Failed") {
+  throw new Error(`template build failed: ${template.status.message}`);
+}
+
+const sandbox = await Sandbox.createFromTemplate({
+  connectionConfig: config,
+  templateId: template.templateId,
+  timeoutSeconds: 3600,
+});
+```
+
+`format` selects the snapshot storage encoding: `"native"` publishes to an S3-compatible target (`s3://bucket/publish`), `"overlaybd"` to an OCI repository (`oci://registry/repository`). It defaults to `"overlaybd"`.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -488,6 +519,28 @@ await sandbox.credentialVault.create({
         paths: ["/v1/*"],
       },
       auth: { type: "apiKey", name: "x-api-key", credential: "api-token" },
+    },
+  ],
+});
+```
+
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — `{ credential }` with no `type` (the static-only fields are compile errors in that form).
+
+```ts
+await sandbox.credentialVault.create({
+  credentials: [
+    {
+      name: "spi-signer",
+      source: { type: "exchange", endpoint: "unix:///run/spi/spi.sock" },
+    },
+  ],
+  bindings: [
+    {
+      name: "internal-api",
+      match: { hosts: ["*.internal.example.com"] },
+      auth: { credential: "spi-signer" },
     },
   ],
 });
