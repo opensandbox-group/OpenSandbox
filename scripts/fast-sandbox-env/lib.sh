@@ -80,7 +80,20 @@ EXECD="${EXECD:-opensandbox/execd:latest}"
 # is the on-demand first-sandbox pull through DART.
 WARM_IMAGES="${WARM_IMAGES:-0}"
 
-POOL_NAME="${POOL_NAME:-firecracker-egress-pool}"
+# Pool profile (OSEP-0026 T4): mirrors integration-env.sh — POOL_MODE picks
+# the SandboxPool manifest/default name so standalone verify runs resolve the
+# same pool the env brought up (resource-aware = the ResourceAware fixture).
+POOL_MODE="${POOL_MODE:-legacy}"
+case "$POOL_MODE" in
+	legacy)
+		POOL_PROFILE="firecracker-egress-pool" ;;
+	resource-aware)
+		POOL_PROFILE="firecracker-egress-resource-aware-pool" ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: POOL_MODE must be legacy or resource-aware (got: %s)\n' "$POOL_MODE" >&2
+		exit 1 ;;
+esac
+POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
