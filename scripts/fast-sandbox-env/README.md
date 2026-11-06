@@ -37,6 +37,8 @@ Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgr
 
 ### OverlayBD OCI profile (default on)
 
+The node ublk warm pool is enabled at low/high watermarks of 4/8 with 2 GiB devices, matching this environment's explicit `--resource disk=2Gi` template build setting. `verify-overlaybd` waits for idle devices, logs `/v1/pool` and daemon restart counts before and after the six template creates/deletes, and requires at least six new hits with no new misses, daemon restarts or Pod replacement. The Helm chart also defaults to 2 GiB devices because the OpenSandbox template API uses `resourceLimits.disk=2Gi` when omitted. When changing the template build size, change `runtime.oci.poolSizeGB` to the built rootfs capacity as well: exact capacity matching is required, even when the pool device is larger. `runtime.oci.poolLow=0` disables pooling.
+
 `OCI_STACK` defaults to 1: one cluster serves both template paths. The env generates a local CA + TLS certificate and deploys an in-cluster `registry:2` (fsb-vm and overlaybd require HTTPS), bakes the CA into the `fsb-fastlet`, `fsb-firecracker-runtime` and sandboxtemplate-builder images, installs the `fast-sandbox` chart's `runtime.oci` node stack, wires the registry credentials and the server's `template_oci_publish_secret`, and renders the pool fastlet with `FAST_SANDBOX_OCI_ENABLED=true` plus the shared tools/socket//dev mounts. The `verify-overlaybd` action builds an overlaybd template (published to the in-cluster registry) and runs the whole verify matrix against it — the same assertions as `verify-native`, but on the overlaybd path (template-mode create resolves `status.manifestRef`, boot is ublk on-demand, and snapshots publish/restore via `oci://` manifests). Nodes need kernel ublk support (`CONFIG_BLK_DEV_UBLK`; `modprobe ublk_drv` when built as a module). `OCI_STACK=0` restores the native-only environment (`verify-overlaybd` becomes a no-op).
 
 After `up`, point any OpenSandbox SDK at `http://127.0.0.1:18080` with the `OPEN-SANDBOX-API-KEY: fast-sandbox-env` header; sandbox endpoints are signed `f1.*` header routes served by the gateway at `http://127.0.0.1:18081`. The installed CLI works against the same stack, e.g. `OPEN_SANDBOX_DOMAIN=127.0.0.1:18080 OPEN_SANDBOX_API_KEY=fast-sandbox-env osb sandbox list`.
@@ -67,6 +69,7 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fast-sand
 ## Defaults
 
 - **Pool with egress**: `firecracker-egress-pool` (firecracker runtime, `poolMin=2`) carries the OpenSandbox egress container in every fastlet Pod netns — fast-sandbox profile, `dns+nft` mode, MITM addon pinned to the CA seed mount — wired through the Sandbox Actions channel (`infraComponents` host-process entry + `actionHandlers` egress@18080 with the runtime-ready / data-plane-ready hooks).
+- **ResourceAware pool fixture (OSEP-0026)**: `POOL_MODE=resource-aware` swaps the default pool for `firecracker-egress-resource-aware-pool` (`manifests/pool/firecracker-egress-resource-aware-pool.yaml`) — identical except `sandboxResources.mode: ResourceAware` with `overcommitRatio` cpu `4` / memory `2`, so FastPath derives each sandbox's committed request (`ceil(limit / ratio)`, a default-shape sandbox commits 250m CPU / 256Mi) instead of fixed slot accounting. `POOL_NAME` and the server's `fastpath_resource_pool` follow the profile.
 - **P2P by default**: two kind nodes, each running the runtime-agent with a node-local DART daemon (peer discovery through the headless `dart` Service); the pool spreads one fastlet per node via podAntiAffinity. Each node binds its **own** state-root subdirectory (`/var/lib/fast-sandbox/control-plane`, `/var/lib/fast-sandbox/worker`) at the same container path, so one node's committed image cache never satisfies another node's pull — artifact delivery flows `cache -> peer -> origin` with the origin fetched ~once per 4MiB block cluster-wide on every node's first create. `KIND_SINGLE=1` falls back to one node (cache-only).
 - **On-demand loading**: the pool has no `warmImages`; the verify sandbox's create pulls the golden snapshot set through DART. `WARM_IMAGES=1` preheats instead.
 - **fast-sandbox @ pinned commit**: env-owned clone at `$WORK/fast-sandbox`, cloned on first `up` and checked out at the pinned commit afterwards; relocate it with `FSB_DIR`. The source itself has no override — bump the commit in `manifests/third-party/fast-sandbox.commit`.
@@ -82,6 +85,9 @@ manifests/
                                per-node state-root subdirectories
   pool/firecracker-egress-pool.yaml  SandboxPool: egress attached (MITM CA
                                seed mount) + P2P spread
+  pool/firecracker-egress-resource-aware-pool.yaml  OSEP-0026 ResourceAware
+                               fixture: same pool + mode/overcommitRatio
+                               (POOL_MODE=resource-aware)
 ```
 
 Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), rendered with `helm template` from the workdir's values (image tags, artifact-store endpoint, FastPath endpoint, signing key, NodePorts) and applied with plain `kubectl apply` — the cluster keeps no helm state:
@@ -121,6 +127,7 @@ The RustFS migration replaces the previous `MINIO_*` and `MC_IMAGE` overrides. B
 | `IMAGE_RUNTIME` | `opensandbox/fsb-firecracker-runtime:dev` | firecracker runtime image (passed to the fast-sandbox chart) |
 | — | agent-config defaults pinned by the chart | Firecracker asset version/kernel live in the runtime agent config (`runtime.config` chart value), hot-reloadable |
 | `POOL_MIN` / `POOL_MAX` | `2` / `2` | pool capacity (auto `1`/`1` when `KIND_SINGLE=1`) |
+| `POOL_MODE` | `legacy` | `resource-aware` = OSEP-0026 ResourceAware pool fixture (`firecracker-egress-resource-aware-pool`: `sandboxResources.mode: ResourceAware` + cpu `4` / memory `2` `overcommitRatio`); `POOL_NAME` follows the profile |
 | `WARM_IMAGES` | `0` | `1` = preheat pool instead of on-demand first-sandbox pull |
 | `SBX_IMAGE` / `EXECD` | `opensandbox/fsb-sandbox-golden:latest` / `opensandbox/execd:latest` | template build inputs |
 | `EXECD_RUN_AS_INIT` | `true` | OSEP-0018 execd-as-init: templates bake `EXECD_INIT=1` (pinned by the init-mode verify stage); `false` = classic topology, that stage fails. |

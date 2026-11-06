@@ -151,6 +151,30 @@ const manual = await Sandbox.create({
 });
 ```
 
+Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewalPolicy` moves the expiration to `max(now + extendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  lifecycle: { renewalPolicy: { extendSeconds: 3600 } },
+});
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `lifecycle.idlePolicy` pauses the sandbox after `idleTimeoutSeconds` continuously idle seconds (30–86400, `onIdle: "pause"` is the only action today). Incoming traffic then wakes it:
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  lifecycle: {
+    idlePolicy: { idleTimeoutSeconds: 600, onIdle: "pause" },
+  },
+});
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`wakeRetryEnabled` / `wakeMaxAttempts` / `wakeOverallDeadlineSeconds` on the connection config; defaults 5 attempts / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. The request that starts a stream wake-retries too; an established stream is never replayed.
+
 ### 2. Custom Health Check
 
 Define custom logic to determine whether the sandbox is ready/healthy. This overrides the default ping check used during readiness checks.
@@ -326,6 +350,37 @@ console.log(list.items.map((s) => s.id));
 await manager.close();
 ```
 
+### 10. Build reusable base images with templates
+
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them; sandboxes then boot from a `templateId` instead of a plain image:
+
+```ts
+const manager = SandboxManager.create({ connectionConfig: config });
+
+let template = await manager.createTemplate({
+  image: "python:3.11",
+  publish: "s3://bucket/templates/py311",
+  format: "native",
+});
+
+// Poll getTemplate until the build finishes (or fails).
+while (template.status.phase !== "Succeeded" && template.status.phase !== "Failed") {
+  await new Promise((r) => setTimeout(r, 5000));
+  template = await manager.getTemplate(template.templateId);
+}
+if (template.status.phase === "Failed") {
+  throw new Error(`template build failed: ${template.status.message}`);
+}
+
+const sandbox = await Sandbox.createFromTemplate({
+  connectionConfig: config,
+  templateId: template.templateId,
+  timeoutSeconds: 3600,
+});
+```
+
+`format` selects the snapshot storage encoding: `"native"` publishes to an S3-compatible target (`s3://bucket/publish`), `"overlaybd"` to an OCI repository (`oci://registry/repository`). It defaults to `"overlaybd"`.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -384,6 +439,7 @@ const config2 = new ConnectionConfig({
 | `env`                        | Environment variables                            | `{}`                         |
 | `metadata`                   | Custom metadata tags                             | `{}`                         |
 | `networkPolicy`              | Optional outbound network policy (egress)        | -                            |
+| `lifecycle`                  | Pre-start and periodic hooks, `idlePolicy` (OSEP-0024) and `renewalPolicy` (OSEP-0009) | - |
 | `credentialProxy`            | Optional Credential Vault proxy startup settings | -                            |
 | `extensions`                 | Extra server-defined fields                      | `{}`                         |
 | `skipHealthCheck`            | Skip readiness checks (`Running` + health check) | `false`                      |
@@ -401,6 +457,19 @@ const sandbox = await Sandbox.create({
   networkPolicy: {
     defaultAction: "deny",
     egress: [{ action: "allow", target: "pypi.org" }],
+  },
+});
+```
+
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected: The Fast Sandbox backend rejects `ports` rules with HTTP 400 today (Docker and Kubernetes support them); a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "python:3.11",
+  networkPolicy: {
+    defaultAction: "deny",
+    egress: [{ action: "allow", ports: [443, 8443] }],
   },
 });
 ```
@@ -450,6 +519,28 @@ await sandbox.credentialVault.create({
         paths: ["/v1/*"],
       },
       auth: { type: "apiKey", name: "x-api-key", credential: "api-token" },
+    },
+  ],
+});
+```
+
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — `{ credential }` with no `type` (the static-only fields are compile errors in that form).
+
+```ts
+await sandbox.credentialVault.create({
+  credentials: [
+    {
+      name: "spi-signer",
+      source: { type: "exchange", endpoint: "unix:///run/spi/spi.sock" },
+    },
+  ],
+  bindings: [
+    {
+      name: "internal-api",
+      match: { hosts: ["*.internal.example.com"] },
+      auth: { credential: "spi-signer" },
     },
   ],
 });

@@ -7,7 +7,7 @@ last-updated: 2026-11-06
 status: draft
 ---
 
-# OSEP-0026: Optional E2B Compatibility for Core Agent Workflows
+# OSEP-0027: Optional E2B Compatibility for Core Agent Workflows
 
 <!-- toc -->
 - [Summary](#summary)

@@ -233,11 +233,15 @@ class IsolatedFilesystemAdapter(Filesystem):
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-            return create_read_bytes_response(
-                response,
-                iter_async_response_bytes(response, chunk_size),
-                line_based=offset is not None or limit is not None,
-            )
+            try:
+                return create_read_bytes_response(
+                    response,
+                    iter_async_response_bytes(response, chunk_size),
+                    line_based=offset is not None or limit is not None,
+                )
+            except BaseException:
+                await response.aclose()
+                raise
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 

@@ -32,7 +32,7 @@ var (
 	ApiGracefulShutdownTimeout time.Duration
 
 	// JupyterIdlePollInterval controls how often ExecuteCodeStream checks for
-	// late execute_result/error messages after receiving idle status.
+	// execute_reply after receiving the execution's matching idle status.
 	JupyterIdlePollInterval time.Duration
 
 	// IsolationConfigPath points to the TOML isolation config file.

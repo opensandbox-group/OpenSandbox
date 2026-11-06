@@ -1665,3 +1665,35 @@ def test_fsb_list_excludes_old_prefix(persisted_fsb):
     response = client.get("/v1/sandboxes")
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["items"]] == [sandbox_id]
+
+
+def test_pool_is_resource_aware_requires_explicit_resource_aware_profile():
+    """The gate fails safe: only an explicit RESOURCE_AWARE mode passes."""
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(namespace="ns-1", name="p")
+    )
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(),
+        )
+    )
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                mode=pb2.SANDBOX_RESOURCE_MODE_LEGACY_SLOT
+            ),
+        )
+    )
+    assert FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                mode=pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+            ),
+        )
+    )

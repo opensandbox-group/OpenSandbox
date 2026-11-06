@@ -244,14 +244,48 @@ print(f"State: {info.status.state}")
 print(f"Expires: {info.expires_at}")  # None when no automatic expiration is configured
 ```
 
-Create a non-expiring sandbox by omitting `timeout`:
+Create a non-expiring sandbox by passing `timeout=None` explicitly — omitting the argument falls back to the 10-minute default, not manual cleanup:
 
 ```python
 manual = await Sandbox.create(
     "ubuntu",
     connection_config=config,
+    timeout=None,
 )
 ```
+
+Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewal_policy` moves the expiration to `max(now + extend_seconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
+
+```python
+from opensandbox.models.sandboxes import RenewalPolicy, SandboxLifecycle
+
+sandbox = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        renewal_policy=RenewalPolicy(extend_seconds=3600),
+    ),
+)
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `lifecycle.idle_policy` pauses the sandbox after `idle_timeout_seconds` continuously idle seconds (30–86400, `on_idle="pause"` is the only action today). Incoming traffic then wakes it:
+
+```python
+from opensandbox.models.sandboxes import IdlePolicy, SandboxLifecycle
+
+sandbox = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        idle_policy=IdlePolicy(
+            idle_timeout_seconds=600,
+            on_idle="pause",
+        ),
+    ),
+)
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (default 5 attempts / 60 seconds overall, `RetryPolicy.wake_retry_enabled` / `wake_max_attempts` / `wake_overall_deadline`; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. The request that starts a stream wake-retries too; an established stream is never replayed.
 
 ### 2. Custom Health Check
 
@@ -450,6 +484,43 @@ async with await SandboxManager.create(connection_config=config) as manager:
         await manager.kill_sandbox(info.id)
 ```
 
+### 8. Build reusable base images with templates
+
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them; sandboxes then boot from a `template_id` instead of a plain image:
+
+```python
+import asyncio
+from datetime import timedelta
+
+from opensandbox.manager import SandboxManager
+from opensandbox.models.templates import CreateTemplateRequest
+
+manager = await SandboxManager.create(connection_config=config)
+
+template = await manager.create_template(
+    CreateTemplateRequest(
+        image="python:3.11",
+        publish="s3://bucket/templates/py311",
+        format="native",
+    )
+)
+
+# Poll get_template until the build finishes (or fails).
+while template.status.phase not in ("Succeeded", "Failed"):
+    await asyncio.sleep(5)
+    template = await manager.get_template(template.template_id)
+if template.status.phase == "Failed":
+    raise RuntimeError(f"template build failed: {template.status.message}")
+
+sandbox = await Sandbox.create_from_template(
+    template.template_id,
+    connection_config=config,
+    timeout=timedelta(hours=1),
+)
+```
+
+`format` selects the snapshot storage encoding: `"native"` publishes to an S3-compatible target (`s3://bucket/publish`), `"overlaybd"` to an OCI repository (`oci://registry/repository`). It defaults to `"overlaybd"`.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -523,6 +594,7 @@ The `Sandbox.create()` allows configuring the sandbox environment.
 | `env`           | Environment variables                    | Empty                           |
 | `metadata`      | Custom metadata tags                     | Empty                           |
 | `network_policy` | Optional outbound network policy (egress) | -                             |
+| `lifecycle`      | Pre-start and periodic hooks, `idle_policy` (OSEP-0024) and `renewal_policy` (OSEP-0009) | - |
 | `credential_proxy` | Optional Credential Vault proxy startup settings | -                     |
 | `ready_timeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
 
@@ -543,6 +615,19 @@ sandbox = await Sandbox.create(
     network_policy=NetworkPolicy(
         defaultAction="deny",
         egress=[NetworkRule(action="allow", target="pypi.org")],
+    ),
+)
+```
+
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected: The Fast Sandbox backend rejects `ports` rules with HTTP 400 today (Docker and Kubernetes support them); a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
+
+```python
+sandbox = await Sandbox.create(
+    "python:3.11",
+    connection_config=config,
+    network_policy=NetworkPolicy(
+        defaultAction="deny",
+        egress=[NetworkRule(action="allow", ports=[443, 8443])],
     ),
 )
 ```
@@ -602,6 +687,30 @@ await sandbox.credential_vault.create(
                 "paths": ["/v1/*"],
             },
             auth={"type": "apiKey", "name": "x-api-key", "credential": "api-token"},
+        )
+    ],
+)
+```
+
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — an `auth` dict with only `"credential"` and no `"type"`.
+
+```python
+from opensandbox.models.sandboxes import Credential, CredentialBinding
+
+await sandbox.credential_vault.create(
+    credentials=[
+        Credential(
+            name="spi-signer",
+            source={"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+        )
+    ],
+    bindings=[
+        CredentialBinding(
+            name="internal-api",
+            match={"hosts": ["*.internal.example.com"]},
+            auth={"credential": "spi-signer"},
         )
     ],
 )

@@ -29,6 +29,7 @@ from opensandbox.models.filesystem import (
 
 _BodyT = TypeVar("_BodyT")
 _CONTENT_RANGE_RE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", re.IGNORECASE)
+_MAX_RANGE_INTEGER = (1 << 63) - 1
 
 
 def _parse_header_integer(raw: str | None) -> int:
@@ -46,12 +47,23 @@ def _parse_content_range(raw: str | None) -> ByteRange | None:
     if match is None:
         return invalid
 
-    start = int(match.group(1))
-    end = int(match.group(2))
-    total = -1 if match.group(3) == "*" else int(match.group(3))
+    start = _parse_range_integer(match.group(1))
+    end = _parse_range_integer(match.group(2))
+    total = -1 if match.group(3) == "*" else _parse_range_integer(match.group(3))
+    if start is None or end is None or total is None:
+        return invalid
     if end < start or (total != -1 and total <= end):
         return invalid
     return ByteRange(start=start, end=end, total=total, raw=raw)
+
+
+def _parse_range_integer(raw: str) -> int | None:
+    """Parse a Content-Range integer within the SDKs' signed 64-bit range."""
+    normalized = raw.lstrip("0") or "0"
+    if len(normalized) > 19:
+        return None
+    value = int(normalized)
+    return value if value <= _MAX_RANGE_INTEGER else None
 
 
 def create_read_bytes_response(

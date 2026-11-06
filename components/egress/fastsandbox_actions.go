@@ -99,7 +99,12 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 	writeJSON(w, http.StatusOK, s.actionStatusResponse())
 }
 
-func (s *fastSandboxPolicyServer) actionStatusResponse() actionhandler.StatusResponse {
+type fastSandboxActionStatusResponse struct {
+	actionhandler.StatusResponse
+	SubjectLifecycleDegraded []string `json:"subjectLifecycleDegraded,omitempty"`
+}
+
+func (s *fastSandboxPolicyServer) actionStatusResponse() fastSandboxActionStatusResponse {
 	recovery := s.vaultRecoveryActive()
 	policyRecovery := s.policyRecoveryActive()
 	degraded := s.degradedVaultUIDs()
@@ -135,7 +140,7 @@ func (s *fastSandboxPolicyServer) actionStatusResponse() actionhandler.StatusRes
 			resp.MitmCaError = reason
 		}
 	}
-	return resp
+	return fastSandboxActionStatusResponse{StatusResponse: resp, SubjectLifecycleDegraded: s.subjectLifecycleDegraded()}
 }
 
 func (s *fastSandboxPolicyServer) handleActionsV2Status(w http.ResponseWriter, r *http.Request) {
@@ -548,6 +553,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 			s.reg.Unregister(subj)
 			s.mu.Lock()
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil { // preserve this exact token through C publication
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
@@ -560,6 +566,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		}
 		s.mu.Lock()
 		if !token.purged {
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil {
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
@@ -620,6 +627,14 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	// action gate prevents a victim being re-registered before this purge.
 	for _, victim := range victims {
 		if _, exists := s.reg.Fence(victim); !exists {
+			s.mu.Lock()
+			victimFence, known := s.subjFence[victim]
+			// Actual eviction is known outside the callback, even if a
+			// subsequent best-effort file purge refuses cleanup.
+			if s.subjectDrain != nil && known {
+				s.recordSubjectIntentLocked(victim, victimFence, true)
+			}
+			s.mu.Unlock()
 			s.dropSubjectState(victim)
 		}
 	}
@@ -785,6 +800,16 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 	// does not promise automatic cleanup retry.
 	s.policyCommitMu.Lock()
 	s.mu.Lock()
+	if s.subjectDrain != nil {
+		// A pending rebind REMOVE may carry expectedNew while the actually
+		// unregistered owner is still old. If already absent, retire only an
+		// existing drain mirror, never the unregistered expectedNew fence.
+		if ok {
+			s.recordSubjectIntentLocked(subj, registeredFence, true)
+		} else if mirroredFence, exists := s.subjectDrain.fences[subj]; exists {
+			s.recordSubjectIntentLocked(subj, mirroredFence, true)
+		}
+	}
 	if err := s.dropSubjectStateLocked(subj); err != nil {
 		status := s.vaultPurgeFailureStatusLocked(subj)
 		s.mu.Unlock()

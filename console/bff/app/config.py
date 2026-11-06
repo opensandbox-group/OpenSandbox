@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     bff_cookie_secure: bool = False
     bff_cors_origins: str = "http://localhost:5173"
     bff_http_timeout_seconds: float = 30.0
+    # Empty follows LIFECYCLE_API_BASE. Set http or https when execd endpoints omit a scheme.
+    bff_execd_protocol: str = ""
+    # server: dial LIFECYCLE_API_BASE /sandboxes/{id}/proxy/44772. gateway: dial the public ingress endpoint.
+    bff_shell_endpoint_mode: str = "server"
     bff_session_cookie_name: str = "opensandbox_console_session"
     bff_session_max_age_seconds: int = 86400
 

@@ -201,7 +201,7 @@ func fileType(fileInfo os.FileInfo) string {
 }
 
 func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error) {
-	createdAt := getFileCreateTime(fileInfo)
+	createdAt := getFileCreateTime(absPath, fileInfo)
 	if data, ok := fileInfo.Sys().(*syscall.Win32FileAttributeData); ok && data != nil {
 		createdAt = time.Unix(0, data.CreationTime.Nanoseconds())
 	}

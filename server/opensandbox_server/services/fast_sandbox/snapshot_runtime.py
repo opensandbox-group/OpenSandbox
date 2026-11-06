@@ -26,6 +26,7 @@ from __future__ import annotations
 # protobuf-generated modules expose dynamic attributes.
 
 import logging
+from dataclasses import replace
 from threading import Lock
 from typing import Callable, Iterable, Optional
 from uuid import UUID
@@ -219,7 +220,25 @@ class FastSandboxSnapshotRuntime:
                 "completion is observed via watch."
             ),
             backend=_BACKEND_FSB,
+            resource_limits=self._source_sandbox_limits(ns, sandbox_id),
         )
+
+    def _source_sandbox_limits(self, namespace: str, sandbox_id: str) -> Optional[dict]:
+        """The source's per-sandbox limits (SandboxInfo field 10), or None
+        when unset (pool-default shaped) or the read fails."""
+        try:
+            info = self._fastpath.get_sandbox(namespace, sandbox_id).sandbox
+            requirements = getattr(info, "resources", None)
+            limits = getattr(requirements, "limits", None) if requirements is not None else None
+            if limits is None or not (limits.cpu and limits.memory):
+                return None
+            return {"cpu": limits.cpu, "memory": limits.memory}
+        except FastPathError as exc:
+            logger.warning(
+                f"Could not read resource limits of sandbox {namespace}/{sandbox_id} "
+                f"for snapshot replay: {exc}"
+            )
+            return None
 
     def _source_sandbox_image(self, namespace: str, sandbox_id: str) -> Optional[str]:
         """The source Sandbox CR's image, or None when unreadable."""
@@ -288,7 +307,15 @@ class FastSandboxSnapshotRuntime:
                 message=f"Failed to inspect fsb snapshot {snapshot_name}: {exc}",
             )
 
-        return self._status_from_info(response.snapshot)
+        status = self._status_from_info(response.snapshot)
+        if status.state == SnapshotState.READY and source_sandbox_id:
+            # Retry point for a transient read failure at creation: the
+            # source still exists at its terminal transition.
+            status = replace(
+                status,
+                resource_limits=self._source_sandbox_limits(ns, source_sandbox_id),
+            )
+        return status
 
     # -- status watch ------------------------------------------------------
 

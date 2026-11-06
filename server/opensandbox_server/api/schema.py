@@ -985,6 +985,8 @@ class CreateSandboxRequest(BaseModel):
     # Internal routing hint: set by snapshot restore resolution to the backend
     # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
     _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+    # The snapshot's recorded source limits, set by restore resolution.
+    _resolved_snapshot_limits: Optional[dict] = PrivateAttr(default=None)
 
     image: Optional[ImageSpec] = Field(
         None,
@@ -1190,6 +1192,11 @@ class CreateSandboxRequest(BaseModel):
     def resolved_snapshot_backend(self) -> Optional[str]:
         """Backend that produced the snapshot being restored, if resolved."""
         return self._resolved_snapshot_backend
+
+    @property
+    def resolved_snapshot_limits(self) -> Optional[dict]:
+        """Recorded source limits of the snapshot being restored, if any."""
+        return self._resolved_snapshot_limits
 
 
 class CreateSandboxResponse(BaseModel):
