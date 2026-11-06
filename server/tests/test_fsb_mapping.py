@@ -420,9 +420,6 @@ def test_map_reason(runtime, data_plane, ready, expected):
     )
 
 
-# -- OSEP-0026: gated template resource forwarding ------------------------------
-
-
 def _template_request(**overrides):
     from opensandbox_server.api.schema import CreateSandboxRequest
 
@@ -521,9 +518,6 @@ def test_map_template_remap_is_byte_identical_with_same_inputs():
     assert second.request_id == first.request_id
     assert second.expires_at_unix_seconds == EXPECTED_EXPIRY
     assert second.SerializeToString() == first.SerializeToString()
-
-
-# -- snapshot restore replay ----------------------------------------------------
 
 
 def _snapshot_restore_request(limits):

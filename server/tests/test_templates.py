@@ -390,9 +390,6 @@ def test_create_maps_disk_resource_to_rootfs_size(service, crs):
     assert spec["machine"] == {"vcpu": "1", "memory": "512Mi"}
 
 
-# -- OSEP-0026: effective machine shape ----------------------------------------
-
-
 def test_effective_machine_declared():
     spec = {"resourceLimits": {"cpu": "2", "memory": "1Gi", "disk": "5Gi"}}
     assert effective_machine(spec) == {"cpu": "2", "memory": "1Gi"}
