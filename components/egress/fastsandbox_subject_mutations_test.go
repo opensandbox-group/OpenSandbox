@@ -430,3 +430,132 @@ func TestFastSandboxSubjectSnapshotMutationHTTPDifferential(t *testing.T) {
 		})
 	}
 }
+
+// All recovery assertions use the production addon over Unix IPC. The disk
+// edit remains a valid v2 file, so the 503 proves the metadata mismatch path.
+func mismatchMutationVault(t *testing.T, s *fastSandboxPolicyServer, owner actionhandler.Owner) {
+	t.Helper()
+	subj := subject.FromSandboxUID(owner.SandboxUID)
+	record, err := s.readOwnerRecord(subj)
+	require.NoError(t, err)
+	vf, body, err := s.writerFile(subj, record)
+	require.NoError(t, err)
+	vf.StateRevision++
+	payload, err := credentialvault.EncodeVaultFileV2(vf, body)
+	require.NoError(t, err)
+	fs, err := s.vaultFiles.storeFor(subj)
+	require.NoError(t, err)
+	state, err := fs.SaveRaw(payload)
+	require.NoError(t, err)
+	require.Equal(t, policy.FileCommitted, state)
+	before := latestSubjectSnapshot(t, s, owner.SandboxUID)
+	require.Equal(t, 503, doActionsV2Relay(t, s, "GET", vaultStatePrefix+owner.SandboxUID, owner, "").Code)
+	require.Contains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+	require.Same(t, before, latestSubjectSnapshot(t, s, owner.SandboxUID))
+}
+
+func TestFastSandboxSubjectSnapshotUnknownBootstrapRecovery(t *testing.T) {
+	s, owner := writerTestServer(t)
+	attachMutationReceiver(t, s)
+	require.Equal(t, 200, writerInit(t, s, owner, true))
+	require.Equal(t, 201, writerMutation(t, s, owner, "POST", writerState(t, s, owner), vaultCredential()))
+	want := committedMutationSnapshot(t, s, owner.SandboxUID)
+	// Recreate the Go server with only durable files, as after egress restart.
+	restarted, _, _ := fastSandboxTestServer(t)
+	restarted.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	restarted.SetPolicyFiles(s.policyFiles)
+	restarted.SetVaultFiles(s.vaultFiles)
+	h := attachMutationReceiver(t, restarted)
+	require.Equal(t, 200, doActionsV2(t, restarted, actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())).Code)
+	restarted.mu.Lock()
+	bootstrap := restarted.subjectDrain.snapshots[subject.FromSandboxUID(owner.SandboxUID)]
+	restarted.mu.Unlock()
+	require.Nil(t, bootstrap, "bootstrap unknown must not publish empty")
+	// A failed bootstrap verify must not turn its placeholder into a live loss.
+	vp := restarted.vaultFiles
+	restarted.vaultFiles = &vaultPersistence{dir: vp.dir, newFile: func(string) (vaultFileStore, error) { return nil, errors.New("injected verification failure") }}
+	require.Equal(t, 503, writerInit(t, restarted, owner, false))
+	restarted.vaultFiles = vp
+	require.Equal(t, 200, writerInit(t, restarted, owner, false))
+	checkMutationInstalled(t, restarted, h, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID)
+	require.Equal(t, want, latestSubjectSnapshot(t, restarted, owner.SandboxUID))
+	require.NotContains(t, restarted.subjectLifecycleDegraded(), "vault_state_unknown")
+}
+
+func TestFastSandboxSubjectSnapshotUnknownVerifiedRecovery(t *testing.T) {
+	for _, cause := range []string{"file-meta", "writer-file", "owner", "verify-file", "verify-reload"} {
+		t.Run(cause, func(t *testing.T) {
+			s, owner := writerTestServer(t)
+			h := attachMutationReceiver(t, s)
+			require.Equal(t, 200, writerInit(t, s, owner, true))
+			require.Equal(t, 201, writerMutation(t, s, owner, "POST", writerState(t, s, owner), vaultCredential()))
+			checkMutationInstalled(t, s, h, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID)
+			before := latestSubjectSnapshot(t, s, owner.SandboxUID)
+			switch cause {
+			case "file-meta":
+				mismatchMutationVault(t, s, owner)
+			case "owner":
+				path := filepath.Join(s.policyFiles.dir, owner.SandboxUID+".json.owner")
+				raw, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.NoError(t, os.Remove(path))
+				require.Equal(t, 412, doActionsV2Relay(t, s, "GET", vaultStatePrefix+owner.SandboxUID, owner, "").Code)
+				require.NoError(t, os.WriteFile(path, raw, 0600))
+			case "writer-file", "verify-file":
+				vp := s.vaultFiles
+				s.vaultFiles = &vaultPersistence{dir: vp.dir, newFile: func(string) (vaultFileStore, error) { return nil, errors.New("injected writer file failure") }}
+				if cause == "writer-file" {
+					require.Equal(t, 503, doActionsV2Relay(t, s, "GET", vaultStatePrefix+owner.SandboxUID, owner, "").Code)
+				} else {
+					require.Equal(t, 503, writerInit(t, s, owner, false))
+				}
+				s.vaultFiles = vp
+			case "verify-reload":
+				// A policy that no longer permits the committed credential rejects
+				// Reload, without invalidating the durable Vault file itself.
+				require.Equal(t, 200, doActionsV2Relay(t, s, "PUT", constants.ActionsV2PolicyRelayPathPrefix+owner.SandboxUID, owner, policyPutDoc(policyAllowAlt(), 0, false, false)).Code)
+				before = latestSubjectSnapshot(t, s, owner.SandboxUID)
+				require.Equal(t, 503, writerInit(t, s, owner, false))
+				require.Equal(t, 200, doActionsV2Relay(t, s, "PUT", constants.ActionsV2PolicyRelayPathPrefix+owner.SandboxUID, owner, policyPutDoc(*vaultAllowPolicy(), 0, false, false)).Code)
+			}
+			require.Contains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+			require.Same(t, before, latestSubjectSnapshot(t, s, owner.SandboxUID))
+			require.Equal(t, 200, writerInit(t, s, owner, false))
+			checkMutationInstalled(t, s, h, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID)
+			require.NotContains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+		})
+	}
+}
+
+func TestFastSandboxSubjectSnapshotUnknownTwoSubjects(t *testing.T) {
+	s, a := writerTestServer(t)
+	h := attachMutationReceiver(t, s)
+	b := actionsV2Owner("b", "runtime-b", "attachment-b", 1)
+	require.Equal(t, 200, doActionsV2(t, s, actionsV2Body(t, actionhandler.OperationSetBinding, b, vaultAllowPolicy())).Code)
+	for _, owner := range []actionhandler.Owner{a, b} {
+		require.Equal(t, 200, writerInit(t, s, owner, true))
+		checkMutationInstalled(t, s, h, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID)
+		mismatchMutationVault(t, s, owner)
+	}
+	require.Equal(t, 200, writerInit(t, s, a, false))
+	checkMutationInstalled(t, s, h, a.SandboxUID, a.RuntimeInstanceID, a.AttachmentID)
+	require.Contains(t, s.subjectLifecycleDegraded(), "vault_state_unknown", "B is still unknown")
+	require.Equal(t, 200, writerInit(t, s, b, false))
+	checkMutationInstalled(t, s, h, b.SandboxUID, b.RuntimeInstanceID, b.AttachmentID)
+	require.NotContains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+}
+
+func TestFastSandboxSubjectSnapshotUnknownRemoval(t *testing.T) {
+	s, owner := writerTestServer(t)
+	h := attachMutationReceiver(t, s)
+	require.Equal(t, 200, writerInit(t, s, owner, true))
+	checkMutationInstalled(t, s, h, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID)
+	mismatchMutationVault(t, s, owner)
+	require.Equal(t, 200, doActionsV2(t, s, actionsV2Body(t, actionhandler.OperationRemoveBinding, owner, nil)).Code)
+	waitSubjectKnown(t, h, lifecycleTarget(t, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID), false)
+	s.mu.Lock()
+	removed := s.subjectDrain.snapshots[subject.FromSandboxUID(owner.SandboxUID)]
+	s.mu.Unlock()
+	require.Nil(t, removed)
+	require.NotContains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+}
