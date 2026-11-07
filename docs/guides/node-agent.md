@@ -126,11 +126,39 @@ The chart handles the Kubernetes plumbing automatically when `syscalls` is prese
 
 Syscall records land in their own `<cluster>/_streams/syscall/…` tree and carry their own markers. Expect the syscall marker to be `incomplete` by design in some cases — for example, the tracer attaches only after Kubernetes reports the container ID, so the interval before attachment is reported as a gap rather than claimed as covered.
 
+## Opt into VM console collection
+
+Add `vm-console` alongside `container-logs` to collect standard Pod logs and
+FastSandbox Firecracker guest serial output concurrently:
+
+```yaml
+opensandbox-node-agent:
+  config:
+    sources: [container-logs, vm-console]
+  hostPaths:
+    vmConsole: /var/lib/fast-sandbox/firecracker
+```
+
+For the standalone chart, drop the `opensandbox-node-agent` prefix. Set `hostPaths.vmConsole` to the FC driver's StateRoot. The chart mounts it read-only. VM console discovery does not watch Kubernetes Pods or Sandbox CRs and requires no Kubernetes RBAC when enabled alone. For direct execution, set `NODEAGENT_SOURCES=container-logs,vm-console` and `NODEAGENT_VM_CONSOLE_ROOT` to that directory.
+
+The FC driver must support the version-1 `fast-sandbox.json` contract introduced in [fast-sandbox #154](https://github.com/opensandbox-group/fast-sandbox/pull/154) (merged commit `1b8e1c5cccd4fed0c5700fe1b880875c49a4ba34`). Deploy a driver built with that change before enabling collection. Older VMs without metadata are not discovered; there is no CR-watch fallback or automatic backfill.
+
+The Agent scans `<StateRoot>/jails/firecracker/*/root/` and `<StateRoot>/sandboxes/*/` for metadata beside `firecracker.log`. Missing, partial, invalid or unsupported metadata is skipped and retried on subsequent scans. A permanently failed metadata publication leaves that VM uncollectable. The driver owns both files and their GC; teardown may remove entries between discovery and opening the log.
+
+This collects guest console stdout/stderr, kernel and init messages. To capture command output, the guest process must write to `/dev/console`; output captured only by execd is outside this source. The VMM's separate `fc.log` is not collected.
+
+Console records preserve raw bytes and land under `<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.log`. Each Sandbox UID has one stable stream across placement changes. Optional `placementAttempt` metadata selects the newest local directory; it does not split streams. VM records and markers have Sandbox and node identity; Kubernetes Pod/container identity fields are empty rather than fabricated.
+
+When a console path disappears, the Agent drains any open descriptor and waits 30 seconds before finalizing. A returning console within that window continues the same stream. Already finalized checkpoints are retained for 24 hours and pruned after the local VM metadata is gone. A file removed while the Agent is offline cannot be recovered and is reported as a source gap. The file sink currently does not automatically expire VM console output families.
+
+See [collection mechanics](/architecture/data-plane/node-agent#firecracker-vm-console) for identity and recovery details.
+
 ## Key values
 
 | Value | Default | What it controls |
 |---|---|---|
 | `config.sources` | `["container-logs"]` | Enabled sources; the image must contain every named source |
+| `hostPaths.vmConsole` | `/var/lib/fast-sandbox/firecracker` | FC driver StateRoot, mounted read-only when `vm-console` is enabled |
 | `config.clusterID` | `dev-cluster` | Cluster name in records, paths, and target identity |
 | `config.memoryBudgetBytes` | 256 MiB | Global queue budget for buffered records |
 | `config.perSandboxQueueBytes` | 16 MiB | Per-sandbox queue budget before backpressure |

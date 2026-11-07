@@ -41,11 +41,23 @@ Pod selection is identity-based, not label-guesswork: a pod is collected when it
 
 **`syscalls`** records what sandboxes actually do at the kernel level: an embedded eBPF program is attached to each sandbox pod's cgroup and emits one record per syscall — syscall number, host PID/TID, command name, timestamps — as `syscall` records. Kernel ring-buffer overflows, agent-restart intervals, and late attachment are all tracked per stream and reflected in the markers, and container restarts rebind the tracer behind a drain barrier so events cannot be misattributed across generations. This source is Linux-only (kernel 5.11+, cgroup v2) and requires BPF and PERFMON capabilities.
 
-Each source owns its record kind and storage format; both feed the same marker and recovery machinery.
+**`vm-console`** (opt-in) collects FastSandbox Firecracker serial output through driver-owned node-local metadata. It can run alongside `container-logs`; see [VM console configuration](/guides/node-agent#opt-into-vm-console-collection).
+
+Each source owns its record kind and storage format; all feed the same marker and recovery machinery.
+
+## Firecracker VM console
+
+The Source discovers local VM directories through the FC driver's write-once `fast-sandbox.json`, containing version, full Sandbox UID, namespace and name. The directory's presence establishes node-local ownership, without Pod or Sandbox CR informers. The metadata sits beside `firecracker.log` in both jailer and direct modes; a partial or missing publication is retried rather than treated as a fatal error. Optional placement attempt metadata only selects the newest directory for a UID.
+
+The full Sandbox UID defines a stable stream across placement changes. Records carry Sandbox and node identity; VM markers allow empty Kubernetes Pod/container identity fields, while other streams retain the existing Pod identity requirements. File identity and acknowledged offsets track input progress. The Source drains the old descriptor before following a replacement pathname.
+
+Console output preserves raw bytes, including newlines and terminal control characters. Guest stdout/stderr share this console, which can also contain kernel and init messages. Commands whose output is captured by execd rather than written to `/dev/console` are outside this Source. The separate VMM `fc.log` is not collected.
+
+Output families use `<cluster>/_streams/vm-console/<namespace>/<sandbox_id>/<sandbox_uid>/console.log`. The Source checkpoints offsets after delivery acknowledgement. FC driver retains ownership of input-file GC; the Agent never deletes these files. A missing console starts a persisted 30-second grace window before finalization. Reappearance within the window resumes the stream. An open descriptor can drain its final tail after unlink, but data removed while the Agent is offline cannot be recovered. Replaced, truncated or unavailable files report source gaps. Ended checkpoints are pruned after 24 hours once local metadata is gone; the file Sink does not automatically expire VM console output families.
 
 ## Where records land
 
-Each stream becomes an object family under a layout that mirrors cluster reality. Every record kind has its own family (`container-log`, `syscall`), each with its own encoding and marker set:
+Each stream becomes an object family under a layout that mirrors cluster reality. Every record kind has its own family (`container-log`, `syscall`, `vm-console`), each with its own encoding and marker set:
 
 ```text
 <cluster>/<namespace>/<sandbox_id>/<pod_uid>/

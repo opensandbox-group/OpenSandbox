@@ -14,7 +14,7 @@
 
 //go:build linux || darwin
 
-package containerlogs
+package fileidentity
 
 import (
 	"fmt"
@@ -24,7 +24,7 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 )
 
-func sourceFileIdentity(info os.FileInfo) (uint64, uint64, error) {
+func Read(info os.FileInfo) (uint64, uint64, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return 0, 0, api.Permanent(fmt.Errorf("unsupported stat type %T for %q", info.Sys(), info.Name()))
