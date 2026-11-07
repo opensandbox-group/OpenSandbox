@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -237,7 +238,12 @@ func TestRecreateUpdateStrategy_Compute(t *testing.T) {
 			wantSupplyNew:  2,
 		},
 		{
-			name: "unready pods count towards curUnavailable",
+			// Unready idle pods (here: update-revision replacements that are
+			// still starting) consume the budget: 50% of 4 idle = 2, both
+			// already taken, so no ready old-revision pod may be deleted.
+			// Previously this case used allocated unready pods; those no
+			// longer count, see the "allocated unready pods" case below.
+			name: "unready idle pods count towards curUnavailable",
 			pool: &sandboxv1alpha1.Pool{
 				Spec: sandboxv1alpha1.PoolSpec{
 					UpdateStrategy: &sandboxv1alpha1.UpdateStrategy{
@@ -246,15 +252,64 @@ func TestRecreateUpdateStrategy_Compute(t *testing.T) {
 				},
 			},
 			pods: []*v1.Pod{
-				makePod("pod-1", "v1", false, false),
-				makePod("pod-2", "v1", false, false),
+				makePod("pod-1", "v2", false, true),
+				makePod("pod-2", "v2", false, true),
 				makePod("pod-3", "v1", true, true),
 				makePod("pod-4", "v1", true, true),
 			},
-			idlePods:       []string{"pod-3", "pod-4"},
-			wantIdlePods:   []string{"pod-3", "pod-4"},
+			idlePods:       []string{"pod-1", "pod-2", "pod-3", "pod-4"},
+			wantIdlePods:   []string{"pod-1", "pod-2", "pod-3", "pod-4"},
 			wantDeletePods: []string{},
 			wantSupplyNew:  0,
+		},
+		{
+			// The percentage is resolved against idle pods only. 16 allocated
+			// + 4 idle with 25%: based on all 20 pods the budget would be 5
+			// and drain the whole warm buffer in one batch; based on the 4
+			// idle pods it is 1, keeping 3 ready pods to serve allocations.
+			name: "percentage is based on idle pods, not allocated pods",
+			pool: &sandboxv1alpha1.Pool{
+				Spec: sandboxv1alpha1.PoolSpec{
+					UpdateStrategy: &sandboxv1alpha1.UpdateStrategy{
+						MaxUnavailable: intStrPtr("25%"),
+					},
+				},
+			},
+			pods: append(makeAllocatedPods("alloc", 16, true),
+				makePod("idle-1", "v1", true, true),
+				makePod("idle-2", "v1", true, true),
+				makePod("idle-3", "v1", true, true),
+				makePod("idle-4", "v1", true, true),
+			),
+			idlePods:       []string{"idle-1", "idle-2", "idle-3", "idle-4"},
+			wantIdlePods:   []string{"idle-1", "idle-2", "idle-3"},
+			wantDeletePods: []string{"idle-4"},
+			wantSupplyNew:  1,
+		},
+		{
+			// Allocated pods are never recreated by an update, so their
+			// readiness (driven by the user's workload) must not consume the
+			// budget. With an absolute maxUnavailable of 1, counting all pods
+			// gives 1 - 1 unready allocated = 0, and the update would stall
+			// until that sandbox goes away.
+			name: "allocated unready pods do not consume update budget",
+			pool: &sandboxv1alpha1.Pool{
+				Spec: sandboxv1alpha1.PoolSpec{
+					UpdateStrategy: &sandboxv1alpha1.UpdateStrategy{
+						MaxUnavailable: intStrIntPtr(1),
+					},
+				},
+			},
+			pods: append(makeAllocatedPods("alloc", 1, false),
+				makePod("idle-1", "v1", true, true),
+				makePod("idle-2", "v1", true, true),
+				makePod("idle-3", "v1", true, true),
+				makePod("idle-4", "v1", true, true),
+			),
+			idlePods:       []string{"idle-1", "idle-2", "idle-3", "idle-4"},
+			wantIdlePods:   []string{"idle-1", "idle-2", "idle-3"},
+			wantDeletePods: []string{"idle-4"},
+			wantSupplyNew:  1,
 		},
 		{
 			name: "empty idle pods",
@@ -388,6 +443,17 @@ func makePod(name, revision string, ready, idle bool) *v1.Pod {
 	}
 
 	return pod
+}
+
+// makeAllocatedPods builds n old-revision ("v1") pods that are allocated to a
+// sandbox, i.e. not passed in idlePods. Used to make the allocated share of
+// the pool large without listing every pod by hand.
+func makeAllocatedPods(prefix string, n int, ready bool) []*v1.Pod {
+	pods := make([]*v1.Pod, 0, n)
+	for i := range n {
+		pods = append(pods, makePod(fmt.Sprintf("%s-%d", prefix, i), "v1", ready, false))
+	}
+	return pods
 }
 
 func resetPodCounter() {
