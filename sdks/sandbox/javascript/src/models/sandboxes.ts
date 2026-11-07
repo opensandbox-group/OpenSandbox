@@ -24,9 +24,14 @@
 
 export type SandboxId = string;
 
+/**
+ * Registry authentication accepts only username and password on the lifecycle API.
+ * Additional properties are forwarded as supplied and rejected with HTTP 422.
+ */
 export interface ImageAuth extends Record<string, unknown> {
   username?: string;
   password?: string;
+  /** @deprecated Use password for registry tokens; the lifecycle API rejects this key. */
   token?: string;
 }
 

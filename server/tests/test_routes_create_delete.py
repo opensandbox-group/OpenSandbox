@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from docker.errors import NotFound as DockerNotFound
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
@@ -211,6 +213,148 @@ def test_create_sandbox_rejects_invalid_network_policy(
     create.assert_not_called()
 
 
+PVC_VOLUME = {"name": "data", "pvc": {"claimName": "data-vol"}, "mountPath": "/data"}
+OSSFS_BACKEND = {
+    "bucket": "my-bucket",
+    "endpoint": "oss-cn-hangzhou.aliyuncs.com",
+    "accessKeyId": "ak",
+    "accessKeySecret": "sk",
+}
+
+
+def pending_sandbox() -> CreateSandboxResponse:
+    return CreateSandboxResponse.model_validate({
+        "id": "sbx-001",
+        "status": {"state": "Pending"},
+        "createdAt": datetime.now(timezone.utc),
+    })
+
+
+@pytest.mark.parametrize(
+    ("patch", "location"),
+    [
+        ({"image": {"uri": "python:3.11", "auht": {"username": "u", "password": "p"}}}, ["image", "auht"]),
+        (
+            {"image": {"uri": "python:3.11", "auth": {"username": "u", "password": "p", "token": "t"}}},
+            ["image", "auth", "token"],
+        ),
+        ({"platform": {"os": "linux", "arch": "arm64", "variant": "v8"}}, ["platform", "variant"]),
+        ({"credentialProxy": {"enable": True}}, ["credentialProxy", "enable"]),
+        ({"volumes": [{**PVC_VOLUME, "readonly": True}]}, ["volumes", 0, "readonly"]),
+        (
+            {"volumes": [{**PVC_VOLUME, "pvc": {"claimName": "data-vol", "createIfNotExist": False}}]},
+            ["volumes", 0, "pvc", "createIfNotExist"],
+        ),
+        (
+            {"volumes": [{"name": "data", "host": {"path": "/srv/data", "readonly": True}, "mountPath": "/data"}]},
+            ["volumes", 0, "host", "readonly"],
+        ),
+        (
+            {"volumes": [{"name": "data", "ossfs": {**OSSFS_BACKEND, "versoin": "1.0"}, "mountPath": "/data"}]},
+            ["volumes", 0, "ossfs", "versoin"],
+        ),
+    ],
+)
+def test_create_sandbox_rejects_unknown_fields_in_closed_request_objects(
+    client: TestClient,
+    auth_headers: dict,
+    sample_sandbox_request: dict,
+    monkeypatch,
+    patch,
+    location,
+) -> None:
+    create = AsyncMock(return_value=pending_sandbox())
+    monkeypatch.setattr(lifecycle.sandbox_service, "create_sandbox", create)
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={**sample_sandbox_request, **patch},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": [{
+        "type": "extra_forbidden",
+        "loc": ["body", *location],
+        "msg": "Extra inputs are not permitted",
+    }]}
+    create.assert_not_called()
+
+
+def snake_case_keys(value: dict) -> dict:
+    """The same object with snake_case field names, which the models accept next to the camelCase aliases."""
+    return {
+        re.sub(r"(?<=[a-z])(?=[A-Z])", "_", key).lower(): snake_case_keys(item) if isinstance(item, dict) else item
+        for key, item in value.items()
+    }
+
+
+def test_create_sandbox_accepts_declared_fields_aliases_and_open_maps(
+    client: TestClient,
+    auth_headers: dict,
+    sample_sandbox_request: dict,
+    monkeypatch,
+) -> None:
+    calls: list[CreateSandboxRequest] = []
+
+    async def create_sandbox(request: CreateSandboxRequest) -> CreateSandboxResponse:
+        calls.append(request)
+        return pending_sandbox()
+
+    monkeypatch.setattr(lifecycle.sandbox_service, "create_sandbox", create_sandbox)
+    pvc = {
+        "claimName": "data-vol",
+        "createIfNotExists": False,
+        "deleteOnSandboxTermination": True,
+        "storageClass": "fast",
+        "storage": "1Gi",
+        "accessModes": ["ReadWriteOnce"],
+    }
+    volumes = [
+        {"name": "pvc", "pvc": pvc, "mountPath": "/pvc", "readOnly": True, "subPath": "sub"},
+        {"name": "host", "host": {"path": "/srv/data"}, "mountPath": "/host", "readOnly": False},
+        {
+            "name": "oss",
+            "ossfs": {**OSSFS_BACKEND, "version": "1.0", "options": ["allow_other"]},
+            "mountPath": "/oss",
+            "readOnly": False,
+        },
+    ]
+    snake_volumes = [
+        {**volume, "name": f"{volume['name']}-snake", "mountPath": f"{volume['mountPath']}-snake"}
+        for volume in volumes
+    ]
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={
+            **sample_sandbox_request,
+            "image": {"uri": "python:3.11", "auth": {"username": "u", "password": "p"}},
+            "platform": {"os": "linux", "arch": "arm64"},
+            "credentialProxy": {"enabled": True},
+            "networkPolicy": {"defaultAction": "deny"},
+            "metadata": {"any-key": "v", "example.com/owner": "a"},
+            "env": {"ANY_VAR": "1", "UNSET_VAR": None},
+            "extensions": {"vendor.example.com/flag": "on"},
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi", "vendor.example.com/gpu": "1"},
+            "volumes": [*volumes, *(snake_case_keys(volume) for volume in snake_volumes)],
+        },
+    )
+
+    assert response.status_code == 202
+    parsed = calls[0]
+    dumped = parsed.model_dump(by_alias=True, exclude_none=True)
+    assert dumped["image"] == {"uri": "python:3.11", "auth": {"username": "u", "password": "p"}}
+    assert dumped["platform"] == {"os": "linux", "arch": "arm64"}
+    assert dumped["credentialProxy"] == {"enabled": True}
+    assert dumped["resourceLimits"] == {"cpu": "500m", "memory": "512Mi", "vendor.example.com/gpu": "1"}
+    assert dumped["volumes"] == [*volumes, *snake_volumes]
+    assert parsed.metadata == {"any-key": "v", "example.com/owner": "a"}
+    assert parsed.env == {"ANY_VAR": "1", "UNSET_VAR": None}
+    assert parsed.extensions == {"vendor.example.com/flag": "on"}
+
+
 @pytest.fixture
 def docker_policy_runtime(monkeypatch):
     docker_client = MagicMock()
@@ -305,6 +449,57 @@ def test_create_docker_sends_normalized_network_policy_to_sidecar(
     assert sidecar_call.kwargs["name"].startswith("sandbox-egress-")
     environment = dict(item.split("=", 1) for item in sidecar_call.kwargs["environment"])
     assert json.loads(environment[EGRESS_RULES_ENV]) == expected
+
+
+@pytest.mark.parametrize(
+    ("read_only", "status_code", "binds"),
+    [
+        ({"readOnly": True}, 202, ["data-vol:/data:ro"]),
+        ({"read_only": True}, 202, ["data-vol:/data:ro"]),
+        ({"readonly": True}, 422, None),
+    ],
+)
+def test_create_docker_does_not_mount_a_misspelled_read_only_volume_read_write(
+    client, auth_headers, sample_sandbox_request, docker_policy_runtime, read_only, status_code, binds,
+):
+    # `readonly` used to be dropped, which mounted the volume read-write.
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={**sample_sandbox_request, "metadata": {}, "volumes": [{**PVC_VOLUME, **read_only}]},
+    )
+
+    assert response.status_code == status_code
+    if binds is None:
+        docker_policy_runtime.api.create_container.assert_not_called()
+    else:
+        assert docker_policy_runtime.api.create_host_config.call_args.kwargs["binds"] == binds
+
+
+@pytest.mark.parametrize(
+    ("pvc", "status_code"),
+    [
+        ({"claimName": "data-vol", "createIfNotExists": False}, 400),
+        ({"claimName": "data-vol", "createIfNotExist": False}, 422),
+    ],
+)
+def test_create_docker_does_not_create_a_volume_when_the_create_flag_is_misspelled(
+    client, auth_headers, sample_sandbox_request, docker_policy_runtime, pvc, status_code,
+):
+    # `createIfNotExist` used to be dropped, so the missing volume was created.
+    docker_policy_runtime.api.inspect_volume.side_effect = [
+        DockerNotFound("no such volume"),
+        {"Name": "data-vol", "Driver": "local"},
+    ]
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={**sample_sandbox_request, "metadata": {}, "volumes": [{**PVC_VOLUME, "pvc": pvc}]},
+    )
+
+    assert response.status_code == status_code
+    docker_policy_runtime.api.create_volume.assert_not_called()
 
 
 def test_create_sandbox_accepts_snapshot_id_without_entrypoint(
