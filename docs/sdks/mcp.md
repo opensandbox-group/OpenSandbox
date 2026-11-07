@@ -127,6 +127,8 @@ The MCP server exposes the tool set below, not the complete Python SDK. It does 
 ### Command Execution
 
 - `command_run`: run a command inside a sandbox
+- `command_get_status`: get a command's running state, exit code, and error
+- `command_get_logs`: read combined stdout/stderr of a background command, with an optional `cursor` for incremental reads
 - `command_interrupt`: interrupt a running command
 
 ### Filesystem
@@ -148,6 +150,18 @@ The MCP server exposes the tool set below, not the complete Python SDK. It does 
 4. `sandbox_get_endpoint` if you expose a port.
 5. `sandbox_kill` when finished.
 
+### Background Commands
+
+1. `command_run` with `background=true` -> keep the execution `id`.
+2. `command_get_status` until `running` is `false`; check `exit_code` and `error`.
+3. Between status checks, `command_get_logs` with the `cursor` from the previous call to read only new output.
+4. After `running` is `false`, call `command_get_logs` once more to read the remaining output.
+5. `command_interrupt` to stop a command early.
+
+::: tip
+The `cursor` is a server-side position: pass back the returned value instead of computing it from the content length. Empty `content` does not mean the command finished. Completed command records are retained for at least 24 hours, so a "not found" error for an old execution does not mean the command failed.
+:::
+
 ## Usage Examples
 
 Here are some examples of what you can ask an LLM to do:
@@ -155,6 +169,7 @@ Here are some examples of what you can ask an LLM to do:
 - "Create a Python sandbox and run a quick health command."
 - "Write a Python script into the sandbox and run it."
 - "Download a GitHub repo, install dependencies, and run its tests."
+- "Run the test suite in the background, report progress, and tell me whether it passed."
 - "Generate a CSV file with fake sales data and run a simple summary script."
 - "Start a tiny web server on port 8000 and return the public URL."
 - "Build a minimal REST API (hello + health) and expose it on port 8000."
