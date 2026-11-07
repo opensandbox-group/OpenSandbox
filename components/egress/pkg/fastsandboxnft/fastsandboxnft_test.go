@@ -223,6 +223,34 @@ func TestRemoveRebuildsTable(t *testing.T) {
 	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
 }
 
+func TestRemoveKeepsRemainingSubjectsLeases(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	now := time.Unix(1_700_000_000, 0)
+	a.now = func() time.Time { return now }
+	ctx := context.Background()
+	removed := subject.FromSandboxUID("u-1")
+	kept := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, removed, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyDenyFirst(ctx, kept, testSlot("u-2", "10.0.0.6")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, kept, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, kept, []nftables.ResolvedIP{
+		{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0},                   // 60s lease
+		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 300 * time.Second}, // 360s lease
+		{Addr: netip.MustParseAddr("192.0.2.9"), TTL: 0},                   // expires before the rebuild
+	}))
+	a.states[kept].dyn[netip.MustParseAddr("192.0.2.9")] = now.Add(-time.Second)
+
+	now = now.Add(20*time.Second + 500*time.Millisecond)
+	require.NoError(t, a.Remove(ctx, removed))
+	script := runner.last()
+	require.Contains(t, script, fmt.Sprintf("add element inet %s %s { 192.0.2.1 timeout 40s }", TableName, dynSetName(kept, "v4")))
+	require.Contains(t, script, fmt.Sprintf("add element inet %s %s { 2001:db8::1 timeout 340s }", TableName, dynSetName(kept, "v6")))
+	assert.NotContains(t, script, "192.0.2.9", "an expired lease must not be re-added")
+}
+
 // TestRemoveFailureStaysRetryable: a failed nft transaction must not forget
 // the subject from the in-memory map — otherwise the retry short-circuits to
 // success and the stale same-IP dispatch rule stays first-match in the kernel
