@@ -26,17 +26,21 @@ import (
 )
 
 func getFileCreateTime(filePath string, fileInfo os.FileInfo) time.Time {
-	var statx unix.Statx_t
-	if err := unix.Statx(unix.AT_FDCWD, filePath, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BTIME, &statx); err == nil && statx.Mask&unix.STATX_BTIME != 0 {
-		return time.Unix(statx.Btime.Sec, int64(statx.Btime.Nsec))
-	}
-
-	// Preserve the legacy fallback on kernels/filesystems without birth time.
-	// Inode change time is not creation time and can change after metadata updates.
 	stat, ok := fileInfo.Sys().(*syscall.Stat_t)
 	if !ok || stat == nil {
 		return fileInfo.ModTime()
 	}
 
+	var statx unix.Statx_t
+	// The path may have been replaced since fileInfo was read.
+	if err := unix.Statx(unix.AT_FDCWD, filePath, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BTIME|unix.STATX_INO, &statx); err == nil &&
+		statx.Mask&unix.STATX_BTIME != 0 && statx.Mask&unix.STATX_INO != 0 &&
+		statx.Ino == stat.Ino &&
+		statx.Dev_major == unix.Major(uint64(stat.Dev)) && statx.Dev_minor == unix.Minor(uint64(stat.Dev)) {
+		return time.Unix(statx.Btime.Sec, int64(statx.Btime.Nsec))
+	}
+
+	// Preserve the legacy fallback when birth time is unavailable or the entry changed.
+	// Inode change time is not creation time and can change after metadata updates.
 	return time.Unix(stat.Ctim.Sec, stat.Ctim.Nsec)
 }
