@@ -43,11 +43,12 @@ type fastSandboxSubjectDrain struct {
 	// Unbounded: action intents are recorded only inside the serial actionGate,
 	// so growth is limited by action rate; stale intents are dropped before send.
 	// Child publication replaces the queue with the current replay set.
-	queue     []fastSandboxSubjectIntent
-	degraded  map[string]bool
-	deadline  time.Duration
-	snapshots map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
-	fences    map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
+	queue         []fastSandboxSubjectIntent
+	degraded      map[string]bool
+	unknownVaults map[subject.Subject]bool // live Vaults invalidated under the current registered fence
+	deadline      time.Duration
+	snapshots     map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
+	fences        map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
 
 	// Optional test observer, called under s.mu after acknowledged Unload.
 	epochCountForTest func(int)
@@ -156,11 +157,13 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 		if current, ok := d.fences[subj]; ok && current.Matches(fence) {
 			delete(d.fences, subj)
 			delete(d.snapshots, subj)
+			delete(d.unknownVaults, subj)
 		}
 	} else {
 		if old, exists := d.fences[subj]; exists && !old.Matches(fence) {
 			d.dropInstallsLocked(mustSubjectTarget(subj, old))
 			delete(d.snapshots, subj)
+			delete(d.unknownVaults, subj)
 		}
 		d.fences[subj] = fence
 	}
@@ -174,7 +177,7 @@ func mustSubjectTarget(subj subject.Subject, fence subject.Fencing) revision.Sub
 	return target
 }
 
-// Called after the binding policy commits, while policyCommitMu is still held.
+// Called after a local mutation commits, while policyCommitMu is still held.
 // ActiveSnapshot returns an owned clone of the Store's committed render cache.
 // Marshal stays under s.mu so the payload, revisions and fence freeze together;
 // no registry lookup, resolver, or IPC is performed here.
@@ -184,9 +187,23 @@ func (s *fastSandboxPolicyServer) recordBindingSnapshot(subj subject.Subject, fe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recordSubjectSnapshotLocked(subj, fence)
+}
+
+// Shared producer seam for callers already holding policyCommitMu and s.mu.
+// Policy validation/rendering belongs to the committing path: only the Store's
+// committed snapshot and recorded policy epoch are read here. In particular,
+// never call vaultValidationPolicy here (it acquires s.mu itself).
+func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subject, fence subject.Fencing) {
 	d := s.subjectDrain
+	if d == nil {
+		return
+	}
 	if current, ok := d.fences[subj]; !ok || !current.Matches(fence) {
 		return
+	}
+	if entry := s.vaults[subj]; entry.vaultStateUnknown {
+		return // retain the last payload; unknown is not committed empty
 	}
 	// The registry itself has no capacity cap. Bound the observation mirror
 	// independently to the receiver's subject budget without failing SET.
@@ -218,6 +235,7 @@ func (s *fastSandboxPolicyServer) recordBindingSnapshot(subj subject.Subject, fe
 	}
 	frozen := &fastSandboxSubjectSnapshot{payload: payload, vaultRevision: snapshot.Revision, policyEpoch: policyEpoch}
 	d.snapshots[subj] = frozen
+	delete(d.unknownVaults, subj)
 	d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: fence, target: mustSubjectTarget(subj, fence), epoch: d.current, snapshot: frozen})
 }
 
@@ -258,6 +276,31 @@ func (d *fastSandboxSubjectDrain) degradeLocked(reason string) {
 	d.degraded[reason] = true
 }
 
+// Call only at a known/live-to-unknown transition under s.mu. Registration
+// checks bound the set to current subjects; bootstrap placeholders never enter.
+func (s *fastSandboxPolicyServer) markSubjectVaultUnknownLocked(subj subject.Subject, fence subject.Fencing) {
+	d := s.subjectDrain
+	if d == nil {
+		return
+	}
+	if current, ok := d.fences[subj]; !ok || !current.Matches(fence) {
+		return
+	}
+	if len(d.unknownVaults) == 0 {
+		log.Warnf("subject lifecycle degraded: vault_state_unknown")
+	}
+	if d.unknownVaults == nil {
+		d.unknownVaults = make(map[subject.Subject]bool)
+	}
+	d.unknownVaults[subj] = true
+}
+
+func (s *fastSandboxPolicyServer) clearSubjectVaultUnknownLocked(subj subject.Subject) {
+	if s.subjectDrain != nil {
+		delete(s.subjectDrain.unknownVaults, subj)
+	}
+}
+
 func (s *fastSandboxPolicyServer) subjectIntentCurrentLocked(intent fastSandboxSubjectIntent) bool {
 	fence, exists := s.subjectDrain.fences[intent.subj]
 	if intent.unload {
@@ -273,6 +316,9 @@ func (s *fastSandboxPolicyServer) subjectLifecycleDegraded() []string {
 		return nil
 	}
 	var reasons []string
+	if len(s.subjectDrain.unknownVaults) != 0 {
+		reasons = append(reasons, "vault_state_unknown")
+	}
 	for reason := range s.subjectDrain.degraded {
 		reasons = append(reasons, reason)
 	}

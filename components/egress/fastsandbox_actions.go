@@ -661,6 +661,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 		}
 		s.finishRebind(subj, token)
+		s.recordBindingSnapshot(subj, fence)
 		log.Infof("subject %s: binding removed (deny-first)", subj)
 		return http.StatusOK, nil
 	}
@@ -740,6 +741,7 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		if err := s.applyPolicy(subj, pol); err != nil {
 			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
 		}
+		s.recordBindingSnapshot(subj, fence)
 		// The pending slot stays: it now mirrors what is enforced, so a
 		// data-plane-ready replayed after a lost ack is idempotent (same
 		// rationale as the relay PUT and policy import).
