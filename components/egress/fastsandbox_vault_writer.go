@@ -230,6 +230,9 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 			s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
 			payload, encodeErr := credentialvault.EncodeVaultFileV2(credentialvault.VaultFile{Incarnation: expected.RuntimeInstanceID, AttachmentID: expected.AttachmentID, State: credentialvault.FileStateEmpty, StateLineage: req.Contract.Lineage, StateRevision: 1, InitializationID: req.Contract.InitializationID}, credentialvault.VaultFileBody{})
 			if encodeErr != nil {
+				if s.subjectDrain != nil {
+					s.subjectDrain.degradeLocked("vault_state_unknown")
+				}
 				return func() { http.Error(w, "invalid initial state", 500) }
 			}
 			state, saveErr = fs.SaveRaw(payload)
@@ -251,6 +254,9 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 				} else {
 					s.requireVaultRecoveryLocked("initial Vault persistence uncertain")
 				}
+				if s.subjectDrain != nil && s.vaults[subj].vaultStateUnknown {
+					s.subjectDrain.degradeLocked("vault_state_unknown")
+				}
 				return func() { http.Error(w, "initial Vault persistence not confirmed", 503) }
 			}
 		} else if record.VaultContract == nil || *record.VaultContract != req.Contract {
@@ -259,11 +265,17 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 		s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
 		vf, body, err := s.writerFile(subj, record)
 		if err != nil {
+			if s.subjectDrain != nil {
+				s.subjectDrain.degradeLocked("vault_state_unknown")
+			}
 			return func() { http.Error(w, "Vault verification requires recovery", 503) }
 		}
 		store := credentialvault.NewSubjectStore()
 		if vf.State == credentialvault.FileStateActive {
 			if err := store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
+				if s.subjectDrain != nil {
+					s.subjectDrain.degradeLocked("vault_state_unknown")
+				}
 				return func() { http.Error(w, "Vault verification rejected", 503) }
 			}
 		}
@@ -333,6 +345,9 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 			entry.vaultStateUnknown = true
 			entry.store = credentialvault.NewSubjectStore()
 			s.vaults[subj] = entry
+			if s.subjectDrain != nil {
+				s.subjectDrain.degradeLocked("vault_state_unknown")
+			}
 			return func() { http.Error(w, "Vault persistent state requires recovery", 503) }
 		}
 		if r.Method == http.MethodGet {

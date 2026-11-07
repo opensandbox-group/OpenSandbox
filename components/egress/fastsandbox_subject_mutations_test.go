@@ -303,7 +303,7 @@ type mutationObservation struct {
 	Allow string
 }
 
-func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict bool) []mutationObservation {
+func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict, fileMetaMismatch bool) []mutationObservation {
 	t.Helper()
 	var out []mutationObservation
 	observe := func(rec *httptest.ResponseRecorder) {
@@ -328,8 +328,37 @@ func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict bool)
 			require.NoError(t, err)
 			observe(doActionsV2Relay(t, s, method, vaultStatePrefix+testUID, owner, string(payload)))
 		}
-		require.NoError(t, os.Remove(filepath.Join(s.policyFiles.dir, testUID+".json.owner")))
-		observe(doActionsV2Relay(t, s, "GET", vaultStatePrefix+testUID, owner, ""))
+		var before *fastSandboxSubjectSnapshot
+		if fileMetaMismatch {
+			if s.subjectDrain != nil {
+				before = latestSubjectSnapshot(t, s, testUID)
+			}
+			vf, body, err := s.writerFile(subject.FromSandboxUID(testUID), &strictOwnerRecord{Owner: owner, VaultContract: &strictVaultContract{vaultWriterVersion, "init-a", "lineage-a"}})
+			require.NoError(t, err)
+			vf.StateRevision++
+			payload, err := credentialvault.EncodeVaultFileV2(vf, body)
+			require.NoError(t, err)
+			fs, err := s.vaultFiles.storeFor(subject.FromSandboxUID(testUID))
+			require.NoError(t, err)
+			state, err := fs.SaveRaw(payload)
+			require.NoError(t, err)
+			require.Equal(t, policy.FileCommitted, state)
+		} else {
+			require.NoError(t, os.Remove(filepath.Join(s.policyFiles.dir, testUID+".json.owner")))
+		}
+		rec := doActionsV2Relay(t, s, "GET", vaultStatePrefix+testUID, owner, "")
+		observe(rec)
+		if fileMetaMismatch {
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			if s.subjectDrain != nil {
+				require.Contains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+				require.Same(t, before, latestSubjectSnapshot(t, s, testUID), "file metadata mismatch must preserve the last mirrored payload")
+				s.mu.Lock()
+				s.recordSubjectSnapshotLocked(subject.FromSandboxUID(testUID), subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+				s.mu.Unlock()
+				require.Same(t, before, latestSubjectSnapshot(t, s, testUID), "later producers must preserve the unknown mirror")
+			}
+		}
 		return out
 	}
 	observe(doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())))
@@ -358,8 +387,12 @@ func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict bool)
 }
 
 func TestFastSandboxSubjectSnapshotMutationHTTPDifferential(t *testing.T) {
-	for _, strict := range []bool{false, true} {
-		t.Run(fmt.Sprint(strict), func(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		strict, fileMetaMismatch bool
+	}{{"false", false, false}, {"true", true, false}, {"strict-file-meta-mismatch", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			strict := tc.strict
 			var baseline []mutationObservation
 			for _, mode := range []string{"disabled", "enabled", "rejected"} {
 				s, _, _ := fastSandboxTestServer(t)
@@ -373,7 +406,7 @@ func TestFastSandboxSubjectSnapshotMutationHTTPDifferential(t *testing.T) {
 					require.NoError(t, err)
 					s.publishSubjectClient(client, proxy)
 				}
-				observed := exerciseMutationHTTP(t, s, strict)
+				observed := exerciseMutationHTTP(t, s, strict, tc.fileMetaMismatch)
 				if mode == "disabled" {
 					baseline = observed
 					require.Nil(t, s.subjectDrain)
