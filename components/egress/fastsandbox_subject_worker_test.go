@@ -847,6 +847,24 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 		}
 		fault.mu.Unlock()
 		isTarget := event.Target.SubjectKey == "s-"+testUID
+		if failOperation == "prepare-disconnect" && isTarget {
+			if firstPrepare {
+				connection, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = connection.Close() // fail before the command deadline, without forwarding
+				}
+				fault.once.Do(func() { close(fault.reached) })
+				return
+			}
+			if event.Path == "/v2/revisions/abort" {
+				fault.abortOnce.Do(func() { close(fault.abortReached) })
+				select {
+				case <-fault.release:
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
 		if failOperation == "prepare-timeout" && isTarget {
 			switch event.Path {
 			case "/v2/revisions/prepare":
@@ -877,7 +895,7 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 			fault.once.Do(func() { close(fault.reached) })
 			return
 		}
-		if outcome == "" && failOperation != "prepare-timeout" && isTarget && strings.HasSuffix(r.URL.Path, "/active") {
+		if ((outcome == "" && failOperation != "prepare-timeout" && failOperation != "prepare-disconnect") || failOperation == "commit-after") && isTarget && strings.HasSuffix(r.URL.Path, "/active") {
 			select {
 			case <-fault.release:
 			case <-r.Context().Done():
@@ -898,8 +916,18 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 		if err != nil {
 			return
 		}
+		if failOperation == "commit-after" && isTarget && strings.HasSuffix(event.Path, "/commit") {
+			replace := false
+			fault.once.Do(func() { replace = true; close(fault.reached) })
+			if replace {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": outcome})
+				return
+			}
+		}
 		lose := false
-		if ((outcome == "" && failOperation != "prepare-timeout") || failOperation == "active") && isTarget && strings.HasSuffix(r.URL.Path, "/commit") {
+		if ((outcome == "" && failOperation != "prepare-timeout" && failOperation != "prepare-disconnect") || failOperation == "active") && isTarget && strings.HasSuffix(r.URL.Path, "/commit") {
 			fault.once.Do(func() { lose = true; close(fault.reached) })
 		}
 		if lose {
@@ -911,7 +939,15 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 		_, _ = w.Write(body)
 	})}
 	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close(); transport.CloseIdleConnections() })
+	t.Cleanup(func() {
+		_ = server.Close()
+		transport.CloseIdleConnections()
+		fault.mu.Lock()
+		defer fault.mu.Unlock()
+		for _, event := range fault.events {
+			t.Logf("wire path=%s target=%s epoch=%d digest=%s", event.Path, event.Target.SubjectKey, event.Revision.DecisionEpoch, event.Revision.Digest)
+		}
+	})
 	proxy := *h
 	proxy.SocketPath = path
 	return fault, proxy
@@ -1028,7 +1064,7 @@ func TestFastSandboxSubjectSnapshotReconcileCoalesceAndSlowIPC(t *testing.T) {
 
 func TestFastSandboxSubjectSnapshotConfirmedRejectionsContinueFIFO(t *testing.T) {
 	for _, operation := range []string{"prepare", "commit", "active"} {
-		for _, outcome := range []string{"subject_unknown", "subject_generation_mismatch", "subject_failed", "control_generation_mismatch", "revision_rejected", "not-a-public-reason"} {
+		for _, outcome := range []string{"subject_unknown", "subject_generation_mismatch", "subject_failed", "control_generation_mismatch", "revision_rejected"} {
 			t.Run(operation+"/"+outcome, func(t *testing.T) {
 				s, h, fault := snapshotFaultHarness(t, outcome, operation)
 				require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
@@ -1042,9 +1078,6 @@ func TestFastSandboxSubjectSnapshotConfirmedRejectionsContinueFIFO(t *testing.T)
 				reason := outcome
 				if outcome == "revision_rejected" {
 					reason = "subject_prepare_rejected"
-				}
-				if outcome == "not-a-public-reason" {
-					reason = "subject_install_rejected"
 				}
 				require.Equal(t, []string{reason}, s.subjectLifecycleDegraded())
 				require.True(t, s.actionStatusResponse().Ready)
@@ -1387,4 +1420,180 @@ func TestFastSandboxSubjectSnapshotEpochRebindGap(t *testing.T) {
 	}
 	next := waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, "gap-r", "gap-a"), latestSubjectSnapshot(t, s, testUID))
 	require.Greater(t, next.DecisionEpoch, old.DecisionEpoch)
+}
+
+// Each failure is injected in front of the production addon, not a replacement
+// receiver. Channels bound the interruption; polling only observes completion.
+func TestFastSandboxSubjectSnapshotEarlyPrepareDisconnect(t *testing.T) {
+	for _, mode := range []string{"retry-same", "superseded", "stale"} {
+		t.Run(mode, func(t *testing.T) {
+			s, h, fault := snapshotFaultHarness(t, "", "prepare-disconnect")
+			s.mu.Lock()
+			s.subjectDrain.deadline = 2 * time.Second
+			s.mu.Unlock()
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			first := latestSubjectSnapshot(t, s, testUID)
+			select {
+			case <-fault.abortReached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("early disconnect did not reach Abort")
+			}
+			latest := first
+			if mode == "superseded" {
+				require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
+				queueSnapshotWithoutRegister(t, s)
+				latest = latestSubjectSnapshot(t, s, testUID)
+			} else if mode == "stale" {
+				require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
+			}
+			close(fault.release)
+			target := lifecycleTarget(t, testUID, testFenceR, testFenceA)
+			if mode == "stale" {
+				waitLifecycleIdle(t, s, h, 2)
+				waitSubjectKnown(t, h, target, false)
+			} else {
+				active := waitSubjectInstalled(t, h, target, latest)
+				require.Equal(t, int64(2), active.DecisionEpoch)
+				// No Register intervenes: a later install needs the same installer.
+				require.Equal(t, 200, doPolicy(t, s, http.MethodPut, testUID, policyPutDoc(policyAllow(), 0, false, false), "").Code)
+				queueSnapshotWithoutRegister(t, s)
+				waitSubjectInstalled(t, h, target, latestSubjectSnapshot(t, s, testUID))
+				require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) == 0 }, time.Second, time.Millisecond)
+			}
+			fault.mu.Lock()
+			defer fault.mu.Unlock()
+			var paths []string
+			var prepares []snapshotWireEvent
+			for _, event := range fault.events {
+				paths = append(paths, event.Path)
+				if strings.HasSuffix(event.Path, "/prepare") {
+					prepares = append(prepares, event)
+				}
+			}
+			require.Equal(t, []string{"/v2/subjects/register", "/v2/revisions/prepare", "/v2/revisions/abort"}, paths[:3])
+			if mode == "stale" {
+				require.Len(t, prepares, 1)
+			} else {
+				require.Len(t, prepares, 3)
+				require.Equal(t, first.payload, prepares[0].Payload)
+				require.Equal(t, latest.payload, prepares[1].Payload)
+				require.Equal(t, int64(2), prepares[1].Revision.DecisionEpoch)
+			}
+		})
+	}
+}
+
+func queueSnapshotWithoutRegister(t *testing.T, s *fastSandboxPolicyServer) {
+	t.Helper()
+	s.policyCommitMu.Lock()
+	s.recordBindingSnapshot(subject.FromSandboxUID(testUID), subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+	s.policyCommitMu.Unlock()
+}
+
+func TestFastSandboxSubjectSnapshotRegisterCapacityRecovery(t *testing.T) {
+	for _, mode := range []string{"same-target", "different-uid"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, _ := fastSandboxTestServer(t)
+			o := subjectTestOwner(t)
+			launch, configs := subjectAddonLauncher(t, o)
+			child, err := o.launch(context.Background(), mitmproxy.Config{}, func(cfg mitmproxy.Config) (*mitmproxy.Running, error) {
+				h := *cfg.SubjectRevisionIPC
+				h.MaxSubjects = 1
+				cfg.SubjectRevisionIPC = &h
+				return launch(cfg)
+			})
+			require.NoError(t, err)
+			o.attach(s, child)
+			t.Cleanup(o.stopDrain)
+			h := (*configs)[0].SubjectRevisionIPC
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), latestSubjectSnapshot(t, s, testUID))
+			require.Equal(t, 200, doAction(t, s, bindBody(t, "overflow", "10.0.0.9", "r2", "a2", 1, vaultAllowPolicy())).Code)
+			waitLifecycleIdle(t, s, h, 2)
+			require.Equal(t, []string{"subject_capacity_exhausted"}, s.subjectLifecycleDegraded())
+			waitSubjectKnown(t, h, lifecycleTarget(t, "overflow", "r2", "a2"), false)
+			require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
+			waitSubjectKnown(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), false)
+			uid, ip := "overflow", "10.0.0.9"
+			if mode == "different-uid" {
+				uid, ip = "later", "10.0.0.8"
+			}
+			require.Equal(t, 200, doAction(t, s, bindBody(t, uid, ip, "r2", "a2", 2, vaultAllowPolicy())).Code)
+			waitLifecycleIdle(t, s, h, 4)
+			target := lifecycleTarget(t, uid, "r2", "a2")
+			waitSubjectKnown(t, h, target, true)
+			// Preserve the receiver's final identity even when the installation
+			// assertion fails on the baseline (known target, active identity nil).
+			t.Cleanup(func() {
+				transport, err := revision.NewSubjectUnixTransport(h.SocketPath, h.SessionToken, h.ControlGeneration, target, h.MaxSnapshotBytes)
+				require.NoError(t, err)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				active, err := transport.Readback(ctx)
+				t.Logf("capacity recovery receiver active=%+v error=%v", active, err)
+			})
+			waitSubjectInstalled(t, h, target, latestSubjectSnapshot(t, s, uid))
+		})
+	}
+}
+
+func TestFastSandboxSubjectSnapshotCommitInternalErrorReadback(t *testing.T) {
+	for _, outcome := range []string{"internal_error", "unknown_outcome"} {
+		t.Run(outcome, func(t *testing.T) {
+			s, h, fault := snapshotFaultHarness(t, outcome, "commit-after")
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			select {
+			case <-fault.reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("applied Commit not reached")
+			}
+			first := latestSubjectSnapshot(t, s, testUID)
+			active := waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), first)
+			require.Equal(t, int64(1), active.DecisionEpoch, "Commit has already installed the candidate")
+			require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) > 0 }, time.Second, time.Millisecond)
+			require.Equal(t, []string{"subject_ipc_unavailable"}, s.subjectLifecycleDegraded())
+			close(fault.release)
+			// A second subject confirms the uncertain operation released the FIFO.
+			require.Equal(t, 200, doAction(t, s, bindBody(t, "other", "10.0.0.9", "r2", "a2", 1, vaultAllowPolicy())).Code)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, "other", "r2", "a2"), latestSubjectSnapshot(t, s, "other"))
+			require.Empty(t, s.subjectLifecycleDegraded())
+			fault.mu.Lock()
+			var paths []string
+			for _, event := range fault.events {
+				if event.Target.SubjectKey == "s-"+testUID {
+					paths = append(paths, event.Path)
+				}
+			}
+			fault.mu.Unlock()
+			require.Equal(t, []string{"/v2/subjects/register", "/v2/revisions/prepare", "/v2/revisions/commit", "/v2/revisions/active"}, paths)
+			require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
+			queueSnapshotWithoutRegister(t, s)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), latestSubjectSnapshot(t, s, testUID))
+		})
+	}
+}
+
+func TestFastSandboxSubjectSnapshotConfirmedRejectionRetiresInstaller(t *testing.T) {
+	s, h, fault := snapshotFaultHarness(t, "revision_rejected", "prepare")
+	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+	select {
+	case <-fault.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirmed rejection not reached")
+	}
+	require.Equal(t, 200, doAction(t, s, bindBody(t, "other", "10.0.0.9", "r2", "a2", 1, vaultAllowPolicy())).Code)
+	waitSubjectInstalled(t, h, lifecycleTarget(t, "other", "r2", "a2"), latestSubjectSnapshot(t, s, "other"))
+	queueSnapshotWithoutRegister(t, s) // enqueue only after the rejection has retired the installer
+	require.Equal(t, 200, doAction(t, s, bindBody(t, "other", "10.0.0.9", "r2", "a2", 2, vaultAllowPolicy())).Code)
+	waitLifecycleIdle(t, s, h, 3)
+	require.Equal(t, []string{"subject_prepare_rejected"}, s.subjectLifecycleDegraded())
+	fault.mu.Lock()
+	defer fault.mu.Unlock()
+	var paths []string
+	for _, event := range fault.events {
+		if event.Target.SubjectKey == "s-"+testUID {
+			paths = append(paths, event.Path)
+		}
+	}
+	require.Equal(t, []string{"/v2/subjects/register", "/v2/revisions/prepare"}, paths, "no retry, Abort, Readback or later install without a new Register")
 }

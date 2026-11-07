@@ -219,7 +219,7 @@ func TestSubjectTransportUnicodeAndMetadataLimits(t *testing.T) {
 }
 
 func TestSubjectTransportConfirmedRejectionsAndSidecarCompatibility(t *testing.T) {
-	for _, outcome := range []string{"subject_unknown", "subject_generation_mismatch", "subject_failed", "control_generation_mismatch", "revision_rejected", "untrusted-body"} {
+	for _, outcome := range []string{"subject_unknown", "subject_generation_mismatch", "subject_failed", "control_generation_mismatch", "revision_rejected"} {
 		t.Run(outcome, func(t *testing.T) {
 			responder := subjectRoundTrip(func(*http.Request) (*http.Response, error) {
 				return subjectHTTPResponse(409, `{"error":"`+outcome+`"}`), nil
@@ -263,5 +263,30 @@ func TestSubjectTransportConfirmedRejectionsAndSidecarCompatibility(t *testing.T
 		transport := subjectTestTransport(t, func(*http.Request) (*http.Response, error) { return subjectHTTPResponse(409, body), nil })
 		_, err := transport.Readback(context.Background())
 		require.Same(t, ErrTransportRejected, err, "malformed outcomes retain the conservative legacy error")
+	}
+}
+
+func TestSubjectTransportConfirmedRejectionVocabulary(t *testing.T) {
+	for _, outcome := range []string{"unauthorized", "malformed_request", "request_too_large", "not_found", "method_not_allowed", "control_generation_mismatch", "subject_unknown", "subject_generation_mismatch", "subject_failed", "revision_rejected"} {
+		t.Run(outcome, func(t *testing.T) {
+			transport := subjectTestTransport(t, func(*http.Request) (*http.Response, error) {
+				return subjectHTTPResponse(409, `{"error":"`+outcome+`"}`), nil
+			})
+			_, err := transport.Readback(context.Background())
+			var rejection *SubjectTransportRejection
+			require.ErrorAs(t, err, &rejection)
+			require.Equal(t, outcome, rejection.Outcome)
+		})
+	}
+	for _, outcome := range []string{"internal_error", "unknown_outcome", "registered", "subject_capacity_exhausted"} {
+		t.Run(outcome, func(t *testing.T) {
+			transport := subjectTestTransport(t, func(*http.Request) (*http.Response, error) {
+				return subjectHTTPResponse(500, `{"error":"`+outcome+`"}`), nil
+			})
+			_, err := transport.Commit(context.Background(), testIdentity())
+			require.Error(t, err)
+			var rejection *SubjectTransportRejection
+			require.False(t, errors.As(err, &rejection), "an ambiguous error must not retire the installer")
+		})
 	}
 }

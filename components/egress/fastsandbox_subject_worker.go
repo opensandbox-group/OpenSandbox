@@ -469,7 +469,9 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 				}
 				delete(installers, intent.target)
 				retired[intent.target] = true
-			} else if installers[intent.target] == nil && !retired[intent.target] {
+			} else if installers[intent.target] == nil {
+				// Only a newly confirmed Register revives a rejected target.
+				delete(retired, intent.target)
 				counter := epochs[intent.subj]
 				if counter == nil {
 					counter = new(int64)
@@ -583,9 +585,6 @@ func subjectInstallReason(installer *fastSandboxSubjectInstaller, err error) str
 			return "subject_install_rejected"
 		}
 	}
-	if errors.Is(err, revision.ErrPrepareRejected) {
-		return "subject_prepare_rejected"
-	}
 	if errors.Is(err, revision.ErrInvalid) {
 		return "subject_snapshot_invalid"
 	}
@@ -608,7 +607,11 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 			return true
 		}
 		reason := subjectInstallReason(installer, err)
-		terminal := installer.transport.rejection != nil || errors.Is(err, revision.ErrPrepareRejected) || errors.Is(err, revision.ErrInvalid)
+		terminal := installer.transport.rejection != nil || errors.Is(err, revision.ErrInvalid)
+		// Apply also returns ErrPrepareRejected after a transport failure when
+		// Abort succeeds on the original context. That is confirmed non-install,
+		// not a receiver rejection, and permits the same retry as Reconcile.
+		aborted := errors.Is(err, revision.ErrPrepareRejected)
 		s.mu.Lock()
 		if d.current == epoch {
 			if installed || terminal {
@@ -621,12 +624,12 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				d.dropInstallsLocked(intent.target)
 			}
 		}
-		retry := err == nil && !installed && d.retryInstallLocked(s, epoch, intent)
+		retry := (err == nil || aborted) && !installed && d.retryInstallLocked(s, epoch, intent)
 		s.mu.Unlock()
 		if terminal {
 			return false
 		}
-		if err == nil && !retry {
+		if (err == nil || aborted) && !retry {
 			return true
 		}
 		timer := time.NewTimer(subjectLifecycleRetryDelay)

@@ -225,7 +225,7 @@ func (t *SubjectUnixTransport) do(ctx context.Context, path string, value any) (
 		var outcome string
 		if validSubjectJSON(data) && decodeStrictObject(data, map[string]func(*json.Decoder) error{
 			"error": subjectField(&outcome),
-		}) == nil && outcome != "" {
+		}) == nil && confirmedSubjectRejection(outcome) {
 			return nil, &SubjectTransportRejection{Outcome: outcome}
 		}
 		return nil, ErrTransportRejected
@@ -238,6 +238,19 @@ func (t *SubjectUnixTransport) do(ctx context.Context, path string, value any) (
 		return nil, ErrInvalidTransportResponse
 	}
 	return response, nil
+}
+
+// Only outcomes raised before dispatch/state change, or an explicitly fenced
+// receiver failure, confirm rejection. internal_error can follow publication;
+// unknown outcomes retain the generic error so callers reconcile conservatively.
+func confirmedSubjectRejection(outcome string) bool {
+	switch outcome {
+	case "unauthorized", "malformed_request", "request_too_large", "not_found", "method_not_allowed",
+		"control_generation_mismatch", "subject_unknown", "subject_generation_mismatch", "subject_failed", "revision_rejected":
+		return true
+	default:
+		return false
+	}
 }
 
 // encoding/json replaces malformed UTF-8 and unpaired UTF-16 escapes. V2 must
