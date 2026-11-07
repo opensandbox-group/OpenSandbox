@@ -231,10 +231,10 @@ async def bridge_pty(browser: WebSocket, execd_ws) -> None:
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
-    for task in tasks:
-        if task.cancelled():
-            continue
-        exc = task.exception()
+    # Both directions can fail before wait() returns; retrieve every
+    # exception so asyncio does not log the one that is not raised.
+    errors = [task.exception() for task in tasks if not task.cancelled()]
+    for exc in errors:
         if exc is not None:
             raise exc
 

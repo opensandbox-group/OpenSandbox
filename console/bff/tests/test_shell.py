@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 
 import httpx
@@ -29,6 +30,7 @@ from websockets.frames import Close
 from app.session import admin_session, encode_session, tenant_session
 from app.shell import (
     ShellError,
+    bridge_pty,
     execd_http_base,
     execd_protocol,
     execd_request_headers,
@@ -352,3 +354,61 @@ def test_execd_dropping_before_connected_is_a_failed_start(
         message = ws.receive_json()
 
     assert message["code"] == "SHELL_FAILED"
+
+
+class _TypingBrowser:
+    """A browser that types once the shell is open and then stays idle."""
+
+    def __init__(self) -> None:
+        self._opened = asyncio.Event()
+        self._typed = False
+
+    async def receive(self) -> dict:
+        await self._opened.wait()
+        if not self._typed:
+            self._typed = True
+            return {"type": "websocket.receive", "bytes": b"\x00ls\n"}
+        await asyncio.sleep(3600)
+        raise AssertionError("idle wait should be cancelled")
+
+    async def send_text(self, data: str) -> None:
+        self._opened.set()
+
+    async def send_bytes(self, data: bytes) -> None:
+        pass
+
+
+class _DroppingBothWays(DroppingExecdSocket):
+    """Drops on send and fails the pending receive in the same step."""
+
+    def __init__(self) -> None:
+        super().__init__([CONNECTED_FRAME])
+        self._dropped = asyncio.Event()
+
+    async def send(self, data: bytes | str) -> None:
+        self._dropped.set()
+        raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+
+    async def __anext__(self) -> bytes | str:
+        if self._frames:
+            return self._frames.pop(0)
+        await self._dropped.wait()
+        raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+
+
+def test_execd_dropping_both_ways_leaves_no_unretrieved_exception():
+    unhandled: list[dict] = []
+
+    async def run() -> str:
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+        with pytest.raises(ShellError) as raised:
+            await bridge_pty(_TypingBrowser(), _DroppingBothWays())
+        return raised.value.code
+
+    # Only the code is kept: the raised error's traceback would keep the
+    # other task alive and hide an exception it never had retrieved.
+    code = asyncio.run(run())
+    gc.collect()
+
+    assert code == "SHELL_DISCONNECTED"
+    assert unhandled == []
