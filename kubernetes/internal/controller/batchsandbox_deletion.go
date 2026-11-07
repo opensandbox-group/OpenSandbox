@@ -32,6 +32,11 @@ import (
 // reconcileDeletion owns the terminating window. No allocation, scaling,
 // pause/resume or runtime status reconciliation may start new work here.
 func (r *BatchSandboxReconciler) reconcileDeletion(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (ctrl.Result, error) {
+	// The terminating path never reconciles runtime status, even when task
+	// cleanup needs another attempt. Its last status expectation is obsolete.
+	if r.StatusRVExpectation != nil {
+		r.StatusRVExpectation.Delete(sandbox)
+	}
 	if !controllerutil.ContainsFinalizer(sandbox, finalizerTaskCleanup) {
 		r.deleteTaskScheduler(ctx, sandbox)
 		return ctrl.Result{}, nil
