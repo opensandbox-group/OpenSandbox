@@ -880,7 +880,10 @@ def create_server(connection_config: ConnectionConfig | None = None) -> MCPServe
             "Always keep track of the sandbox_id returned by sandbox_create/connect. "
             "Use command_run for execution, file_read/file_write for file IO, and "
             "sandbox_kill to terminate remote sandboxes. Use sandbox_get_endpoint to "
-            "expose sandbox ports; for large files, prefer range reads."
+            "expose sandbox ports; for large files, prefer range reads. "
+            "For command_run with background=True, poll command_get_status and read "
+            "new output with command_get_logs, passing back the returned cursor; "
+            "once the status reports running=false, read the logs one last time."
         ),
     )
     register_tools(mcp, connection_config=connection_config)
