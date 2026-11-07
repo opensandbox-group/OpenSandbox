@@ -517,6 +517,29 @@ require_template_id() {
 		|| die "no template id at $WORK/template-id (run 'integration.sh up' first)"
 }
 
+# Shared verify preconditions: cluster up, server reachable, osb resolvable.
+require_live_stack() {
+	kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
+		|| die "cluster $KIND_CLUSTER is not up (run up first)"
+	curl -fsS -m 5 "$SERVER_URL/health" >/dev/null 2>&1 \
+		|| die "server $SERVER_URL is not reachable (run up first)"
+	[[ -n "$OSB_BIN" ]] || OSB_BIN="$OSB_VENV/bin/osb"
+	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
+}
+
+# Status-returning API call (curl -f hides codes; this prints the trailing one).
+server_api_status() { # method path [json-body]
+	local method="$1" path="$2" body="${3:-}" out
+	if [[ -n "$body" ]]; then
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-H "Content-Type: application/json" -d "$body" -w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	else
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	fi
+	printf '%s' "${out##*$'\n'}"
+}
+
 # --- artifact-store hygiene ---------------------------------------------------------
 
 # Prune stale artifact sets from the test S3 (RustFS). Every pause publishes

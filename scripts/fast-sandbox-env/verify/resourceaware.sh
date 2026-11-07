@@ -23,7 +23,8 @@
 #   1. distinctly-shaped template (2 vCPU / 1Gi) -> create forwards the recorded
 #      machine as per-sandbox limits: Sandbox CR spec.resources.limits, cgroup
 #      leaf cpu.max (from the limit) and cpu.weight (from the pool-derived
-#      request ceil(2000m/4)=500m), aggregate memory budget (1280Mi).
+#      request ceil(2000m/4)=500m), aggregate memory budget (derived from
+#      the rendered maxSandboxesPerPod).
 #   2. oversized template (8 vCPU > 1250m per-fastlet budget) -> permanent 400.
 #   3. capacity saturation (5 concurrent 2vCPU sandboxes vs 2x2 slots) -> 429.
 #   4. template -> snapshot -> restore round-trip: recorded limits replayed
@@ -41,11 +42,28 @@ ra_expected_cpu_weight() { # <milli> — mirrors fastlet cpuWeight (shares [2,26
 	echo $(( 1 + (shares - 2) * 9999 / 262142 ))
 }
 
+# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios 4 / 2.
+RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 4 ))
+RA_DEFAULT_REQ_MEM_BYTES=$(( 512 * 1024 * 1024 / 2 ))
+
+ra_aggregate_memory_budget() { # max(defaultRequest * maxSandboxesPerPod, defaultLimit)
+	local req=$(( RA_DEFAULT_REQ_MEM_BYTES * MAX_SANDBOXES_PER_POD ))
+	local limit=$(( 512 * 1024 * 1024 ))
+	(( req >= limit )) && { echo "$req"; return 0; }
+	echo "$limit"
+}
+
 ra_cg_read() { # <fastlet-pod> <rel-path-under-pod-cgroup> <file>
 	local pod="$1" rel="$2" file="$3" node uid out base
 	node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)" || return 1
 	uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 1
-	for base in "kubepods.slice/kubepods-pod${uid//-/_}.slice" "kubepods/pod${uid//-/_}"; do
+	# The egress sidecar's unequal requests/limits make every fastlet Pod
+	# Burstable; try the Burstable and Guaranteed forms on both drivers.
+	for base in \
+		"kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod${uid//-/_}.slice" \
+		"kubepods.slice/kubepods-pod${uid//-/_}.slice" \
+		"kubepods/burstable/pod${uid}" \
+		"kubepods/pod${uid}"; do
 		out="$(docker exec "$node" cat "/sys/fs/cgroup/$base/$rel/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
 	done
 	return 1
@@ -134,8 +152,10 @@ ra_forward_verify() {
 		|| fail "cgroup leaf cpu.weight mismatch: $(ra_leaf_read "$id" cpu.weight 2>/dev/null) (want $weight for the 500m derived request)"
 	[[ "$(ra_leaf_read "$id" pids.max)" == "128" ]] \
 		|| fail "cgroup leaf pids.max mismatch (want pool pids 128)"
-	[[ "$(ra_aggregate_read memory.max)" == "1342177280" ]] \
-		|| fail "aggregate memory.max mismatch: $(ra_aggregate_read memory.max 2>/dev/null) (want 1342177280 = max(256Mi*5, 512Mi))"
+	local want_mem_budget
+	want_mem_budget="$(ra_aggregate_memory_budget)"
+	[[ "$(ra_aggregate_read memory.max)" == "$want_mem_budget" ]] \
+		|| fail "aggregate memory.max mismatch: $(ra_aggregate_read memory.max 2>/dev/null) (want $want_mem_budget = max(256Mi*$MAX_SANDBOXES_PER_POD, 512Mi))"
 	pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
 
 	wait_for "resource-aware sandbox execd /ping" 60 execd_ping_ok
@@ -154,12 +174,23 @@ ra_oversized_verify() {
 
 ra_capacity_verify() {
 	local -a ids=()
-	local i id code
+	local i id code total
 	# Committed per sandbox: cpu ceil(2000m/4)=500m, memory ceil(1Gi/2)=512Mi.
-	# Per-fastlet budget: 1250m CPU / 1280Mi -> two sandboxes per fastlet,
-	# poolMax=2 fastlets -> the 5th concurrent create must exhaust capacity.
+	# Per-fastlet slots derive from the RENDERED density (budget =
+	# max(defaultReq * maxSandboxesPerPod, defaultLimit)), not the manifest
+	# literal; total = slots * POOL_MIN fastlets, then one more must 429.
+	local budget_cpu=$(( RA_DEFAULT_REQ_CPU_MILLI * MAX_SANDBOXES_PER_POD ))
+	(( budget_cpu < 1000 )) && budget_cpu=1000
+	local budget_mem
+	budget_mem="$(ra_aggregate_memory_budget)"
+	local per=$(( budget_cpu / 500 ))
+	local per_mem=$(( budget_mem / (512 * 1024 * 1024) ))
+	(( per_mem < per )) && per=$per_mem
+	(( per > MAX_SANDBOXES_PER_POD )) && per=$MAX_SANDBOXES_PER_POD
+	total=$(( per * POOL_MIN ))
+	log "capacity: $per slots/fastlet (budget ${budget_cpu}m/$(printf '%d' "$budget_mem")B) x $POOL_MIN fastlets -> saturating at $total"
 	ra_template_up 2 1Gi
-	for i in 1 2 3 4; do
+	for i in $(seq 1 "$total"); do
 		id="$(ra_sandbox_create)"
 		[[ -n "$id" && "$id" != "null" ]] || fail "capacity pre-fill create #$i failed"
 		RA_VERIFY_IDS+=("$id"); ids+=("$id")
@@ -226,6 +257,7 @@ verify_resourceaware() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"
 	resolve_osb
+	require_live_stack
 	[[ "$POOL_MODE" == "resource-aware" ]] \
 		|| die "verify/resourceaware.sh requires POOL_MODE=resource-aware"
 	trap 'on_error verify-resourceaware' ERR
