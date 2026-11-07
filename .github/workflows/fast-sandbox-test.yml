@@ -9,6 +9,17 @@ on:
         type: string
   repository_dispatch:
     types: [fast-sandbox-pr]
+  workflow_dispatch:
+    inputs:
+      fsb_commit:
+        description: Optional fast-sandbox commit SHA to test instead of the pinned commit (full 40-char SHA; a PR head SHA works)
+        required: false
+        type: string
+      pool_mode:
+        description: SandboxPool profile (resource-aware | legacy)
+        required: false
+        type: string
+        default: resource-aware
   pull_request:
     branches: [ main ]
 
@@ -39,6 +50,10 @@ jobs:
       # Full-stack profile (single round while scenarios stabilize).
       IDLE_PAUSE: "1"
       IDLE_PAUSE_ROUNDS: "1"
+      # OSEP-0026: the integration lane exercises the ResourceAware pool by
+      # default; LegacySlot regression moved to the nightly full-stack run
+      # (pool_mode is the forwarding switch, not a server-side flag).
+      POOL_MODE: ${{ inputs.pool_mode || github.event.client_payload.pool_mode || 'resource-aware' }}
       # workflow_dispatch input or repository_dispatch client_payload (empty on PRs).
       FSB_COMMIT_OVERRIDE: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit }}
     steps:
@@ -83,6 +98,12 @@ jobs:
         # Builds the overlaybd template first; no-op when OCI_STACK=0.
         timeout-minutes: 90
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
+      - name: Run ResourceAware verify (OSEP-0026)
+        # Shaped-template forwarding + cgroup enforcement, oversized -> 400,
+        # snapshot round-trip with recorded-limit replay, saturation -> 429.
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware
 
       - name: Run base SDK e2e
         # Runs on the overlaybd template (native only under OCI_STACK=0).
