@@ -88,15 +88,20 @@ func TestMergedView_RenameOfKernelWhiteoutIsNotFound(t *testing.T) {
 
 // A directory whose copy-up stops partway still gets its lower mode, since a
 // retry finds it in upper and does not set the mode again.
-func TestMergedView_PartialDirectoryCopyUpKeepsMode(t *testing.T) {
+func TestMergedView_PartialDirectoryCopyUpIsRemoved(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
-	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o751))
-	require.NoError(t, os.Chmod(filepath.Join(mv.LowerDir, "d"), 0o751))
+	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d", "a"), 0o751))
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d", "a", "a.txt"), []byte("a"), 0o644))
+	require.NoError(t, os.Chmod(filepath.Join(mv.LowerDir, "d", "a"), 0o555))
 	require.NoError(t, unix.Mkfifo(filepath.Join(mv.LowerDir, "d", "pipe"), 0o644))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(mv.LowerDir, "d", "a"), 0o755) })
 
 	assert.Error(t, mv.Rename("d", "e"))
 
+	entries, err := os.ReadDir(mv.UpperDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a failed copy-up must not leave a partial copy in upper")
 	info, err := mv.Stat("d")
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o751), info.Mode().Perm())
+	assert.Equal(t, os.FileMode(0o751), info.Mode().Perm(), "the lower directory stays visible")
 }

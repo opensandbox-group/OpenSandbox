@@ -545,13 +545,51 @@ func (m *MergedView) Rename(oldPath, newPath string) error {
 // rel, so that renaming the upper entry moves all of it. The caller has
 // checked that nothing above rel hides lower. Lower entries that upper
 // replaces or deletes are left behind. Each copy keeps its lower mode.
+//
+// A copy that fails part way is removed again, so the lower entries stay
+// visible and a retry starts over. Copied directories therefore get their
+// lower mode only once the whole tree is in place: until then they stay
+// private and writable, so a read-only one neither refuses its own entries
+// nor blocks the cleanup.
 func (m *MergedView) copyUpTree(rel string) error {
+	var c treeCopy
+	if err := m.copyUpSubtree(rel, false, &c); err != nil {
+		for _, created := range c.created {
+			err = errors.Join(err, os.RemoveAll(m.resolveUpper(created)))
+		}
+		return err
+	}
+	for _, dir := range c.dirs {
+		if err := os.Chmod(m.resolveUpper(dir.rel), dir.mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// treeCopy records what copyUpTree has copied so far.
+type treeCopy struct {
+	// created holds the outermost copies, those whose parent was already in
+	// upper; removing them removes everything copied.
+	created []string
+	// dirs holds the copied directories and their lower modes, innermost
+	// first.
+	dirs []copiedDir
+}
+
+type copiedDir struct {
+	rel  string
+	mode os.FileMode
+}
+
+func (m *MergedView) copyUpSubtree(rel string, parentCopied bool, c *treeCopy) error {
 	if m.hidesLowerAt(rel) {
 		return nil
 	}
 	lowerPath := m.resolveLower(rel)
 	info, err := os.Lstat(lowerPath)
-	if errors.Is(err, fs.ErrNotExist) {
+	// ENOTDIR: a lower ancestor is a file, so nothing below it is in lower.
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return nil
 	}
 	if err != nil {
@@ -563,27 +601,15 @@ func (m *MergedView) copyUpTree(rel string) error {
 			return err
 		}
 		copied = true
+		if !parentCopied {
+			c.created = append(c.created, rel)
+		}
 	} else if err != nil {
 		return err
 	}
-
-	var walkErr error
-	if info.IsDir() {
-		walkErr = m.copyUpEntries(rel, lowerPath)
+	if !info.IsDir() {
+		return nil
 	}
-
-	// A directory gets its mode only once filled, as a read-only one would
-	// refuse its own entries otherwise. It gets it even when that failed: a
-	// retry finds the directory in upper and would not set it again.
-	if !copied || info.Mode()&os.ModeSymlink != 0 {
-		return walkErr
-	}
-	err = os.Chmod(m.resolveUpper(rel), info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
-	return errors.Join(walkErr, err)
-}
-
-// copyUpEntries runs copyUpTree on each entry of the lower directory at rel.
-func (m *MergedView) copyUpEntries(rel, lowerPath string) error {
 	entries, err := os.ReadDir(lowerPath)
 	if err != nil {
 		return err
@@ -592,9 +618,12 @@ func (m *MergedView) copyUpEntries(rel, lowerPath string) error {
 		if isStagingName(e.Name()) {
 			continue
 		}
-		if err := m.copyUpTree(filepath.Join(rel, e.Name())); err != nil {
+		if err := m.copyUpSubtree(filepath.Join(rel, e.Name()), copied, c); err != nil {
 			return err
 		}
+	}
+	if copied {
+		c.dirs = append(c.dirs, copiedDir{rel: rel, mode: info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)})
 	}
 	return nil
 }

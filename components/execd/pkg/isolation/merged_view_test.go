@@ -329,6 +329,60 @@ func TestMergedView_FailedCopyUpLeavesLowerVisible(t *testing.T) {
 	assert.Equal(t, "lower", string(data))
 }
 
+func TestMergedView_Rename_UpperDirectoryUnderLowerFile(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "d"), []byte("lower file"), 0o644))
+	require.NoError(t, mv.MkdirAll("d/sub", 0o755))
+	require.NoError(t, mv.WriteFile("d/sub/upper.txt", []byte("upper"), 0o644))
+
+	require.NoError(t, mv.Rename("d/sub", "moved"))
+
+	data, err := mv.ReadFile("moved/upper.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "upper", string(data))
+}
+
+func TestMergedView_FailedReadOnlyDirectoryCopyUpCanBeRetried(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads files regardless of mode")
+	}
+	mv := newTestMergedView(t, WorkspaceRW)
+	lowerDir := filepath.Join(mv.LowerDir, "d")
+	lowerFile := filepath.Join(lowerDir, "f.txt")
+	require.NoError(t, os.MkdirAll(filepath.Join(lowerDir, "a"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(lowerDir, "a", "a.txt"), []byte("a"), 0o644))
+	require.NoError(t, os.Chmod(filepath.Join(lowerDir, "a"), 0o555))
+	require.NoError(t, os.WriteFile(lowerFile, []byte("lower"), 0o000))
+	require.NoError(t, os.Chmod(lowerDir, 0o555))
+	t.Cleanup(func() {
+		_ = os.Chmod(lowerDir, 0o755)
+		_ = os.Chmod(filepath.Join(lowerDir, "a"), 0o755)
+	})
+
+	require.Error(t, mv.Rename("d", "e"))
+	entries, err := os.ReadDir(mv.UpperDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a failed copy-up must not leave a partial copy in upper")
+
+	require.NoError(t, os.Chmod(lowerDir, 0o755))
+	require.NoError(t, os.Chmod(lowerFile, 0o644))
+	require.NoError(t, os.Chmod(lowerDir, 0o555))
+	require.NoError(t, mv.Rename("d", "e"))
+
+	for rel, want := range map[string]os.FileMode{"e": 0o555, "e/a": 0o555} {
+		info, err := mv.Stat(rel)
+		require.NoError(t, err)
+		assert.Equal(t, want, info.Mode().Perm(), rel)
+	}
+	data, err := mv.ReadFile("e/f.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "lower", string(data))
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(mv.UpperDir, "e"), 0o755)
+		_ = os.Chmod(filepath.Join(mv.UpperDir, "e", "a"), 0o755)
+	})
+}
+
 func TestMergedView_Chmod_LowerDirectory(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 	require.NoError(t, os.MkdirAll(filepath.Join(mv.LowerDir, "d"), 0o755))
