@@ -123,7 +123,8 @@ controller:
     # leader exit with "leader election lost". Empty keeps the default of 10s.
     renewDeadline: ""
     # -- How long candidates wait between attempts to acquire or renew the
-    # lease (`--leader-elect-retry-period`). Empty keeps the default of 2s.
+    # lease (`--leader-elect-retry-period`). renewDeadline must be more than
+    # 1.2 times this value. Empty keeps the default of 2s.
     retryPeriod: ""
 
   # -- Additional args appended to the controller container command, after

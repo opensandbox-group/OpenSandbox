@@ -187,7 +187,8 @@ func main() {
 		"How long the leader keeps retrying to renew the lease before giving up leadership. "+
 			"Must be less than --leader-elect-lease-duration.")
 	flag.DurationVar(&retryPeriod, "leader-elect-retry-period", 2*time.Second,
-		"How long candidates wait between attempts to acquire or renew the lease.")
+		"How long candidates wait between attempts to acquire or renew the lease. "+
+			"--leader-elect-renew-deadline must be more than 1.2 times this value.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
