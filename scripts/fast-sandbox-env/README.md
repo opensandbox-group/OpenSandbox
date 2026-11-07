@@ -24,6 +24,7 @@ Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgr
 ./scripts/fast-sandbox-env/integration-env.sh up              # environment: stack + pool + server/ingress + native template
 ./scripts/fast-sandbox-env/integration-env.sh verify-native   # verify matrix on the native template (needs up)
 ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + verify matrix (needs up)
+POOL_MODE=resource-aware ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware  # OSEP-0026 matrix (needs a resource-aware up)
 ./scripts/fast-sandbox-env/integration-env.sh status          # component / pool / DART / OpenSandbox health
 ./scripts/fast-sandbox-env/integration-env.sh pool            # re-apply the pool only
 ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e         # Python SDK e2e suite against the live stack
@@ -106,6 +107,8 @@ Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), ren
 `verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → **execd-as-init in-guest process verify** (PID 1 = guest init; execd `--init` supervises the workload; orphan reparented and reaped; hardening report `init_mode=subreaper`) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
 
 `verify-overlaybd`: overlaybd SandboxTemplate build (oci:// publication) → the same verify matrix against the overlaybd template.
+
+`verify-resourceaware` (OSEP-0026, needs `POOL_MODE=resource-aware up`): distinctly-shaped template (2 vCPU / 1Gi) create → Sandbox CR `spec.resources.limits` + cgroup leaf `cpu.max`/`cpu.weight`/`pids.max` + aggregate `memory.max` asserted separately → oversized template (8 vCPU) → permanent 400 → template → snapshot → restore round-trip replaying the recorded limits through the composite path → capacity saturation (5 concurrent shaped sandboxes vs 2×2 slots) → retryable 429.
 
 Every stage logs to `$WORK/logs/`; failures dump component logs to `logs/failure-<task>-<ts>.txt`.
 

@@ -98,6 +98,7 @@ source "$SCRIPT_DIR/verify/pause-resume.sh"
 source "$SCRIPT_DIR/verify/vault.sh"
 source "$SCRIPT_DIR/verify/idle-pause.sh"
 source "$SCRIPT_DIR/verify/snapshot.sh"
+source "$SCRIPT_DIR/verify/resourceaware.sh"
 
 
 # --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py) -----------------
