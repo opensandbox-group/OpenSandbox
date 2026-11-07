@@ -113,6 +113,19 @@ controller:
   # -- Enable leader election for controller manager
   leaderElection:
     enabled: true
+    # -- How long standby replicas wait after the last renewal before taking
+    # over the lease (`--leader-elect-lease-duration`). Empty keeps the binary
+    # default of 15s.
+    leaseDuration: ""
+    # -- How long the leader keeps retrying to renew the lease before giving up
+    # leadership (`--leader-elect-renew-deadline`). Must be less than
+    # leaseDuration. Raise it with leaseDuration if API server stalls make the
+    # leader exit with "leader election lost". Empty keeps the default of 10s.
+    renewDeadline: ""
+    # -- How long candidates wait between attempts to acquire or renew the
+    # lease (`--leader-elect-retry-period`). renewDeadline must be more than
+    # 1.2 times this value. Empty keeps the default of 2s.
+    retryPeriod: ""
 
   # -- Additional args appended to the controller container command, after
   # the chart-managed flags. Unlocks binary flags the chart does not model,
