@@ -862,25 +862,20 @@ func writeDispatchRule(b *strings.Builder, s subject.Subject, att actionhandler.
 	}
 }
 
-// writeResolvedIPsFragment adds DNS-learned IPs to a subject's dynamic sets
-// with clamped TTLs (mirrors pkg/nftables lease behavior).
+// writeResolvedIPsFragment adds or renews DNS-learned IPs in a subject's
+// dynamic sets with clamped TTLs (mirrors pkg/nftables lease behavior).
 func writeResolvedIPsFragment(b *strings.Builder, s subject.Subject, ips []nftables.ResolvedIP) {
-	var v4, v6 []string
 	for _, r := range ips {
 		addr := r.Addr.Unmap()
-		ttl := clampTTL(r.TTL)
-		value := fmt.Sprintf("%s timeout %ds", addr, int(ttl/time.Second))
+		var set string
 		if addr.Is4() {
-			v4 = append(v4, value)
+			set = dynSetName(s, "v4")
 		} else if addr.Is6() {
-			v6 = append(v6, value)
+			set = dynSetName(s, "v6")
+		} else {
+			continue
 		}
-	}
-	if len(v4) > 0 {
-		fmt.Fprintf(b, "add element inet %s %s { %s }\n", TableName, dynSetName(s, "v4"), strings.Join(v4, ", "))
-	}
-	if len(v6) > 0 {
-		fmt.Fprintf(b, "add element inet %s %s { %s }\n", TableName, dynSetName(s, "v6"), strings.Join(v6, ", "))
+		nftables.WriteTimedElement(b, TableName, set, addr, clampTTL(r.TTL))
 	}
 }
 
