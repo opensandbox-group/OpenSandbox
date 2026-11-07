@@ -1,0 +1,19 @@
+# Copyright 2026 The OpenSandbox Authors
+# SPDX-License-Identifier: Apache-2.0
+# This bundle alone is NOT the persistent safety fence. Install the dedicated
+# examples/opensandbox-web.patch.yml as the profile patch before first startup.
+- insert:
+  - id: opensandbox-native
+    name: '@opensandbox/deepseek-harness-native'
+    config:
+      domain: !!js process.env.OPENSANDBOX_DOMAIN
+      protocol: https
+      apiKey: !!js process.env.OPENSANDBOX_API_KEY
+      kind: create-template
+      templateId: !!js process.env.OPENSANDBOX_TEMPLATE_ID
+      remoteCwd: /tmp
+      ttlSeconds: 600
+      requestTimeoutSeconds: 15
+      readyTimeoutSeconds: 30
+      preflightTimeoutSeconds: 10
+      settlementTimeoutMs: 3000

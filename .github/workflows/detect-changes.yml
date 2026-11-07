@@ -114,6 +114,22 @@ jobs:
                 path === "manifests/charts/opensandbox/Chart.yaml" ||
                 path === "manifests/charts/opensandbox/Chart.lock" ||
                 path === "manifests/charts/opensandbox/values.yaml",
+              "deepseek-harness": (path) =>
+                workflowChanged(path, "deepseek-harness-test.yml") ||
+                path.startsWith("integrations/deepseek-harness/") ||
+                path.startsWith("examples/deepseek-harness/") ||
+                path.startsWith("sdks/sandbox/javascript/") ||
+                path === "sdks/package.json" ||
+                path === "sdks/pnpm-lock.yaml" ||
+                path === "specs/sandbox-lifecycle.yml" ||
+                path === "specs/execd-api.yaml" ||
+                path === "server/opensandbox_server/services/fast_sandbox/create_mapping.py" ||
+                path === "scripts/fast-sandbox-env/integration-env.sh" ||
+                path === "manifests/third-party/fast-sandbox.commit" ||
+                path === "docs/guides/deepseek-harness.md" ||
+                path === "docs/examples/deepseek-harness.md" ||
+                path === "docs/examples/deepseek-harness-ubuntu.md" ||
+                path === "docs/.vitepress/config.mts",
               sdk: (path) =>
                 workflowChanged(path, "sdk-tests.yml") ||
                 path.startsWith("cli/") ||
