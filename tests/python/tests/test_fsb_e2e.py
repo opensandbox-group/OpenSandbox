@@ -451,17 +451,6 @@ class TestFsbE2E:
             metadata={"origin": "fast-sandbox-env-pause"},
         )
         try:
-            # Pause a RUNNING sandbox: on a warm pool the guest serves execd
-            # almost immediately, and a pause fired before the Sandbox CR
-            # settles loses its intent (the controller never sees it — the
-            # CI run on 2026-10-21 swallowed a pause fired ~500ms after
-            # create). Wait for Running first.
-            await _wait_until(
-                lambda: _state_is(manager, sandbox.id, "Running"),
-                timedelta(minutes=3),
-                "Running",
-            )
-
             # State markers written before the checkpoint.
             await sandbox.files.write_file("/tmp/fsb-state.txt", "pause-state-check")
             await sandbox.commands.run("echo ram-state-check > /dev/shm/fsb-mem.txt")
