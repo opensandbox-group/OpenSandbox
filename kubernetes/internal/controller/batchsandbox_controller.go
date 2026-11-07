@@ -37,10 +37,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -773,8 +775,21 @@ func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurren
 		Owns(&corev1.Pod{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.findBatchSandboxesForPooledPod)).
 		Owns(&sandboxv1alpha1.SandboxSnapshot{}).
+		Watches(&sandboxv1alpha1.BatchSandbox{}, r.forgetDeletedBatchSandbox()).
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)
+}
+
+// forgetDeletedBatchSandbox drops the status resourceVersion expectation of a
+// BatchSandbox once it is gone. The entry is keyed by UID and only cleared when
+// a newer version is reconciled, which never happens after deletion, so without
+// this every BatchSandbox ever patched would stay in memory.
+func (r *BatchSandboxReconciler) forgetDeletedBatchSandbox() handler.Funcs {
+	return handler.Funcs{
+		DeleteFunc: func(_ context.Context, e event.DeleteEvent, _ workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			r.StatusRVExpectation.Delete(e.Object)
+		},
+	}
 }
 
 func (r *BatchSandboxReconciler) findBatchSandboxesForPooledPod(ctx context.Context, obj client.Object) []reconcile.Request {
