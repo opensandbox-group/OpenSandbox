@@ -430,16 +430,35 @@ TemplateInfo template = manager.createTemplate(
 );
 
 // Poll getTemplate until the build finishes (or fails).
-while (template.status.phase != "Succeeded" && template.status.phase != "Failed") {
+// In Kotlin: template.status.phase  (dot-access shorthand)
+// In Java:   template.getStatus().getPhase()  (JavaBean getter)
+while (!"Succeeded".equals(template.getStatus().getPhase())
+       && !"Failed".equals(template.getStatus().getPhase())) {
     Thread.sleep(5000);
-    template = manager.getTemplate(template.templateId);
+    template = manager.getTemplate(template.getTemplateId());
 }
-if (template.status.phase == "Failed") {
-    throw new IllegalStateException("template build failed: " + template.status.message);
+if ("Failed".equals(template.getStatus().getPhase())) {
+    throw new IllegalStateException(
+        "template build failed: " + template.getStatus().getMessage());
 }
 ```
 
-`format` selects the publish layout: `TemplateFormat.NATIVE` publishes to the `s3://` target as-is, while `TemplateFormat.OVERLAYBD` (the default) converts the image to OCI layout at the `oci://` target. Booting a sandbox from a template is not yet available in this SDK: template support currently covers building and polling only.
+`format` selects the publish layout: `TemplateFormat.NATIVE` publishes to the `s3://` target as-is, while `TemplateFormat.OVERLAYBD` (the default) converts the image to OCI layout at the `oci://` target. Boot a sandbox from a built template using the fluent launcher:
+
+```java
+import com.alibaba.opensandbox.sandbox.Sandbox;
+import java.time.Duration;
+
+Sandbox sandbox = Sandbox.fromTemplate()
+    .templateId(template.getTemplateId())
+    .timeout(Duration.ofMinutes(30))
+    .create();
+```
+
+> **Note for Java callers:** Kotlin `val` properties on data classes expose
+> JavaBean-style getters (`getStatus()`, `getPhase()`, etc.) rather than
+> direct field access. The examples above use getter syntax for Java
+> compatibility; in pure Kotlin code you can use the dot-access shorthand.
 
 ## Configuration
 
