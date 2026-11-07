@@ -343,6 +343,7 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 		http.Error(w, "policy persistence failure", status)
 		return
 	}
+	s.recordBindingSnapshot(subj, fence)
 	writeJSON(w, putResponseStatus(created), doc)
 }
 
@@ -424,6 +425,7 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 		http.Error(w, "policy persistence failure", status)
 		return
 	}
+	s.recordBindingSnapshot(subj, fence)
 	log.Infof("subject %s: policy deleted (deny tombstone enforced and persisted at revision %d)", subj, newRev)
 	w.WriteHeader(http.StatusNoContent)
 }

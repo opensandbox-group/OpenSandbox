@@ -174,7 +174,7 @@ func mustSubjectTarget(subj subject.Subject, fence subject.Fencing) revision.Sub
 	return target
 }
 
-// Called after the binding policy commits, while policyCommitMu is still held.
+// Called after a local mutation commits, while policyCommitMu is still held.
 // ActiveSnapshot returns an owned clone of the Store's committed render cache.
 // Marshal stays under s.mu so the payload, revisions and fence freeze together;
 // no registry lookup, resolver, or IPC is performed here.
@@ -184,9 +184,24 @@ func (s *fastSandboxPolicyServer) recordBindingSnapshot(subj subject.Subject, fe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recordSubjectSnapshotLocked(subj, fence)
+}
+
+// Shared producer seam for callers already holding policyCommitMu and s.mu.
+// Policy validation/rendering belongs to the committing path: only the Store's
+// committed snapshot and recorded policy epoch are read here. In particular,
+// never call vaultValidationPolicy here (it acquires s.mu itself).
+func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subject, fence subject.Fencing) {
 	d := s.subjectDrain
+	if d == nil {
+		return
+	}
 	if current, ok := d.fences[subj]; !ok || !current.Matches(fence) {
 		return
+	}
+	if entry := s.vaults[subj]; entry.vaultStateUnknown {
+		d.degradeLocked("vault_state_unknown")
+		return // retain the last payload; unknown is not committed empty
 	}
 	// The registry itself has no capacity cap. Bound the observation mirror
 	// independently to the receiver's subject budget without failing SET.

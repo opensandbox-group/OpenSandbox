@@ -115,6 +115,9 @@ func (s *fastSandboxPolicyServer) readWriterOwner(w http.ResponseWriter, r *http
 			entry.vaultStateUnknown = true
 			entry.store = credentialvault.NewSubjectStore()
 			s.vaults[subj] = entry
+			if s.subjectDrain != nil {
+				s.subjectDrain.degradeLocked("vault_state_unknown")
+			}
 		}
 		s.mu.Unlock()
 		s.policyCommitMu.Unlock()
@@ -265,6 +268,7 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 			}
 		}
 		s.vaults[subj] = vaultEntry{store: store, fence: expected, fileMeta: metadataForWriter(vf), vaultStateProtected: true, v2Verified: true}
+		s.recordSubjectSnapshotLocked(subj, expected)
 		reply := s.writerReply(record, vf, nil)
 		return func() { writeJSON(w, 200, reply) }
 	}()
@@ -397,6 +401,7 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 		if err != nil {
 			return func() { http.Error(w, "Vault persistence not confirmed", 503) }
 		}
+		s.recordSubjectSnapshotLocked(subj, entry.fence)
 		status := http.StatusNoContent
 		if r.Method == http.MethodPost || r.Method == http.MethodPut && candidate.Created() {
 			status = http.StatusCreated
