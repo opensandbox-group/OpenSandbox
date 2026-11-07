@@ -24,7 +24,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import SandboxException
-from opensandbox.models.execd import Execution, RunCommandOpts
+from opensandbox.models.execd import (
+    CommandLogs,
+    CommandStatus,
+    Execution,
+    RunCommandOpts,
+)
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
     ContentReplaceResult,
@@ -539,6 +544,81 @@ def register_tools(
         )
         await sandbox.commands.interrupt(execution_id)
         return StatusResponse(status="interrupted")
+
+    @tool()
+    async def command_get_status(
+        sandbox_id: str,
+        execution_id: str,
+        *,
+        connect_if_missing: bool = False,
+    ) -> CommandStatus:
+        """Get the status of a command started by command_run.
+
+        Works for both foreground and background executions.
+
+        Parameters:
+            sandbox_id: Target sandbox identifier.
+            execution_id: Execution identifier returned by command_run.
+            connect_if_missing: Connect if sandbox not in local registry.
+
+        Returns:
+            Command status with running flag, exit code, error, and
+            start/finish timestamps. ``running=False`` means the command has
+            finished; check ``exit_code`` and ``error`` for the outcome.
+            ``running=None`` means the state is unknown, not that the command
+            failed. Completed command records are retained for at least 24
+            hours, so a "not found" error can mean the record expired.
+
+        Example:
+            status = await command_get_status("sbx_123", "cmd_abc")
+        """
+        sandbox = await _get_or_connect_sandbox(
+            sandbox_id,
+            connect_if_missing=connect_if_missing,
+        )
+        return await sandbox.commands.get_command_status(execution_id)
+
+    @tool()
+    async def command_get_logs(
+        sandbox_id: str,
+        execution_id: str,
+        *,
+        cursor: int | None = None,
+        connect_if_missing: bool = False,
+    ) -> CommandLogs:
+        """Read the combined stdout/stderr of a background command.
+
+        Pass the returned ``cursor`` back on the next call to read only new
+        output; omit it to read the full log. Treat ``cursor`` as an opaque
+        server-side position and never derive it from the content length.
+        Empty ``content`` does not mean the command finished; use
+        command_get_status for that. Once command_get_status reports
+        ``running=False``, call this tool once more with the last cursor to
+        read the remaining output.
+
+        Parameters:
+            sandbox_id: Target sandbox identifier.
+            execution_id: Execution identifier returned by command_run with
+                background=True.
+            cursor: Cursor returned by a previous call; omit to read from the
+                start of the log.
+            connect_if_missing: Connect if sandbox not in local registry.
+
+        Returns:
+            Command logs with ``content`` (stdout and stderr combined) and the
+            ``cursor`` for the next incremental read. ``cursor`` is null when
+            the server does not report one; keep the previous cursor then.
+
+        Example:
+            logs = await command_get_logs("sbx_123", "cmd_abc", cursor=128)
+        """
+        sandbox = await _get_or_connect_sandbox(
+            sandbox_id,
+            connect_if_missing=connect_if_missing,
+        )
+        return await sandbox.commands.get_background_command_logs(
+            execution_id, cursor=cursor
+        )
 
     @tool()
     async def file_read(

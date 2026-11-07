@@ -29,7 +29,7 @@ from opensandbox.exceptions import SandboxApiException
 
 from opensandbox_mcp.server import create_server
 
-_EXPECTED_TOOL_COUNT = 19
+_EXPECTED_TOOL_COUNT = 21
 _EXPECTED_NEGOTIATED_VERSION = LATEST_HANDSHAKE_VERSION
 
 
@@ -91,6 +91,8 @@ async def test_mcp2_initialize_and_list_tools() -> None:
         "sandbox_create",
         "sandbox_kill",
         "command_run",
+        "command_get_status",
+        "command_get_logs",
         "file_read",
         "file_write",
     } <= names
