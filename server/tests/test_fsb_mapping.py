@@ -534,12 +534,16 @@ def _snapshot_restore_request(limits):
 
 
 def test_map_create_replays_snapshot_limits_when_gate_passes():
-    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    # Pool profile restated (pids, pool-shaped cpu/memory) does not fight the
+    # recorded shape: cpu/memory baseline is the recorded limits, pids stays
+    # pool-owned.
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "128"})
     create = map_create_request(
         request,
         "sbx-1",
         "ns-1",
         now=NOW,
+        pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
         snapshot_limits={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=True,
     )
@@ -549,12 +553,13 @@ def test_map_create_replays_snapshot_limits_when_gate_passes():
 
 
 def test_map_create_accepts_matching_snapshot_limits_on_legacy_pool():
-    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "128"})
     create = map_create_request(
         request,
         "sbx-1",
         "ns-1",
         now=NOW,
+        pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
         snapshot_limits={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=False,
     )
@@ -563,7 +568,7 @@ def test_map_create_accepts_matching_snapshot_limits_on_legacy_pool():
 
 def test_map_create_rejects_snapshot_limit_mismatch():
     request = _snapshot_restore_request({"cpu": "1", "memory": "1Gi"})
-    with pytest.raises(UnsupportedFieldError, match="snapshot's recorded"):
+    with pytest.raises(UnsupportedFieldError, match="the snapshot's recorded"):
         map_create_request(
             request,
             "sbx-1",
@@ -573,14 +578,29 @@ def test_map_create_rejects_snapshot_limit_mismatch():
         )
 
 
-def test_map_create_rejects_snapshot_restore_key_outside_recorded_shape():
-    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "128"})
+def test_map_create_rejects_pids_mismatched_with_pool_profile():
+    # pids is not part of the recorded shape; its baseline stays the pool.
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "64"})
+    with pytest.raises(UnsupportedFieldError, match="SandboxPool profile"):
+        map_create_request(
+            request,
+            "sbx-1",
+            "ns-1",
+            now=NOW,
+            pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
+            snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        )
+
+
+def test_map_create_rejects_snapshot_restore_key_outside_both_baselines():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "gpu": "1"})
     with pytest.raises(UnsupportedFieldError, match="not part of the snapshot"):
         map_create_request(
             request,
             "sbx-1",
             "ns-1",
             now=NOW,
+            pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
             snapshot_limits={"cpu": "2", "memory": "1Gi"},
         )
 
@@ -591,6 +611,7 @@ def test_map_create_snapshot_without_caller_limits_is_valid():
         "sbx-1",
         "ns-1",
         now=NOW,
+        pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
         snapshot_limits={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=True,
     )
