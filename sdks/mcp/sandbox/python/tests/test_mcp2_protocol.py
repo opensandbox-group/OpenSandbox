@@ -26,6 +26,7 @@ from mcp.client.session import ClientSession
 from mcp.shared.memory import create_client_server_memory_streams
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, LATEST_HANDSHAKE_VERSION
 from opensandbox.exceptions import SandboxApiException
+from opensandbox.models.execd import CommandLogs, CommandStatus
 
 from opensandbox_mcp.server import create_server
 
@@ -48,6 +49,34 @@ class _FakeManager:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FakeCommands:
+    async def get_command_status(self, execution_id: str) -> CommandStatus:
+        if execution_id == "cmd-missing":
+            raise SandboxApiException(
+                f"command not found: {execution_id}", status_code=404
+            )
+        return CommandStatus(
+            id=execution_id, running=False, exit_code=3, error="exit status 3"
+        )
+
+    async def get_background_command_logs(
+        self, execution_id: str, cursor: int | None = None
+    ) -> CommandLogs:
+        return CommandLogs(content="第2步\n", cursor=(cursor or 0) + 8)
+
+
+class _FakeSandbox:
+    def __init__(self, sandbox_id: str) -> None:
+        self.id = sandbox_id
+        self.commands = _FakeCommands()
+
+
+class _FakeSandboxModule:
+    @staticmethod
+    async def connect(sandbox_id, connection_config=None, **kwargs):
+        return _FakeSandbox(sandbox_id)
 
 
 @asynccontextmanager
@@ -147,6 +176,70 @@ async def test_mcp2_sandbox_errors_keep_actionable_message(
     assert isinstance(result, types.CallToolResult)
     assert result.is_error is True
     assert "Sandbox sbx-missing not found" in _text_content(result)
+
+
+async def test_mcp2_command_get_logs_schema_has_optional_cursor() -> None:
+    async with _client_session() as mcp_session:
+        await mcp_session.initialize()
+        listed = await mcp_session.list_tools()
+
+    tools = {tool.name: tool for tool in listed.tools}
+    logs_schema = tools["command_get_logs"].input_schema
+    assert logs_schema["required"] == ["sandbox_id", "execution_id"]
+    assert {"type": "integer"} in logs_schema["properties"]["cursor"]["anyOf"]
+    assert tools["command_get_status"].input_schema["required"] == [
+        "sandbox_id",
+        "execution_id",
+    ]
+
+
+async def test_mcp2_command_status_and_logs_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeSandboxModule)
+
+    async with _client_session() as mcp_session:
+        await mcp_session.initialize()
+        status = await mcp_session.call_tool(
+            "command_get_status",
+            {
+                "sandbox_id": "sbx-1",
+                "execution_id": "cmd-1",
+                "connect_if_missing": True,
+            },
+        )
+        logs = await mcp_session.call_tool(
+            "command_get_logs",
+            {"sandbox_id": "sbx-1", "execution_id": "cmd-1", "cursor": 8},
+        )
+
+    assert status.is_error is False
+    assert status.structured_content is not None
+    assert status.structured_content["running"] is False
+    assert status.structured_content["exit_code"] == 3
+    assert status.structured_content["error"] == "exit status 3"
+    assert logs.is_error is False
+    assert logs.structured_content == {"content": "第2步\n", "cursor": 16}
+
+
+async def test_mcp2_command_status_errors_keep_actionable_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeSandboxModule)
+
+    async with _client_session() as mcp_session:
+        await mcp_session.initialize()
+        result = await mcp_session.call_tool(
+            "command_get_status",
+            {
+                "sandbox_id": "sbx-1",
+                "execution_id": "cmd-missing",
+                "connect_if_missing": True,
+            },
+        )
+
+    assert result.is_error is True
+    assert "command not found: cmd-missing" in _text_content(result)
 
 
 async def test_mcp2_unknown_tool_is_an_error_result() -> None:
