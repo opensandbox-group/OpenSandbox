@@ -75,7 +75,10 @@ The following table lists the configurable parameters of the chart and their def
 | controller.kubeClient | object | `{"burst":200,"qps":100}` | Kubernetes client rate limiter configuration |
 | controller.kubeClient.burst | int | `200` | Burst for Kubernetes client rate limiter. |
 | controller.kubeClient.qps | int | `100` | QPS for Kubernetes client rate limiter. |
-| controller.leaderElection | object | `{"enabled":true}` | Enable leader election for controller manager |
+| controller.leaderElection | object | `{"enabled":true,"leaseDuration":"","renewDeadline":"","retryPeriod":""}` | Enable leader election for controller manager |
+| controller.leaderElection.leaseDuration | string | `""` | How long standby replicas wait after the last renewal before taking over the lease (`--leader-elect-lease-duration`). Empty keeps the binary default of 15s. |
+| controller.leaderElection.renewDeadline | string | `""` | How long the leader keeps retrying to renew the lease before giving up leadership (`--leader-elect-renew-deadline`). Must be less than leaseDuration. Raise it with leaseDuration if API server stalls make the leader exit with "leader election lost". Empty keeps the default of 10s. |
+| controller.leaderElection.retryPeriod | string | `""` | How long candidates wait between attempts to acquire or renew the lease (`--leader-elect-retry-period`). Empty keeps the default of 2s. |
 | controller.livenessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":15,"periodSeconds":20,"successThreshold":1,"timeoutSeconds":1}` | Liveness probe configuration. The livenessProbe.httpGet.port below also drives --health-probe-bind-address and the health container port. |
 | controller.logLevel | string | `"info"` | Log level for zap logger (debug, info, error) |
 | controller.metrics | object | `{"enabled":false,"port":8080,"secure":false}` | controller-runtime metrics endpoint (Prometheus). Disabled by default to preserve the current behavior (the binary defaults to `--metrics-bind-address=0`). |
