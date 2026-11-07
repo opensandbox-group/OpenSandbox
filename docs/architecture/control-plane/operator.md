@@ -122,6 +122,8 @@ Conditions (`Ready`, `Progressing`, `Paused`, `PauseFailed`, `ResumeFailed`, `Po
 
 ## Performance
 
+The BatchSandbox controller keeps resource-version expectations for pending status writes. Expectations are removed when the informer catches up, when termination starts, or when reconciliation finds the sandbox gone. Recreating a sandbox with the same namespace and name does not inherit the previous UID's pending status version.
+
 With pooling enabled, measured delivery of 100 sandboxes:
 
 | Scenario | Total time |

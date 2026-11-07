@@ -122,6 +122,9 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Name:      req.Name,
 	}, batchSbx); err != nil {
 		if errors.IsNotFound(err) {
+			if r.StatusRVExpectation != nil {
+				r.StatusRVExpectation.DeleteByKey(req.NamespacedName)
+			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err

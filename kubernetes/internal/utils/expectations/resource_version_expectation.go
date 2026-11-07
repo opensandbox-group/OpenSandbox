@@ -28,18 +28,23 @@ type ResourceVersionExpectation interface {
 	Observe(obj metav1.Object)
 	IsSatisfied(obj metav1.Object) (bool, time.Duration)
 	Delete(obj metav1.Object)
+	// DeleteByKey clears an expectation after reconciliation observes NotFound.
+	DeleteByKey(key types.NamespacedName)
 }
 
 func NewResourceVersionExpectation() ResourceVersionExpectation {
-	return &realResourceVersionExpectation{objectVersions: make(map[types.UID]*objectCacheVersions, 100)}
+	return &realResourceVersionExpectation{objectVersions: make(map[types.NamespacedName]*objectCacheVersions, 100)}
 }
 
 type realResourceVersionExpectation struct {
 	sync.Mutex
-	objectVersions map[types.UID]*objectCacheVersions
+	// Key by namespace/name so a NotFound reconcile can reclaim the entry
+	// without an object UID. The stored UID still fences recreated objects.
+	objectVersions map[types.NamespacedName]*objectCacheVersions
 }
 
 type objectCacheVersions struct {
+	uid                       types.UID
 	version                   string
 	firstUnsatisfiedTimestamp time.Time
 }
@@ -48,12 +53,13 @@ func (r *realResourceVersionExpectation) Expect(obj metav1.Object) {
 	r.Lock()
 	defer r.Unlock()
 
-	expectations := r.objectVersions[obj.GetUID()]
-	if expectations == nil {
-		r.objectVersions[obj.GetUID()] = &objectCacheVersions{}
+	key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	expectations := r.objectVersions[key]
+	if expectations == nil || expectations.uid != obj.GetUID() {
+		r.objectVersions[key] = &objectCacheVersions{uid: obj.GetUID()}
 	}
-	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
-		r.objectVersions[obj.GetUID()].version = obj.GetResourceVersion()
+	if isResourceVersionNewer(r.objectVersions[key].version, obj.GetResourceVersion()) {
+		r.objectVersions[key].version = obj.GetResourceVersion()
 	}
 }
 
@@ -61,12 +67,13 @@ func (r *realResourceVersionExpectation) Observe(obj metav1.Object) {
 	r.Lock()
 	defer r.Unlock()
 
-	expectations := r.objectVersions[obj.GetUID()]
-	if expectations == nil {
+	key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	expectations := r.objectVersions[key]
+	if expectations == nil || expectations.uid != obj.GetUID() {
 		return
 	}
-	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
-		delete(r.objectVersions, obj.GetUID())
+	if isResourceVersionNewer(r.objectVersions[key].version, obj.GetResourceVersion()) {
+		delete(r.objectVersions, key)
 	}
 }
 
@@ -74,21 +81,22 @@ func (r *realResourceVersionExpectation) IsSatisfied(obj metav1.Object) (bool, t
 	r.Lock()
 	defer r.Unlock()
 
-	expectations := r.objectVersions[obj.GetUID()]
-	if expectations == nil {
+	key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	expectations := r.objectVersions[key]
+	if expectations == nil || expectations.uid != obj.GetUID() {
 		return true, 0
 	}
 
-	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
-		delete(r.objectVersions, obj.GetUID())
+	if isResourceVersionNewer(r.objectVersions[key].version, obj.GetResourceVersion()) {
+		delete(r.objectVersions, key)
 	}
-	_, existing := r.objectVersions[obj.GetUID()]
+	_, existing := r.objectVersions[key]
 	if existing {
-		if r.objectVersions[obj.GetUID()].firstUnsatisfiedTimestamp.IsZero() {
-			r.objectVersions[obj.GetUID()].firstUnsatisfiedTimestamp = time.Now()
+		if r.objectVersions[key].firstUnsatisfiedTimestamp.IsZero() {
+			r.objectVersions[key].firstUnsatisfiedTimestamp = time.Now()
 		}
 
-		return false, time.Since(r.objectVersions[obj.GetUID()].firstUnsatisfiedTimestamp)
+		return false, time.Since(r.objectVersions[key].firstUnsatisfiedTimestamp)
 	}
 
 	return !existing, 0
@@ -97,7 +105,16 @@ func (r *realResourceVersionExpectation) IsSatisfied(obj metav1.Object) (bool, t
 func (r *realResourceVersionExpectation) Delete(obj metav1.Object) {
 	r.Lock()
 	defer r.Unlock()
-	delete(r.objectVersions, obj.GetUID())
+	key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	if expectation := r.objectVersions[key]; expectation != nil && expectation.uid == obj.GetUID() {
+		delete(r.objectVersions, key)
+	}
+}
+
+func (r *realResourceVersionExpectation) DeleteByKey(key types.NamespacedName) {
+	r.Lock()
+	defer r.Unlock()
+	delete(r.objectVersions, key)
 }
 
 func isResourceVersionNewer(old, new string) bool {
