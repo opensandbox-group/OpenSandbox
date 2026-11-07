@@ -288,7 +288,7 @@ func TestFilesystemIdentityCancellation(t *testing.T) {
 }
 
 func TestFilesystemIdentityRequiresAuthentication(t *testing.T) {
-	router := NewRouter("secret-token")
+	router := NewRouter("secret-token", nil)
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodDelete, "/v1/filesystem/0/0/files?path=/unused", nil)
 	router.ServeHTTP(response, request)

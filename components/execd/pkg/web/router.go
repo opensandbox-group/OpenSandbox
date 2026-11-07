@@ -15,6 +15,7 @@
 package web
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +24,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/mcpproxy"
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
@@ -40,7 +42,7 @@ var preInitPaths = map[string]struct{}{
 	"/internal/init": {},
 }
 
-func NewRouter(accessToken string) *gin.Engine {
+func NewRouter(accessToken string, mcpRegistry *mcpproxy.Registry) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -57,7 +59,73 @@ func NewRouter(accessToken string) *gin.Engine {
 	registerFilesystemRoutes(r.Group("/v1/filesystem/:uid/:gid", filesystemIdentityMiddleware()))
 
 	registerExecutionRoutes(r)
+	registerMCPRoutes(r, mcpRegistry)
 	return r
+}
+
+// registerMCPRoutes exposes the MCP proxy bridge under /mcp: the index
+// lists upstreams, {name} dispatches to its bridge (GET/POST/DELETE), and
+// /mcp/servers manages registrations at runtime. All routes sit behind the
+// same runtime-init gate and access-token check as every other endpoint.
+func registerMCPRoutes(r *gin.Engine, registry *mcpproxy.Registry) {
+	mcpGroup := r.Group("/mcp")
+	{
+		list := func(c *gin.Context) {
+			servers := registry.List()
+			if servers == nil {
+				servers = []mcpproxy.ServerInfo{}
+			}
+			c.JSON(http.StatusOK, servers)
+		}
+		mcpGroup.GET("", list)
+		mcpGroup.GET("/servers", list)
+
+		mcpGroup.POST("/servers", func(c *gin.Context) {
+			var server mcpproxy.ServerConfig
+			if err := c.ShouldBindJSON(&server); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mcp server config: " + err.Error()})
+				return
+			}
+			switch err := registry.Add(&server); {
+			case err == nil:
+				c.JSON(http.StatusCreated, mcpproxy.ServerInfo{Name: server.Name, Transport: string(server.Transport)})
+			case errors.Is(err, mcpproxy.ErrDuplicateServer):
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			case errors.Is(err, mcpproxy.ErrTooManyServers):
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			case errors.Is(err, mcpproxy.ErrRegistryClosed):
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			default:
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			}
+		})
+
+		mcpGroup.DELETE("/servers/:name", func(c *gin.Context) {
+			switch err := registry.Remove(c.Param("name")); {
+			case err == nil:
+				c.Status(http.StatusNoContent)
+			case errors.Is(err, mcpproxy.ErrUnknownServer):
+				c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, mcpproxy.ErrRegistryClosed):
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			default:
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			}
+		})
+
+		dispatch := func(c *gin.Context) {
+			name := c.Param("name")
+			handler, ok := registry.Handler(name)
+			if !ok {
+				c.JSON(http.StatusNotFound, gin.H{"error": "unknown mcp server: " + name})
+				return
+			}
+			handler.ServeHTTP(c.Writer, c.Request)
+		}
+		mcpGroup.GET("/:name", dispatch)
+		mcpGroup.POST("/:name", dispatch)
+		mcpGroup.DELETE("/:name", dispatch)
+	}
 }
 
 // Both entrypoints use the same handlers. Identity-scoped requests are
