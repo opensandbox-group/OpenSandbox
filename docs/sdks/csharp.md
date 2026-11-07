@@ -371,6 +371,8 @@ For binary data, use `byte[]` or `Stream` in `WriteEntry.Data`, and download wit
 
 Use `ReadBytesDetailedAsync` or `ReadBytesStreamDetailedAsync` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `IsPartial` before appending a resumed download, and dispose a detailed stream body with `await using`. These extension methods are in `OpenSandbox`; custom adapters must implement `IDownloadSandboxFiles` or the methods throw `NotSupportedException`.
 
+For content-encoded responses, `ContentLength` and `ContentRange` describe the encoded HTTP representation when available. The default HTTP client decodes the body and can remove the encoding and length headers; a partial response reports `TotalSize` as `-1` when neither `Content-Length` nor an explicit `identity` encoding is visible.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:

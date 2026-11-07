@@ -50,6 +50,11 @@ export function createReadBytesResponse<TBody>(
     ? parseContentRange(response.headers.get("content-range"))
     : undefined;
   const contentLength = parseHeaderInteger(response.headers.get("content-length"));
+  const contentEncoding = response.headers.get("content-encoding")?.trim().toLowerCase();
+  // CORS can hide Content-Encoding while leaving Content-Length visible.
+  const encodedOrUnknown = contentEncoding
+    ? contentEncoding !== "identity"
+    : response.type === "cors";
 
   return {
     body,
@@ -57,7 +62,7 @@ export function createReadBytesResponse<TBody>(
     contentType: response.headers.get("content-type") ?? undefined,
     contentDisposition: response.headers.get("content-disposition") ?? undefined,
     contentLength,
-    totalSize: isPartial
+    totalSize: encodedOrUnknown ? -1 : isPartial
       ? (contentRange?.total ?? -1)
       : (lineBased ? -1 : contentLength),
     contentRange,

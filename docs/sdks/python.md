@@ -432,6 +432,8 @@ async with aclosing(await sandbox.files.read_bytes_stream("/tmp/large.bin")) as 
 
 Use `read_bytes_detailed` or `read_bytes_stream_detailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check the optional `DownloadFilesystem` capability before calling them:
 
+For content-encoded responses, `content_length` and `content_range` describe the encoded HTTP representation. The SDK decodes the body, so `total_size` is `-1` when its decoded size cannot be determined from those headers.
+
 ```python
 from opensandbox.services import DownloadFilesystem
 
