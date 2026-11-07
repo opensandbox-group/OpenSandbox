@@ -48,7 +48,7 @@ export function SandboxListPage() {
       setTotal(data.pagination?.totalItems ?? data.items?.length ?? 0);
     } catch (e) {
       if (seq !== requestSeq.current) return;
-      message.error(e instanceof Error ? e.message : '加载失败');
+      message.error(e instanceof Error ? e.message : 'Failed to load');
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
@@ -60,43 +60,43 @@ export function SandboxListPage() {
 
   const columns: ColumnsType<Sandbox> = [
     {
-      title: '名称 / ID',
+      title: 'Name / ID',
       render: (_, r) => (
         <Link to={`/sandboxes/${r.id}`}>{sandboxDisplayName(r)}</Link>
       ),
     },
     {
-      title: '状态',
+      title: 'Status',
       dataIndex: ['status', 'state'],
       render: (s: string | undefined) => <SandboxStateTag state={s} />,
     },
     {
-      title: '镜像',
+      title: 'Image',
       render: (_, r) => r.image?.uri ?? '—',
       ellipsis: true,
     },
     {
-      title: '运行时长',
+      title: 'Uptime',
       render: (_, r) => formatDuration(r.runtimeSummary?.wallClockSeconds),
     },
     {
-      title: '剩余',
+      title: 'Remaining',
       render: (_, r) =>
         r.runtimeSummary?.remainingSeconds !== undefined
           ? formatDuration(r.runtimeSummary.remainingSeconds)
           : '—',
     },
     {
-      title: '创建时间',
+      title: 'Created At',
       dataIndex: 'createdAt',
       width: 200,
       render: (v: string | undefined) => formatDateTime(v),
     },
     {
-      title: '操作',
+      title: 'Actions',
       render: (_, r) => (
         <Space>
-          <Link to={`/sandboxes/${r.id}?tab=logs`}>日志</Link>
+          <Link to={`/sandboxes/${r.id}?tab=logs`}>Logs</Link>
           <ShellLink sandboxId={r.id} state={r.status?.state} />
         </Space>
       ),
@@ -107,12 +107,12 @@ export function SandboxListPage() {
     <div>
       <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
         <Typography.Title level={4} style={{ margin: 0 }}>
-          沙箱
+          Sandbox
         </Typography.Title>
         <Space>
           <Select
             allowClear
-            placeholder="按状态筛选"
+            placeholder="Filter by status"
             style={{ width: 180 }}
             value={stateFilter}
             onChange={(value) => {
@@ -121,9 +121,9 @@ export function SandboxListPage() {
             }}
             options={SANDBOX_STATES.map((s) => ({ label: s, value: s }))}
           />
-          <Button onClick={() => void load()}>刷新</Button>
+          <Button onClick={() => void load()}>Refresh</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/sandboxes/new')}>
-            创建沙箱
+            Create Sandbox
           </Button>
         </Space>
       </Space>

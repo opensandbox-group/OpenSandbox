@@ -26,7 +26,7 @@ export function VersionPage() {
       try {
         setVersion(await platformApi.version());
       } catch (e) {
-        setError(e instanceof Error ? e.message : '加载失败');
+        setError(e instanceof Error ? e.message : 'Failed to load');
       }
     })();
   }, []);
@@ -35,7 +35,7 @@ export function VersionPage() {
 
   return (
     <div>
-      <Typography.Title level={4}>版本</Typography.Title>
+      <Typography.Title level={4}>Version</Typography.Title>
       {error && <Typography.Text type="danger">{error}</Typography.Text>}
       {version && (
         <Card>

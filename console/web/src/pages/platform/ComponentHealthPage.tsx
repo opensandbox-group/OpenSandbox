@@ -41,14 +41,14 @@ export function ComponentHealthPage() {
         }
       } catch (err) {
         setUsedFallback(true);
-        const primary = err instanceof Error ? err.message : '加载平台摘要失败';
+        const primary = err instanceof Error ? err.message : 'Failed to load platform summary';
         try {
           setBffHealth(await platformApi.bffHealth());
           setLoadError(primary);
         } catch (fallbackErr) {
           setBffHealth(null);
           const secondary =
-            fallbackErr instanceof Error ? fallbackErr.message : 'BFF /health 不可用';
+            fallbackErr instanceof Error ? fallbackErr.message : 'BFF /health is unavailable';
           setLoadError(`${primary}；${secondary}`);
         }
       } finally {
@@ -61,7 +61,7 @@ export function ComponentHealthPage() {
 
   return (
     <div>
-      <Typography.Title level={4}>组件健康</Typography.Title>
+      <Typography.Title level={4}>Component Health</Typography.Title>
       {loadError && (
         <Alert type="warning" showIcon message={loadError} style={{ marginBottom: 16 }} />
       )}
@@ -70,7 +70,7 @@ export function ComponentHealthPage() {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="未使用 Admin platform/summary，已回退到 BFF /health"
+          message="Admin platform/summary is not being used; falling back to BFF /health"
         />
       )}
 
