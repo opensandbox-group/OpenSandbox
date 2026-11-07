@@ -154,3 +154,9 @@ Sandboxes can be pre-warmed in pools and reused across allocations. Execd makes 
 ## Observability
 
 Execd exposes local CPU and memory metrics as a snapshot and as a live stream, and exports OpenTelemetry metrics when the platform configures an endpoint — attributed to your sandbox ID and allocation. See [telemetry](/guides/telemetry#execd) for the metric list and how export is configured.
+
+Command-related operational records add only the top-level JSON field `command_id`, equal to the runtime-generated ID in the SSE `init` event and command status, output, and interrupt endpoints. Query this field to correlate existing records. No public wire field or header is added. Noncommand records are unchanged.
+
+Existing formatted messages, levels, event counts, ordering, and sampling remain unchanged, including the ID already present in the init message. Received commands remain INFO; start and wait failures remain ERROR. Successful verbose SSE writes, including completion, remain INFO; successful stdout/stderr and keepalive writes remain quiet. Correlation is assigned before output workers start, including Unix output before init, without emitting init or committing headers earlier.
+
+A background `execution_complete` acknowledges startup, not process termination. Successful background termination produces no additional log record; foreground completion follows a successful wait. These sampled operational logs are **not an audit trail**. The existing sampler groups by level and fully formatted message, retaining the first 100 per one-second tick and then every 100th matching event. The added field neither changes this key nor bypasses sampling; even ERROR records may be dropped. Use the command status and output APIs for lifecycle state and output.
