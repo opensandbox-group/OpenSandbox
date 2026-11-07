@@ -96,6 +96,8 @@ jobs:
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback
+          bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
+            TestResolvedIPRenewalExtendsKernelExpiry
           bash scripts/ci-nft-go-test.sh ./pkg/iptables \
             TestGatewayDNSRedirectKernelPrivateNS
           bash scripts/ci-nft-go-test.sh . \
