@@ -189,13 +189,10 @@ class CommandsAdapter(Commands):
                 if event_node is None:
                     continue
                 await dispatcher.dispatch(event_node)
-                # Foreground responses drain to EOF (no break below): older
-                # servers may emit trailing output after the completion event.
-                if is_background and event_node.type == "execution_complete":
-                    # Background commands are done once execution_complete
-                    # arrives; do not wait for the chunked terminator, which
-                    # older execd versions delay with a grace-period sleep and can
-                    # be lost if the connection is closed early (#1528).
+                # Command execution is complete once execution_complete or error arrives;
+                # do not wait for the chunked terminator or EOF, which execd delays with
+                # a graceful shutdown sleep (ApiGracefulShutdownTimeout, 200ms-1000ms) (#1528, #2654).
+                if event_node.type in ("execution_complete", "error"):
                     break
 
         if infer_exit_code:

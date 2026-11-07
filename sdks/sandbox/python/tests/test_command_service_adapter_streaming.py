@@ -27,7 +27,6 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,
-    SandboxConnectionException,
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
@@ -414,18 +413,20 @@ async def test_run_background_command_breaks_on_complete_before_terminator() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_foreground_command_still_waits_for_terminator() -> None:
-    """Foreground commands must keep waiting for the stream terminator
-    after ``execution_complete`` — an early close is still surfaced as an
-    error, proving the background early-break did not change this path."""
+async def test_run_foreground_command_breaks_on_complete_before_terminator() -> None:
+    """Foreground commands break immediately on ``execution_complete``
+    without waiting for the stream terminator (#2654). An early close after
+    completion does not raise."""
     cfg = ConnectionConfig(
         protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
     )
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapter(cfg, endpoint)
 
-    with pytest.raises(SandboxConnectionException):
-        await adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+    execution = await adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+    assert execution.complete is not None
+    assert execution.complete.execution_time_in_millis == 3
+    assert execution.exit_code == 0
 
 
 @pytest.mark.asyncio
@@ -441,25 +442,23 @@ async def test_run_rejects_unsupported_command_types(command) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [False, True])
-@pytest.mark.parametrize("late_output", [False, True])
 async def test_foreground_drains_terminal_response_and_closes_stream(
-    failure: bool, late_output: bool
+    failure: bool,
 ) -> None:
-    """Handle immediate EOF from fixed execd and trailing output from older execd."""
+    """Foreground commands return immediately on terminal event and close the stream (#2654)."""
     terminal = (
         {"type": "error", "error": {"ename": "CommandExecError", "evalue": "7", "traceback": []}}
-        if failure else
-        {"type": "execution_complete", "execution_time": 5}
+        if failure
+        else {"type": "execution_complete", "execution_time": 5}
     )
     output = [
         {"type": "stdout", "text": "last stdout"},
         {"type": "stderr", "text": "last stderr"},
     ]
-    events = [terminal, *output] if late_output else [*output, terminal]
+    events = [*output, terminal]
 
     class Stream(httpx.AsyncByteStream):
         closed = False
-        exhausted = False
 
         async def __aiter__(self) -> AsyncIterator[bytes]:
             for timestamp, event in enumerate(events, start=1):
@@ -467,7 +466,6 @@ async def test_foreground_drains_terminal_response_and_closes_stream(
                 # Split frames across reads to exercise incremental SSE decoding.
                 yield frame[:7]
                 yield frame[7:]
-            self.exhausted = True
 
         async def aclose(self) -> None:
             self.closed = True
@@ -488,7 +486,6 @@ async def test_foreground_drains_terminal_response_and_closes_stream(
     assert [item.text for item in execution.logs.stderr] == ["last stderr"]
     assert execution.exit_code == (7 if failure else 0)
     assert (execution.complete is None) == failure
-    assert stream.exhausted
     assert stream.closed
 
 
