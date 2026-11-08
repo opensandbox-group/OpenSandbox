@@ -166,6 +166,14 @@ func (s *source) notify() {
 
 func (s *source) Acknowledge(_ context.Context, results []api.AckResult) error {
 	for _, result := range results {
+		if result.Guarantee != api.GuaranteeDurable && result.Guarantee != api.GuaranteeBestEffort {
+			return api.Permanent(fmt.Errorf("unsupported delivery guarantee %q", result.Guarantee))
+		}
+		if result.Disposition != api.AckDelivered && result.Disposition != api.AckIntentionalDrop {
+			return api.Permanent(fmt.Errorf("unsupported acknowledgement disposition %q", result.Disposition))
+		}
+	}
+	for _, result := range results {
 		if err := func() error {
 			var t token
 			if err := json.Unmarshal(result.Token.Value, &t); err != nil {
@@ -190,7 +198,11 @@ func (s *source) Acknowledge(_ context.Context, results []api.AckResult) error {
 			next.Offset = t.Offset
 			if result.Disposition == api.AckIntentionalDrop {
 				next.Outcome.HadDrops = true
-				next.Outcome.LossReasons = api.AddLossReason(next.Outcome.LossReasons, result.Reason)
+				reason := result.Reason
+				if reason == "" {
+					reason = "pipeline-policy-drop"
+				}
+				next.Outcome.LossReasons = api.AddLossReason(next.Outcome.LossReasons, reason)
 			}
 			if err := s.save(&next); err != nil {
 				return err
@@ -219,6 +231,9 @@ func (s *source) AcknowledgeEnd(_ context.Context, t api.EndToken) error {
 	defer st.mu.Unlock()
 	if s.lookup(value.UID) != st || t.Source != api.SourceNameVMConsole || t.StreamRef != streamRef(value.UID) || t.ID != "end/"+tokenID(value) || value.Sequence != st.Sequence || value.Offset != st.Offset || !st.Finalizing && !st.Ended {
 		return api.Permanent(errors.New("invalid VM console end acknowledgement"))
+	}
+	if st.Ended {
+		return nil
 	}
 	next := st.stream
 	next.Ended = true

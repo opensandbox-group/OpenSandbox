@@ -553,7 +553,7 @@ func TestBlockedStreamSaveDoesNotBlockOtherStreamAck(t *testing.T) {
 	}
 	acked := make(chan error, 1)
 	go func() {
-		acked <- s.Acknowledge(context.Background(), []api.AckResult{{Token: api.AckToken{Source: api.SourceNameVMConsole, ID: tokenID(tok), StreamRef: streamRef(tok.UID), Value: value}, Disposition: api.AckDelivered}})
+		acked <- s.Acknowledge(context.Background(), []api.AckResult{{Token: api.AckToken{Source: api.SourceNameVMConsole, ID: tokenID(tok), StreamRef: streamRef(tok.UID), Value: value}, Disposition: api.AckDelivered, Guarantee: api.GuaranteeDurable}})
 	}()
 	select {
 	case err := <-acked:
@@ -654,5 +654,84 @@ func TestIdleConsoleDoesNotWriteCheckpoint(t *testing.T) {
 	}
 	if counter.writes != writes {
 		t.Fatal("idle poll wrote checkpoint")
+	}
+}
+
+func TestAcknowledgementValidationAndDropReason(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		disposition api.AckDisposition
+		guarantee   api.DeliveryGuarantee
+		rejected    bool
+	}{
+		{"invalid disposition", "invalid", api.GuaranteeDurable, true},
+		{"invalid guarantee", api.AckDelivered, "invalid", true},
+		{"empty drop reason", api.AckIntentionalDrop, api.GuaranteeBestEffort, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, st, _ := fixture(t)
+			counter := &countingState{SourceState: s.state}
+			s.state = counter
+			tok := token{UID: st.UID, Sequence: st.Sequence, Offset: 5}
+			value, err := json.Marshal(tok)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.pending = tokenID(tok)
+			result := api.AckResult{Token: api.AckToken{Source: api.SourceNameVMConsole, ID: tokenID(tok), StreamRef: streamRef(tok.UID), Value: value}, Disposition: tc.disposition, Guarantee: tc.guarantee}
+			err = s.Acknowledge(context.Background(), []api.AckResult{result})
+			if tc.rejected {
+				if err == nil || api.IsRetryableError(err) {
+					t.Fatalf("expected permanent error, got %v", err)
+				}
+				if st.Offset != 0 || st.pending != tokenID(tok) || counter.writes != 0 {
+					t.Fatal("invalid ACK changed progress")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved stream
+			if err := s.state.View(func(r state.SourceStateReader) error {
+				data, _, err := r.Get([]byte(st.UID))
+				if err != nil {
+					return err
+				}
+				return json.Unmarshal(data, &saved)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Offset != 5 || !saved.Outcome.HadDrops || len(saved.Outcome.LossReasons) != 1 || saved.Outcome.LossReasons[0] != "pipeline-policy-drop" {
+				t.Fatalf("unexpected checkpoint: %+v", saved)
+			}
+		})
+	}
+}
+
+func TestRepeatedEndAcknowledgementKeepsRetentionBoundary(t *testing.T) {
+	s, st, _ := fixture(t)
+	counter := &countingState{SourceState: s.state}
+	s.state = counter
+	st.Finalizing = true
+	event := s.endEvent(st)
+	if err := s.AcknowledgeEnd(context.Background(), event.End.EndToken); err != nil {
+		t.Fatal(err)
+	}
+	endedAt := st.EndedAt
+	writes := counter.writes
+	if endedAt.IsZero() || !st.Ended {
+		t.Fatal("first end ACK did not finish stream")
+	}
+	if err := s.AcknowledgeEnd(context.Background(), event.End.EndToken); err != nil {
+		t.Fatal(err)
+	}
+	if !st.EndedAt.Equal(endedAt) || counter.writes != writes {
+		t.Fatal("repeated end ACK changed retention boundary or wrote state")
+	}
+	invalid := event.End.EndToken
+	invalid.ID = "invalid"
+	if err := s.AcknowledgeEnd(context.Background(), invalid); err == nil {
+		t.Fatal("ended stream accepted invalid token")
 	}
 }
