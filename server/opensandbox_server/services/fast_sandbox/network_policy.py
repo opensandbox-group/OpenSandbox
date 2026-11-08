@@ -44,29 +44,25 @@ def _rule_key(rule: dict) -> tuple[str, tuple[int, ...]]:
 def merge_policy_rules(policy: dict, rules: list[NetworkRule]) -> dict:
     """Apply sidecar PATCH merge semantics to a normalized policy dict.
 
-    - Incoming rules replace existing rules in place for the same
-      (case-insensitive target, sorted ports) scope.
+    - Incoming rules replace every existing rule with the same
+      (case-insensitive target, sorted ports) scope, at the first one's position.
     - Within one patch payload, the first rule for a scope wins.
-    - Existing rules for other scopes remain; the current defaultAction is
-      preserved.
+    - Existing rules for other scopes remain untouched, duplicates included;
+      the current defaultAction is preserved.
     """
     incoming: dict[tuple[str, tuple[int, ...]], dict] = {}
     for rule in normalized_policy(NetworkPolicy(egress=rules))["egress"]:
         incoming.setdefault(_rule_key(rule), rule)
-    if not incoming:
-        return {
-            "defaultAction": policy.get("defaultAction") or "deny",
-            "egress": policy.get("egress") or [],
-        }
     merged: list[dict] = []
-    seen: set[tuple[str, tuple[int, ...]]] = set()
+    replaced: set[tuple[str, tuple[int, ...]]] = set()
     for rule in policy.get("egress") or []:
         key = _rule_key(rule)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(incoming.pop(key, rule))
-    merged.extend(incoming.values())
+        if key not in incoming:
+            merged.append(rule)
+        elif key not in replaced:
+            merged.append(incoming[key])
+            replaced.add(key)
+    merged.extend(rule for key, rule in incoming.items() if key not in replaced)
     return {"defaultAction": policy.get("defaultAction") or "deny", "egress": merged}
 
 

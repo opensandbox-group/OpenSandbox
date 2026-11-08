@@ -83,7 +83,7 @@ def test_merge_empty_patch_preserves_base(default_action):
     assert policy == before
 
 
-def test_merge_keeps_unmatched_scopes_and_first_base_duplicate():
+def test_merge_keeps_unmatched_scopes_and_base_duplicates():
     policy = {
         "defaultAction": "allow",
         "egress": [
@@ -103,10 +103,54 @@ def test_merge_keeps_unmatched_scopes_and_first_base_duplicate():
     assert merge_policy_rules(policy, additions) == {
         "defaultAction": "allow",
         "egress": [
-            policy["egress"][0],
-            *policy["egress"][2:],
+            *policy["egress"],
             {"action": "allow", "target": "10.0.0.5", "ports": [22]},
             {"action": "allow", "target": "", "ports": [22]},
+        ],
+    }
+
+
+@pytest.mark.parametrize("default_action", ["allow", "deny"])
+@pytest.mark.parametrize("target", ["10.0.0.5", ""])
+def test_merge_unrelated_patch_keeps_shadowing_deny(default_action, target):
+    # deny wins in nft: dropping the later same-scope deny would open the port.
+    policy = {
+        "defaultAction": default_action,
+        "egress": [
+            {"action": "allow", "target": target, "ports": [443]},
+            {"action": "deny", "target": target, "ports": [443]},
+        ],
+    }
+    before = deepcopy(policy)
+    unrelated = NetworkRule(action="allow", target="10.0.0.6", ports=[443])
+
+    assert merge_policy_rules(policy, [unrelated]) == {
+        "defaultAction": default_action,
+        "egress": [
+            *before["egress"],
+            {"action": "allow", "target": "10.0.0.6", "ports": [443]},
+        ],
+    }
+    assert policy == before
+
+
+def test_merge_override_replaces_every_same_scope_rule_in_place():
+    policy = {
+        "defaultAction": "deny",
+        "egress": [
+            {"action": "allow", "target": "10.0.0.9"},
+            {"action": "allow", "target": "10.0.0.5", "ports": [443]},
+            {"action": "allow", "target": "10.0.0.7"},
+            {"action": "deny", "target": "10.0.0.5", "ports": [443]},
+        ],
+    }
+
+    assert merge_policy_rules(policy, [NetworkRule(action="deny", target="10.0.0.5", ports=[443])]) == {
+        "defaultAction": "deny",
+        "egress": [
+            {"action": "allow", "target": "10.0.0.9"},
+            {"action": "deny", "target": "10.0.0.5", "ports": [443]},
+            {"action": "allow", "target": "10.0.0.7"},
         ],
     }
 
