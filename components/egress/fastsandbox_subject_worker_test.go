@@ -752,7 +752,7 @@ func TestFastSandboxSubjectSnapshotBindingAndReplay(t *testing.T) {
 	require.Equal(t, int64(1), bound.vaultRevision)
 	second := waitSubjectInstalled(t, h, target, bound)
 	require.Greater(t, second.DecisionEpoch, first.DecisionEpoch)
-	// The relay itself is a B2a-2 producer; SET is the only trigger here.
+	// Relay mutations install directly; a repeated SET still refreshes safely.
 	require.Equal(t, 200, doPolicy(t, s, http.MethodPut, testUID, policyPutDoc(policyAllow(), 0, false, false), "").Code)
 	set(testUID, testIP, testFenceR, testFenceA, 3)
 	newPolicy := latestSubjectSnapshot(t, s, testUID)
@@ -1286,11 +1286,6 @@ func TestFastSandboxSubjectSnapshotPrepareTimeoutAbort(t *testing.T) {
 			latest := first
 			if mode == "superseded" {
 				require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
-				// Enqueue a same-key replacement directly at the existing
-				// producer seam, without an intervening lifecycle command.
-				s.policyCommitMu.Lock()
-				s.recordBindingSnapshot(subject.FromSandboxUID(testUID), subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
-				s.policyCommitMu.Unlock()
 				latest = latestSubjectSnapshot(t, s, testUID)
 				require.NotEqual(t, first.payload, latest.payload)
 			} else if mode == "stale" {
@@ -1441,7 +1436,6 @@ func TestFastSandboxSubjectSnapshotEarlyPrepareDisconnect(t *testing.T) {
 			latest := first
 			if mode == "superseded" {
 				require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
-				queueSnapshotWithoutRegister(t, s)
 				latest = latestSubjectSnapshot(t, s, testUID)
 			} else if mode == "stale" {
 				require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
@@ -1456,7 +1450,6 @@ func TestFastSandboxSubjectSnapshotEarlyPrepareDisconnect(t *testing.T) {
 				require.Equal(t, int64(2), active.DecisionEpoch)
 				// No Register intervenes: a later install needs the same installer.
 				require.Equal(t, 200, doPolicy(t, s, http.MethodPut, testUID, policyPutDoc(policyAllow(), 0, false, false), "").Code)
-				queueSnapshotWithoutRegister(t, s)
 				waitSubjectInstalled(t, h, target, latestSubjectSnapshot(t, s, testUID))
 				require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) == 0 }, time.Second, time.Millisecond)
 			}
@@ -1567,7 +1560,6 @@ func TestFastSandboxSubjectSnapshotCommitInternalErrorReadback(t *testing.T) {
 			fault.mu.Unlock()
 			require.Equal(t, []string{"/v2/subjects/register", "/v2/revisions/prepare", "/v2/revisions/commit", "/v2/revisions/active"}, paths)
 			require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
-			queueSnapshotWithoutRegister(t, s)
 			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), latestSubjectSnapshot(t, s, testUID))
 		})
 	}
