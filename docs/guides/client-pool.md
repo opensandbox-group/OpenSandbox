@@ -118,6 +118,8 @@ All four standalone sandbox creation APIs accept these fields. Use a custom `san
 
 JavaScript and Go also accept minimum remaining TTL and skip-health-check overrides on each acquire. Python and Kotlin expose these as pool-level configuration.
 
+Go checks the acquire context before taking an idle entry and before falling back to direct creation. An already-cancelled request returns a `PoolAcquireFailedError` wrapping the context error without consuming idle capacity or invoking a custom creator. Cancellation after an idle entry has been taken still follows the existing best-effort cleanup path.
+
 ### Staged warmup
 
 Staged warmup separates creation admission from post-create work:
