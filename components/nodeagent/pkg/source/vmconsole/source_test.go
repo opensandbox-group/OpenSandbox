@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,7 +32,7 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 )
 
-func fixture(t *testing.T) (*source, *stream, string) {
+func fixture(t *testing.T) (*source, *streamRuntime, string) {
 	t.Helper()
 	root := t.TempDir()
 	db, err := state.Open(t.TempDir(), "test", 1<<20)
@@ -42,8 +44,8 @@ func fixture(t *testing.T) (*source, *stream, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &source{cfg: config.Config{VMConsoleRoot: root, PerSandboxQueueBytes: 1 << 20, NodeName: "node-a", ClusterID: "test"}, state: private, streams: make(map[string]*stream), wake: make(chan struct{}, 1)}
-	st := &stream{UID: "12345678-1234-1234-1234-123456789012", Sequence: 1, Started: time.Now().UTC().Truncate(time.Second), Resource: api.Resource{SandboxID: "sandbox-a", ClusterName: "test", Namespace: "ns", NodeName: "node-a"}}
+	s := &source{cfg: config.Config{VMConsoleRoot: root, PerSandboxQueueBytes: 1 << 20, NodeName: "node-a", ClusterID: "test"}, state: private, streams: make(map[string]*streamRuntime), wake: make(chan struct{}, 1)}
+	st := &streamRuntime{stream: stream{UID: "12345678-1234-1234-1234-123456789012", Sequence: 1, Started: time.Now().UTC().Truncate(time.Second), Resource: api.Resource{SandboxID: "sandbox-a", ClusterName: "test", Namespace: "ns", NodeName: "node-a"}}}
 	s.streams[st.UID] = st
 	filename := filepath.Join(root, "sandboxes", st.UID, "firecracker.log")
 	st.Path = filename
@@ -96,7 +98,7 @@ func TestConsoleResumeAndDriverGC(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	*st = restored
+	st.stream = restored
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0640)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +214,7 @@ func TestRestartWithPendingConsoleSwitch(t *testing.T) {
 				t.Fatal(err)
 			}
 			st.NextPath = next
-			if err := s.save(st); err != nil {
+			if err := s.save(&st.stream); err != nil {
 				t.Fatal(err)
 			}
 			_ = st.file.Close()
@@ -227,7 +229,7 @@ func TestRestartWithPendingConsoleSwitch(t *testing.T) {
 					}
 				}
 			}
-			restored := &source{cfg: s.cfg, state: s.state, streams: make(map[string]*stream), done: make(chan struct{}), wake: make(chan struct{}, 1)}
+			restored := &source{cfg: s.cfg, state: s.state, streams: make(map[string]*streamRuntime), done: make(chan struct{}), wake: make(chan struct{}, 1)}
 			out := make(chan api.SourceEvent, 4)
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(func() {
@@ -263,7 +265,7 @@ func TestRestartWithPendingConsoleSwitch(t *testing.T) {
 	}
 }
 
-func writeMetadata(t *testing.T, filename string, st *stream, attempt int64) {
+func writeMetadata(t *testing.T, filename string, st *streamRuntime, attempt int64) {
 	t.Helper()
 	data, err := json.Marshal(vmMetadata{Version: 1, UID: st.UID, Namespace: st.Resource.Namespace, Name: st.Resource.SandboxID, PlacementAttempt: attempt})
 	if err != nil {
@@ -364,7 +366,7 @@ func TestLocalDiscoveryResumeGraceAndGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.MissingSince = time.Now().Add(-disappearanceGrace - time.Second)
-	if err := s.save(st); err != nil {
+	if err := s.save(&st.stream); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.scan(context.Background()); err != nil {
@@ -378,7 +380,7 @@ func TestLocalDiscoveryResumeGraceAndGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.EndedAt = time.Now().Add(-25 * time.Hour)
-	if err := s.save(st); err != nil {
+	if err := s.save(&st.stream); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.scan(context.Background()); err != nil {
@@ -496,6 +498,133 @@ func TestReplacementDrainsBeforeSwitch(t *testing.T) {
 type countingState struct {
 	registry.SourceState
 	writes int
+}
+
+type gatedState struct {
+	registry.SourceState
+	failure error
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedState) Update(fn func(state.SourceStateWriter) error) error {
+	if g.failure != nil {
+		return g.failure
+	}
+	if g.armed.CompareAndSwap(true, false) {
+		close(g.entered)
+		<-g.release
+	}
+	return g.SourceState.Update(fn)
+}
+
+func TestBlockedStreamSaveDoesNotBlockOtherStreamAck(t *testing.T) {
+	s, first, _ := fixture(t)
+	second := &streamRuntime{stream: first.stream}
+	second.UID = "second-uid"
+	tok := token{UID: second.UID, Sequence: second.Sequence, Offset: 5}
+	value, err := json.Marshal(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.pending = tokenID(tok)
+	s.streams[second.UID] = second
+	gated := &gatedState{SourceState: s.state, entered: make(chan struct{}), release: make(chan struct{})}
+	s.state = gated
+	gated.armed.Store(true)
+	readDone := make(chan error, 1)
+	go func() { _, err := s.read(first, true); readDone <- err }()
+	defer func() {
+		close(gated.release)
+		select {
+		case err := <-readDone:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("blocked scan did not finish")
+		}
+	}()
+	select {
+	case <-gated.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("scan did not reach checkpoint save")
+	}
+	acked := make(chan error, 1)
+	go func() {
+		acked <- s.Acknowledge(context.Background(), []api.AckResult{{Token: api.AckToken{Source: api.SourceNameVMConsole, ID: tokenID(tok), StreamRef: streamRef(tok.UID), Value: value}, Disposition: api.AckDelivered}})
+	}()
+	select {
+	case err := <-acked:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("unrelated ACK waited for another stream's I/O")
+	}
+	if second.Offset != 5 || second.pending != "" {
+		t.Fatal("ACK failed to commit progress")
+	}
+}
+
+func TestRunFailureClosesOutputAndStops(t *testing.T) {
+	s, st, filename := fixture(t)
+	s.done = make(chan struct{})
+	failures := make(chan error, 1)
+	s.onError = func(err error) { failures <- err }
+	writeMetadata(t, filename, st, 1)
+	delete(s.streams, st.UID)
+	s.state = &gatedState{SourceState: s.state, failure: errors.New("checkpoint save failed")}
+	out := make(chan api.SourceEvent, 1)
+	if err := s.Start(context.Background(), out); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stopCancel()
+		if err := s.Stop(stopCtx); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-failures:
+	case <-ctx.Done():
+		t.Fatal("checkpoint error was not reported")
+	}
+	select {
+	case _, open := <-out:
+		if open {
+			t.Fatal("failed source emitted data")
+		}
+	case <-ctx.Done():
+		t.Fatal("failed source left output open")
+	}
+}
+
+func TestStartRejectsInvalidCheckpoint(t *testing.T) {
+	for _, invalid := range []string{"json", "escaped-path"} {
+		t.Run(invalid, func(t *testing.T) {
+			s, st, _ := fixture(t)
+			payload := []byte("invalid json")
+			if invalid == "escaped-path" {
+				st.Path = filepath.Join(s.cfg.VMConsoleRoot, "..", "outside", "firecracker.log")
+				var err error
+				payload, err = json.Marshal(st.stream)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.state.Update(func(w state.SourceStateWriter) error { return w.Put([]byte(st.UID), payload) }); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Start(context.Background(), make(chan api.SourceEvent, 1)); err == nil {
+				t.Fatal("invalid checkpoint accepted")
+			}
+		})
+	}
 }
 
 func (c *countingState) Update(fn func(state.SourceStateWriter) error) error {

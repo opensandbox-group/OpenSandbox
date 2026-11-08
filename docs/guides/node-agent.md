@@ -151,6 +151,8 @@ Console records preserve raw bytes and land under `<cluster>/_streams/vm-console
 
 When a console path disappears, the Agent drains any open descriptor and waits 30 seconds before finalizing. A returning console within that window continues the same stream. Already finalized checkpoints are retained for 24 hours and pruned after the local VM metadata is gone. A file removed while the Agent is offline cannot be recovered and is reported as a source gap. The file sink currently does not automatically expire VM console output families.
 
+The grace window is the last opportunity to resume a UID stream: once finalization starts, a returning console is not collected. Source checkpoint reclamation requires both the input and metadata to be absent, so driver GC must remove both. VM state and acknowledgement locks are isolated per stream, while input scanning and bbolt writes remain sequential; production-scale throughput and VM density limits have not been established.
+
 See [collection mechanics](/architecture/data-plane/node-agent#firecracker-vm-console) for identity and recovery details.
 
 ## Key values

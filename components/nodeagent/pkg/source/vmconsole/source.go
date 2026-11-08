@@ -58,9 +58,15 @@ type stream struct {
 	Started          time.Time
 	Outcome          api.SourceOutcome
 	Ended            bool
-	file             *os.File
-	pending          string
-	ending           bool
+}
+
+// streamRuntime owns synchronization and descriptors; stream is the wire checkpoint.
+type streamRuntime struct {
+	mu sync.Mutex
+	stream
+	file    *os.File
+	pending string
+	ending  bool
 }
 
 type token struct {
@@ -74,7 +80,7 @@ type source struct {
 	state   registry.SourceState
 	onError func(error)
 	mu      sync.Mutex
-	streams map[string]*stream
+	streams map[string]*streamRuntime
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wake    chan struct{}
@@ -83,7 +89,7 @@ type source struct {
 
 func init() {
 	registry.RegisterSource(api.SourceNameVMConsole, func(d registry.SourceDependencies) (api.Source, error) {
-		return &source{cfg: d.Config, state: d.State, onError: d.OnError, streams: make(map[string]*stream), done: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
+		return &source{cfg: d.Config, state: d.State, onError: d.OnError, streams: make(map[string]*streamRuntime), done: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 	})
 }
 
@@ -115,7 +121,7 @@ func (s *source) Start(ctx context.Context, out chan<- api.SourceEvent) error {
 					return errors.New("VM console checkpoint belongs to a different input root")
 				}
 			}
-			s.streams[st.UID] = &st
+			s.streams[st.UID] = &streamRuntime{stream: st}
 			return nil
 		})
 	}); err != nil {
@@ -159,59 +165,86 @@ func (s *source) notify() {
 }
 
 func (s *source) Acknowledge(_ context.Context, results []api.AckResult) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, result := range results {
-		var t token
-		if err := json.Unmarshal(result.Token.Value, &t); err != nil {
-			return api.Permanent(err)
-		}
-		st := s.streams[t.UID]
-		if st == nil || result.Token.Source != api.SourceNameVMConsole || result.Token.StreamRef != streamRef(t.UID) || result.Token.ID != tokenID(t) || st.Sequence != t.Sequence {
-			return api.Permanent(errors.New("invalid VM console acknowledgement"))
-		}
-		if t.Offset == st.Offset {
-			continue
-		}
-		if st.pending != result.Token.ID || t.Offset < st.Offset {
-			return api.Permanent(errors.New("unexpected VM console offset"))
-		}
-		next := *st
-		next.Offset = t.Offset
-		if result.Disposition == api.AckIntentionalDrop {
-			next.Outcome.HadDrops = true
-			next.Outcome.LossReasons = api.AddLossReason(next.Outcome.LossReasons, result.Reason)
-		}
-		if err := s.save(&next); err != nil {
+		if err := func() error {
+			var t token
+			if err := json.Unmarshal(result.Token.Value, &t); err != nil {
+				return api.Permanent(err)
+			}
+			st := s.lookup(t.UID)
+			if st == nil {
+				return api.Permanent(errors.New("unknown VM console stream"))
+			}
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			if s.lookup(t.UID) != st || result.Token.Source != api.SourceNameVMConsole || result.Token.StreamRef != streamRef(t.UID) || result.Token.ID != tokenID(t) || st.Sequence != t.Sequence {
+				return api.Permanent(errors.New("invalid VM console acknowledgement"))
+			}
+			if t.Offset == st.Offset {
+				return nil
+			}
+			if st.pending != result.Token.ID || t.Offset < st.Offset {
+				return api.Permanent(errors.New("unexpected VM console offset"))
+			}
+			next := st.stream
+			next.Offset = t.Offset
+			if result.Disposition == api.AckIntentionalDrop {
+				next.Outcome.HadDrops = true
+				next.Outcome.LossReasons = api.AddLossReason(next.Outcome.LossReasons, result.Reason)
+			}
+			if err := s.save(&next); err != nil {
+				return err
+			}
+			st.stream = next
+			st.pending = ""
+			return nil
+		}(); err != nil {
 			return err
 		}
-		*st = next
-		st.pending = ""
 	}
 	s.notify()
 	return nil
 }
 
 func (s *source) AcknowledgeEnd(_ context.Context, t api.EndToken) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var value token
 	if err := json.Unmarshal(t.Value, &value); err != nil {
 		return api.Permanent(err)
 	}
-	st := s.streams[value.UID]
-	if st == nil || t.Source != api.SourceNameVMConsole || t.StreamRef != streamRef(value.UID) || t.ID != "end/"+tokenID(value) || value.Sequence != st.Sequence || value.Offset != st.Offset || !st.Finalizing && !st.Ended {
+	st := s.lookup(value.UID)
+	if st == nil {
+		return api.Permanent(errors.New("unknown VM console stream"))
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if s.lookup(value.UID) != st || t.Source != api.SourceNameVMConsole || t.StreamRef != streamRef(value.UID) || t.ID != "end/"+tokenID(value) || value.Sequence != st.Sequence || value.Offset != st.Offset || !st.Finalizing && !st.Ended {
 		return api.Permanent(errors.New("invalid VM console end acknowledgement"))
 	}
-	next := *st
+	next := st.stream
 	next.Ended = true
 	next.EndedAt = time.Now().UTC()
 	if err := s.save(&next); err != nil {
 		return err
 	}
-	*st = next
+	st.stream = next
 	s.notify()
 	return nil
+}
+
+func (s *source) lookup(uid string) *streamRuntime {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streams[uid]
+}
+
+func (s *source) snapshot() []*streamRuntime {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	streams := make([]*streamRuntime, 0, len(s.streams))
+	for _, st := range s.streams {
+		streams = append(streams, st)
+	}
+	return streams
 }
 
 func streamRef(uid string) api.StreamRef {
@@ -221,7 +254,7 @@ func streamRef(uid string) api.StreamRef {
 func tokenID(t token) string {
 	return fmt.Sprintf("%s/%d/%d", t.UID, t.Sequence, t.Offset)
 }
-func metadata(st *stream) api.StreamMetadata {
+func metadata(st *streamRuntime) api.StreamMetadata {
 	return api.StreamMetadata{"sandbox-uid": st.UID}
 }
 
@@ -229,15 +262,16 @@ func (s *source) run(ctx context.Context) {
 	defer close(s.done)
 	defer close(s.out)
 	defer func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		for _, st := range s.streams {
+		for _, st := range s.snapshot() {
+			st.mu.Lock()
 			if st.file != nil {
 				_ = st.file.Close()
 				st.file = nil
 			}
+			st.mu.Unlock()
 		}
 	}()
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -323,77 +357,34 @@ func (s *source) scan(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
 	for uid, record := range found {
-		if _, exists := s.streams[uid]; exists {
+		if s.lookup(uid) != nil {
 			continue
 		}
-		st := &stream{UID: uid, Path: record.path, PlacementAttempt: record.PlacementAttempt, Resource: api.Resource{SandboxID: record.Name, Namespace: record.Namespace, ClusterName: s.cfg.ClusterID, NodeName: s.cfg.NodeName}, Started: time.Now().UTC().Truncate(time.Second), Sequence: 1}
-		if err := s.save(st); err != nil {
-			s.mu.Unlock()
+		checkpoint := stream{UID: uid, Path: record.path, PlacementAttempt: record.PlacementAttempt, Resource: api.Resource{SandboxID: record.Name, Namespace: record.Namespace, ClusterName: s.cfg.ClusterID, NodeName: s.cfg.NodeName}, Started: time.Now().UTC().Truncate(time.Second), Sequence: 1}
+		if err := s.save(&checkpoint); err != nil {
 			return err
 		}
-		s.streams[uid] = st
-	}
-	uids := make([]string, 0, len(s.streams))
-	for uid := range s.streams {
-		uids = append(uids, uid)
-	}
-	s.mu.Unlock()
-	for _, uid := range uids {
 		s.mu.Lock()
-		st := s.streams[uid]
-		before := *st
-		if record, exists := found[uid]; exists && record.Name == st.Resource.SandboxID && record.Namespace == st.Resource.Namespace && record.PlacementAttempt >= st.PlacementAttempt {
-			st.PlacementAttempt = record.PlacementAttempt
-			if record.path != st.Path {
-				st.NextPath = record.path
-			}
+		s.streams[uid] = &streamRuntime{stream: checkpoint}
+		s.mu.Unlock()
+	}
+	for _, st := range s.snapshot() {
+		st.mu.Lock()
+		uid := st.UID
+		st.mu.Unlock()
+		record, present := found[uid]
+		ended, err := s.reconcile(st, record, present)
+		if err != nil {
+			return err
 		}
-		input := st.Path
-		if st.NextPath != "" {
-			if _, err := os.Stat(st.NextPath); errors.Is(err, os.ErrNotExist) {
-				st.NextPath = ""
-			} else if err != nil {
-				s.mu.Unlock()
-				return err
-			} else {
-				input = st.NextPath
-			}
-		}
-		_, statErr := os.Stat(input)
-		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			s.mu.Unlock()
-			return statErr
-		}
-		missing := errors.Is(statErr, os.ErrNotExist)
-		if st.Ended {
-			if _, present := found[uid]; missing && !present && time.Since(st.EndedAt) > 24*time.Hour {
-				if err := s.state.Update(func(w state.SourceStateWriter) error { return w.Delete([]byte(uid)) }); err != nil {
-					s.mu.Unlock()
-					return err
-				}
-				delete(s.streams, uid)
-			}
-			s.mu.Unlock()
+		st.mu.Lock()
+		finished := st.Ended
+		st.mu.Unlock()
+		if finished {
 			continue
 		}
-		if missing {
-			if st.MissingSince.IsZero() {
-				st.MissingSince = time.Now().UTC()
-			}
-		} else {
-			st.MissingSince = time.Time{}
-		}
-		if st.PlacementAttempt != before.PlacementAttempt || st.NextPath != before.NextPath || !st.MissingSince.Equal(before.MissingSince) {
-			if err := s.save(st); err != nil {
-				s.mu.Unlock()
-				return err
-			}
-		}
-		ended := missing && time.Since(st.MissingSince) >= disappearanceGrace
 		event, err := s.read(st, ended)
-		s.mu.Unlock()
 		if err != nil {
 			return err
 		}
@@ -408,7 +399,66 @@ func (s *source) scan(ctx context.Context) error {
 	return nil
 }
 
-func (s *source) open(st *stream) error {
+// Only the scanner changes input paths. ACKs may advance state while Stat runs.
+func (s *source) reconcile(st *streamRuntime, record vmMetadata, present bool) (bool, error) {
+	st.mu.Lock()
+	path, nextPath := st.Path, st.NextPath
+	if present && record.Name == st.Resource.SandboxID && record.Namespace == st.Resource.Namespace && record.PlacementAttempt >= st.PlacementAttempt && record.path != path {
+		nextPath = record.path
+	}
+	st.mu.Unlock()
+	input := path
+	if nextPath != "" {
+		if _, err := os.Stat(nextPath); errors.Is(err, os.ErrNotExist) {
+			nextPath = ""
+		} else if err != nil {
+			return false, err
+		} else {
+			input = nextPath
+		}
+	}
+	_, err := os.Stat(input)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	missing := errors.Is(err, os.ErrNotExist)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.Ended {
+		if missing && !present && time.Since(st.EndedAt) > 24*time.Hour {
+			if err := s.state.Update(func(w state.SourceStateWriter) error { return w.Delete([]byte(st.UID)) }); err != nil {
+				return false, err
+			}
+			s.mu.Lock()
+			if s.streams[st.UID] == st {
+				delete(s.streams, st.UID)
+			}
+			s.mu.Unlock()
+		}
+		return false, nil
+	}
+	next := st.stream
+	if present && record.Name == st.Resource.SandboxID && record.Namespace == st.Resource.Namespace && record.PlacementAttempt >= st.PlacementAttempt {
+		next.PlacementAttempt = record.PlacementAttempt
+	}
+	next.NextPath = nextPath
+	if missing {
+		if next.MissingSince.IsZero() {
+			next.MissingSince = time.Now().UTC()
+		}
+	} else {
+		next.MissingSince = time.Time{}
+	}
+	if next.PlacementAttempt != st.PlacementAttempt || next.NextPath != st.NextPath || !next.MissingSince.Equal(st.MissingSince) {
+		if err := s.save(&next); err != nil {
+			return false, err
+		}
+		st.stream = next
+	}
+	return missing && time.Since(st.MissingSince) >= disappearanceGrace, nil
+}
+
+func (s *source) open(st *streamRuntime) error {
 	candidates := []string{st.Path}
 	preferOld := false
 	if st.NextPath != "" {
@@ -467,19 +517,54 @@ func (s *source) open(st *stream) error {
 	return nil
 }
 
-func gap(st *stream, reason string) {
+func gap(st *streamRuntime, reason string) {
 	st.Outcome.HadSourceGaps = true
 	st.Outcome.LossReasons = api.AddLossReason(st.Outcome.LossReasons, reason)
 }
 
-func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
-	if st.pending != "" || st.ending {
+func (s *source) read(st *streamRuntime, ended bool) (*api.SourceEvent, error) {
+	st.mu.Lock()
+	if st.pending != "" || st.ending || st.Ended {
+		st.mu.Unlock()
 		return nil, nil
 	}
 	if st.Finalizing {
-		return s.endEvent(st), nil
+		event := s.endEvent(st)
+		st.mu.Unlock()
+		return event, nil
 	}
-	before := *st
+	before := st.stream
+	before.Outcome = before.Outcome.Clone()
+	input := &streamRuntime{stream: before, file: st.file}
+	st.mu.Unlock()
+	event, err := s.readInput(input, ended)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	// Descriptor ownership stays with the scanner, including error cleanup.
+	st.file = input.file
+	if err != nil {
+		return nil, err
+	}
+	if st.Sequence != before.Sequence || st.Offset != before.Offset || st.pending != "" || st.Finalizing || st.Ended {
+		return nil, api.Permanent(errors.New("VM console changed during input read"))
+	}
+	next := st.stream
+	next.Path, next.NextPath = input.Path, input.NextPath
+	next.Device, next.Inode = input.Device, input.Inode
+	next.Offset, next.Sequence = input.Offset, input.Sequence
+	next.Prefix, next.PrefixBytes = input.Prefix, input.PrefixBytes
+	next.Outcome, next.Finalizing = input.Outcome, input.Finalizing
+	if next.Path != before.Path || next.NextPath != before.NextPath || next.Device != before.Device || next.Inode != before.Inode || next.Offset != before.Offset || next.Sequence != before.Sequence || next.Prefix != before.Prefix || next.PrefixBytes != before.PrefixBytes || next.Finalizing != before.Finalizing || !next.Outcome.Equal(before.Outcome) {
+		if err := s.save(&next); err != nil {
+			return nil, err
+		}
+		st.stream = next
+	}
+	st.pending, st.ending = input.pending, input.ending
+	return event, nil
+}
+
+func (s *source) readInput(st *streamRuntime, ended bool) (*api.SourceEvent, error) {
 	if st.file == nil {
 		if err := s.open(st); err != nil {
 			return nil, err
@@ -512,9 +597,6 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 			st.Path, st.NextPath = target, ""
 			st.Sequence++
 			gap(st, "vm-console-file-replaced")
-			if err := s.save(st); err != nil {
-				return nil, err
-			}
 			return nil, nil
 		}
 		if info.Size() < st.Offset {
@@ -544,11 +626,7 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 			hash := sha256.Sum256(prefix[:n])
 			st.PrefixBytes, st.Prefix = n, hex.EncodeToString(hash[:])
 		}
-		if st.Path != before.Path || st.NextPath != before.NextPath || st.Device != before.Device || st.Inode != before.Inode || st.Sequence != before.Sequence || st.Prefix != before.Prefix || st.PrefixBytes != before.PrefixBytes || !st.Outcome.Equal(before.Outcome) {
-			if err := s.save(st); err != nil {
-				return nil, err
-			}
-		}
+
 		if info.Size() > st.Offset {
 			chunkSize := min(int64(64<<10), s.cfg.PerSandboxQueueBytes-1024)
 			if chunkSize <= 0 {
@@ -577,13 +655,10 @@ func (s *source) read(st *stream, ended bool) (*api.SourceEvent, error) {
 		st.file = nil
 	}
 	st.Finalizing = true
-	if err := s.save(st); err != nil {
-		return nil, err
-	}
 	return s.endEvent(st), nil
 }
 
-func (s *source) endEvent(st *stream) *api.SourceEvent {
+func (s *source) endEvent(st *streamRuntime) *api.SourceEvent {
 	t := token{UID: st.UID, Sequence: st.Sequence, Offset: st.Offset}
 	value, _ := json.Marshal(t)
 	st.ending = true
