@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -253,31 +254,136 @@ func TestWakeOverallDeadline_FreshConnReplayAfterHeadersSucceeds(t *testing.T) {
 	}
 }
 
-// A generic backoff during the wake phase can spend the rest of the budget;
-// the next attempt must then not be sent at all.
-func TestWakeOverallDeadline_SpentByBackoffSendsNoFurtherAttempt(t *testing.T) {
-	srv, calls := newInflightWakeServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-	})
+func TestWakeOverallDeadline_RejectsGenericBackoffBeyondBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		method     string
+		backoff    time.Duration
+		retryAfter string
+	}{
+		{name: "get-backoff", method: http.MethodGet, backoff: time.Minute},
+		{name: "get-retry-after", method: http.MethodGet, retryAfter: "60"},
+		{name: "opted-in-post", method: http.MethodPost, backoff: time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, calls := newInflightWakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tc.method {
+					t.Errorf("method = %s, want %s", r.Method, tc.method)
+				}
+				w.Header().Set("Retry-After", tc.retryAfter)
+				w.Header().Set("X-Request-Id", "ordinary-failure")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(`{"code":"UPSTREAM_FAILURE","message":"upstream failed"}`))
+			})
 
-	cfg := inflightWakeConfig(inflightWakeBudget)
-	cfg.MaxRetries = 1
-	cfg.InitialBackoff = 4 * inflightWakeBudget
-	client := NewLifecycleClient(srv.URL, "", WithRetry(cfg))
-	_, err := client.GetSandbox(context.Background(), "sandbox-1")
+			cfg := inflightWakeConfig(inflightWakeBudget)
+			cfg.MaxRetries = 1
+			cfg.InitialBackoff = tc.backoff
+			cfg.RetryableStatusCodesNonIdempotent = []int{http.StatusBadGateway}
+			client := NewLifecycleClient(srv.URL, "", WithRetry(cfg))
+			// Safety net for the unfixed minute-long sleep, not the wake budget.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			started := time.Now()
+			var err error
+			if tc.method == http.MethodPost {
+				_, err = client.CreateSandbox(ctx, CreateSandboxRequest{TemplateID: "tpl_1"})
+			} else {
+				_, err = client.GetSandbox(ctx, "sandbox-1")
+			}
+			if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+				t.Errorf("40ms wake budget did not bound the generic wait: elapsed %v", elapsed)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway || apiErr.RequestID != "ordinary-failure" {
+				t.Fatalf("err = %v, want the last ordinary 502 response", err)
+			}
+			var wakeErr *SandboxWakeTimeoutError
+			if errors.As(err, &wakeErr) {
+				t.Fatalf("err = %v, ordinary failure must not claim the request was never forwarded", err)
+			}
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("calls = %d, want marked response and ordinary failure only", got)
+			}
+		})
+	}
+}
 
-	var wakeErr *SandboxWakeTimeoutError
-	if !errors.As(err, &wakeErr) {
-		t.Fatalf("err = %v, want SandboxWakeTimeoutError", err)
+func TestWakeOverallDeadline_GenericBackoffControls(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		marked   bool
+		deadline time.Duration
+	}{
+		{name: "fitting-backoff", marked: true, deadline: time.Minute},
+		{name: "unbounded-wake", marked: true, deadline: -1},
+		{name: "no-wake-response", deadline: time.Nanosecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := inflightWakeConfig(tc.deadline)
+			cfg.MaxRetries = 1
+			cfg.InitialBackoff = time.Millisecond
+			client := NewClient("http://unused", "", "", WithRetry(cfg))
+			calls := 0
+			err := client.withRetry(context.Background(), func(context.Context) error {
+				calls++
+				if tc.marked && calls == 1 {
+					return &APIError{StatusCode: http.StatusServiceUnavailable, WakeExpired: true, RetryAfterPresent: true}
+				}
+				if calls == 1 || (tc.marked && calls == 2) {
+					return &APIError{StatusCode: http.StatusBadGateway}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			want := 2
+			if tc.marked {
+				want++
+			}
+			if calls != want {
+				t.Fatalf("calls = %d, want %d", calls, want)
+			}
+		})
 	}
-	if wakeErr.Attempts != 1 {
-		t.Fatalf("Attempts = %d, want 1", wakeErr.Attempts)
-	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || !apiErr.WakeExpired {
-		t.Fatalf("err = %v, want it to wrap the marked wake response", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("calls = %d, want no attempt after the budget was spent", got)
+}
+
+func TestWakeOverallDeadline_GenericBackoffPreservesError(t *testing.T) {
+	for _, cancelCaller := range []bool{false, true} {
+		name := "transport-error"
+		if cancelCaller {
+			name = "caller-cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := inflightWakeConfig(time.Minute)
+			cfg.MaxRetries = 1
+			cfg.InitialBackoff = time.Hour
+			client := NewClient("http://unused", "", "", WithRetry(cfg))
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			failure := &net.OpError{Op: "read", Net: "tcp", Err: io.ErrUnexpectedEOF}
+			calls := 0
+			err := client.withRetry(ctx, func(context.Context) error {
+				calls++
+				if calls == 1 {
+					return &APIError{StatusCode: http.StatusServiceUnavailable, WakeExpired: true, RetryAfterPresent: true}
+				}
+				if cancelCaller {
+					cancel()
+				}
+				return failure
+			})
+			var want error = failure
+			if cancelCaller {
+				want = context.Canceled
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("err = %v, want %v", err, want)
+			}
+			if calls != 2 {
+				t.Fatalf("calls = %d, want 2", calls)
+			}
+		})
 	}
 }
