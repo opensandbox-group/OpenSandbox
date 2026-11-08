@@ -139,6 +139,52 @@ func TestFastSandboxSubjectReadinessConfirmedIntentAndSlowIPC(t *testing.T) {
 	waitReadiness(t, s, "other", "r2", "a2")
 }
 
+func TestFastSandboxSubjectReadinessRegistrationInstance(t *testing.T) {
+	for _, variant := range []string{"same-fence-same-payload", "same-fence-different-payload", "different-fence-same-payload"} {
+		t.Run(variant, func(t *testing.T) {
+			s, h, fault := snapshotFaultHarness(t, "", "readiness")
+			mutationPersistence(t, s)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			select {
+			case <-fault.reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("old registration Commit not reached")
+			}
+			old := latestSubjectSnapshot(t, s, testUID)
+			requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+			require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
+			r, a := testFenceR, testFenceA
+			if variant == "different-fence-same-payload" {
+				r, a = "next-r", "next-a"
+			}
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, r, a, 2, vaultAllowPolicy())).Code)
+			if variant == "same-fence-different-payload" {
+				require.Equal(t, 201, doVault(t, s, "POST", testUID, vaultCredential(), "").Code)
+			}
+			latest := latestSubjectSnapshot(t, s, testUID)
+			if variant == "same-fence-different-payload" {
+				require.NotEqual(t, old.payload, latest.payload)
+			} else {
+				require.Equal(t, old.payload, latest.payload, "the regression requires byte-identical payloads")
+			}
+			requireReadinessBlocked(t, s, testUID, r, a)
+			// Release only the old registration's real Readback confirmation.
+			// The next Prepare barrier proves the worker stamped that result,
+			// while the new registration's install cannot yet be acknowledged.
+			close(fault.release)
+			select {
+			case <-fault.retryReached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("new registration Prepare not reached")
+			}
+			requireReadinessBlocked(t, s, testUID, r, a)
+			close(fault.retryRelease)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, r, a), latest)
+			waitReadiness(t, s, testUID, r, a)
+		})
+	}
+}
+
 func TestFastSandboxSubjectReadinessReconcileAndPermanentFailure(t *testing.T) {
 	for _, terminal := range []bool{false, true} {
 		t.Run(map[bool]string{false: "uncertain-commit", true: "rejected"}[terminal], func(t *testing.T) {

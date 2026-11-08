@@ -1132,7 +1132,15 @@ func TestFastSandboxSubjectSnapshotCoalesceKeysAndDiscard(t *testing.T) {
 	next := old
 	next.fence, next.target, next.epoch = newFence, mustSubjectTarget(subj, newFence), newEpoch
 	d.enqueueInstallLocked(next)
-	require.Equal(t, []fastSandboxSubjectIntent{marker, {subj: subj, fence: newFence, target: next.target}, next}, d.queue)
+	require.Len(t, d.queue, 3)
+	require.Equal(t, []fastSandboxSubjectIntent{marker, next}, []fastSandboxSubjectIntent{d.queue[0], d.queue[2]})
+	registered := d.queue[1]
+	require.Equal(t, subj, registered.subj)
+	require.Equal(t, newFence, registered.fence)
+	require.Equal(t, next.target, registered.target)
+	require.False(t, registered.unload)
+	require.Nil(t, registered.epoch)
+	require.Nil(t, registered.snapshot)
 	s.recordSubjectIntentLocked(subj, newFence, true)
 	for _, intent := range d.queue {
 		require.Nil(t, intent.snapshot, "Unload drops all generation installs")
