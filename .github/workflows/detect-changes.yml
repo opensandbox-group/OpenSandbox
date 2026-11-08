@@ -71,10 +71,22 @@ jobs:
               "fast-sandbox": (path) =>
                 workflowChanged(path, "fast-sandbox-test.yml") ||
                 path.startsWith("scripts/fast-sandbox-env/") ||
-                path.startsWith("manifests/") ||
-                path.startsWith("server/") ||
-                path.startsWith("components/egress/") ||
-                path.startsWith("components/ingress/") ||
+                ((path.startsWith("manifests/charts/base/") ||
+                  path.startsWith("manifests/charts/fast-sandbox/") ||
+                  path.startsWith("manifests/charts/server/") ||
+                  path.startsWith("manifests/charts/ingress-gateway/")) &&
+                  !path.endsWith(".md")) ||
+                path === "manifests/release/build-fast-sandbox.sh" ||
+                path === "manifests/third-party/fast-sandbox.commit" ||
+                (path.startsWith("server/") &&
+                  !path.startsWith("server/tests/") &&
+                  !path.endsWith(".md")) ||
+                ((path.startsWith("components/egress/") ||
+                  path.startsWith("components/ingress/")) &&
+                  !path.startsWith("components/egress/docs/") &&
+                  !path.startsWith("components/ingress/docs/") &&
+                  !path.endsWith(".md") &&
+                  !path.endsWith("_test.go")) ||
                 path === "tests/python/tests/test_fsb_e2e.py" ||
                 path === "tests/python/tests/test_fsb_idle_pause_e2e.py",
               egress: (path) =>
