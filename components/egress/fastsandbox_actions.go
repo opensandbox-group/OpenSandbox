@@ -553,12 +553,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 			s.reg.Unregister(subj)
 			s.mu.Lock()
-			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil { // preserve this exact token through C publication
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
 				return status, fmt.Errorf("subject reset purge: %w", err)
 			}
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.needsReset = false
 			token.oldRemoved = true
 			token.purged = true
@@ -566,12 +566,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		}
 		s.mu.Lock()
 		if !token.purged {
-			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil {
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
 				return status, fmt.Errorf("subject rebind purge: %w", err)
 			}
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.purged = true
 		}
 		removeOld := token.removeOld && !token.oldRemoved
@@ -727,6 +727,7 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		s.mu.Lock()
 		stale := !s.fenceMatchesLocked(subj, fence)
 		pol := s.pendingPolicies[subj]
+		acknowledged := s.subjectSnapshotAcknowledgedLocked(subj, fence)
 		s.mu.Unlock()
 		if stale {
 			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
@@ -736,6 +737,9 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 			// ordering violation) or the binding was removed. Fail closed —
 			// the subject must never activate without its current policy.
 			return http.StatusConflict, fmt.Errorf("data-plane-ready for subject %s with no pending policy", subj)
+		}
+		if !acknowledged {
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
 		}
 		applyStarted := time.Now()
 		if err := s.applyPolicy(subj, pol); err != nil {
