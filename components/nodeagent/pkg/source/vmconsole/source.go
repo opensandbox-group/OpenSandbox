@@ -410,8 +410,21 @@ func (s *source) scan(ctx context.Context) error {
 
 func (s *source) open(st *stream) error {
 	candidates := []string{st.Path}
+	preferOld := false
 	if st.NextPath != "" {
 		candidates = []string{st.NextPath, st.Path}
+		if info, err := os.Stat(st.Path); err == nil {
+			device, inode, err := fileidentity.Read(info)
+			if err != nil {
+				return err
+			}
+			preferOld = st.Inode != 0 && st.Device == device && st.Inode == inode
+			if preferOld {
+				candidates = []string{st.Path, st.NextPath}
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	for _, name := range candidates {
 		file, err := os.Open(name)
@@ -435,13 +448,20 @@ func (s *source) open(st *stream) error {
 			_ = file.Close()
 			return err
 		}
+		if preferOld && name == st.Path && (st.Device != device || st.Inode != inode) {
+			_ = file.Close()
+			continue
+		}
 		if st.Inode != 0 && (st.Device != device || st.Inode != inode) {
 			st.Offset, st.PrefixBytes, st.Prefix = 0, 0, ""
 			st.Sequence++
 			gap(st, "vm-console-file-replaced")
 		}
 		st.Device, st.Inode = device, inode
-		st.file, st.Path, st.NextPath = file, name, ""
+		if name == st.NextPath {
+			st.NextPath = ""
+		}
+		st.file, st.Path = file, name
 		return nil
 	}
 	return nil

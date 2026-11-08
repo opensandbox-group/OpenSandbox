@@ -189,6 +189,80 @@ func requireFileIdentity(t *testing.T) {
 	}
 }
 
+func TestRestartWithPendingConsoleSwitch(t *testing.T) {
+	requireFileIdentity(t)
+	for _, old := range []string{"survives", "removed", "replaced"} {
+		t.Run(old, func(t *testing.T) {
+			s, st, filename := fixture(t)
+			payload := bytes.Repeat([]byte("a"), 150000)
+			if err := os.WriteFile(filename, payload, 0640); err != nil {
+				t.Fatal(err)
+			}
+			first, err := s.read(st, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			acknowledge(t, s, first)
+			next := filepath.Join(s.cfg.VMConsoleRoot, "jails", "firecracker", st.UID[:32], "root", "firecracker.log")
+			if err := os.MkdirAll(filepath.Dir(next), 0750); err != nil {
+				t.Fatal(err)
+			}
+			writeMetadata(t, next, st, 2)
+			if err := os.WriteFile(next, []byte("new"), 0640); err != nil {
+				t.Fatal(err)
+			}
+			st.NextPath = next
+			if err := s.save(st); err != nil {
+				t.Fatal(err)
+			}
+			_ = st.file.Close()
+			st.file = nil
+			if old != "survives" {
+				if err := os.Rename(filename, filename+".retired"); err != nil {
+					t.Fatal(err)
+				}
+				if old == "replaced" {
+					if err := os.WriteFile(filename, []byte("wrong inode"), 0640); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			restored := &source{cfg: s.cfg, state: s.state, streams: make(map[string]*stream), done: make(chan struct{}), wake: make(chan struct{}, 1)}
+			out := make(chan api.SourceEvent, 4)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(func() {
+				cancel()
+				if err := restored.Stop(context.Background()); err != nil {
+					t.Error(err)
+				}
+			})
+			if err := restored.Start(ctx, out); err != nil {
+				t.Fatal(err)
+			}
+			var got []byte
+			want := []byte("new")
+			if old == "survives" {
+				want = append(append([]byte(nil), payload[len(first.Delivery.Record.Body):]...), want...)
+			}
+			for len(got) < len(want) {
+				select {
+				case event := <-out:
+					if event.Delivery == nil || event.Delivery.StreamRef != first.Delivery.StreamRef {
+						t.Fatal("stream changed during recovery")
+					}
+					got = append(got, event.Delivery.Record.Body...)
+					acknowledge(t, restored, &event)
+				case <-time.After(5 * time.Second):
+					t.Fatal("recovery stalled")
+				}
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatal("old tail was skipped or replacement was read out of order")
+			}
+		})
+	}
+}
+
 func writeMetadata(t *testing.T, filename string, st *stream, attempt int64) {
 	t.Helper()
 	data, err := json.Marshal(vmMetadata{Version: 1, UID: st.UID, Namespace: st.Resource.Namespace, Name: st.Resource.SandboxID, PlacementAttempt: attempt})
