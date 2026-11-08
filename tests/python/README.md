@@ -42,6 +42,8 @@ cd tests/python
 OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" make test-fsb
 ```
 
+The independent port-scope packet-level test requires the controlled MITM echo container on the kind network: the same handler serves HTTP on TCP 18082/18083 and CA-signed TLS on TCP 443. `integration-env.sh sdk-e2e` inspects that container and exports `OPENSANDBOX_TEST_FSB_EGRESS_TARGET_IP` and `OPENSANDBOX_TEST_FSB_EGRESS_TARGET_DOMAIN` (from `MITM_ECHO_DOMAIN`, default `echo.test`); set these when running manually and use a template with curl and the existing MITM CA baked into its system trust store. TLS probes use `--resolve` with normal certificate verification, never `-k`, and a separate default-allow sandbox proves fixture health and isolation. If the target IP is unset, only this packet-level test is skipped; the port-scope contract test still runs when the fsb template is configured.
+
 #### Covered SDK surface
 
 Template management (`SandboxManager`):
@@ -84,7 +86,8 @@ Egress policy (`Sandbox`):
 
 - [x] `patch_egress_rules` — merge semantics verified **at HTTP level** (newly allowed target serves HTTPS)
 - [x] `delete_egress_rules` — removal verified **at HTTP level** (deleted target stops serving)
-- [x] port-scoped rules fail closed with 400 (create-carried and PATCH)
+- [x] TCP port-scoped rules — create/get preserve IP+ports and port-only scopes; PATCH keeps distinct scopes and replaces reordered equivalent scopes; DELETE `[""]` removes only port-only rules and DELETE `[target]` removes every scope of that IP; domain+ports remains forbidden, UDP is unsupported
+- [x] controlled TCP traffic — IP/port-only allows, L3/L4 deny priority, CIDR+443 and original-port MITM enforcement with verified TLS, per-subject isolation, pause/resume policy persistence, and DELETE convergence
 
 State fidelity:
 

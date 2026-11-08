@@ -30,7 +30,7 @@
 //	    tcp/udp dport 853 drop                        <- DoT bypass blocked
 //	    ip saddr <ip> jump subj_<id>                  <- one rule per subject
 //	    meta mark & 0x2 != 0x2 drop                   <- fail-closed tail
-//	  chain subj_<id> (regular chain)                 <- deny sets only
+//	  chain subj_<id> (regular chain)                 <- deny sets and port rules
 //	    ip daddr @subj_<id>_deny_v4/v6 drop
 //
 // Dispatch matches the sandbox source IP only — never iifname: with
@@ -154,8 +154,7 @@ type Options struct {
 	// profile's uid-scoped upstream rules.
 	UpstreamProxy *UpstreamProxyEndpoint
 	// PortFloorDenyRanges carries the platform port cap (reachable.ports.cap
-	// complement), enforced profile-wide in the master chains. User
-	// port-scoped rules never reach this profile (#2213).
+	// complement), enforced profile-wide in the master chains.
 	PortFloorDenyRanges []policy.PortRange
 }
 
@@ -337,19 +336,6 @@ func (a *Applier) ApplyPolicy(ctx context.Context, s subject.Subject, pol *polic
 	}
 	if pol == nil {
 		pol = policy.DefaultDenyPolicy()
-	}
-	// User port-scoped rules (Ports) would be silently dropped by the fast
-	// path — a deny rule that stops denying is fail-open — so refuse the
-	// apply. PortRanges-only rules are the platform floor, enforced in the
-	// master chains, and are exempt.
-	blocked := 0
-	for _, r := range pol.Egress {
-		if len(r.Ports) > 0 {
-			blocked++
-		}
-	}
-	if blocked > 0 {
-		return fmt.Errorf("fastsandboxnft: subject policy carries %d port-scoped rule(s), which the fast path cannot enforce", blocked)
 	}
 	var b strings.Builder
 	if err := writeSubjectPolicySwapFragment(&b, s, pol, a.opts.MitmRedirectPort); err != nil {
@@ -619,8 +605,8 @@ func writeSubjectDenyFirstFragment(b *strings.Builder, s subject.Subject, att ac
 	}
 	writeSubjectChain(b, s, mitmPort)
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, true)
-	writeSubjectInputVerdictRules(b, s, policy.ActionDeny, mitmPort)
+	writeSubjectForwardDenyRules(b, s, nil, true)
+	writeSubjectInputVerdictRules(b, s, nil, mitmPort)
 	return nil
 }
 
@@ -632,9 +618,9 @@ func writeSubjectInitialPolicyFragment(b *strings.Builder, s subject.Subject, at
 	}
 	writeSubjectChain(b, s, mitmPort)
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, false)
-	writeSubjectMarkRules(b, s, pol.DefaultAction)
-	writeSubjectInputVerdictRules(b, s, pol.DefaultAction, mitmPort)
+	writeSubjectForwardDenyRules(b, s, pol, false)
+	writeSubjectMarkRules(b, s, pol)
+	writeSubjectInputVerdictRules(b, s, pol, mitmPort)
 	return nil
 }
 
@@ -657,8 +643,8 @@ func writeSubjectResetFragment(b *strings.Builder, s subject.Subject, att action
 		fmt.Fprintf(b, "flush set inet %s %s\n", TableName, name)
 	}
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, true)
-	writeSubjectInputVerdictRules(b, s, policy.ActionDeny, mitmPort)
+	writeSubjectForwardDenyRules(b, s, nil, true)
+	writeSubjectInputVerdictRules(b, s, nil, mitmPort)
 	return nil
 }
 
@@ -692,9 +678,9 @@ func writeSubjectPolicySwapFragment(b *strings.Builder, s subject.Subject, pol *
 	if err := writeSetElements(b, denySetName(s, "v6"), denyV6); err != nil {
 		return err
 	}
-	writeSubjectForwardDenyRules(b, s, false)
-	writeSubjectMarkRules(b, s, pol.DefaultAction)
-	writeSubjectInputVerdictRules(b, s, pol.DefaultAction, mitmPort)
+	writeSubjectForwardDenyRules(b, s, pol, false)
+	writeSubjectMarkRules(b, s, pol)
+	writeSubjectInputVerdictRules(b, s, pol, mitmPort)
 	return nil
 }
 
@@ -759,14 +745,16 @@ func writeSubjectChain(b *strings.Builder, s subject.Subject, mitmPort int) {
 }
 
 // writeSubjectForwardDenyRules emits the forward-path subject chain content:
-// the deny-set drops ONLY. No accept verdicts exist in the forward path
+// the deny-set and port-scoped drops ONLY. No accept verdicts exist in the forward path
 // (bridge-netfilter semantics — an explicit accept would return the frame to
 // the bridge L2 path and drop it); allowed traffic is marked in prerouting
 // and simply not dropped by the master-chain tail. denyFirst additionally
 // appends a bare drop so a deny-first subject is blocked even before any
 // marks could exist.
-func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, denyFirst bool) {
+func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy, denyFirst bool) {
 	chain := subjectChain(s)
+	deny, _ := pol.PortScopedRules()
+	writeSubjectPortRules(b, chain, deny, false, "drop")
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s drop\n", TableName, chain, denySetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s drop\n", TableName, chain, denySetName(s, "v6"))
 	if denyFirst {
@@ -779,12 +767,14 @@ func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, denyFir
 // unmarked and is dropped by the master-chain tail); default-allow policies
 // mark EVERY outbound packet (the deny sets still drop). Deny-first subjects
 // carry no mark rules at all.
-func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, defaultAction string) {
+func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy) {
 	chain := markChainName(s)
-	if defaultAction == policy.ActionAllow {
+	if pol.DefaultAction == policy.ActionAllow {
 		fmt.Fprintf(b, "add rule inet %s %s meta mark set 0x%x\n", TableName, chain, allowMark)
 		return
 	}
+	_, allow := pol.PortScopedRules()
+	writeSubjectPortRules(b, chain, allow, false, fmt.Sprintf("meta mark set 0x%x", allowMark))
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s meta mark set 0x%x\n", TableName, chain, allowSetName(s, "v4"), allowMark)
 	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s meta mark set 0x%x\n", TableName, chain, allowSetName(s, "v6"), allowMark)
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s meta mark set 0x%x\n", TableName, chain, dynSetName(s, "v4"), allowMark)
@@ -797,21 +787,53 @@ func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, defaultAction 
 // accept semantics are normal for local delivery, and the conntrack ORIGINAL
 // destination is matched. The trailing rule carries the default action: drop
 // for default-deny (deny-first and enforcing), accept for default-allow.
-func writeSubjectInputVerdictRules(b *strings.Builder, s subject.Subject, defaultAction string, mitmPort int) {
+func writeSubjectInputVerdictRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy, mitmPort int) {
 	if mitmPort <= 0 {
 		return
 	}
 	in := subjectChainIn(s)
+	deny, allow := pol.PortScopedRules()
+	writeSubjectPortRules(b, in, deny, true, "drop")
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s drop\n", TableName, in, denySetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s drop\n", TableName, in, denySetName(s, "v6"))
+	writeSubjectPortRules(b, in, allow, true, "accept")
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s accept\n", TableName, in, dynSetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s accept\n", TableName, in, dynSetName(s, "v6"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s accept\n", TableName, in, allowSetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s accept\n", TableName, in, allowSetName(s, "v6"))
-	if defaultAction == policy.ActionDeny {
+	if pol == nil || pol.DefaultAction == policy.ActionDeny {
 		fmt.Fprintf(b, "add rule inet %s %s drop\n", TableName, in)
 	} else {
 		fmt.Fprintf(b, "add rule inet %s %s accept\n", TableName, in)
+	}
+}
+
+func writeSubjectPortRules(b *strings.Builder, chain string, rules []policy.PortScopedRule, original bool, verdict string) {
+	for _, r := range rules {
+		// PortRanges-only rules are the platform cap, already enforced in the master chains.
+		if len(r.Ports) == 0 {
+			continue
+		}
+		members := make([]string, 0, len(r.Ports))
+		for _, port := range r.Ports {
+			members = append(members, fmt.Sprintf("%d", port))
+		}
+		target := ""
+		if r.Target != "" {
+			daddr := "ip daddr"
+			if r.IsV6 {
+				daddr = "ip6 daddr"
+			}
+			if original {
+				daddr = "ct original " + daddr
+			}
+			target = daddr + " " + r.Target + " "
+		}
+		dport := "tcp dport"
+		if original {
+			dport = "meta l4proto tcp ct original proto-dst"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s%s { %s } %s\n", TableName, chain, target, dport, strings.Join(members, ", "), verdict)
 	}
 }
 

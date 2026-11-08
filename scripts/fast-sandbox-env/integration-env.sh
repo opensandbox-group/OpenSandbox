@@ -1294,6 +1294,7 @@ import http.server
 import json
 import ssl
 import sys
+import threading
 
 port, cert, key = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 
@@ -1313,6 +1314,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+
+for http_port in (18082, 18083):
+    http_server = http.server.ThreadingHTTPServer(("0.0.0.0", http_port), Handler)
+    threading.Thread(target=http_server.serve_forever, daemon=True).start()
 
 httpd = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -3756,6 +3761,12 @@ sdk_e2e() {
 		template_ids+=("$template_id")
 		template_origins+=("fast-sandbox-env")
 	fi
+	local egress_target_ip
+	egress_target_ip="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{end}}' "$MITM_ECHO_CONTAINER")" \
+		|| die "could not inspect the MITM echo container (run up first)"
+	[[ -n "$egress_target_ip" ]] || die "MITM echo container has no IP (run up first)"
+	export OPENSANDBOX_TEST_FSB_EGRESS_TARGET_IP="$egress_target_ip"
+	export OPENSANDBOX_TEST_FSB_EGRESS_TARGET_DOMAIN="$MITM_ECHO_DOMAIN"
 	export OPENSANDBOX_TEST_DOMAIN="127.0.0.1:$SERVER_HOST_PORT"
 	export OPENSANDBOX_TEST_PROTOCOL="http"
 	export OPENSANDBOX_TEST_API_KEY="$SERVER_API_KEY"
