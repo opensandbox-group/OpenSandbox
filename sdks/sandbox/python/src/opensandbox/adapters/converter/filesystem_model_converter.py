@@ -96,7 +96,7 @@ class FilesystemModelConverter:
 
         dirs_data = {
             entry.path: {
-                "mode": entry.mode,
+                "mode": entry.directory_mode(),
                 "owner": entry.owner,
                 "group": entry.group,
             }
@@ -174,7 +174,7 @@ class FilesystemModelConverter:
 
         dirs_data = {
             entry.path: {
-                "mode": entry.mode,
+                "mode": entry.directory_mode(),
                 "owner": entry.owner,
                 "group": entry.group,
             }

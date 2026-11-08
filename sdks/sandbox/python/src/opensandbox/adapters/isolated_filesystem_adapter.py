@@ -256,14 +256,15 @@ class IsolatedFilesystemAdapter(Filesystem):
                 if entry.data is None:
                     raise InvalidArgumentException("File data cannot be null")
 
-                metadata = {
-                    "path": entry.path,
-                    "owner": entry.owner,
-                    "group": entry.group,
-                    "mode": entry.mode,
-                }
                 multipart_parts.append(
-                    ("metadata", ("metadata", json.dumps(metadata), "application/json"))
+                    (
+                        "metadata",
+                        (
+                            "metadata",
+                            json.dumps(entry.upload_metadata()),
+                            "application/json",
+                        ),
+                    )
                 )
 
                 if isinstance(entry.data, bytes):
@@ -303,7 +304,7 @@ class IsolatedFilesystemAdapter(Filesystem):
         data: str | bytes | IOBase,
         *,
         encoding: str = "utf-8",
-        mode: int = 755,
+        mode: int | None = None,
         owner: str | None = None,
         group: str | None = None,
     ) -> None:
