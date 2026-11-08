@@ -25,10 +25,10 @@ import { decodePtyOutput, encodeStdin } from '../utils/ptyFrames';
 type ShellStatus = 'connecting' | 'open' | 'closed' | 'error';
 
 const SHELL_STATUS_LABELS: Record<ShellStatus, string> = {
-  connecting: '连接中',
-  open: '已连接',
-  error: '失败',
-  closed: '已断开',
+  connecting: 'Connecting',
+  open: 'Connected',
+  error: 'Failed',
+  closed: 'Disconnected',
 };
 
 function shellWebSocketUrl(id: string, admin: boolean, tenant: string): string {
@@ -112,7 +112,7 @@ export function SandboxShellPage() {
         }
         if (frame.type === 'error') {
           setStatus('error');
-          setError(frame.error ?? '打开 Shell 失败');
+          setError(frame.error ?? 'Failed to open shell');
           return;
         }
         if (frame.type === 'exit') {
@@ -128,7 +128,7 @@ export function SandboxShellPage() {
     ws.onerror = () => {
       if (!alive) return;
       setStatus('error');
-      setError('Shell 连接失败');
+      setError('Shell connection failed');
     };
 
     ws.onclose = () => {
@@ -155,7 +155,7 @@ export function SandboxShellPage() {
           <Typography.Text type="secondary">{SHELL_STATUS_LABELS[status]}</Typography.Text>
         </Space>
         <Space>
-          <Link to={backTo}>返回沙箱</Link>
+          <Link to={backTo}>Back to Sandbox</Link>
           <Button
             disabled={missingTenant}
             onClick={() => {
@@ -164,7 +164,7 @@ export function SandboxShellPage() {
               setAttempt((value) => value + 1);
             }}
           >
-            重新连接
+            Reconnect
           </Button>
         </Space>
       </Space>
@@ -173,8 +173,8 @@ export function SandboxShellPage() {
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message="Admin 打开 Shell 需要 tenant"
-          description="请从「全局沙箱」列表进入，或访问 /sandboxes/{id}/shell?tenant=租户名"
+          message="Admins must specify a tenant to open a shell"
+          description="Open this page from the All Tenants sandbox list, or visit /sandboxes/{id}/shell?tenant=tenant-name"
         />
       )}
       {error && <Alert type="error" showIcon style={{ marginBottom: 12 }} message={error} />}
