@@ -3926,8 +3926,16 @@ ra_pod_cgroup_dir() { # <fastlet-pod> -> "<node>\n<pod-cgroup-dir>" (absolute, i
 	local pod="$1" node uid cand
 	node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)" || return 1
 	uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 1
-	# The egress sidecar's unequal requests/limits make every fastlet Pod
-	# Burstable; try the Burstable and Guaranteed forms on both drivers.
+	# Node-side discovery is the primary: the kubelet slice prefix varies by
+	# distribution (kubelet-kubepods-* on newer kubeadm, kubepods-* classic)
+	# and the Pod UID suffix is systemd-escaped; the fast-sandbox aggregate
+	# under the pod dir is the stable marker.
+	dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 5 -type d -name 'fast-sandbox' \( -path '*${uid//-/_}*' -o -path '*${uid}*' \) 2>/dev/null | head -1")"
+	if [[ -n "$dir" ]]; then
+		printf '%s\n%s\n' "$node" "${dir%/fast-sandbox}"
+		return 0
+	fi
+	# Classic-layout fallbacks (Guaranteed/Burstable x systemd/cgroupfs).
 	for cand in \
 		"kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod${uid//-/_}.slice" \
 		"kubepods.slice/kubepods-pod${uid//-/_}.slice" \
@@ -3938,14 +3946,6 @@ ra_pod_cgroup_dir() { # <fastlet-pod> -> "<node>\n<pod-cgroup-dir>" (absolute, i
 			return 0
 		fi
 	done
-	# Auto-discovery fallback: locate the fast-sandbox aggregate under any
-	# pod<uid> path (systemd escapes '-' to '_', cgroupfs keeps hyphens).
-	dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 4 -type d -name 'fast-sandbox' -path '*${uid//-/_}*' 2>/dev/null | head -1")"
-	[[ -n "$dir" ]] || dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 4 -type d -name 'fast-sandbox' -path '*${uid}*' 2>/dev/null | head -1")"
-	if [[ -n "$dir" ]]; then
-		printf '%s\n%s\n' "$node" "${dir%/fast-sandbox}"
-		return 0
-	fi
 	return 1
 }
 
