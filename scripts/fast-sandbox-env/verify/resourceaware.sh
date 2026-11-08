@@ -53,37 +53,59 @@ ra_aggregate_memory_budget() { # max(defaultRequest * maxSandboxesPerPod, defaul
 	echo "$limit"
 }
 
-ra_cg_read() { # <fastlet-pod> <rel-path-under-pod-cgroup> <file>
-	local pod="$1" rel="$2" file="$3" node uid out base
+ra_pod_cgroup_dir() { # <fastlet-pod> -> "<node>\n<pod-cgroup-dir>" (absolute, inside the node)
+	local pod="$1" node uid cand
 	node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)" || return 1
 	uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 1
 	# The egress sidecar's unequal requests/limits make every fastlet Pod
 	# Burstable; try the Burstable and Guaranteed forms on both drivers.
-	for base in \
+	for cand in \
 		"kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod${uid//-/_}.slice" \
 		"kubepods.slice/kubepods-pod${uid//-/_}.slice" \
 		"kubepods/burstable/pod${uid}" \
 		"kubepods/pod${uid}"; do
-		out="$(docker exec "$node" cat "/sys/fs/cgroup/$base/$rel/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
+		if docker exec "$node" test -d "/sys/fs/cgroup/$cand/fast-sandbox" 2>/dev/null; then
+			printf '%s\n%s\n' "$node" "/sys/fs/cgroup/$cand"
+			return 0
+		fi
 	done
 	return 1
 }
 
-ra_leaf_read() { # <sandbox-id> <cgroup-file> — from the fastlet hosting the sandbox
-	local sid="$1" file="$2" pod out
+ra_leaf_read() { # <sandbox-id> <cgroup-file> -> value, from the fastlet hosting the sandbox
+	local sid="$1" file="$2" pod node dir out
 	local leaf="fsb-$(printf '%s' "$sid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
 	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-		out="$(ra_cg_read "$pod" "fast-sandbox/$leaf" "$file")" && { printf '%s' "$out"; return 0; }
+		dir="$(ra_pod_cgroup_dir "$pod")" || continue
+		node="${dir%%$'\n'*}"; dir="${dir#*$'\n'}"
+		out="$(docker exec "$node" cat "$dir/fast-sandbox/$leaf/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
 	done
 	return 1
 }
 
-ra_aggregate_read() { # <cgroup-file> — from the first fastlet's VM pool aggregate
-	local file="$1" pod out
+ra_aggregate_read() { # <cgroup-file> -> value, from the first fastlet's VM pool aggregate
+	local file="$1" pod node dir out
 	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-		out="$(ra_cg_read "$pod" "fast-sandbox" "$file")" && { printf '%s' "$out"; return 0; }
+		dir="$(ra_pod_cgroup_dir "$pod")" || continue
+		node="${dir%%$'\n'*}"; dir="${dir#*$'\n'}"
+		out="$(docker exec "$node" cat "$dir/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
 	done
 	return 1
+}
+
+ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read failure
+	local sid="$1" pod node uid leaf
+	leaf="fsb-$(printf '%s' "$sid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
+	log "ra debug: sandbox=$sid leaf=$leaf pool=$POOL_NAME ns=$RESOURCE_NS"
+	log "ra debug: fastlet pods: $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo '<selector matched none>')"
+	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+		node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+		uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+		log "ra debug: pod=$pod node=$node uid=$uid"
+		log "ra debug: node cgroup roots: $(docker exec "$node" ls /sys/fs/cgroup 2>&1 | head -c 200 | tr '\n' ' ')"
+		log "ra debug: node pod dirs: $(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 3 -type d -name '*${uid}*' 2>/dev/null" | tr '\n' ' ')"
+		log "ra debug: node fast-sandbox dirs: $(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 5 -type d -name 'fast-sandbox' 2>/dev/null" | tr '\n' ' ')"
+	done
 }
 
 _ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
@@ -146,17 +168,20 @@ ra_forward_verify() {
 		|| fail "Sandbox CR spec.resources.limits mismatch: cpu=$cpu memory=$memory (want 2 / 1Gi)"
 	pass "Sandbox CR carries the forwarded limits (cpu=2, memory=1Gi)"
 
+	local cpu_max cpu_weight pids_max want_mem_budget got_mem_budget
 	weight="$(ra_expected_cpu_weight 500)" # request = ceil(2000m / ratio 4) = 500m
-	[[ "$(ra_leaf_read "$id" cpu.max)" == "200000 100000" ]] \
-		|| fail "cgroup leaf cpu.max mismatch: $(ra_leaf_read "$id" cpu.max 2>/dev/null) (want '200000 100000' for 2 cores)"
-	[[ "$(ra_leaf_read "$id" cpu.weight)" == "$weight" ]] \
-		|| fail "cgroup leaf cpu.weight mismatch: $(ra_leaf_read "$id" cpu.weight 2>/dev/null) (want $weight for the 500m derived request)"
-	[[ "$(ra_leaf_read "$id" pids.max)" == "128" ]] \
-		|| fail "cgroup leaf pids.max mismatch (want pool pids 128)"
-	local want_mem_budget
+	cpu_max="$(ra_leaf_read "$id" cpu.max)"
+	cpu_weight="$(ra_leaf_read "$id" cpu.weight)"
+	pids_max="$(ra_leaf_read "$id" pids.max)"
+	got_mem_budget="$(ra_aggregate_read memory.max)"
 	want_mem_budget="$(ra_aggregate_memory_budget)"
-	[[ "$(ra_aggregate_read memory.max)" == "$want_mem_budget" ]] \
-		|| fail "aggregate memory.max mismatch: $(ra_aggregate_read memory.max 2>/dev/null) (want $want_mem_budget = max(256Mi*$MAX_SANDBOXES_PER_POD, 512Mi))"
+	if [[ "$cpu_max" == "200000 100000" && "$cpu_weight" == "$weight" \
+		&& "$pids_max" == "128" && "$got_mem_budget" == "$want_mem_budget" ]]; then
+		pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
+	else
+		ra_debug_cgroup "$id"
+		fail "cgroup enforcement mismatch: cpu.max='$cpu_max' cpu.weight='$cpu_weight' (want $weight) pids.max='$pids_max' memory.max='$got_mem_budget' (want $want_mem_budget)"
+	fi
 	pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
 
 	wait_for "resource-aware sandbox execd /ping" 60 execd_ping_ok
