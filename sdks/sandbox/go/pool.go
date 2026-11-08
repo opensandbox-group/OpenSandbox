@@ -857,12 +857,16 @@ func (p *DefaultSandboxPool) Shutdown(ctx context.Context, graceful bool) error 
 	_ = p.config.StateStore.ReleasePrimaryLock(ctx, p.config.PoolName, p.config.OwnerID)
 
 	// Wait for in-flight operations to drain.
+	var drainErr error
 	if p.config.DrainTimeout > 0 {
 		deadline := time.After(p.config.DrainTimeout)
 		pollTicker := time.NewTicker(100 * time.Millisecond)
 		defer pollTicker.Stop()
 		for atomic.LoadInt32(&p.inFlight) > 0 {
 			select {
+			case <-ctx.Done():
+				drainErr = ctx.Err()
+				goto done
 			case <-deadline:
 				p.config.Logger.Warn("pool shutdown: drain timeout expired with in-flight operations",
 					"pool_name", p.config.PoolName,
@@ -887,7 +891,7 @@ done:
 			close(sdCh)
 		}
 	}
-	return nil
+	return drainErr
 }
 
 // ensureNamespaceActive returns *PoolDestroyedError when a destroy has fenced or
