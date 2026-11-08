@@ -3938,6 +3938,14 @@ ra_pod_cgroup_dir() { # <fastlet-pod> -> "<node>\n<pod-cgroup-dir>" (absolute, i
 			return 0
 		fi
 	done
+	# Auto-discovery fallback: locate the fast-sandbox aggregate under any
+	# pod<uid> path (systemd escapes '-' to '_', cgroupfs keeps hyphens).
+	dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 4 -type d -name 'fast-sandbox' -path '*${uid//-/_}*' 2>/dev/null | head -1")"
+	[[ -n "$dir" ]] || dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 4 -type d -name 'fast-sandbox' -path '*${uid}*' 2>/dev/null | head -1")"
+	if [[ -n "$dir" ]]; then
+		printf '%s\n%s\n' "$node" "${dir%/fast-sandbox}"
+		return 0
+	fi
 	return 1
 }
 
@@ -4039,11 +4047,14 @@ ra_forward_verify() {
 
 	local cpu_max cpu_weight pids_max want_mem_budget got_mem_budget
 	weight="$(ra_expected_cpu_weight 500)" # request = ceil(2000m / ratio 4) = 500m
-	cpu_max="$(ra_leaf_read "$id" cpu.max)"
-	cpu_weight="$(ra_leaf_read "$id" cpu.weight)"
-	pids_max="$(ra_leaf_read "$id" pids.max)"
-	got_mem_budget="$(ra_aggregate_read memory.max)"
+	# Reads may legitimately fail (|| true): the debug dump below must run
+	# before the failure is finalized.
+	cpu_max="$(ra_leaf_read "$id" cpu.max || true)"
+	cpu_weight="$(ra_leaf_read "$id" cpu.weight || true)"
+	pids_max="$(ra_leaf_read "$id" pids.max || true)"
+	got_mem_budget="$(ra_aggregate_read memory.max || true)"
 	want_mem_budget="$(ra_aggregate_memory_budget)"
+	[[ -z "$cpu_max$cpu_weight$pids_max$got_mem_budget" ]] && ra_debug_cgroup "$id"
 	if [[ "$cpu_max" == "200000 100000" && "$cpu_weight" == "$weight" \
 		&& "$pids_max" == "128" && "$got_mem_budget" == "$want_mem_budget" ]]; then
 		pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
