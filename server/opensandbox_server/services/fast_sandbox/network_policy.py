@@ -17,13 +17,12 @@ def normalized_policy(policy: NetworkPolicy) -> dict:
     for rule in policy.egress:
         target = (rule.target or "").strip()
         action = normalize_network_policy_action(rule.action, "networkPolicy rule action")
+        if not target and not rule.ports:
+            raise HTTPException(400, detail="networkPolicy rule requires target or ports.")
+        normalized: dict = {"action": action, "target": target}
         if rule.ports:
-            # Not enforceable by the fastlet nft path yet (#2213); accepting
-            # would silently drop deny rules.
-            raise HTTPException(400, detail="networkPolicy ports are not supported for Fast Sandbox policy yet.")
-        if not target:
-            raise HTTPException(400, detail="networkPolicy rule target cannot be empty.")
-        rules.append({"action": action, "target": target})
+            normalized["ports"] = list(rule.ports)
+        rules.append(normalized)
     return {"defaultAction": default_action, "egress": rules}
 
 
@@ -38,32 +37,44 @@ def policy_status(policy: dict | None) -> dict:
     return {"status": "ok", "mode": mode, "policy": policy}
 
 
+def _rule_key(rule: dict) -> tuple[str, tuple[int, ...]]:
+    return (rule.get("target") or "").lower(), tuple(sorted(rule.get("ports") or []))
+
+
 def merge_policy_rules(policy: dict, rules: list[NetworkRule]) -> dict:
     """Apply sidecar PATCH merge semantics to a normalized policy dict.
 
-    - Incoming rules take priority over existing rules with the same target
-      and replace them in place.
-    - Within one patch payload, the first rule for a target wins.
-    - Existing rules for other targets remain; the current defaultAction is
+    - Incoming rules replace existing rules in place for the same
+      (case-insensitive target, sorted ports) scope.
+    - Within one patch payload, the first rule for a scope wins.
+    - Existing rules for other scopes remain; the current defaultAction is
       preserved.
     """
-    incoming: dict[str, dict] = {}
-    for rule in rules:
-        if rule.ports:
-            # Mirrors normalized_policy (#2213).
-            raise HTTPException(400, detail="networkPolicy ports are not supported for Fast Sandbox policy yet.")
-        target = (rule.target or "").strip()
-        if target and target not in incoming:
-            incoming[target] = {"action": rule.action, "target": target}
+    incoming: dict[tuple[str, tuple[int, ...]], dict] = {}
+    for rule in normalized_policy(NetworkPolicy(egress=rules))["egress"]:
+        incoming.setdefault(_rule_key(rule), rule)
+    if not incoming:
+        return {
+            "defaultAction": policy.get("defaultAction") or "deny",
+            "egress": policy.get("egress") or [],
+        }
     merged: list[dict] = []
+    seen: set[tuple[str, tuple[int, ...]]] = set()
     for rule in policy.get("egress") or []:
-        merged.append(incoming.pop(rule["target"]) if rule["target"] in incoming else rule)
+        key = _rule_key(rule)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(incoming.pop(key, rule))
     merged.extend(incoming.values())
     return {"defaultAction": policy.get("defaultAction") or "deny", "egress": merged}
 
 
 def delete_policy_rules(policy: dict, targets: list[str]) -> dict:
-    """Drop rules by target (idempotent), preserving the current defaultAction."""
-    removed = {t.strip() for t in targets}
-    kept = [rule for rule in policy.get("egress") or [] if rule["target"] not in removed]
+    """Drop targets case-insensitively; an empty target drops all port-only rules."""
+    removed = {t.strip().lower() for t in targets}
+    kept = [
+        rule for rule in policy.get("egress") or []
+        if (rule.get("target") or "").lower() not in removed
+    ]
     return {"defaultAction": policy.get("defaultAction") or "deny", "egress": kept}

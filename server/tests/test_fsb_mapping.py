@@ -108,6 +108,25 @@ def test_create_includes_network_policy_in_atomic_intent():
     }
 
 
+@pytest.mark.parametrize(
+    "target",
+    [None, "", "  ", " 10.0.0.5 ", "10.0.0.0/24", "2001:db8::5", "2001:db8::/64"],
+)
+def test_create_preserves_port_scopes_in_egress_binding(target):
+    policy = NetworkPolicy(
+        defaultAction=" Allow ",
+        egress=[NetworkRule(action=" Deny ", target=target, ports=[65535, 1, 443])],
+    )
+    create = map_create_request(_base_request(network_policy=policy), "sbx-1", "ns-1", now=NOW)
+
+    assert len(create.action_bindings) == 1
+    assert create.action_bindings[0].handler == "egress"
+    assert json.loads(create.action_bindings[0].input) == {
+        "defaultAction": "allow",
+        "egress": [{"action": "deny", "target": (target or "").strip(), "ports": [65535, 1, 443]}],
+    }
+
+
 def test_map_create_request_strips_pool_ref():
     blank = map_create_request(
         _base_request(extensions={"poolRef": "   "}), "sbx-1", "ns-1", now=NOW
