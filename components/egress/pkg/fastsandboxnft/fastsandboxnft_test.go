@@ -185,6 +185,27 @@ func TestAddResolvedIPsClampsTTL(t *testing.T) {
 	require.Contains(t, script, "2001:db8::1 timeout 360s")
 }
 
+func TestAddResolvedIPsRecreatesElementsToRenewExpiry(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{
+		{Addr: netip.MustParseAddr("1.2.3.4"), TTL: 300 * time.Second},
+		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 300 * time.Second},
+	}))
+	script := runner.last()
+	for _, tc := range []struct{ set, addr string }{
+		{dynSetName(s, "v4"), "1.2.3.4"},
+		{dynSetName(s, "v6"), "2001:db8::1"},
+	} {
+		require.Contains(t, script, fmt.Sprintf(
+			"add element inet %[1]s %[2]s { %[3]s }\ndelete element inet %[1]s %[2]s { %[3]s }\nadd element inet %[1]s %[2]s { %[3]s timeout 360s }\n",
+			TableName, tc.set, tc.addr), "a plain add does not renew an existing element's kernel expiry")
+	}
+}
+
 func TestRemoveRebuildsTable(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
