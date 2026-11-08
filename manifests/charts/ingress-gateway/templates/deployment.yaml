@@ -23,6 +23,10 @@ metadata:
     {{- include "opensandbox-ingress-gateway.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.gateway.replicaCount }}
+  {{- with .Values.gateway.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "opensandbox-ingress-gateway.selectorLabels" . | nindent 6 }}
@@ -40,6 +44,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      {{- if ne .Values.gateway.terminationGracePeriodSeconds nil }}
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
+      {{- end }}
       serviceAccountName: {{ include "opensandbox-ingress-gateway.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -76,6 +83,10 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          {{- with .Values.gateway.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - "--namespace={{ .Values.gateway.dataplaneNamespace }}"
             - "--port={{ .Values.gateway.port }}"
@@ -128,6 +139,10 @@ spec:
             {{- with .Values.gateway.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- end }}
+          {{- with .Values.gateway.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           livenessProbe:
             httpGet:
