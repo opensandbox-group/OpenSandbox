@@ -241,3 +241,42 @@ func TestHandleEviction(t *testing.T) {
 		}
 	})
 }
+
+// After a controller restart the allocation store is empty until it is
+// recovered from the BatchSandbox annotations. Eviction runs before the
+// first Schedule, so it must not see an empty store and evict a pod that
+// is still allocated.
+func TestHandleEvictionRecoversAllocationsFirst(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = sandboxv1alpha1.AddToScheme(scheme)
+
+	pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"}}
+	pod := newEvictionTestPod("pod-1", map[string]string{eviction.LabelEvict: ""}, false)
+	sandbox := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "sandbox-1",
+			Namespace:   "default",
+			Annotations: map[string]string{annoAllocStatusKey: `{"pods":["pod-1"]}`},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "test-pool"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod.DeepCopy(), sandbox).Build()
+	r := &PoolReconciler{
+		Client:    c,
+		Scheme:    scheme,
+		Recorder:  record.NewFakeRecorder(10),
+		Allocator: NewDefaultAllocator(c),
+	}
+
+	got, err := r.handleEviction(context.Background(), pool, []*corev1.Pod{pod})
+	if err != nil {
+		t.Fatalf("handleEviction() returned error: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "pod-1" {
+		t.Fatalf("expected allocated pod-1 to stay schedulable, got %v", got)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "pod-1", Namespace: "default"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("expected allocated pod-1 to still exist: %v", err)
+	}
+}
