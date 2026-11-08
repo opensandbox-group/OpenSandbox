@@ -89,7 +89,8 @@ ra_aggregate_read() { # <cgroup-file> — from the first fastlet's VM pool aggre
 _ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
 
 ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
-	local cpu="$1" memory="$2" created phase attempts=0 cache="$WORK/ra-template-$cpu-$memory.id"
+	local cpu="$1" memory="$2" created phase attempts=0
+	local cache="$WORK/ra-template-$cpu-$memory.id"
 	if [[ -s "$cache" ]]; then
 		RA_TEMPLATE_ID="$(<"$cache")"
 		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
