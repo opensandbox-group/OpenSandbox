@@ -422,6 +422,7 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 	if err := a.writeTableHeader(&b); err != nil {
 		return err
 	}
+	now := a.now()
 	for subj, inst := range a.subjects {
 		if subj == s {
 			continue
@@ -435,6 +436,7 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 		if err != nil {
 			return err
 		}
+		writeRemainingLeasesFragment(&b, subj, a.states[subj], now)
 	}
 	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpRemove)
@@ -903,6 +905,31 @@ func writeResolvedIPsFragment(b *strings.Builder, s subject.Subject, ips []nftab
 	}
 	if len(v6) > 0 {
 		fmt.Fprintf(b, "add element inet %s %s { %s }\n", TableName, dynSetName(s, "v6"), strings.Join(v6, ", "))
+	}
+}
+
+// writeRemainingLeasesFragment re-adds a subject's unexpired DNS-learned IPs
+// to its freshly rebuilt dynamic sets with the time each lease has left, so
+// rebuilding the table to remove another subject keeps them allowed.
+func writeRemainingLeasesFragment(b *strings.Builder, s subject.Subject, st *refreshState, now time.Time) {
+	if st == nil {
+		return
+	}
+	for addr, expiresAt := range st.dyn {
+		left := expiresAt.Sub(now)
+		if left <= 0 {
+			continue
+		}
+		var set string
+		if addr.Is4() {
+			set = dynSetName(s, "v4")
+		} else if addr.Is6() {
+			set = dynSetName(s, "v6")
+		} else {
+			continue
+		}
+		seconds := int((left + time.Second - 1) / time.Second)
+		fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", TableName, set, addr, seconds)
 	}
 }
 
