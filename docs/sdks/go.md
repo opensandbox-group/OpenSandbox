@@ -340,6 +340,8 @@ if _, err := resumed.Renew(ctx, 30*time.Minute); err != nil {
 
 During sandbox creation, `ReadyTimeout` bounds the wait for the lifecycle state to become `Running`, even when the caller context has a longer deadline. An earlier caller deadline or cancellation still takes precedence.
 
+Expiration of this running-state budget or an earlier caller deadline returns `*SandboxRunningTimeoutError`, including when a status request is in flight. Use `errors.As` to identify this error and `errors.Is(err, context.DeadlineExceeded)` to inspect its cause. Caller cancellation remains `context.Canceled`. A request failure before the running-state deadline, including a shorter HTTP-client timeout, remains a request error.
+
 Use `ConnectSandbox(ctx, config, id, opensandbox.ReadyOptions{})` to attach to an already running sandbox with a readiness check. See [Pause and Resume](/guides/pause-resume).
 
 ### Resource metrics
