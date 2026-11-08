@@ -35,6 +35,14 @@ server:
   # -- Number of server replicas. Keep one active server; multi-replica HA is not supported yet.
   replicaCount: 1
 
+  # -- Deployment update strategy. Recreate keeps one active server; changing this does not enable general multi-replica HA.
+  strategy:
+    type: Recreate
+  # -- Pod termination grace period in seconds. Null keeps the Kubernetes default; zero is honored.
+  terminationGracePeriodSeconds: null
+  # -- Container lifecycle hooks. Hook commands must exist in the server image.
+  lifecycle: {}
+
   # -- Resource requests and limits
   resources:
     limits:
@@ -106,6 +114,9 @@ server:
       # the Secret in place, `kubectl rollout restart` the server Deployment
       # (or version the Secret name to get a spec-driven rollout).
       existingSecret: ""
+
+# -- Additional non-secret text files mounted read-only at /etc/opensandbox/<name>. Contents are literal strings; config.toml and path names are forbidden. Changes trigger a server rollout.
+extraFiles: {}
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
 # [kubernetes].namespace below is the sandbox workload namespace: the chart

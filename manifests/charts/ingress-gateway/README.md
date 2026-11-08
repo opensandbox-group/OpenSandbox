@@ -40,6 +40,7 @@ Kubernetes: `>=1.21.1-0`
 | gateway.image.pullPolicy | string | `"IfNotPresent"` | Gateway image pull policy. |
 | gateway.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress"` | Gateway image repository. |
 | gateway.image.tag | string | `""` | Gateway image tag. Empty uses the release-<appVersion> image tag published for this chart version. |
+| gateway.lifecycle | object | `{}` | Container lifecycle hooks. Hook commands must exist in the gateway image. |
 | gateway.logLevel | string | `"info"` | Gateway log level. |
 | gateway.nodeSelector | object | `{}` | Node selector for the gateway pod. |
 | gateway.podAnnotations | object | `{}` | Extra annotations for the gateway pod. |
@@ -56,6 +57,9 @@ Kubernetes: `>=1.21.1-0`
 | gateway.service.nodePort | string | `""` | Static nodePort (used when the service type is NodePort or LoadBalancer). |
 | gateway.service.port | int | `80` | Service port. The targetPort always points to gateway.port. |
 | gateway.service.type | string | `"ClusterIP"` | Service type for the gateway. |
+| gateway.startupProbe | object | `{}` | Optional startup probe to allow informer-cache sync before liveness/readiness probes run. |
+| gateway.strategy | object | `{}` | Deployment update strategy. Empty keeps the Kubernetes default. |
+| gateway.terminationGracePeriodSeconds | string | `nil` | Pod termination grace period in seconds. Null keeps the Kubernetes default; zero is honored. |
 | gateway.tolerations | list | `[]` | Tolerations for the gateway pod. |
 | gateway.topologySpreadConstraints | list | `[]` | Topology spread constraints for the gateway pod. |
 | gateway.wake.enabled | bool | `false` | Enable wake-on-access. |

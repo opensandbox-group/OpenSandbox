@@ -213,6 +213,64 @@ curl --fail http://127.0.0.1:8080/health
 
 The server container and its Service use port `80`. Keep `[server].port = 80` when replacing `configToml` unless the chart templates are also updated to use a different port. The Service is `ClusterIP` by default; set `server.service.type` to reach the server from outside the cluster.
 
+### Configure shutdown and startup timing
+
+The server and ingress-gateway charts expose `strategy`, `terminationGracePeriodSeconds`, and container `lifecycle` under `server` and `gateway`, respectively. Defaults preserve the existing deployments: the server uses `Recreate`, the gateway leaves its strategy to Kubernetes, and neither chart overrides the Pod grace period or adds hooks. An explicit grace period of `0` is supported, but gives the process no time to finish requests.
+
+For an external load balancer, choose a pre-stop delay long enough for deregistration and a Pod grace period that also leaves time for shutdown. For example, add this to the standalone server values:
+
+```yaml
+server:
+  terminationGracePeriodSeconds: 90
+  lifecycle:
+    preStop:
+      exec:
+        command: ["/bin/sh", "-c", "sleep 20"]
+```
+
+The command must exist in the selected image. These hooks do not implement application-level graceful shutdown or guarantee that long-lived connections finish. Keep the server's default `strategy: {type: Recreate}` unless your deployment explicitly supports overlapping active servers; setting `RollingUpdate` does not add general multi-replica HA.
+
+The gateway also accepts `gateway.startupProbe`. A startup probe prevents liveness and readiness probes from running until startup succeeds, which can accommodate a long initial informer-cache sync. For example, in the standalone gateway values:
+
+```yaml
+gateway:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  terminationGracePeriodSeconds: 90
+  lifecycle:
+    preStop:
+      exec:
+        command: ["/bin/sh", "-c", "sleep 20"]
+  startupProbe:
+    httpGet:
+      path: /status.ok
+      port: http
+    periodSeconds: 2
+    failureThreshold: 60
+```
+
+With the umbrella chart, nest the server values under `opensandbox-server` and the gateway values under `ingress-gateway` (and set `ingress-gateway.enabled: true`).
+
+### Mount additional server configuration files
+
+The standalone server chart's `extraFiles` maps file names to literal text. Each entry is stored in the server ConfigMap and mounted read-only at `/etc/opensandbox/<name>`. For example, to supply the template referenced by the default `configToml`, use:
+
+```bash
+helm upgrade --install opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --values values-server.yaml \
+  --set-file 'extraFiles.example\.batchsandbox-template\.yaml=./my-template.yaml'
+```
+
+Use the appropriate complete BatchSandbox template for your deployment. If you choose another file name, also update `[kubernetes].batchsandbox_template_file` in the complete `configToml` value. For the umbrella chart, use the `opensandbox-server.extraFiles` prefix.
+
+File names must be single ConfigMap-compatible names (letters, digits, `.`, `_`, and `-`, at most 253 characters), cannot be `.` or start with `..`, and cannot be `config.toml`. Contents must be strings and are not evaluated as Helm templates. Keep secrets in Kubernetes Secrets rather than `extraFiles`.
+
+Adding, removing, renaming, or changing an extra file changes `checksum/config` on the server Pod template and triggers a rollout. With no extra files, the existing config checksum is preserved. Avoid overriding `checksum/config` through `server.podAnnotations` if you want automatic configuration rollouts.
+
 ### Configure egress sidecar resources
 
 When a create request includes `networkPolicy`, the lifecycle server adds an egress sidecar to each non-pooled sandbox Pod. Namespace `LimitRange` defaults apply to this container when it does not declare resources, which can reserve substantially more capacity than basic DNS/nft enforcement needs.

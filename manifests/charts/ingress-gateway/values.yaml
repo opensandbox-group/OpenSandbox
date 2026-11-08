@@ -45,6 +45,15 @@ gateway:
   # -- Number of gateway replicas.
   replicaCount: 2
 
+  # -- Deployment update strategy. Empty keeps the Kubernetes default.
+  strategy: {}
+  # -- Pod termination grace period in seconds. Null keeps the Kubernetes default; zero is honored.
+  terminationGracePeriodSeconds: null
+  # -- Container lifecycle hooks. Hook commands must exist in the gateway image.
+  lifecycle: {}
+  # -- Optional startup probe to allow informer-cache sync before liveness/readiness probes run.
+  startupProbe: {}
+
   # -- Gateway container port.
   port: 28888
 

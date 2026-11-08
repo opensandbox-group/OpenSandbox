@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- include "opensandbox-server.extraFiles.validate" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -23,3 +24,6 @@ data:
   config.toml: |
 {{ .Values.configToml | indent 4 }}
 {{ include "opensandbox-server.ingressConfigToml" . | indent 4 }}
+  {{- range $name, $content := .Values.extraFiles }}
+  {{ $name | quote }}: {{ $content | quote }}
+  {{- end }}
