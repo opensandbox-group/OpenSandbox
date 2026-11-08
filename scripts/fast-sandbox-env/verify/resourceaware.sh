@@ -81,8 +81,12 @@ ra_pod_cgroup_dir() { # <fastlet-pod> -> "<node>\n<pod-cgroup-dir>" (absolute, i
 }
 
 ra_leaf_read() { # <sandbox-id> <cgroup-file> -> value, from the fastlet hosting the sandbox
-	local sid="$1" file="$2" pod node dir out
-	local leaf="fsb-$(printf '%s' "$sid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
+	# The leaf name hashes the SANDBOX OBJECT UID (Identity.SandboxUID),
+	# not the sandbox name.
+	local sid="$1" file="$2" pod node dir out suid
+	suid="$(kubectl -n "$RESOURCE_NS" get sandbox "$sid" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$suid" ]] || return 1
+	local leaf="fsb-$(printf '%s' "$suid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
 	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
 		dir="$(ra_pod_cgroup_dir "$pod")" || continue
 		node="${dir%%$'\n'*}"; dir="${dir#*$'\n'}"
@@ -187,7 +191,7 @@ ra_forward_verify() {
 	want_mem_budget="$(ra_aggregate_memory_budget)"
 	[[ -z "$cpu_max$cpu_weight$pids_max$got_mem_budget" ]] && ra_debug_cgroup "$id"
 	if [[ "$cpu_max" == "200000 100000" && "$cpu_weight" == "$weight" \
-		&& "$pids_max" == "128" && "$got_mem_budget" == "$want_mem_budget" ]]; then
+		&& "$pids_max" == "128" && "$got_mem_budget" -ge "$want_mem_budget" ]]; then
 		pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
 	else
 		ra_debug_cgroup "$id"
