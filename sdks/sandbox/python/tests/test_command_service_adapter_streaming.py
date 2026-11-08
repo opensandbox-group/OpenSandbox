@@ -27,6 +27,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,
+    SandboxConnectionException,
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
@@ -391,6 +392,11 @@ _EARLY_CLOSE_SSE = (
     b'data: {"type":"execution_complete","timestamp":2,"execution_time":3}\n\n'
 )
 
+_EARLY_CLOSE_MODERN_SSE = (
+    b'data: {"type":"init","text":"exec-fg","timestamp":1}\n\n'
+    b'data: {"type":"execution_complete","timestamp":2,"execution_time":3,"exit_code":0}\n\n'
+)
+
 
 @pytest.mark.asyncio
 async def test_run_background_command_breaks_on_complete_before_terminator() -> None:
@@ -413,12 +419,27 @@ async def test_run_background_command_breaks_on_complete_before_terminator() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_foreground_command_breaks_on_complete_before_terminator() -> None:
-    """Foreground commands break immediately on ``execution_complete``
-    without waiting for the stream terminator (#2654). An early close after
-    completion does not raise."""
+async def test_run_foreground_command_still_waits_for_terminator_on_legacy_server() -> None:
+    """Foreground commands against legacy execd (without exit_code field)
+    must keep waiting for the stream terminator after ``execution_complete``
+    to drain any trailing output (e.g. execd v1.0.1). An early close surfaces as an error."""
     cfg = ConnectionConfig(
         protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    with pytest.raises(SandboxConnectionException):
+        await adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+
+
+@pytest.mark.asyncio
+async def test_run_foreground_command_breaks_on_modern_complete_before_terminator() -> None:
+    """Foreground commands against modern execd (with authoritative exit_code field)
+    break immediately on ``execution_complete`` without waiting for the stream terminator
+    or graceful-shutdown sleep (#2654). An early close after completion does not raise."""
+    cfg = ConnectionConfig(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_MODERN_SSE)
     )
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapter(cfg, endpoint)
@@ -442,10 +463,11 @@ async def test_run_rejects_unsupported_command_types(command) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("late_output", [False, True])
 async def test_foreground_drains_terminal_response_and_closes_stream(
-    failure: bool,
+    failure: bool, late_output: bool
 ) -> None:
-    """Foreground commands return immediately on terminal event and close the stream (#2654)."""
+    """Legacy execd streams (without exit_code) drain to EOF so trailing output is preserved."""
     terminal = (
         {"type": "error", "error": {"ename": "CommandExecError", "evalue": "7", "traceback": []}}
         if failure
@@ -455,10 +477,11 @@ async def test_foreground_drains_terminal_response_and_closes_stream(
         {"type": "stdout", "text": "last stdout"},
         {"type": "stderr", "text": "last stderr"},
     ]
-    events = [*output, terminal]
+    events = [terminal, *output] if late_output else [*output, terminal]
 
     class Stream(httpx.AsyncByteStream):
         closed = False
+        exhausted = False
 
         async def __aiter__(self) -> AsyncIterator[bytes]:
             for timestamp, event in enumerate(events, start=1):
@@ -466,6 +489,7 @@ async def test_foreground_drains_terminal_response_and_closes_stream(
                 # Split frames across reads to exercise incremental SSE decoding.
                 yield frame[:7]
                 yield frame[7:]
+            self.exhausted = True
 
         async def aclose(self) -> None:
             self.closed = True
@@ -486,7 +510,62 @@ async def test_foreground_drains_terminal_response_and_closes_stream(
     assert [item.text for item in execution.logs.stderr] == ["last stderr"]
     assert execution.exit_code == (7 if failure else 0)
     assert (execution.complete is None) == failure
+    assert stream.exhausted
     assert stream.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_foreground_breaks_immediately_on_authoritative_exit_code(
+    failure: bool,
+) -> None:
+    """Modern execd streams (with exit_code) break immediately upon completion (#2654)."""
+    terminal = (
+        {
+            "type": "error",
+            "error": {"ename": "CommandExecError", "evalue": "7", "exit_code": 7, "traceback": []},
+        }
+        if failure
+        else {"type": "execution_complete", "execution_time": 5, "exit_code": 0}
+    )
+    output = [
+        {"type": "stdout", "text": "stdout"},
+    ]
+    # Trailing ping/keepalive frame that should NEVER be consumed because stream terminates early.
+    trailing = [{"type": "ping"}]
+    events = [*output, terminal, *trailing]
+
+    class Stream(httpx.AsyncByteStream):
+        closed = False
+        exhausted = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for timestamp, event in enumerate(events, start=1):
+                frame = f"data: {json.dumps({'timestamp': timestamp, **event})}\n\n".encode()
+                yield frame
+            self.exhausted = True
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = Stream()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"}, stream=stream
+        )
+    )
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    execution = await adapter.run("echo test")
+
+    assert [item.text for item in execution.logs.stdout] == ["stdout"]
+    assert execution.exit_code == (7 if failure else 0)
+    assert (execution.complete is None) == failure
+    assert stream.closed
+    # Proves the stream stopped at terminal event without consuming trailing frames.
+    assert not stream.exhausted
 
 
 class _ErrorEventTransport(httpx.AsyncBaseTransport):
