@@ -47,6 +47,7 @@ type fastSandboxSubjectDrain struct {
 	queue            []fastSandboxSubjectIntent
 	degraded         map[string]bool
 	unknownVaults    map[subject.Subject]bool // live Vaults invalidated under the current registered fence
+	snapshotFailures map[subject.Subject]bool // current committed inputs could not produce a replayable snapshot
 	deadline         time.Duration
 	snapshots        map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
 	fences           map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
@@ -101,7 +102,7 @@ func (s *fastSandboxPolicyServer) subjectSnapshotAcknowledgedLocked(subj subject
 	if d == nil {
 		return true
 	}
-	if !s.subjectVaultAuthoritativeLocked(subj) || d.current == nil || d.snapshots[subj] == nil {
+	if !s.subjectVaultAuthoritativeLocked(subj) || d.snapshotFailures[subj] || d.current == nil || d.snapshots[subj] == nil {
 		return false
 	}
 	ack, ok := d.acked[subj]
@@ -199,6 +200,7 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 			delete(d.snapshots, subj)
 			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
+			delete(d.snapshotFailures, subj)
 		}
 	} else {
 		if old, exists := d.fences[subj]; exists && !old.Matches(fence) {
@@ -206,6 +208,7 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 			delete(d.snapshots, subj)
 			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
+			delete(d.snapshotFailures, subj)
 		}
 		d.fences[subj] = fence
 		d.nextRegistration++
@@ -253,7 +256,7 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 	// The registry itself has no capacity cap. Bound the observation mirror
 	// independently to the receiver's subject budget without failing SET.
 	if d.snapshots[subj] == nil && len(d.snapshots) >= fastSandboxRevisionMaxSubjects {
-		d.degradeLocked("subject_capacity_exhausted")
+		d.markSnapshotFailureLocked(subj, "subject_capacity_exhausted")
 		return
 	}
 	var snapshot credentialvault.ActiveSnapshot
@@ -262,7 +265,7 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 		snapshot, err = entry.store.ActiveSnapshot()
 	}
 	if err != nil && !errors.Is(err, credentialvault.ErrNotFound) {
-		d.degradeLocked("subject_snapshot_invalid")
+		d.markSnapshotFailureLocked(subj, "subject_snapshot_invalid")
 		return
 	}
 	var policyEpoch int64
@@ -271,17 +274,28 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 	}
 	payload, err := credentialvault.MarshalDecisionSnapshot(snapshot, policyEpoch)
 	if err != nil {
-		d.degradeLocked("subject_snapshot_invalid")
+		d.markSnapshotFailureLocked(subj, "subject_snapshot_invalid")
 		return
 	}
 	if len(payload) > defaultRevisionMaxSnapshotSize {
-		d.degradeLocked("subject_snapshot_too_large")
+		d.markSnapshotFailureLocked(subj, "subject_snapshot_too_large")
 		return
 	}
 	frozen := &fastSandboxSubjectSnapshot{payload: payload, digest: sha256.Sum256(payload), vaultRevision: snapshot.Revision, policyEpoch: policyEpoch}
 	d.snapshots[subj] = frozen
+	delete(d.snapshotFailures, subj)
 	delete(d.unknownVaults, subj)
 	d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: fence, target: mustSubjectTarget(subj, fence), epoch: d.current, snapshot: frozen, registration: d.registrations[subj]})
+}
+
+// Called under s.mu. Keep the old replay payload, but never let its ACK stand
+// in for newer committed inputs that failed to produce a snapshot.
+func (d *fastSandboxSubjectDrain) markSnapshotFailureLocked(subj subject.Subject, reason string) {
+	if d.snapshotFailures == nil {
+		d.snapshotFailures = make(map[subject.Subject]bool)
+	}
+	d.snapshotFailures[subj] = true
+	d.degradeLocked(reason)
 }
 
 func (d *fastSandboxSubjectDrain) dropInstallsLocked(target revision.SubjectTarget) {

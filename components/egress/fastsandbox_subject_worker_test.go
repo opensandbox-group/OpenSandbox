@@ -184,11 +184,8 @@ func TestFastSandboxSubjectDrainAbsentRemoveUsesMirror(t *testing.T) {
 // changes real entry state after the preflight's entry check, before its disk
 // read; the next purge check observes unknown. No Snapshot result is mocked.
 func TestFastSandboxSubjectDrainPurgeFailureDefersUnload(t *testing.T) {
-	for _, reset := range []bool{false, true} {
-		name := "rebind"
-		if reset {
-			name = "needs-reset"
-		}
+	for _, name := range []string{"rebind", "needs-reset", "needs-reset-superseded"} {
+		reset := name != "rebind"
 		t.Run(name, func(t *testing.T) {
 			seed := readinessLegacySeed(t)
 			s := readinessRestart(t, seed, false)
@@ -230,29 +227,53 @@ func TestFastSandboxSubjectDrainPurgeFailureDefersUnload(t *testing.T) {
 			require.Contains(t, response.Body.String(), "purge", "the first preflight passed; drop rejected the actual unknown entry")
 			_, registered := s.reg.Fence(subj)
 			require.Equal(t, !reset, registered, "needsReset already unregisters before drop; this existing order is unchanged")
-			waitSubjectKnown(t, h, target, true)
-			waitLifecycleIdle(t, s, h, 1)
-			s.mu.Lock()
-			mirrored := s.subjectDrain.fences[subj]
-			queued := len(s.subjectDrain.queue)
-			s.mu.Unlock()
-			require.Equal(t, old, mirrored)
-			require.Zero(t, queued, "no Unload or compensating Register on failed drop")
-			require.Contains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
-			// A real replacement child retains the observed old fence. Recovery and
-			// retry then perform exactly one old Unload followed by new Register.
-			h = readinessReceiver(t, s)
-			waitSubjectKnown(t, h, target, true)
-			waitLifecycleIdle(t, s, h, 1)
+			if name != "needs-reset-superseded" {
+				waitSubjectKnown(t, h, target, !reset)
+				sequence := int64(1)
+				if reset {
+					sequence = 2 // the registry's actual retirement must reach the receiver
+				}
+				waitLifecycleIdle(t, s, h, sequence)
+				s.mu.Lock()
+				mirrored, exists := s.subjectDrain.fences[subj]
+				queued := len(s.subjectDrain.queue)
+				s.mu.Unlock()
+				require.Equal(t, !reset, exists)
+				if !reset {
+					require.Equal(t, old, mirrored)
+				}
+				require.Zero(t, queued, "no compensating Register or lifecycle oscillation")
+			}
+			if !reset {
+				require.Contains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+			}
+			// Both reset retries keep the same child. Replacing it could hide a
+			// stale receiver target; only the non-reset control also checks replay.
+			if !reset {
+				h = readinessReceiver(t, s)
+				waitSubjectKnown(t, h, target, !reset)
+				waitLifecycleIdle(t, s, h, 1)
+			}
 			s.mu.Lock()
 			entry := s.vaults[subj]
 			entry.vaultStateUnknown = false
 			s.vaults[subj] = entry
 			s.mu.Unlock()
-			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, "next", "next-att", 3, vaultAllowPolicy())).Code)
-			waitReadiness(t, s, testUID, "next", "next-att")
+			r, a := "next", "next-att"
+			if name == "needs-reset-superseded" {
+				r, a = "superseding-r", "superseding-a"
+			}
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, r, a, 3, vaultAllowPolicy())).Code)
+			latest := latestSubjectSnapshot(t, s, testUID)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, r, a), latest)
+			waitReadiness(t, s, testUID, r, a)
 			waitSubjectKnown(t, h, target, false)
-			waitLifecycleIdle(t, s, h, 3)
+			sequence := int64(3)
+			if name == "needs-reset" {
+				sequence = 4 // prior Register/Unload, harmless repeat Unload, new Register
+			}
+			waitLifecycleIdle(t, s, h, sequence)
+			require.NotContains(t, s.subjectLifecycleDegraded(), "subject_conflict")
 			require.NotContains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
 		})
 	}

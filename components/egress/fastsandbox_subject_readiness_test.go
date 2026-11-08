@@ -17,9 +17,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +100,105 @@ func TestFastSandboxSubjectReadinessFirstSETAndCurrentPayload(t *testing.T) {
 	waitReadiness(t, s, testUID, testFenceR, testFenceA)
 	state, _ = reg.Get(subject.FromSandboxUID(testUID))
 	require.Equal(t, subject.StateActive, state)
+}
+
+// A small relay body expands each shared credential into ten disjoint bindings.
+// Exercise the real Store commit and serializer, not a mocked snapshot builder.
+func TestFastSandboxSubjectReadinessSnapshotProductionFailure(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+	h := readinessReceiver(t, s)
+	subj := subject.FromSandboxUID(testUID)
+	old := latestSubjectSnapshot(t, s, testUID)
+	waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), old)
+	// Observe the ACK under mu without invoking the hook and activating policy.
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subj, subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+	}, 5*time.Second, 5*time.Millisecond)
+	var bindings []string
+	for i := 0; i < 10; i++ {
+		bindings = append(bindings, fmt.Sprintf(`{"name":"b%d","match":{"hosts":["api.example.com"],"paths":["/b%d/"]},"auth":{"type":"bearer","credential":"tok"}}`, i, i))
+	}
+	body := `{"credentials":[{"name":"tok","source":{"type":"inline","value":"` + strings.Repeat("x", 900000) + `"}}],"bindings":[` + strings.Join(bindings, ",") + `]}`
+	require.Less(t, len(body), 1<<20, "one real relay write stays below 1 MiB")
+	rec := doVault(t, s, "POST", testUID, body, "")
+	require.Equal(t, 201, rec.Code, rec.Body.String())
+	s.mu.Lock()
+	store := s.vaults[subj].store
+	authoritative := s.subjectVaultAuthoritativeLocked(subj)
+	policyEpoch := s.policies[subj].revision
+	s.mu.Unlock()
+	require.True(t, authoritative, "production failure is independent of Vault authority")
+	active, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), active.Revision)
+	payload, err := credentialvault.MarshalDecisionSnapshot(active, policyEpoch)
+	require.NoError(t, err)
+	require.Greater(t, len(payload), defaultRevisionMaxSnapshotSize, "committed inputs really exceed 8 MiB after rendering")
+	t.Logf("relay bytes=%d, rendered bytes=%d", len(body), len(payload))
+	require.Same(t, old, latestSubjectSnapshot(t, s, testUID), "keep the last replayable payload")
+	require.Contains(t, s.subjectLifecycleDegraded(), "subject_snapshot_too_large")
+	requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+	state, _ := s.reg.Get(subj)
+	require.Equal(t, subject.StateDenying, state)
+	require.Nil(t, s.reg.EffectivePolicy(subj))
+	// A different subject remains ready; failure bookkeeping is subject-scoped.
+	require.Equal(t, 200, doAction(t, s, bindBody(t, "other", "10.0.0.9", "other-r", "other-a", 1, vaultAllowPolicy())).Code)
+	waitReadiness(t, s, "other", "other-r", "other-a")
+	// Restart replays the retained old payload, but must retain the failure too.
+	h = readinessReceiver(t, s)
+	waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), old)
+	requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+	// A subsequent legal committed write clears the failure and installs anew.
+	rec = doVault(t, s, "PUT", testUID, vaultPut("1"), "")
+	require.Equal(t, 200, rec.Code, rec.Body.String())
+	latest := latestSubjectSnapshot(t, s, testUID)
+	require.Equal(t, int64(2), latest.vaultRevision)
+	waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), latest)
+	waitReadiness(t, s, testUID, testFenceR, testFenceA)
+}
+
+func TestFastSandboxSubjectReadinessInvalidSnapshotRecovery(t *testing.T) {
+	for _, recovery := range []string{"snapshot", "unload", "fence"} {
+		t.Run(recovery, func(t *testing.T) {
+			s, _, _ := fastSandboxTestServer(t)
+			readinessDrain(t, s)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			h := readinessReceiver(t, s)
+			waitReadiness(t, s, testUID, testFenceR, testFenceA)
+			subj := subject.FromSandboxUID(testUID)
+			old := latestSubjectSnapshot(t, s, testUID)
+			// Inject actual invalid producer input under the existing lock order.
+			s.policyCommitMu.Lock()
+			s.mu.Lock()
+			epoch := s.policies[subj].revision
+			s.policies[subj].revision = -1
+			s.recordSubjectSnapshotLocked(subj, subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+			s.policies[subj].revision = epoch
+			s.mu.Unlock()
+			s.policyCommitMu.Unlock()
+			require.Same(t, old, latestSubjectSnapshot(t, s, testUID))
+			require.Contains(t, s.subjectLifecycleDegraded(), "subject_snapshot_invalid")
+			requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+			r, a := testFenceR, testFenceA
+			switch recovery {
+			case "snapshot":
+				require.Equal(t, 200, doPolicy(t, s, "PUT", testUID, policyPutDoc(*vaultAllowPolicy(), 0, false, false), "").Code)
+			case "unload":
+				require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, r, a)).Code)
+				require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, r, a, 2, vaultAllowPolicy())).Code)
+			case "fence":
+				r, a = "next-r", "next-a"
+				require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, r, a, 2, vaultAllowPolicy())).Code)
+			}
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, r, a), latestSubjectSnapshot(t, s, testUID))
+			waitReadiness(t, s, testUID, r, a)
+		})
+	}
 }
 
 func TestFastSandboxSubjectReadinessConfirmedIntentAndSlowIPC(t *testing.T) {

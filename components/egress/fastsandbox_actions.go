@@ -553,12 +553,13 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 			s.reg.Unregister(subj)
 			s.mu.Lock()
+			// The registry has retired this fence even if the local purge fails.
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil { // preserve this exact token through C publication
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
 				return status, fmt.Errorf("subject reset purge: %w", err)
 			}
-			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.needsReset = false
 			token.oldRemoved = true
 			token.purged = true
