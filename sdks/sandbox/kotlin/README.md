@@ -413,6 +413,7 @@ Pool lifecycle semantics:
 Manage fast-sandbox (fsb) golden-image templates. The build is asynchronous: poll `getTemplate` until the phase is `Succeeded`, and treat `Failed` as terminal by surfacing `status.message`. Template management requires a Kubernetes-backed runtime.
 
 ```java
+import com.alibaba.opensandbox.sandbox.SandboxManager;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFormat;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateInfo;
@@ -443,7 +444,7 @@ if ("Failed".equals(template.getStatus().getPhase())) {
 }
 ```
 
-`format` selects the publish layout: `TemplateFormat.NATIVE` publishes to the `s3://` target as-is, while `TemplateFormat.OVERLAYBD` (the default) converts the image to OCI layout at the `oci://` target. Boot a sandbox from a built template using the fluent launcher:
+`format` selects the snapshot storage encoding: `TemplateFormat.NATIVE` publishes raw snapshots to the `s3://` target, while `TemplateFormat.OVERLAYBD` (the default) publishes an overlaybd snapshot set to the `oci://registry/repository` target (repository only, no tag or digest; the immutable published reference is reported in `status.manifestRef`). Boot a sandbox from a built template using the fluent launcher:
 
 ```java
 import com.alibaba.opensandbox.sandbox.Sandbox;
@@ -455,10 +456,7 @@ Sandbox sandbox = Sandbox.fromTemplate()
     .create();
 ```
 
-> **Note for Java callers:** Kotlin `val` properties on data classes expose
-> JavaBean-style getters (`getStatus()`, `getPhase()`, etc.) rather than
-> direct field access. The examples above use getter syntax for Java
-> compatibility; in pure Kotlin code you can use the dot-access shorthand.
+> **Note for Java callers:** Kotlin `val` properties expose JavaBean-style getters (`getStatus()`, `getPhase()`, etc.) rather than direct field access. The examples above use getter syntax for Java compatibility; in pure Kotlin code you can use the dot-access shorthand.
 
 ## Configuration
 
