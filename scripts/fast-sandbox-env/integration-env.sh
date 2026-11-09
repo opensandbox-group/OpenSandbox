@@ -2857,10 +2857,13 @@ vm_console_collect_check() { # <sandbox-id> — a live e2e-matrix sandbox
 	local id="$1" marker family
 	kubectl -n "$OSB_NS" get daemonset node-agent >/dev/null 2>&1 \
 		|| die "node-agent daemonset not found (re-run 'up' to deploy it; vm-console collection is part of the verify matrix)"
-	# Unique guest serial byte: execd-shelled echo straight to /dev/console —
-	# exactly the firecracker.log line the Source tails.
+	# Unique guest serial byte: echo straight to /dev/console — exactly the
+	# firecracker.log line the Source tails. The CLI joins command-run words
+	# with shlex.quote, so `sh -c <script>` must ride as separate words (one
+	# quoted string would be executed as a single program name and exit 127 —
+	# the same trap mitm_ca_guest_echo documents for curl).
 	marker="vm-console-marker-$id"
-	osb_api command run "$id" -- "echo $marker > /dev/console" >/dev/null \
+	osb_api command run "$id" -- sh -c "echo $marker > /dev/console" >/dev/null \
 		|| fail "vm-console verify: guest console marker write failed for $id"
 	wait_for "node-agent collected the guest console marker" 30 vm_console_marker_collected "$marker"
 	# Locate the collected file across BOTH agent pods: the sandbox may live
