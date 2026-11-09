@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"net/http"
 	"os"
@@ -34,6 +35,109 @@ import (
 // work — these tests drive the egress hooks via the actions protocol. The
 // shared snapshot fence constants (snapshotResumeR/A) live in the vault
 // snapshot tests.
+
+func TestPolicySnapshotCarryPorts(t *testing.T) {
+	for _, mitmPort := range []int{0, 18081} {
+		for _, tc := range []struct {
+			name         string
+			bindingFirst bool
+			readyFirst   bool
+		}{
+			{name: "before_binding"},
+			{name: "after_binding_pending", bindingFirst: true},
+			{name: "after_binding_active", bindingFirst: true, readyFirst: true},
+		} {
+			t.Run(fmt.Sprintf("mitm_%d/%s", mitmPort, tc.name), func(t *testing.T) {
+				source := newPolicyPersistHarness(t)
+				sourceRunner := wirePolicyPortApplier(source.srv, mitmPort)
+				setBindingAndReady(t, source.srv, source.reg, policyTestUID, vaultTestIP, strPtr(policyPortsCreate))
+				rec := doPolicy(t, source.srv, http.MethodPut, policyTestUID, policyPutDoc(policyPortsUpdate, 1, false, true), "")
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assertPolicyPortScript(t, sourceRunner.last(t), mitmPort, true)
+
+				bundlePath := filepath.Join(t.TempDir(), "bundle", "policy.json")
+				beforeExport := sourceRunner.count()
+				rec = doAction(t, source.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Equal(t, beforeExport, sourceRunner.count(), "export does not change enforcement")
+				bundle := source.fakeForPath(bundlePath)
+				pf, body := decodePolicyFile(t, bundle)
+				assert.Equal(t, source.fileFor(policyTestUID).data, bundle.data)
+				assert.Equal(t, testFenceR, pf.Incarnation)
+				assert.Equal(t, testFenceA, pf.AttachmentID)
+				assert.Equal(t, int64(2), pf.Revision)
+				assertPolicyPortBody(t, body, policyPortsUpdate)
+				rec = doPolicy(t, source.srv, http.MethodGet, policyTestUID, "", "")
+				require.Equal(t, http.StatusConflict, rec.Code, "pause export seals the source")
+				// The importer reads real files, so materialize the fake-backed exported bundle.
+				require.NoError(t, os.MkdirAll(filepath.Dir(bundlePath), 0o700))
+				require.NoError(t, os.WriteFile(bundlePath, bundle.data, 0o600))
+
+				restored := newPolicyPersistHarness(t)
+				runner := wirePolicyPortApplier(restored.srv, mitmPort)
+				subj := subject.FromSandboxUID(policyTestUID)
+				if tc.bindingFirst {
+					rec = doAction(t, restored.srv, bindBody(t, policyTestUID, vaultTestIP, snapshotResumeR, snapshotResumeA, 1, strPtr(policyPortsCreate)))
+					require.Equal(t, http.StatusOK, rec.Code)
+					require.Equal(t, 1, runner.count())
+					assertPolicyPortDenyFirst(t, runner, mitmPort)
+					if tc.readyFirst {
+						rec = doAction(t, restored.srv, hookBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, constants.HookRuntimeReady))
+						require.Equal(t, http.StatusOK, rec.Code)
+						rec = doAction(t, restored.srv, hookBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, constants.HookDataPlaneReady))
+						require.Equal(t, http.StatusOK, rec.Code)
+						assertPolicyPortScript(t, runner.last(t), mitmPort, false)
+					}
+				}
+				beforeImport := runner.count()
+				rec = doAction(t, restored.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				pf, body = decodePolicyFile(t, restored.fileFor(policyTestUID))
+				assert.Equal(t, snapshotResumeR, pf.Incarnation, "import re-stamps the runtime fence")
+				assert.Equal(t, snapshotResumeA, pf.AttachmentID)
+				assert.Equal(t, int64(2), pf.Revision, "the carried revision is preserved")
+				assertPolicyPortBody(t, body, policyPortsUpdate)
+				if tc.readyFirst {
+					require.Equal(t, beforeImport+1, runner.count(), "active import must immediately reapply the carried ports")
+					assertPolicyPortScript(t, runner.last(t), mitmPort, true)
+				} else {
+					require.Equal(t, beforeImport, runner.count(), "import cannot open a not-yet-ready subject")
+				}
+				if !tc.bindingFirst {
+					_, registered := restored.reg.Get(subj)
+					assert.False(t, registered, "import before binding only lands the file")
+					rec = doAction(t, restored.srv, bindBody(t, policyTestUID, vaultTestIP, snapshotResumeR, snapshotResumeA, 1, strPtr(policyPortsCreate)))
+					require.Equal(t, http.StatusOK, rec.Code)
+				}
+				rec = doPolicy(t, restored.srv, http.MethodGet, policyTestUID, "", "")
+				rev, doc := mustPolicyRevision(t, rec)
+				assert.Equal(t, int64(2), rev)
+				assertPolicyPortBody(t, doc.Policy, policyPortsUpdate)
+
+				if !tc.readyFirst {
+					require.Equal(t, subject.StateDenying, mustState(restored.reg.Get(subj)))
+					assertPolicyPortDenyFirst(t, runner, mitmPort)
+					beforeReady := runner.count()
+					rec = doAction(t, restored.srv, hookBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, constants.HookRuntimeReady))
+					require.Equal(t, http.StatusOK, rec.Code)
+					require.Equal(t, beforeReady, runner.count())
+					rec = doAction(t, restored.srv, hookBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, constants.HookDataPlaneReady))
+					require.Equal(t, http.StatusOK, rec.Code)
+					require.Equal(t, beforeReady+1, runner.count())
+				}
+				require.Equal(t, subject.StateActive, mustState(restored.reg.Get(subj)))
+				assertPolicyPortScript(t, runner.last(t), mitmPort, true)
+				rec = doPolicy(t, restored.srv, http.MethodGet, policyTestUID, "", "")
+				rev, doc = mustPolicyRevision(t, rec)
+				assert.Equal(t, int64(2), rev)
+				assertPolicyPortBody(t, doc.Policy, policyPortsUpdate)
+				carried, err := os.ReadFile(bundlePath)
+				require.NoError(t, err)
+				assert.Equal(t, bundle.data, carried, "import must not modify the exported source or its old fence")
+			})
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Export: copy + seal

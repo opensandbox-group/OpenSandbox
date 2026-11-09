@@ -408,6 +408,56 @@ Pool lifecycle semantics:
 
 > For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. The pool renews an owned primary lock independently from warmup execution at an internal interval no greater than `primaryLockTtl / 3`, so one slow warmup does not block leader heartbeats. In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass. `releaseAllIdle()` preserves the original serial cleanup behavior. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive; the overload returns only after every ID drained from the store has received a best-effort kill attempt. `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 
+### 9. fsb Templates
+
+Manage fast-sandbox (fsb) golden-image templates. The build is asynchronous: poll `getTemplate` until the phase is `Succeeded`, and treat `Failed` as terminal by surfacing `status.message`. Template management requires a Kubernetes-backed runtime.
+
+```java
+import com.alibaba.opensandbox.sandbox.SandboxManager;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFormat;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateInfo;
+
+SandboxManager manager = SandboxManager.builder()
+    .connectionConfig(config)
+    .build();
+
+TemplateInfo template = manager.createTemplate(
+    CreateTemplateRequest.builder()
+        .image("python:3.11")
+        .publish("s3://bucket/templates/py311")
+        .format(TemplateFormat.NATIVE)
+        .build()
+);
+
+// Poll getTemplate until the build finishes (or fails).
+// In Kotlin: template.status.phase  (dot-access shorthand)
+// In Java:   template.getStatus().getPhase()  (JavaBean getter)
+while (!"Succeeded".equals(template.getStatus().getPhase())
+       && !"Failed".equals(template.getStatus().getPhase())) {
+    Thread.sleep(5000);
+    template = manager.getTemplate(template.getTemplateId());
+}
+if ("Failed".equals(template.getStatus().getPhase())) {
+    throw new IllegalStateException(
+        "template build failed: " + template.getStatus().getMessage());
+}
+```
+
+`format` selects the snapshot storage encoding: `TemplateFormat.NATIVE` publishes raw snapshots to the `s3://` target, while `TemplateFormat.OVERLAYBD` (the default) publishes an overlaybd snapshot set to the `oci://registry/repository` target (repository only, no tag or digest; the immutable published reference is reported in `status.manifestRef`). Boot a sandbox from a built template using the fluent launcher:
+
+```java
+import com.alibaba.opensandbox.sandbox.Sandbox;
+import java.time.Duration;
+
+Sandbox sandbox = Sandbox.fromTemplate()
+    .templateId(template.getTemplateId())
+    .timeout(Duration.ofMinutes(30))
+    .create();
+```
+
+> **Note for Java callers:** Kotlin `val` properties expose JavaBean-style getters (`getStatus()`, `getPhase()`, etc.) rather than direct field access. The examples above use getter syntax for Java compatibility; in pure Kotlin code you can use the dot-access shorthand.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -498,7 +548,7 @@ Sandbox sandbox = Sandbox.builder()
     .build();
 ```
 
-A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected: The Fast Sandbox backend rejects `ports` rules with HTTP 400 today (Docker and Kubernetes support them); a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected. Docker, Kubernetes, and Fast Sandbox backends all enforce `ports` rules; a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
 
 ```java
 Sandbox sandbox = Sandbox.builder()

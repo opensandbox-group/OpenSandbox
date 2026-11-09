@@ -60,10 +60,10 @@ export function SandboxCreatePage() {
       if (Object.keys(metadata).length) body.metadata = metadata;
 
       const created = await sandboxApi.create(body);
-      message.success('沙箱已创建');
+      message.success('Sandbox created');
       navigate(`/sandboxes/${created.id}`);
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '创建失败');
+      message.error(e instanceof Error ? e.message : 'Failed to create');
     } finally {
       setSubmitting(false);
     }
@@ -71,7 +71,7 @@ export function SandboxCreatePage() {
 
   return (
     <div>
-      <Typography.Title level={4}>创建沙箱</Typography.Title>
+      <Typography.Title level={4}>Create Sandbox</Typography.Title>
       <Form
         layout="vertical"
         onFinish={onFinish}
@@ -80,29 +80,29 @@ export function SandboxCreatePage() {
       >
         <Form.Item
           name="imageUri"
-          label="镜像 URI"
-          rules={[{ required: true, message: '请输入镜像' }]}
+          label="Image URI"
+          rules={[{ required: true, message: 'Enter an image' }]}
         >
           <Input placeholder="python:3.11" />
         </Form.Item>
         <Form.Item
           name="entrypoint"
-          label="Entrypoint（空格分隔）"
-          rules={[{ required: true, message: '请输入 entrypoint' }]}
+          label="Entrypoint (space-separated)"
+          rules={[{ required: true, message: 'Enter an entrypoint' }]}
         >
           <Input placeholder="python /app/main.py" />
         </Form.Item>
-        <Form.Item name="cpu" label="CPU" rules={[{ required: true, message: '请输入 CPU' }]}>
+        <Form.Item name="cpu" label="CPU" rules={[{ required: true, message: 'Enter CPU' }]}>
           <Input placeholder="500m" />
         </Form.Item>
-        <Form.Item name="memory" label="内存" rules={[{ required: true, message: '请输入内存' }]}>
+        <Form.Item name="memory" label="Memory" rules={[{ required: true, message: 'Enter memory' }]}>
           <Input placeholder="512Mi" />
         </Form.Item>
-        <Form.Item name="timeout" label="超时（秒）">
+        <Form.Item name="timeout" label="Timeout (seconds)">
           <InputNumber min={60} style={{ width: '100%' }} />
         </Form.Item>
 
-        <Typography.Text strong>环境变量</Typography.Text>
+        <Typography.Text strong>Environment Variables</Typography.Text>
         <Form.List name="env">
           {(fields, { add, remove }) => (
             <>
@@ -119,7 +119,7 @@ export function SandboxCreatePage() {
               ))}
               <Form.Item>
                 <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>
-                  添加环境变量
+                  Add Environment Variable
                 </Button>
               </Form.Item>
             </>
@@ -143,7 +143,7 @@ export function SandboxCreatePage() {
               ))}
               <Form.Item>
                 <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>
-                  添加 metadata
+                  Add Metadata
                 </Button>
               </Form.Item>
             </>
@@ -152,9 +152,9 @@ export function SandboxCreatePage() {
 
         <Space>
           <Button type="primary" htmlType="submit" loading={submitting}>
-            提交
+            Submit
           </Button>
-          <Button onClick={() => navigate('/sandboxes')}>取消</Button>
+          <Button onClick={() => navigate('/sandboxes')}>Cancel</Button>
         </Space>
       </Form>
     </div>

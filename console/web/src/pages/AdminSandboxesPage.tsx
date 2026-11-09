@@ -56,7 +56,7 @@ export function AdminSandboxesPage() {
       setItems([]);
       setTenantErrors([]);
       setCapped(false);
-      message.error(error instanceof Error ? error.message : '加载沙箱失败');
+      message.error(error instanceof Error ? error.message : 'Failed to load sandboxes');
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
@@ -68,7 +68,7 @@ export function AdminSandboxesPage() {
 
   const columns: ColumnsType<Sandbox> = [
     {
-      title: '租户',
+      title: 'Tenant',
       dataIndex: 'tenant',
       width: 128,
       ellipsis: true,
@@ -76,7 +76,7 @@ export function AdminSandboxesPage() {
       render: (t: string | undefined) => <TenantTag tenant={t} />,
     },
     {
-      title: '名称 / ID',
+      title: 'Name / ID',
       render: (_, r) => (
         <Link to={`/sandboxes/${r.id}?tenant=${encodeURIComponent(r.tenant ?? '')}`}>
           {sandboxDisplayName(r)}
@@ -88,34 +88,34 @@ export function AdminSandboxesPage() {
       dataIndex: 'namespace',
     },
     {
-      title: '状态',
+      title: 'Status',
       width: 124,
       ellipsis: true,
       onCell: () => consoleTagTableCellProps,
       render: (_, r) => <SandboxStateTag state={r.status?.state} />,
     },
     {
-      title: '运行时长',
+      title: 'Uptime',
       render: (_, r) => formatDuration(r.runtimeSummary?.wallClockSeconds),
     },
     {
-      title: '剩余',
+      title: 'Remaining',
       render: (_, r) =>
         r.runtimeSummary?.remainingSeconds !== undefined
           ? formatDuration(r.runtimeSummary.remainingSeconds)
           : '—',
     },
     {
-      title: '操作',
+      title: 'Actions',
       render: (_, r) => (
         <Space>
           <Link to={`/sandboxes/${r.id}?tenant=${encodeURIComponent(r.tenant ?? '')}&tab=logs`}>
-            日志
+            Logs
           </Link>
           <Link
             to={`/diagnostics?sandboxId=${encodeURIComponent(r.id)}&tenant=${encodeURIComponent(r.tenant ?? '')}`}
           >
-            诊断
+            Diagnostics
           </Link>
           <ShellLink sandboxId={r.id} state={r.status?.state} tenant={r.tenant} />
         </Space>
@@ -125,16 +125,16 @@ export function AdminSandboxesPage() {
 
   return (
     <div>
-      <Typography.Title level={4}>沙箱（全局）</Typography.Title>
+      <Typography.Title level={4}>Sandboxes (All Tenants)</Typography.Title>
       <Typography.Paragraph type="secondary">
-        来自 Lifecycle 的当前沙箱列表，不是持久化申请记录。Admin 默认全部租户，可筛选单租户。
+        Current sandbox list from Lifecycle; these are not persisted request records. Admins see all tenants by default and can filter by tenant.
       </Typography.Paragraph>
       {capped && (
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message={`每个租户最多显示 ${ADMIN_LIST_PAGE_SIZE} 条，超出的沙箱未列出。`}
+          message={`Showing up to ${ADMIN_LIST_PAGE_SIZE} sandboxes per tenant. Additional sandboxes are not listed.`}
         />
       )}
       {tenantErrors.length > 0 && (
@@ -142,7 +142,7 @@ export function AdminSandboxesPage() {
           type="warning"
           showIcon
           style={{ marginBottom: 16 }}
-          message="部分租户 upstream 失败"
+          message="Some tenant upstream requests failed"
           description={
             <ul style={{ margin: 0, paddingLeft: 20 }}>
               {tenantErrors.map((e) => (
@@ -158,7 +158,7 @@ export function AdminSandboxesPage() {
         <AdminTenantSelect value={tenantFilter} onChange={setTenantFilter} />
         <Select
           allowClear
-          placeholder="状态"
+          placeholder="Status"
           style={{ width: 160 }}
           value={stateFilter}
           onChange={setStateFilter}

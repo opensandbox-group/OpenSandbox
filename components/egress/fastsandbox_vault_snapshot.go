@@ -383,6 +383,7 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 		return status, errors.New("vault import persistence failure")
 	}
 	if registered {
+		s.recordSubjectSnapshotLocked(subj, fence)
 		log.Infof("subject %s: vault imported from snapshot bundle (revision %d, re-stamped to %s/%s)",
 			subj, vf.Revision, fence.RuntimeInstanceID, fence.AttachmentID)
 	} else {

@@ -105,18 +105,6 @@ MITM_ECHO_IP=""
 
 # Status-code-returning variant of server_api for negative-path assertions
 # (curl -f hides the status).
-server_api_status() { # method path [json-body]
-	local method="$1" path="$2" body="${3:-}" out
-	if [[ -n "$body" ]]; then
-		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
-			-H "Content-Type: application/json" -d "$body" -w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
-	else
-		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
-			-w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
-	fi
-	printf '%s' "${out##*$'\n'}"
-}
-
 # The vault stage's sandbox must ride the subject-scoped egress log markers
 # (export/import/registration), so every log assertion goes through this.
 vault_log_contains() { # <fixed-substring>

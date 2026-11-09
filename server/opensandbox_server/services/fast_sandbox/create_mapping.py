@@ -94,7 +94,7 @@ def map_create_request(
     _reject_unsupported_fields(request)
 
     if snapshot_limits is not None:
-        _validate_recorded_limits(request, snapshot_limits)
+        _validate_restore_limits(request, snapshot_limits, pool_resources)
     elif pool_resources is not None:
         _validate_resource_limits(request, pool_resources)
 
@@ -277,23 +277,31 @@ def _set_resource_limits(
     create.resources.limits.memory = memory
 
 
-def _validate_recorded_limits(request: CreateSandboxRequest, recorded: dict) -> None:
-    """Caller ``resource_limits`` must match the recorded source shape."""
+def _validate_restore_limits(
+    request: CreateSandboxRequest, recorded: dict, pool_resources: Optional[dict]
+) -> None:
+    """Snapshot restores fix cpu/memory to the recorded source shape; any
+    other key (pids) stays pool-owned and is validated against the pool
+    profile exactly as a plain create would be."""
     if request.resource_limits is None:
         return
     limits = request.resource_limits.root
     for key, value in limits.items():
-        if key not in recorded:
+        if key in recorded:
+            baseline, source = recorded[key], "the snapshot's recorded"
+        elif pool_resources is not None and key in pool_resources:
+            baseline, source = pool_resources[key], "the SandboxPool profile"
+        else:
             raise UnsupportedFieldError(
                 "resourceLimits",
                 f"{key!r} is not part of the snapshot's recorded shape; "
                 "resources are fixed by the source sandbox",
             )
-        if not _quantities_equal(recorded[key], value):
+        if not _quantities_equal(baseline, value):
             raise UnsupportedFieldError(
                 "resourceLimits",
-                f"{key!r}={value!r} does not match the snapshot's recorded "
-                f"{key!r}={recorded[key]!r}; resources are fixed by the source sandbox",
+                f"{key!r}={value!r} does not match {source} {key!r}={baseline!r}; "
+                "resources are fixed per restore source",
             )
 
 

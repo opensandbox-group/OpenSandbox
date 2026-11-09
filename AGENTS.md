@@ -73,7 +73,7 @@ Never:
 | SDK, CLI, Helm, and other publishable package READMEs | package directory | Keep install, quick start, and package entry points; no long-form docs |
 | Non-publishable component/module READMEs | component/module directory | Keep minimal pointers to `docs/` when a docs page exists |
 | Examples | `docs/examples/` + runnable code under `examples/` | Put docs in `docs/examples/`; keep example READMEs as thin pointers |
-| OSEPs | `oseps/` | `docs/community/oseps.md` only indexes GitHub proposals |
+| OSEPs | `oseps/` | Proposals live only here; there is no docs-site page |
 | CONTRIBUTING, CODE_OF_CONDUCT, DEVELOPMENT | repo root / component directory | `docs/community/` links to them, does not duplicate them |
 
 **When adding design/how-it-works content**: high-level architecture design and implementation principles go under `docs/architecture/`; user-facing usage instructions go under `docs/guides/`. Do not mix usage how-tos into architecture pages, or internals into guides.

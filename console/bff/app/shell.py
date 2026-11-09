@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import re
 from urllib.parse import quote
@@ -161,7 +162,28 @@ async def _send_error(websocket: WebSocket, code: str, message: str) -> None:
         return
 
 
+def _frame_type(payload: str) -> str | None:
+    try:
+        frame = json.loads(payload)
+    except ValueError:
+        return None
+    return frame.get("type") if isinstance(frame, dict) else None
+
+
 async def bridge_pty(browser: WebSocket, execd_ws) -> None:
+    connected = False
+    execd_reported_error = False
+
+    def execd_lost(exc: websockets.ConnectionClosedError) -> None:
+        # execd went away without a normal close: the sandbox was paused or
+        # killed, or the network dropped. Once the shell is open that is a
+        # lost connection; before it, an error execd already sent says more
+        # than anything added here, and without one it is a failed start.
+        if connected:
+            raise ShellError("SHELL_DISCONNECTED", "Lost the connection to the sandbox shell") from exc
+        if not execd_reported_error:
+            raise exc
+
     async def browser_to_execd() -> None:
         while True:
             try:
@@ -177,18 +199,29 @@ async def bridge_pty(browser: WebSocket, execd_ws) -> None:
                     await execd_ws.send(text)
                 elif data is not None:
                     await execd_ws.send(data)
+            except websockets.ConnectionClosedError as exc:
+                execd_lost(exc)
+                return
             except websockets.ConnectionClosed:
                 return
 
     async def execd_to_browser() -> None:
-        async for payload in execd_ws:
-            try:
+        nonlocal connected, execd_reported_error
+        try:
+            async for payload in execd_ws:
                 if isinstance(payload, str):
-                    await browser.send_text(payload)
-                else:
-                    await browser.send_bytes(payload)
-            except Exception:
-                return
+                    frame_type = _frame_type(payload)
+                    connected = connected or frame_type == "connected"
+                    execd_reported_error = execd_reported_error or frame_type == "error"
+                try:
+                    if isinstance(payload, str):
+                        await browser.send_text(payload)
+                    else:
+                        await browser.send_bytes(payload)
+                except Exception:
+                    return
+        except websockets.ConnectionClosedError as exc:
+            execd_lost(exc)
 
     tasks = {
         asyncio.create_task(browser_to_execd()),
@@ -198,10 +231,10 @@ async def bridge_pty(browser: WebSocket, execd_ws) -> None:
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
-    for task in tasks:
-        if task.cancelled():
-            continue
-        exc = task.exception()
+    # Both directions can fail before wait() returns; retrieve every
+    # exception so asyncio does not log the one that is not raised.
+    errors = [task.exception() for task in tasks if not task.cancelled()]
+    for exc in errors:
         if exc is not None:
             raise exc
 

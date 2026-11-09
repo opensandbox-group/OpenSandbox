@@ -23,7 +23,7 @@ import { DIAGNOSTIC_SCOPES } from '../utils/format';
 
 type Props = {
   sandboxId: string;
-  /** Admin 全局列表需指定租户，用于 BFF 代发 Key */
+  /** The admin global list requires a tenant so the BFF can forward its key. */
   tenant?: string;
   defaultScope?: string;
   autoLoad?: boolean;
@@ -49,7 +49,7 @@ export function SandboxLogPanel({
   const fetchLogs = useCallback(async (notify: boolean) => {
     if (!sandboxId.trim()) return;
     if (user?.role === 'admin' && !tenant) {
-      if (notify) message.warning('Admin 查看日志需指定 tenant');
+      if (notify) message.warning('Admins must specify a tenant to view logs');
       return;
     }
     const seq = ++requestSeq.current;
@@ -66,7 +66,7 @@ export function SandboxLogPanel({
       if (seq !== requestSeq.current) return;
       if (notify) {
         setData(null);
-        message.error(e instanceof Error ? e.message : '加载日志失败');
+        message.error(e instanceof Error ? e.message : 'Failed to load logs');
       }
     } finally {
       if (seq === requestSeq.current) setLoading(false);
@@ -91,14 +91,14 @@ export function SandboxLogPanel({
 
   const body = () => {
     if (!data) {
-      return <Typography.Text type="secondary">点击「刷新」加载日志</Typography.Text>;
+      return <Typography.Text type="secondary">Select “Refresh” to load logs</Typography.Text>;
     }
     if (data.contentUrl) {
       return (
         <Space direction="vertical">
-          <Alert type="info" showIcon message="日志过大，请下载查看" />
+          <Alert type="info" showIcon message="Log is too large. Download it to view." />
           <Typography.Link href={data.contentUrl} target="_blank" rel="noreferrer">
-            下载日志 ({data.contentLength ?? '?'} bytes)
+            Download logs ({data.contentLength ?? '?'} bytes)
           </Typography.Link>
         </Space>
       );
@@ -122,10 +122,10 @@ export function SandboxLogPanel({
           options={DIAGNOSTIC_SCOPES.map((s) => ({ label: s, value: s }))}
         />
         <Button type="primary" loading={loading} onClick={() => void fetchLogs(true)}>
-          刷新
+          Refresh
         </Button>
         <Space>
-          <Typography.Text type="secondary">自动刷新 10s</Typography.Text>
+          <Typography.Text type="secondary">Auto-refresh: 10s</Typography.Text>
           <Switch checked={autoRefresh} onChange={setAutoRefresh} />
         </Space>
       </Space>
@@ -134,7 +134,7 @@ export function SandboxLogPanel({
           type="warning"
           showIcon
           style={{ marginBottom: 8 }}
-          message="返回内容已被服务端截断，完整日志请使用 CLI 或增大 retention 配置。"
+          message="The server truncated the response. Use the CLI or increase the retention setting to retrieve the full log."
         />
       )}
       {data?.warnings?.map((w) => (

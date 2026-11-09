@@ -15,17 +15,22 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 
 import httpx
 import pytest
+import websockets
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
+from websockets.frames import Close
+
 from app.session import admin_session, encode_session, tenant_session
 from app.shell import (
     ShellError,
+    bridge_pty,
     execd_http_base,
     execd_protocol,
     execd_request_headers,
@@ -276,3 +281,134 @@ def test_admin_shell_requires_tenant(shell_client: TestClient):
 
     assert message["code"] == "TENANT_REQUIRED"
     assert shell_client.lifecycle_calls == []
+
+
+class DroppingExecdSocket(FakeExecdSocket):
+    """Sends frames, then drops without a close frame, on receive or on send."""
+
+    def __init__(self, frames: list[bytes | str], *, drop_on_send: bool = False) -> None:
+        super().__init__()
+        self._frames = list(frames)
+        self._drop_on_send = drop_on_send
+
+    async def send(self, data: bytes | str) -> None:
+        if self._drop_on_send:
+            raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+        await super().send(data)
+
+    async def __anext__(self) -> bytes | str:
+        if self._frames:
+            return self._frames.pop(0)
+        if self._drop_on_send:
+            await asyncio.sleep(3600)
+        raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+
+
+CONNECTED_FRAME = '{"type":"connected","session_id":"pty-1"}'
+
+
+def _connect_dropping(shell_client: TestClient, monkeypatch: pytest.MonkeyPatch, socket: DroppingExecdSocket):
+    monkeypatch.setattr("app.shell.connect_execd", lambda url, headers: socket)
+    cookies = _cookie(tenant_session("acme", "acme-ns"))
+    return shell_client.websocket_connect("/api/sandboxes/sbx-1/shell/ws", cookies=cookies)
+
+
+def test_dropped_execd_connection_is_reported_as_lost(
+    shell_client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    with _connect_dropping(shell_client, monkeypatch, DroppingExecdSocket([CONNECTED_FRAME, b"\x01hi"])) as ws:
+        assert ws.receive_text() == CONNECTED_FRAME
+        assert ws.receive_bytes() == b"\x01hi"
+        message = ws.receive_json()
+
+    assert message["code"] == "SHELL_DISCONNECTED"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert shell_client.deleted == ["pty-1"]
+
+
+def test_execd_dropping_while_input_is_sent_is_reported_as_lost(
+    shell_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    socket = DroppingExecdSocket([CONNECTED_FRAME], drop_on_send=True)
+    with _connect_dropping(shell_client, monkeypatch, socket) as ws:
+        assert ws.receive_text() == CONNECTED_FRAME
+        ws.send_bytes(b"\x00ls\n")
+        message = ws.receive_json()
+
+    assert message["code"] == "SHELL_DISCONNECTED"
+
+
+def test_execd_start_error_is_not_replaced(shell_client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    start_error = '{"type":"error","code":"START_FAILED","error":"fork failed"}'
+    with _connect_dropping(shell_client, monkeypatch, DroppingExecdSocket([start_error])) as ws:
+        assert ws.receive_text() == start_error
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert shell_client.deleted == ["pty-1"]
+
+
+def test_execd_dropping_before_connected_is_a_failed_start(
+    shell_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    with _connect_dropping(shell_client, monkeypatch, DroppingExecdSocket([])) as ws:
+        message = ws.receive_json()
+
+    assert message["code"] == "SHELL_FAILED"
+
+
+class _TypingBrowser:
+    """A browser that types once the shell is open and then stays idle."""
+
+    def __init__(self) -> None:
+        self._opened = asyncio.Event()
+        self._typed = False
+
+    async def receive(self) -> dict:
+        await self._opened.wait()
+        if not self._typed:
+            self._typed = True
+            return {"type": "websocket.receive", "bytes": b"\x00ls\n"}
+        await asyncio.sleep(3600)
+        raise AssertionError("idle wait should be cancelled")
+
+    async def send_text(self, data: str) -> None:
+        self._opened.set()
+
+    async def send_bytes(self, data: bytes) -> None:
+        pass
+
+
+class _DroppingBothWays(DroppingExecdSocket):
+    """Drops on send and fails the pending receive in the same step."""
+
+    def __init__(self) -> None:
+        super().__init__([CONNECTED_FRAME])
+        self._dropped = asyncio.Event()
+
+    async def send(self, data: bytes | str) -> None:
+        self._dropped.set()
+        raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+
+    async def __anext__(self) -> bytes | str:
+        if self._frames:
+            return self._frames.pop(0)
+        await self._dropped.wait()
+        raise websockets.ConnectionClosedError(Close(1011, "internal error"), None)
+
+
+def test_execd_dropping_both_ways_leaves_no_unretrieved_exception():
+    unhandled: list[dict] = []
+
+    async def run() -> str:
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+        with pytest.raises(ShellError) as raised:
+            await bridge_pty(_TypingBrowser(), _DroppingBothWays())
+        return raised.value.code
+
+    # Only the code is kept: the raised error's traceback would keep the
+    # other task alive and hide an exception it never had retrieved.
+    code = asyncio.run(run())
+    gc.collect()
+
+    assert code == "SHELL_DISCONNECTED"
+    assert unhandled == []

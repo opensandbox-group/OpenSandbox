@@ -34,9 +34,11 @@ type RecordKind string
 const (
 	SourceNameContainerLogs = "container-logs"
 	SourceNameSyscalls      = "syscalls"
+	SourceNameVMConsole     = "vm-console"
 
 	RecordKindContainerLog RecordKind = "container-log"
 	RecordKindSyscall      RecordKind = "syscall"
+	RecordKindVMConsole    RecordKind = "vm-console"
 )
 
 // Capabilities declares the RecordKinds a Source emits or a Sink accepts. The

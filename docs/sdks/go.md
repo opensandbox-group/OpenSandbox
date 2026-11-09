@@ -340,6 +340,8 @@ if _, err := resumed.Renew(ctx, 30*time.Minute); err != nil {
 
 During sandbox creation, `ReadyTimeout` bounds the wait for the lifecycle state to become `Running`, even when the caller context has a longer deadline. An earlier caller deadline or cancellation still takes precedence.
 
+Expiration of this running-state budget or an earlier caller deadline returns `*SandboxRunningTimeoutError`, including when a status request is in flight. Use `errors.As` to identify this error and `errors.Is(err, context.DeadlineExceeded)` to inspect its cause. Caller cancellation remains `context.Canceled`. A request failure before the running-state deadline, including a shorter HTTP-client timeout, remains a request error.
+
 Use `ConnectSandbox(ctx, config, id, opensandbox.ReadyOptions{})` to attach to an already running sandbox with a readiness check. See [Pause and Resume](/guides/pause-resume).
 
 ### Resource metrics
@@ -526,6 +528,8 @@ SSE bootstraps do not use the generic retry loop, even when a write status code 
 ### Wake retry
 
 A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the client recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the client returns a `*SandboxWakeTimeoutError` (carrying `Attempts` and `Waited`) while the server-side resume continues in the background. Bare `503` responses follow the existing retry rules untouched. Wake retry is active whenever a `WithRetry` config is set (`WakeRetryEnabled` defaults to enabled even for hand-built configs; pass `WakeRetryDisabled()` to opt out). It also covers the request that starts an SSE stream, so a command or code execution against an auto-paused sandbox wakes it like any other request; once a stream is established, its events are never re-executed.
+
+Once a marked wake response starts the wake phase, generic retry backoff and `Retry-After` delays must also fit the remaining `WakeOverallDeadline`. If an ordinary retryable failure needs a longer delay, the SDK returns that last error immediately without another request. It does not replace the ordinary failure with an earlier marked response that claims the request was never forwarded. A negative `WakeOverallDeadline` keeps wake retries unbounded by time; requests that never receive a wake marker retain their normal retry policy.
 
 ## Fsb Template Management
 
@@ -770,6 +774,8 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 ## SSE Streaming
 
 The stream parser accepts LF, CRLF, and CR line endings for both standard SSE and execd's legacy bare-JSON frames, including when a line ending is split across network reads.
+
+One leading UTF-8 byte order mark (BOM) is ignored at the start of each response, including when its bytes arrive in separate reads. A BOM inside event data or later in the stream is preserved.
 
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 
