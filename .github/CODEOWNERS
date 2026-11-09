@@ -11,7 +11,7 @@
 /components/execd/ @Pangjiping @hittyt @ninan-nn
 /components/ingress/ @Pangjiping @hittyt @Generalwin @Spground
 /components/egress/ @Pangjiping @hittyt @jwx0925
-/components/nodeagent/ @jianpingpei @Pangjiping @hittyt @jwx0925 @ninan-nn
+/components/nodeagent/ @jianpingpei @Pangjiping
 
 # Kubernetes controller
 /kubernetes/ @Spground @Generalwin @fengcone @kevinlynx @ninan-nn @hittyt @Pangjiping
