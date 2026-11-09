@@ -17,6 +17,7 @@ In addition to the Project Maintainers above:
 - [@Spground](https://github.com/Spground)
 - [@fengcone](https://github.com/fengcone)
 - [@hpliStartAgain](https://github.com/hpliStartAgain)
+- [@jianpingpei](https://github.com/jianpingpei)
 - [@kevinlynx](https://github.com/kevinlynx)
 
 ## Membership Changes
