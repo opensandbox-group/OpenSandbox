@@ -3,8 +3,8 @@ title: Developer Console for Sandbox Operations
 authors:
   - "@divyamagrawal06"
 creation-date: 2026-03-05
-last-updated: 2026-03-06
-status: implementable
+last-updated: 2026-11-09
+status: withdrawn
 ---
 
 # OSEP-0006: Developer Console for Sandbox Operations with Phased Auth Model
