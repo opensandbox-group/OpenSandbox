@@ -588,6 +588,52 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /jwks/{kid}:
+    get:
+      tags: [JWKS]
+      operationId: getEgressSigningJwk
+      summary: Publish one egress caller-authentication public key
+      description: |
+        OSEP-0025 resolver caller authentication: credential resolvers verify
+        the `OpenSandbox-Egress-Credential` JWT offline against the Ed25519
+        public key identified by `kid`.
+
+        The endpoint is public by design — it serves public keys only (the
+        OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
+        is bounded by local `kid` grammar validation and a per-window lookup
+        budget. `kid` is a platform identifier: a fast-sandbox pool kid
+        (`<pool>:v<version>`) or, in later revisions, a sidecar sandboxId.
+        Off-grammar and unknown kids answer 404 without a backend read.
+      parameters:
+        - name: kid
+          in: path
+          required: true
+          description: Platform key identifier, for example `pool-a:v2`.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The Ed25519 public JWK for this kid
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EgressSigningJwk'
+              example:
+                kty: OKP
+                crv: Ed25519
+                x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo
+                kid: pool-a:v2
+                alg: EdDSA
+                use: sig
+        '404':
+          description: Unknown or off-grammar kid
+        '429':
+          description: Lookup budget exhausted; retry later
+        '501':
+          description: No egress signing Secrets are configured on this server
   /sandboxes:
     get:
       tags: [ Sandboxes ]
@@ -1593,6 +1639,32 @@ components:
           type: boolean
           description: Whether create + readiness completed successfully
       required: [eventType, createDurationMs, success]
+    EgressSigningJwk:
+      type: object
+      description: |
+        One egress caller-authentication public key (OSEP-0025). Public
+        material only — the matching private keys never leave the egress
+        provisioning channels.
+      properties:
+        kty:
+          type: string
+          enum: [OKP]
+        crv:
+          type: string
+          enum: [Ed25519]
+        x:
+          type: string
+          description: Raw Ed25519 public key, base64url without padding
+        kid:
+          type: string
+          description: Platform key identifier; the JWKS lookup key
+        alg:
+          type: string
+          enum: [EdDSA]
+        use:
+          type: string
+          enum: [sig]
+      required: [kty, crv, x, kid, alg, use]
     ListSandboxesResponse:
       type: object
       properties:

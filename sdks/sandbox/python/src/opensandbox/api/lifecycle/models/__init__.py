@@ -54,6 +54,11 @@ from .credential_vault_create_request import CredentialVaultCreateRequest
 from .credential_vault_mutation_request import CredentialVaultMutationRequest
 from .credential_vault_state import CredentialVaultState
 from .custom_header_entry import CustomHeaderEntry
+from .egress_signing_jwk import EgressSigningJwk
+from .egress_signing_jwk_alg import EgressSigningJwkAlg
+from .egress_signing_jwk_crv import EgressSigningJwkCrv
+from .egress_signing_jwk_kty import EgressSigningJwkKty
+from .egress_signing_jwk_use import EgressSigningJwkUse
 from .endpoint import Endpoint
 from .endpoint_headers import EndpointHeaders
 from .error_response import ErrorResponse
@@ -141,6 +146,11 @@ __all__ = (
     "CredentialVaultMutationRequest",
     "CredentialVaultState",
     "CustomHeaderEntry",
+    "EgressSigningJwk",
+    "EgressSigningJwkAlg",
+    "EgressSigningJwkCrv",
+    "EgressSigningJwkKty",
+    "EgressSigningJwkUse",
     "Endpoint",
     "EndpointHeaders",
     "ErrorResponse",
