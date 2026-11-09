@@ -2868,12 +2868,14 @@ vm_console_collect_check() { # <sandbox-id> — a live e2e-matrix sandbox
 	wait_for "node-agent collected the guest console marker" 30 vm_console_marker_collected "$marker"
 	# Locate the collected file across BOTH agent pods: the sandbox may live
 	# on either kind node, and the pod that holds the marker is not known
-	# before the grep answers.
+	# before the grep answers. The miss on one pod is EXPECTED — guard the
+	# pipeline (`|| true`) so the empty find cannot trip the ERR trap through
+	# the assignment under `set -euEo pipefail`.
 	family=""
 	local pod
 	for pod in $(node_agent_pods); do
 		family="$(kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- \
-			grep -rl -- "$marker" "$VMCONSOLE_SINK_ROOT" 2>/dev/null | head -1)"
+			grep -rl -- "$marker" "$VMCONSOLE_SINK_ROOT" 2>/dev/null | head -1 || true)"
 		[[ -n "$family" ]] && break
 	done
 	[[ "$family" == *"/_streams/vm-console/"*"/$id/"*"/console.log" ]] \
