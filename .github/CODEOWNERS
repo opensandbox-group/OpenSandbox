@@ -11,6 +11,10 @@
 /components/execd/ @Pangjiping @hittyt @ninan-nn
 /components/ingress/ @Pangjiping @hittyt @Generalwin @Spground
 /components/egress/ @Pangjiping @hittyt @jwx0925
+/components/nodeagent/ @jianpingpei @Pangjiping @hittyt @jwx0925 @ninan-nn
+
+# Helm charts
+/manifests/charts/node-agent/ @jianpingpei @Pangjiping @hittyt @jwx0925 @ninan-nn
 
 # Kubernetes controller
 /kubernetes/ @Spground @Generalwin @fengcone @kevinlynx @ninan-nn @hittyt @Pangjiping
