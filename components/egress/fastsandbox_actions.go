@@ -553,6 +553,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 			s.reg.Unregister(subj)
 			s.mu.Lock()
+			// The registry has retired this fence even if the local purge fails.
 			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil { // preserve this exact token through C publication
 				status := s.vaultPurgeFailureStatusLocked(subj)
@@ -566,12 +567,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		}
 		s.mu.Lock()
 		if !token.purged {
-			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil {
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
 				return status, fmt.Errorf("subject rebind purge: %w", err)
 			}
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.purged = true
 		}
 		removeOld := token.removeOld && !token.oldRemoved
@@ -718,6 +719,22 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		// ever consume.
 		s.policyCommitMu.Lock()
 		defer s.policyCommitMu.Unlock()
+		// A failed activation rollback must be retried before the ACK gate,
+		// even while no child can acknowledge a snapshot. Do not infer this
+		// from registry Active: a healthy active subject may await a new ACK.
+		s.mu.Lock()
+		retryRevert := s.fenceMatchesLocked(subj, fence) && s.subjectDrain != nil && s.subjectDrain.revertPending[subj]
+		att := s.subjAtt[subj]
+		s.mu.Unlock()
+		if retryRevert {
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
+				return http.StatusInternalServerError, err
+			}
+			s.mu.Lock()
+			delete(s.subjectDrain.revertPending, subj)
+			s.mu.Unlock()
+		}
 		// Fence re-validation AND the pending peek under one s.mu hold
 		// (policyCommitMu → s.mu, the established order): fenceMatchesLocked
 		// reads subjFence, which terminal cleanup deletes under s.mu. An
@@ -727,6 +744,13 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		s.mu.Lock()
 		stale := !s.fenceMatchesLocked(subj, fence)
 		pol := s.pendingPolicies[subj]
+		acknowledged := s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		var checkedEpoch *fastSandboxSubjectEpoch
+		var checkedACK fastSandboxSubjectACK
+		if d := s.subjectDrain; d != nil {
+			checkedEpoch, checkedACK = d.current, d.acked[subj]
+		}
+		att = s.subjAtt[subj]
 		s.mu.Unlock()
 		if stale {
 			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
@@ -737,10 +761,42 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 			// the subject must never activate without its current policy.
 			return http.StatusConflict, fmt.Errorf("data-plane-ready for subject %s with no pending policy", subj)
 		}
+		if !acknowledged {
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
+		}
 		applyStarted := time.Now()
 		if err := s.applyPolicy(subj, pol); err != nil {
 			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
 		}
+		// Child publication/detach and worker failures do not take policyCommitMu.
+		// Fence completion against the exact epoch, registration and digest that
+		// passed the gate; a replacement's ACK cannot complete this activation.
+		s.mu.Lock()
+		if checkedEpoch != nil {
+			d := s.subjectDrain
+			acknowledged = d != nil && d.current == checkedEpoch && d.acked[subj] == checkedACK && s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		}
+		s.mu.Unlock()
+		if !acknowledged {
+			// Keep pending policy for a retried hook. Kernel I/O stays outside mu;
+			// the existing primitive resets nft before unsetting registry policy.
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				s.mu.Lock()
+				if s.subjectDrain.revertPending == nil {
+					s.subjectDrain.revertPending = make(map[subject.Subject]bool)
+				}
+				s.subjectDrain.revertPending[subj] = true
+				s.mu.Unlock()
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
+				return http.StatusInternalServerError, err
+			}
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
+		}
+		s.mu.Lock()
+		if s.subjectDrain != nil {
+			delete(s.subjectDrain.revertPending, subj)
+		}
+		s.mu.Unlock()
 		s.recordBindingSnapshot(subj, fence)
 		// The pending slot stays: it now mirrors what is enforced, so a
 		// data-plane-ready replayed after a lost ack is idempotent (same

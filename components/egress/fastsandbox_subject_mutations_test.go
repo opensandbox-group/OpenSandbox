@@ -83,7 +83,7 @@ func committedMutationSnapshot(t *testing.T, s *fastSandboxPolicyServer, uid str
 func checkMutationInstalled(t *testing.T, s *fastSandboxPolicyServer, h *mitmproxy.SubjectRevisionIPCConfig, uid, runtimeID, attachmentID string) revision.Identity {
 	t.Helper()
 	want := committedMutationSnapshot(t, s, uid)
-	require.Equal(t, want, latestSubjectSnapshot(t, s, uid), "mirror must describe this committed mutation")
+	requireSnapshotContent(t, want, latestSubjectSnapshot(t, s, uid))
 	return waitSubjectInstalled(t, h, lifecycleTarget(t, uid, runtimeID, attachmentID), want)
 }
 
@@ -120,7 +120,7 @@ func TestFastSandboxSubjectSnapshotMutationActivation(t *testing.T) {
 	h := (*configs)[0].SubjectRevisionIPC
 	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
 	first := checkMutationInstalled(t, s, h, testUID, testFenceR, testFenceA)
-	require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
+	waitReadiness(t, s, testUID, testFenceR, testFenceA)
 	// Activation has the same digest, but still passes through the producer.
 	frozen := latestSubjectSnapshot(t, s, testUID)
 	require.Eventually(t, func() bool {
@@ -131,14 +131,14 @@ func TestFastSandboxSubjectSnapshotMutationActivation(t *testing.T) {
 		active, err := transport.Readback(ctx)
 		return err == nil && active != nil && active.DecisionEpoch > first.DecisionEpoch
 	}, 5*time.Second, 10*time.Millisecond)
-	require.Equal(t, frozen, committedMutationSnapshot(t, s, testUID))
+	requireSnapshotContent(t, frozen, committedMutationSnapshot(t, s, testUID))
 }
 
 func TestFastSandboxSubjectSnapshotMutationPolicyAndRemoval(t *testing.T) {
 	s, reg, _, _, configs := snapshotDrainHarness(t)
 	h := (*configs)[0].SubjectRevisionIPC
 	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
-	require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
+	waitReadiness(t, s, testUID, testFenceR, testFenceA)
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
 		rec := doPolicy(t, s, method, testUID, policyPutDoc(policyAllowAlt(), 0, false, false), "")
 		require.Contains(t, []int{200, 204}, rec.Code)
@@ -221,7 +221,7 @@ func TestFastSandboxSubjectSnapshotMutationImports(t *testing.T) {
 				require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
 			}
 			ready := func() {
-				require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
+				waitReadiness(t, s, testUID, testFenceR, testFenceA)
 			}
 			if when != "before-set" {
 				set()
@@ -274,14 +274,14 @@ func TestFastSandboxSubjectSnapshotMutationCoalesce(t *testing.T) {
 	for _, tc := range []struct{ op, path string }{{"VAULT_IMPORT", vaultPath}, {"POLICY_IMPORT", policyPath}} {
 		require.Equal(t, 200, doAction(t, s, snapshotBody(t, testUID, testFenceR, testFenceA, tc.op, tc.path)).Code)
 	}
-	require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
+	requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
 	want := committedMutationSnapshot(t, s, testUID)
 	require.NotEqual(t, first.payload, want.payload)
 	s.mu.Lock()
 	queued := append([]fastSandboxSubjectIntent(nil), s.subjectDrain.queue...)
 	s.mu.Unlock()
 	require.Len(t, queued, 1)
-	require.Equal(t, want, queued[0].snapshot)
+	requireSnapshotContent(t, want, queued[0].snapshot)
 	close(fault.release)
 	active := checkMutationInstalled(t, s, h, testUID, testFenceR, testFenceA)
 	require.Equal(t, int64(2), active.DecisionEpoch)
@@ -303,7 +303,7 @@ type mutationObservation struct {
 	Allow string
 }
 
-func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict, fileMetaMismatch bool) []mutationObservation {
+func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict, fileMetaMismatch, waitForACK bool) []mutationObservation {
 	t.Helper()
 	var out []mutationObservation
 	observe := func(rec *httptest.ResponseRecorder) {
@@ -314,6 +314,9 @@ func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict, file
 		owner := actionsV2Owner(testUID, testFenceR, testFenceA, 1)
 		s.instanceID = "fixed-differential-handler"
 		observe(doActionsV2(t, s, actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())))
+		if waitForACK && s.subjectDrain != nil {
+			waitReadiness(t, s, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID)
+		}
 		observe(doActionsV2(t, s, actionsV2Body(t, actionhandler.OperationLifecycleHook, owner, nil)))
 		init, err := json.Marshal(map[string]any{"contract": strictVaultContract{vaultWriterVersion, "init-a", "lineage-a"}, "mode": "legacy", "fresh": true, "handlerInstanceId": s.instanceID})
 		require.NoError(t, err)
@@ -363,6 +366,9 @@ func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict, file
 	}
 	observe(doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())))
 	for _, hook := range []string{constants.HookRuntimeReady, constants.HookDataPlaneReady} {
+		if waitForACK && s.subjectDrain != nil && hook == constants.HookDataPlaneReady {
+			waitReadiness(t, s, testUID, testFenceR, testFenceA)
+		}
 		observe(doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, hook)))
 	}
 	for _, method := range []string{"POST", "PUT", "DELETE"} {
@@ -379,6 +385,9 @@ func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict, file
 	vaultPath, policyPath := mutationBundles(t, 5)
 	for _, tc := range []struct{ op, path string }{{"VAULT_IMPORT", vaultPath}, {"POLICY_IMPORT", policyPath}} {
 		observe(doAction(t, s, snapshotBody(t, testUID, testFenceR, testFenceA, tc.op, tc.path)))
+	}
+	if waitForACK && s.subjectDrain != nil {
+		waitReadiness(t, s, testUID, testFenceR, testFenceA)
 	}
 	observe(doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)))
 	observe(doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, nil)))
@@ -406,7 +415,7 @@ func TestFastSandboxSubjectSnapshotMutationHTTPDifferential(t *testing.T) {
 					require.NoError(t, err)
 					s.publishSubjectClient(client, proxy)
 				}
-				observed := exerciseMutationHTTP(t, s, strict, tc.fileMetaMismatch)
+				observed := exerciseMutationHTTP(t, s, strict, tc.fileMetaMismatch, mode != "rejected")
 				if mode == "disabled" {
 					baseline = observed
 					require.Nil(t, s.subjectDrain)
@@ -414,15 +423,27 @@ func TestFastSandboxSubjectSnapshotMutationHTTPDifferential(t *testing.T) {
 					require.NoError(t, err)
 					t.Logf("HTTP-BASELINE %s", raw)
 				} else {
-					require.Equal(t, baseline, observed, "status/body/Ready/hooks and policy evaluation: %s", mode)
 					if mode == "rejected" {
-						require.Eventually(t, func() bool { return len(s.subjectLifecycleDegraded()) != 0 }, 5*time.Second, 10*time.Millisecond)
-						want := []string{"subject_prepare_rejected"}
-						if strict {
-							want = append(want, "vault_state_unknown")
+						for i := range observed {
+							require.Equal(t, "no-policy", observed[i].Allow, "failed installation must never activate policy")
+							observed[i].Allow = baseline[i].Allow // only the expected deny-first consequence differs
+							gated := (strict && i == 1) || (!strict && (i == 2 || i == 11))
+							if gated {
+								require.Equal(t, 503, observed[i].Code)
+								require.Contains(t, observed[i].Body, "subject snapshot not acknowledged")
+								observed[i].Code, observed[i].Body = baseline[i].Code, baseline[i].Body
+							}
 						}
-						require.Eventually(t, func() bool { return fmt.Sprint(s.subjectLifecycleDegraded()) == fmt.Sprint(want) }, 5*time.Second, 10*time.Millisecond)
-					} else if strict {
+						require.Eventually(t, func() bool {
+							want := []string{"subject_prepare_rejected"}
+							if strict {
+								want = append(want, "vault_state_unknown")
+							}
+							return fmt.Sprint(s.subjectLifecycleDegraded()) == fmt.Sprint(want)
+						}, 5*time.Second, 5*time.Millisecond)
+					}
+					require.Equal(t, baseline, observed, "status/body/Ready/hooks and policy evaluation: %s", mode)
+					if strict && mode != "rejected" {
 						require.Equal(t, []string{"vault_state_unknown"}, s.subjectLifecycleDegraded())
 					}
 				}
@@ -478,7 +499,7 @@ func TestFastSandboxSubjectSnapshotUnknownBootstrapRecovery(t *testing.T) {
 	restarted.vaultFiles = vp
 	require.Equal(t, 200, writerInit(t, restarted, owner, false))
 	checkMutationInstalled(t, restarted, h, owner.SandboxUID, owner.RuntimeInstanceID, owner.AttachmentID)
-	require.Equal(t, want, latestSubjectSnapshot(t, restarted, owner.SandboxUID))
+	requireSnapshotContent(t, want, latestSubjectSnapshot(t, restarted, owner.SandboxUID))
 	require.NotContains(t, restarted.subjectLifecycleDegraded(), "vault_state_unknown")
 }
 
@@ -558,4 +579,12 @@ func TestFastSandboxSubjectSnapshotUnknownRemoval(t *testing.T) {
 	s.mu.Unlock()
 	require.Nil(t, removed)
 	require.NotContains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+}
+
+// Compare committed inputs independently of the mirror's derived digest.
+func requireSnapshotContent(t *testing.T, want, got *fastSandboxSubjectSnapshot) {
+	t.Helper()
+	require.Equal(t, want.payload, got.payload)
+	require.Equal(t, want.vaultRevision, got.vaultRevision)
+	require.Equal(t, want.policyEpoch, got.policyEpoch)
 }

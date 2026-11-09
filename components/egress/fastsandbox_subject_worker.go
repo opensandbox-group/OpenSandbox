@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"math"
 	"sort"
@@ -43,12 +44,17 @@ type fastSandboxSubjectDrain struct {
 	// Unbounded: action intents are recorded only inside the serial actionGate,
 	// so growth is limited by action rate; stale intents are dropped before send.
 	// Child publication replaces the queue with the current replay set.
-	queue         []fastSandboxSubjectIntent
-	degraded      map[string]bool
-	unknownVaults map[subject.Subject]bool // live Vaults invalidated under the current registered fence
-	deadline      time.Duration
-	snapshots     map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
-	fences        map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
+	queue            []fastSandboxSubjectIntent
+	degraded         map[string]bool
+	unknownVaults    map[subject.Subject]bool // live Vaults invalidated under the current registered fence
+	snapshotFailures map[subject.Subject]bool // current committed inputs could not produce a replayable snapshot
+	revertPending    map[subject.Subject]bool // failed readiness rollback; retry before the next ACK gate
+	deadline         time.Duration
+	snapshots        map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
+	fences           map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
+	acked            map[subject.Subject]fastSandboxSubjectACK       // confirmed intent, never the mirror at confirmation time
+	registrations    map[subject.Subject]uint64                      // current registration instance, even when the fence is reused
+	nextRegistration uint64                                          // drain-wide monotonic sequence; never reset on Unload or child replacement
 
 	// Optional test observer, called under s.mu after acknowledged Unload.
 	epochCountForTest func(int)
@@ -62,25 +68,57 @@ type fastSandboxSubjectEpoch struct {
 }
 
 type fastSandboxSubjectIntent struct {
-	subj     subject.Subject
-	fence    subject.Fencing
-	target   revision.SubjectTarget
-	unload   bool
-	epoch    *fastSandboxSubjectEpoch
-	snapshot *fastSandboxSubjectSnapshot
+	subj         subject.Subject
+	fence        subject.Fencing
+	target       revision.SubjectTarget
+	unload       bool
+	epoch        *fastSandboxSubjectEpoch
+	snapshot     *fastSandboxSubjectSnapshot
+	registration uint64
 }
 
 type fastSandboxSubjectSnapshot struct {
 	payload                    []byte
+	digest                     [sha256.Size]byte
 	vaultRevision, policyEpoch int64
+}
+
+type fastSandboxSubjectACK struct {
+	fence        subject.Fencing
+	controlEpoch string
+	digest       [sha256.Size]byte
+	registration uint64
+}
+
+// Call under s.mu. This is an observation of existing recovery state, not a
+// change to the legacy rehydrate or relay recovery protocol.
+func (s *fastSandboxPolicyServer) subjectVaultAuthoritativeLocked(subj subject.Subject) bool {
+	entry := s.vaults[subj]
+	return !entry.vaultStateUnknown && entry.degraded == ""
+}
+
+// Called under policyCommitMu -> s.mu; no IPC, registry callback or wait.
+func (s *fastSandboxPolicyServer) subjectSnapshotAcknowledgedLocked(subj subject.Subject, fence subject.Fencing) bool {
+	d := s.subjectDrain
+	if d == nil {
+		return true
+	}
+	if !s.subjectVaultAuthoritativeLocked(subj) || d.snapshotFailures[subj] || d.current == nil || d.snapshots[subj] == nil {
+		return false
+	}
+	ack, ok := d.acked[subj]
+	registration := d.registrations[subj]
+	return ok && registration != 0 && ack.registration == registration && ack.fence.Matches(fence) && ack.controlEpoch == d.current.handoff.ControlGeneration && ack.digest == d.snapshots[subj].digest
 }
 
 func (s *fastSandboxPolicyServer) startSubjectDrain() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool)}
+	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool), registrations: make(map[subject.Subject]uint64)}
 	for subj, fence := range s.subjFence {
 		d.fences[subj] = fence
+		d.nextRegistration++
+		d.registrations[subj] = d.nextRegistration
 	}
 	s.subjectDrain = d
 	s.mu.Unlock()
@@ -109,6 +147,7 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	d.current = &fastSandboxSubjectEpoch{client: client, handoff: handoff, ctx: ctx, cancel: cancel}
+	d.acked = make(map[subject.Subject]fastSandboxSubjectACK)
 	d.queue = nil // old process intents cannot apply to the new sequence owner
 	d.degraded = make(map[string]bool)
 	subjects := make([]subject.Subject, 0, len(d.fences))
@@ -119,7 +158,7 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 	for _, subj := range subjects {
 		s.recordSubjectIntentLocked(subj, d.fences[subj], false)
 		if snapshot := d.snapshots[subj]; snapshot != nil {
-			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot})
+			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot, registration: d.registrations[subj]})
 		}
 	}
 	d.signal()
@@ -132,6 +171,7 @@ func (s *fastSandboxPolicyServer) detachSubjectClient(client *revision.SubjectLi
 	if d != nil && d.current != nil && d.current.client == client {
 		d.current.cancel()
 		d.current = nil
+		d.acked = nil
 		d.queue = nil
 		d.signal()
 	}
@@ -152,22 +192,33 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 		log.Warnf("subject %s: lifecycle target encoding failed", subj)
 		return
 	} // invalid/failed registrations have no IPC target
+	registration := d.registrations[subj]
 	if unload {
 		d.dropInstallsLocked(target)
 		if current, ok := d.fences[subj]; ok && current.Matches(fence) {
 			delete(d.fences, subj)
+			delete(d.registrations, subj)
 			delete(d.snapshots, subj)
+			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
+			delete(d.snapshotFailures, subj)
+			delete(d.revertPending, subj)
 		}
 	} else {
 		if old, exists := d.fences[subj]; exists && !old.Matches(fence) {
 			d.dropInstallsLocked(mustSubjectTarget(subj, old))
 			delete(d.snapshots, subj)
+			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
+			delete(d.snapshotFailures, subj)
+			delete(d.revertPending, subj)
 		}
 		d.fences[subj] = fence
+		d.nextRegistration++
+		registration = d.nextRegistration
+		d.registrations[subj] = registration
 	}
-	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload, epoch: d.current})
+	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload, epoch: d.current, registration: registration})
 	d.signal()
 }
 
@@ -202,13 +253,13 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 	if current, ok := d.fences[subj]; !ok || !current.Matches(fence) {
 		return
 	}
-	if entry := s.vaults[subj]; entry.vaultStateUnknown {
-		return // retain the last payload; unknown is not committed empty
+	if !s.subjectVaultAuthoritativeLocked(subj) {
+		return // retain the last payload; unrestored state is not committed empty
 	}
 	// The registry itself has no capacity cap. Bound the observation mirror
 	// independently to the receiver's subject budget without failing SET.
 	if d.snapshots[subj] == nil && len(d.snapshots) >= fastSandboxRevisionMaxSubjects {
-		d.degradeLocked("subject_capacity_exhausted")
+		d.markSnapshotFailureLocked(subj, "subject_capacity_exhausted")
 		return
 	}
 	var snapshot credentialvault.ActiveSnapshot
@@ -217,7 +268,7 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 		snapshot, err = entry.store.ActiveSnapshot()
 	}
 	if err != nil && !errors.Is(err, credentialvault.ErrNotFound) {
-		d.degradeLocked("subject_snapshot_invalid")
+		d.markSnapshotFailureLocked(subj, "subject_snapshot_invalid")
 		return
 	}
 	var policyEpoch int64
@@ -226,17 +277,28 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 	}
 	payload, err := credentialvault.MarshalDecisionSnapshot(snapshot, policyEpoch)
 	if err != nil {
-		d.degradeLocked("subject_snapshot_invalid")
+		d.markSnapshotFailureLocked(subj, "subject_snapshot_invalid")
 		return
 	}
 	if len(payload) > defaultRevisionMaxSnapshotSize {
-		d.degradeLocked("subject_snapshot_too_large")
+		d.markSnapshotFailureLocked(subj, "subject_snapshot_too_large")
 		return
 	}
-	frozen := &fastSandboxSubjectSnapshot{payload: payload, vaultRevision: snapshot.Revision, policyEpoch: policyEpoch}
+	frozen := &fastSandboxSubjectSnapshot{payload: payload, digest: sha256.Sum256(payload), vaultRevision: snapshot.Revision, policyEpoch: policyEpoch}
 	d.snapshots[subj] = frozen
+	delete(d.snapshotFailures, subj)
 	delete(d.unknownVaults, subj)
-	d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: fence, target: mustSubjectTarget(subj, fence), epoch: d.current, snapshot: frozen})
+	d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: fence, target: mustSubjectTarget(subj, fence), epoch: d.current, snapshot: frozen, registration: d.registrations[subj]})
+}
+
+// Called under s.mu. Keep the old replay payload, but never let its ACK stand
+// in for newer committed inputs that failed to produce a snapshot.
+func (d *fastSandboxSubjectDrain) markSnapshotFailureLocked(subj subject.Subject, reason string) {
+	if d.snapshotFailures == nil {
+		d.snapshotFailures = make(map[subject.Subject]bool)
+	}
+	d.snapshotFailures[subj] = true
+	d.degradeLocked(reason)
 }
 
 func (d *fastSandboxSubjectDrain) dropInstallsLocked(target revision.SubjectTarget) {
@@ -255,15 +317,15 @@ func (d *fastSandboxSubjectDrain) enqueueInstallLocked(next fastSandboxSubjectIn
 		if intent.snapshot == nil || intent.subj != next.subj {
 			continue
 		}
-		if intent.target == next.target && intent.epoch == next.epoch {
-			d.queue[i] = next // same generation and child: preserve FIFO position
+		if intent.target == next.target && intent.epoch == next.epoch && intent.registration == next.registration {
+			d.queue[i] = next // same registration and child: preserve FIFO position
 			d.signal()
 			return
 		}
 		// At most one generation per subject has queued installs: a
 		// generation change drops the old target first, so one drop suffices.
 		d.dropInstallsLocked(intent.target)
-		break // different generation/epoch: append after its Register
+		break // different registration/epoch: append after its Register
 	}
 	d.queue = append(d.queue, next)
 	d.signal()
@@ -660,6 +722,11 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 		aborted := errors.Is(err, revision.ErrPrepareRejected)
 		s.mu.Lock()
 		if d.current == epoch {
+			if installed && s.subjectIntentCurrentLocked(intent) {
+				// A newer mirror may already exist. Stamp only the acknowledged
+				// intent, so that successor remains gated until its own ACK.
+				d.acked[intent.subj] = fastSandboxSubjectACK{fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration}
+			}
 			if installed || terminal {
 				delete(d.degraded, "subject_ipc_unavailable")
 			}
@@ -667,6 +734,12 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				d.degradeLocked(reason)
 			}
 			if terminal {
+				// A confirmed rejection revokes prior success for this registration,
+				// even when the rejected payload has the same digest. A late result
+				// from a retired registration must not revoke its successor's ACK.
+				if d.acked[intent.subj].registration == intent.registration {
+					delete(d.acked, intent.subj)
+				}
 				d.dropInstallsLocked(intent.target)
 			}
 		}

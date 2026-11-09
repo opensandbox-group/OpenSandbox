@@ -180,80 +180,101 @@ func TestFastSandboxSubjectDrainAbsentRemoveUsesMirror(t *testing.T) {
 	}
 }
 
-// The first lifecycle preflight succeeds; the purge-time snapshot and its
-// status recheck fail. This exercises the error before any file deletion.
-type subjectDrainPurgeFailure struct {
-	vaultFileStore
-	snapshots int
-}
-
-func (f *subjectDrainPurgeFailure) Snapshot() (*policy.PolicyFileSnapshot, error) {
-	f.snapshots++
-	if f.snapshots > 1 {
-		return nil, errors.New("injected purge snapshot failure")
-	}
-	return f.vaultFileStore.Snapshot()
-}
-
-func TestFastSandboxSubjectDrainPurgeFailureStillUnloads(t *testing.T) {
-	for _, reset := range []bool{false, true} {
-		name := "rebind"
-		if reset {
-			name = "needs-reset"
-		}
+// Use the production atomic file throughout. The existing constructor seam
+// changes real entry state after the preflight's entry check, before its disk
+// read; the next purge check observes unknown. No Snapshot result is mocked.
+func TestFastSandboxSubjectDrainPurgeFailureDefersUnload(t *testing.T) {
+	for _, name := range []string{"rebind", "needs-reset", "needs-reset-superseded"} {
+		reset := name != "rebind"
 		t.Run(name, func(t *testing.T) {
-			h := newVaultPersistHarness(t)
-			s := h.srv
-			o := subjectTestOwner(t)
-			launch, configs := subjectAddonLauncher(t, o)
-			m := &mitmTransparent{subjectOwner: o, restartCh: make(chan exitEvent, 64), shutdownCh: make(chan struct{})}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			deps := mitmLaunchDependencies{launch: launch, listen: func(context.Context, string, time.Duration) error { return nil }, retry: func(context.Context, <-chan struct{}, time.Duration) bool { t.Fatal("unexpected retry"); return false }}
-			require.NoError(t, m.startInitial(ctx, deps, func() error { return nil }))
-			o.attach(s, m.running)
-			defer m.shutdown(time.Second)
-			first := (*configs)[0].SubjectRevisionIPC
-			require.Equal(t, http.StatusOK, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, nil)).Code)
-			target := lifecycleTarget(t, testUID, testFenceR, testFenceA)
-			waitSubjectKnown(t, first, target, true)
-			waitLifecycleIdle(t, s, first, 1)
+			seed := readinessLegacySeed(t)
+			s := readinessRestart(t, seed, false)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			h := readinessReceiver(t, s)
+			waitReadiness(t, s, testUID, testFenceR, testFenceA)
 			subj := subject.FromSandboxUID(testUID)
-			old, ok := h.reg.Fence(subj)
+			old, ok := s.reg.Fence(subj)
 			require.True(t, ok)
+			target := lifecycleTarget(t, testUID, testFenceR, testFenceA)
 			if reset {
 				s.mu.Lock()
 				s.rebinds[subj] = &subjectRebind{old: old, expectedNew: subject.Fencing{RuntimeInstanceID: "next", AttachmentID: "next-att"}, oldNetwork: s.subjAtt[subj], newNetwork: s.subjAtt[subj], needsReset: true}
 				s.mu.Unlock()
 			}
-			probe := &subjectDrainPurgeFailure{vaultFileStore: h.fileFor(testUID)}
-			h.vp.mu.Lock()
-			h.vp.files[subj] = probe
-			h.vp.mu.Unlock()
-			response := doAction(t, s, bindBody(t, testUID, testIP, "next", "next-att", 2, nil))
-			require.Equal(t, http.StatusServiceUnavailable, response.Code)
-			require.Contains(t, response.Body.String(), "purge")
-			require.Equal(t, 3, probe.snapshots, "preflight, failed purge, status recheck")
-			_, registered := h.reg.Fence(subj)
-			require.Equal(t, !reset, registered, "only needsReset unregisters before purge")
-			waitSubjectKnown(t, first, target, false)
-			waitLifecycleIdle(t, s, first, 2)
+			constructor := s.vaultFiles.newFile
+			calls := 0
+			s.vaultFiles.mu.Lock()
+			delete(s.vaultFiles.files, subj)
+			s.vaultFiles.newFile = func(path string) (vaultFileStore, error) {
+				fs, err := constructor(path)
+				if err == nil {
+					calls++
+					// applySetBinding holds s.mu at this constructor invocation.
+					entry := s.vaults[subj]
+					entry.vaultStateUnknown = true
+					s.vaults[subj] = entry
+					s.markSubjectVaultUnknownLocked(subj, old)
+				}
+				return fs, err
+			}
+			s.vaultFiles.mu.Unlock()
+			response := doAction(t, s, bindBody(t, testUID, testIP, "next", "next-att", 2, vaultAllowPolicy()))
+			s.vaultFiles.mu.Lock()
+			s.vaultFiles.newFile = constructor
+			s.vaultFiles.mu.Unlock()
+			require.Equal(t, 1, calls)
+			require.Equal(t, 503, response.Code, response.Body.String())
+			require.Contains(t, response.Body.String(), "purge", "the first preflight passed; drop rejected the actual unknown entry")
+			_, registered := s.reg.Fence(subj)
+			require.Equal(t, !reset, registered, "needsReset already unregisters before drop; this existing order is unchanged")
+			if name != "needs-reset-superseded" {
+				waitSubjectKnown(t, h, target, !reset)
+				sequence := int64(1)
+				if reset {
+					sequence = 2 // the registry's actual retirement must reach the receiver
+				}
+				waitLifecycleIdle(t, s, h, sequence)
+				s.mu.Lock()
+				mirrored, exists := s.subjectDrain.fences[subj]
+				queued := len(s.subjectDrain.queue)
+				s.mu.Unlock()
+				require.Equal(t, !reset, exists)
+				if !reset {
+					require.Equal(t, old, mirrored)
+				}
+				require.Zero(t, queued, "no compensating Register or lifecycle oscillation")
+			}
+			if !reset {
+				require.Contains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
+			}
+			// Both reset retries keep the same child. Replacing it could hide a
+			// stale receiver target; only the non-reset control also checks replay.
+			if !reset {
+				h = readinessReceiver(t, s)
+				waitSubjectKnown(t, h, target, !reset)
+				waitLifecycleIdle(t, s, h, 1)
+			}
 			s.mu.Lock()
-			_, mirrored := s.subjectDrain.fences[subj]
+			entry := s.vaults[subj]
+			entry.vaultStateUnknown = false
+			s.vaults[subj] = entry
 			s.mu.Unlock()
-			require.False(t, mirrored, "purge failure cannot retain the old replay entry")
-			o.stop(m.running)
-			m.closeRevisionSession(m.currentGen)
-			m.restartWithBackoffUsing(ctx, mitmproxy.NewHealthGate(), deps)
-			require.Len(t, *configs, 2)
-			second := (*configs)[1].SubjectRevisionIPC
-			require.NotEqual(t, first.ControlGeneration, second.ControlGeneration)
-			waitSubjectKnown(t, second, target, false)
-			waitLifecycleIdle(t, s, second, 0)
-			// A new command proves replay did not silently spend a sequence.
-			require.Equal(t, http.StatusOK, doAction(t, s, bindBody(t, "later", "10.0.0.9", "r3", "a3", 1, nil)).Code)
-			waitSubjectKnown(t, second, lifecycleTarget(t, "later", "r3", "a3"), true)
-			waitLifecycleIdle(t, s, second, 1)
+			r, a := "next", "next-att"
+			if name == "needs-reset-superseded" {
+				r, a = "superseding-r", "superseding-a"
+			}
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, r, a, 3, vaultAllowPolicy())).Code)
+			latest := latestSubjectSnapshot(t, s, testUID)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, r, a), latest)
+			waitReadiness(t, s, testUID, r, a)
+			waitSubjectKnown(t, h, target, false)
+			sequence := int64(3)
+			if name == "needs-reset" {
+				sequence = 4 // prior Register/Unload, harmless repeat Unload, new Register
+			}
+			waitLifecycleIdle(t, s, h, sequence)
+			require.NotContains(t, s.subjectLifecycleDegraded(), "subject_conflict")
+			require.NotContains(t, s.subjectLifecycleDegraded(), "vault_state_unknown")
 		})
 	}
 }
@@ -349,7 +370,7 @@ func TestFastSandboxSubjectDrainSlowIPCAndReconcile(t *testing.T) {
 }
 
 func testSubjectDrainSlowIPC(t *testing.T, beforeConsume bool) {
-	s, reg, _ := fastSandboxTestServer(t)
+	s, _, _ := fastSandboxTestServer(t)
 	o := subjectTestOwner(t)
 	launch, configs := subjectAddonLauncher(t, o)
 	// Start the real addon without attaching the owner: the fault proxy is the
@@ -382,12 +403,13 @@ func testSubjectDrainSlowIPC(t *testing.T, beforeConsume bool) {
 		defer close(actionsDone)
 		require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, vaultAllowPolicy())).Code)
 		require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookRuntimeReady)).Code)
-		require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
+		requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
 		require.True(t, s.actionStatusResponse().Ready)
 		require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
 		require.Equal(t, 200, doPolicy(t, s, http.MethodPut, testUID, policyPutDoc(policyAllow(), 0, false, false), "").Code)
 		require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
-		setBindingAndReady(t, s, reg, "other", "10.0.0.9", vaultAllowPolicy())
+		require.Equal(t, 200, doAction(t, s, bindBody(t, "other", "10.0.0.9", testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+		requireReadinessBlocked(t, s, "other", testFenceR, testFenceA)
 	}()
 	select {
 	case <-actionsDone:
@@ -812,7 +834,7 @@ type snapshotFault struct {
 	reached, release                         chan struct{}
 	abortReached, retryReached, retryRelease chan struct{}
 	abortOnce, retryOnce                     sync.Once
-	prepareCount                             int
+	prepareCount, commitCount                int
 }
 
 func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, outcome, failOperation string) (*snapshotFault, mitmproxy.SubjectRevisionIPCConfig) {
@@ -845,7 +867,19 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 			fault.prepareCount++
 			firstPrepare = fault.prepareCount == 1
 		}
+		duplicateCommit := false
+		if event.Target.SubjectKey == "s-"+testUID && event.Path == "/v2/revisions/commit" {
+			fault.commitCount++
+			duplicateCommit = fault.commitCount == 2
+		}
 		fault.mu.Unlock()
+		if failOperation == "duplicate-commit" && duplicateCommit {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": outcome})
+			fault.once.Do(func() { close(fault.reached) })
+			return
+		}
 		isTarget := event.Target.SubjectKey == "s-"+testUID
 		if failOperation == "prepare-disconnect" && isTarget {
 			if firstPrepare {
@@ -886,6 +920,14 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 				case <-r.Context().Done():
 					return
 				}
+			}
+		}
+		if isTarget && failOperation == "readiness" && event.Path == "/v2/revisions/prepare" && !firstPrepare {
+			fault.retryOnce.Do(func() { close(fault.retryReached) })
+			select {
+			case <-fault.retryRelease:
+			case <-r.Context().Done():
+				return
 			}
 		}
 		if isTarget && strings.HasSuffix(r.URL.Path, "/"+failOperation) && outcome != "" {
@@ -992,9 +1034,8 @@ func TestFastSandboxSubjectSnapshotReconcileCoalesceAndSlowIPC(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for _, hook := range []string{constants.HookRuntimeReady, constants.HookDataPlaneReady} {
-			require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, hook)).Code)
-		}
+		require.Equal(t, 200, doAction(t, s, hookBody(t, testUID, testFenceR, testFenceA, constants.HookRuntimeReady)).Code)
+		requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
 		require.Equal(t, 201, doVault(t, s, http.MethodPost, testUID, vaultCredential(), "").Code)
 		for i := uint64(2); i <= 4; i++ {
 			require.Equal(t, 200, doPolicy(t, s, http.MethodPut, testUID, policyPutDoc(policyAllow(), 0, false, false), "").Code)
@@ -1124,7 +1165,15 @@ func TestFastSandboxSubjectSnapshotCoalesceKeysAndDiscard(t *testing.T) {
 	next := old
 	next.fence, next.target, next.epoch = newFence, mustSubjectTarget(subj, newFence), newEpoch
 	d.enqueueInstallLocked(next)
-	require.Equal(t, []fastSandboxSubjectIntent{marker, {subj: subj, fence: newFence, target: next.target}, next}, d.queue)
+	require.Len(t, d.queue, 3)
+	require.Equal(t, []fastSandboxSubjectIntent{marker, next}, []fastSandboxSubjectIntent{d.queue[0], d.queue[2]})
+	registered := d.queue[1]
+	require.Equal(t, subj, registered.subj)
+	require.Equal(t, newFence, registered.fence)
+	require.Equal(t, next.target, registered.target)
+	require.False(t, registered.unload)
+	require.Nil(t, registered.epoch)
+	require.Nil(t, registered.snapshot)
 	s.recordSubjectIntentLocked(subj, newFence, true)
 	for _, intent := range d.queue {
 		require.Nil(t, intent.snapshot, "Unload drops all generation installs")
@@ -1182,7 +1231,10 @@ func TestFastSandboxSubjectSnapshotFlagDifferential(t *testing.T) {
 			bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, vaultAllowPolicy()),
 			removeBody(t, testUID, testFenceR, testFenceA),
 		}
-		for _, body := range bodies {
+		for i, body := range bodies {
+			if i == 2 && s.subjectDrain != nil {
+				waitReadiness(t, s, testUID, testFenceR, testFenceA)
+			}
 			response := doAction(t, s, body)
 			observations = append(observations, observation{response.Code, response.Body.String(), s.actionStatusResponse().Ready})
 		}
