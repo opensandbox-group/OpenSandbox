@@ -787,7 +787,12 @@ func TestFastSandboxSubjectReadinessConfirmedFailureClearsACK(t *testing.T) {
 			requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
 			// The proxy rejects only the duplicate Commit. A fresh registration
 			// must install through the same production addon before reopening.
+			// Wait for the Unload to reach the child first: a Register queued
+			// before the drain picks up the Unload coalesces it away, and a
+			// child that still holds the rejected candidate then answers the
+			// next Prepare with revision_rejected.
 			require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
+			waitLifecycleIdle(t, s, h, 2)
 			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, vaultAllowPolicy())).Code)
 			waitReadinessACK(t, s)
 			s.mu.Lock()
