@@ -356,10 +356,6 @@ export default withMermaid(defineConfig({
           items: [
             { text: "Contributing", link: "/community/contributing" },
             { text: "Code of Conduct", link: "/community/code-of-conduct" },
-            {
-              text: "Enhancement Proposals",
-              link: "/community/oseps",
-            },
           ],
         },
         {
