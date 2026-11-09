@@ -18,7 +18,9 @@ package runtime
 
 import (
 	"context"
+	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -113,4 +115,73 @@ func TestCommandOutputDrainDoesNotChangeExitClassification(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, "CommandExecError", got.EName)
 	require.Equal(t, "7", got.EValue)
+}
+
+func TestCommandDelayedInitPreservesExitClassification(t *testing.T) {
+	testCommandDelayedInit(t, func(pid int) bool {
+		// Observe exit without reaping the process owned by runCommand.
+		status, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			exitErr, ok := err.(*exec.ExitError)
+			return ok && exitErr.ExitCode() == 1
+		}
+		return strings.HasPrefix(strings.TrimSpace(string(status)), "Z")
+	})
+}
+
+func testCommandDelayedInit(t *testing.T, exited func(int) bool) {
+	t.Helper()
+	for _, tc := range []struct {
+		name      string
+		code      string
+		kill      bool
+		errorName string
+		exitCode  int
+	}{
+		{"nonzero_exit", "exit 7", false, "CommandExecError", 7},
+		{"external_kill", "sleep 30", true, "CommandExecError", -1},
+		{"deadline", "sleep 30", false, "CommandTimeout", -1},
+		{"success", "exit 0", false, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewController("", "")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			var got *execute.ErrorOutput
+			var events []string
+			req := &ExecuteCodeRequest{Code: tc.code}
+			req.SetDefaultHooks()
+			req.Hooks.OnExecuteInit = func(id string) {
+				pid := c.commandSnapshot(id).pid
+				if tc.kill {
+					require.NoError(t, syscall.Kill(-pid, syscall.SIGKILL))
+				}
+				if tc.name != "deadline" {
+					require.Eventually(t, func() bool { return exited(pid) }, 500*time.Millisecond, 10*time.Millisecond)
+					require.NoError(t, ctx.Err(), "process must exit before its deadline")
+				}
+				<-ctx.Done()
+				events = append(events, "init")
+			}
+			req.Hooks.OnExecuteError = func(e *execute.ErrorOutput) {
+				got = e
+				events = append(events, "error")
+			}
+			req.Hooks.OnExecuteComplete = func(time.Duration) { events = append(events, "complete") }
+			require.NoError(t, c.runCommand(ctx, req))
+			require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+			if tc.errorName == "" {
+				require.Nil(t, got)
+				require.Equal(t, []string{"init", "complete"}, events)
+			} else {
+				require.Equal(t, []string{"init", "error"}, events)
+				require.NotNil(t, got)
+				require.Equal(t, tc.errorName, got.EName)
+				require.Equal(t, strconv.Itoa(tc.exitCode), got.EValue)
+				require.NotNil(t, got.ExitCode)
+				require.Equal(t, tc.exitCode, *got.ExitCode)
+				require.NotEmpty(t, got.Traceback)
+			}
+		})
+	}
 }

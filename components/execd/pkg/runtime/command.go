@@ -287,9 +287,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
-	request.Hooks.OnExecuteInit(session)
 
+	watcherDone := make(chan struct{})
 	safego.Go(func() {
+		defer close(watcherDone)
 		for {
 			select {
 			case <-done:
@@ -331,10 +332,17 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		}
 	})
 
-	err = mp.Wait()
-	// Capture the deadline before output callbacks finish draining.
-	timedOut := ctx.Err() == context.DeadlineExceeded
-	close(done)
+	var timedOut bool
+	safego.Go(func() {
+		err = mp.Wait()
+		// Observe exit independently of blocked init or output callbacks.
+		timedOut = ctx.Err() == context.DeadlineExceeded
+		close(done)
+	})
+
+	request.Hooks.OnExecuteInit(session)
+	<-done
+	<-watcherDone
 	wg.Wait()
 	if err == nil {
 		c.markCommandFinished(session, 0, "")
