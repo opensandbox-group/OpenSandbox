@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.client
 import json
@@ -23,6 +24,7 @@ import os
 import socket
 import ssl
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -464,6 +466,154 @@ class SocketDirectoryLayoutTest(unittest.TestCase):
             with _ResolverProcess(build_uds_server(socket_path)):
                 self.assertEqual("0o1777", _mode(tmp))
                 self.assertEqual("0o660", _mode(socket_path))
+
+
+# --- OSEP-0025 D5: opt-in caller authentication -------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_VECTORS_PATH = (
+    _REPO_ROOT / "components" / "egress" / "pkg" / "credentialvault"
+    / "testdata" / "resolver_auth_vectors.json"
+)
+_SDK_SRC = _REPO_ROOT / "sdks" / "resolver-auth" / "python" / "src"
+if _SDK_SRC.is_dir():
+    sys.path.insert(0, str(_SDK_SRC))
+
+try:
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    _HAVE_CRYPTO = True
+except ImportError:  # pragma: no cover - environment-dependent
+    _HAVE_CRYPTO = False
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+@unittest.skipUnless(_HAVE_CRYPTO, "cryptography not available")
+class ResolverRequireCredentialTest(unittest.TestCase):
+    """--require-credential: 401 without a valid egress credential.
+
+    Mints credentials with the shared vectors' sidecar key so the stub, the
+    SDK, and the Go mint side all exercise one frozen contract.
+    """
+
+    KID = "sbx-7f3a2c"
+
+    def setUp(self) -> None:
+        vectors = json.loads(_VECTORS_PATH.read_text())
+        sidecar = next(k for k in vectors["keys"] if k["id"] == "sidecar-1")
+        self.key = load_pem_private_key(
+            sidecar["private_key_pem"].encode(), password=None
+        )
+        self.jwk = sidecar["public_jwk"]
+        self.port = free_port()
+        self.origin = f"https://127.0.0.1:{self.port}"
+        self.jwks_file = Path(tempfile.mkdtemp()) / "jwks.json"
+        self.jwks_file.write_text(json.dumps({self.KID: self.jwk}))
+        self.context = ssl.create_default_context(cafile=str(CERT))
+
+    def build_server(self, argv: list[str] | None = None) -> Any:
+        options = resolver.parse_args([
+            "--https", f"127.0.0.1:{self.port}",
+            "--tls-cert", str(CERT),
+            "--tls-key", str(KEY),
+            "--require-credential",
+            "--jwks-file", str(self.jwks_file),
+            "--expected-aud", self.origin,
+            *(argv or []),
+        ])
+        return resolver.build_server(options, transport="https")
+
+    def mint(self, *, subject: str, audience: str | None = None, kid: str | None = None,
+             tamper: bool = False) -> str:
+        now = int(time.time())
+        header = {"alg": "EdDSA", "typ": "JWT", "kid": kid or self.KID}
+        payload = {
+            "iss": "opensandbox", "aud": audience or self.origin,
+            "sub": subject, "iat": now, "exp": now + 3600,
+            "jti": _b64url(b"test-jti-0123456789ab"),
+        }
+        segment = _b64url(json.dumps(header, separators=(",", ":")).encode())
+        claims = _b64url(json.dumps(payload, separators=(",", ":")).encode())
+        signature = self.key.sign(f"{segment}.{claims}".encode())
+        if tamper:
+            signature = bytes([signature[0] ^ 1]) + signature[1:]
+        return f"{segment}.{claims}.{_b64url(signature)}"
+
+    def post(self, body: bytes, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+        connection = http.client.HTTPSConnection(
+            "127.0.0.1", self.port, context=self.context, timeout=10
+        )
+        try:
+            connection.request("POST", RESOLVE_PATH, body=body, headers={
+                "Content-Type": "application/json",
+                **(headers or {}),
+            })
+            response = connection.getresponse()
+            return response.status, response.read()
+        finally:
+            connection.close()
+
+    def test_missing_credential_is_401(self) -> None:
+        with _ResolverProcess(self.build_server()):
+            status, payload = self.post(dumps(VALID_REQUEST))
+        self.assertEqual(401, status)
+        self.assertEqual("credential_missing", json.loads(payload)["error"])
+
+    def test_valid_credential_is_served(self) -> None:
+        jwt = self.mint(subject=VALID_REQUEST["subject"])
+        with _ResolverProcess(self.build_server()):
+            status, payload = self.post(
+                dumps(VALID_REQUEST),
+                {"OpenSandbox-Egress-Credential": jwt},
+            )
+        self.assertEqual(200, status)
+        body = json.loads(payload)
+        self.assertEqual("Bearer test-spi-signer", body["headers"]["authorization"])
+
+    def test_subject_mismatch_is_401(self) -> None:
+        jwt = self.mint(subject="sbx-somebodyelse")
+        with _ResolverProcess(self.build_server()):
+            status, payload = self.post(
+                dumps(VALID_REQUEST),
+                {"OpenSandbox-Egress-Credential": jwt},
+            )
+        self.assertEqual(401, status)
+        self.assertEqual("subject_mismatch", json.loads(payload)["error"])
+
+    def test_tampered_signature_is_401(self) -> None:
+        jwt = self.mint(subject=VALID_REQUEST["subject"], tamper=True)
+        with _ResolverProcess(self.build_server()):
+            status, payload = self.post(
+                dumps(VALID_REQUEST),
+                {"OpenSandbox-Egress-Credential": jwt},
+            )
+        self.assertEqual(401, status)
+        self.assertEqual("signature", json.loads(payload)["error"])
+
+    def test_unknown_kid_is_401(self) -> None:
+        jwt = self.mint(subject=VALID_REQUEST["subject"], kid="sbx-zzzzzz")
+        with _ResolverProcess(self.build_server()):
+            status, payload = self.post(
+                dumps(VALID_REQUEST),
+                {"OpenSandbox-Egress-Credential": jwt},
+            )
+        self.assertEqual(401, status)
+        self.assertEqual("unknown_kid", json.loads(payload)["error"])
+
+    def test_wrong_audience_is_401(self) -> None:
+        jwt = self.mint(
+            subject=VALID_REQUEST["subject"],
+            audience="https://other-resolver.internal:8443",
+        )
+        with _ResolverProcess(self.build_server()):
+            status, payload = self.post(
+                dumps(VALID_REQUEST),
+                {"OpenSandbox-Egress-Credential": jwt},
+            )
+        self.assertEqual(401, status)
+        self.assertEqual("audience", json.loads(payload)["error"])
 
 
 if __name__ == "__main__":
