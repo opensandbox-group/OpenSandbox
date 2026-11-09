@@ -251,7 +251,7 @@ export default withMermaid(defineConfig({
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             {
-              text: "Resource-Aware Scheduling",
+              text: "Resource-Aware Scheduling for Fast Sandbox",
               link: "/guides/resource-aware-scheduling",
             },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },

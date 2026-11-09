@@ -1,9 +1,9 @@
 ---
-title: Resource-Aware Scheduling
+title: Resource-Aware Scheduling for Fast Sandbox
 description: How fast-sandbox pool scheduling works — LegacySlot vs ResourceAware accounting, how to configure each pool profile, how sandboxes consume resources, and how to operate and monitor both modes.
 ---
 
-# Resource-Aware Scheduling
+# Resource-Aware Scheduling for Fast Sandbox
 
 A fast-sandbox [SandboxPool](/architecture/fast-sandbox/scheduling) is the unit of capacity: every sandbox created through FastPath is admitted into a pre-warmed Fastlet pod that belongs to one pool. The pool's `spec.sandboxResources` field decides **how resources are accounted and enforced** for every sandbox that pool produces.
 
