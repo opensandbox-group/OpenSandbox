@@ -893,3 +893,131 @@ func TestFastSandboxSubjectReadinessChildChangeDuringPolicy(t *testing.T) {
 		})
 	}
 }
+
+// A real addon ACK precedes the blocked activation; only nft failure is fake.
+// Keep these tests independent of the new bookkeeping field so the identical
+// final test file also runs against the pre-fix production code.
+func TestFastSandboxSubjectReadinessRollbackRetry(t *testing.T) {
+	for _, mode := range []string{"transient", "persistent", "unload", "fence-change"} {
+		t.Run(mode, func(t *testing.T) {
+			s, reg, nft := fastSandboxTestServer(t)
+			readinessDrain(t, s)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			readinessReceiver(t, s)
+			waitReadinessACK(t, s)
+			subj := subject.FromSandboxUID(testUID)
+			s.mu.Lock()
+			old := s.subjectDrain.current
+			mirror, pending := s.subjectDrain.snapshots[subj], s.pendingPolicies[subj]
+			s.mu.Unlock()
+			blocking := &readinessBlockingNft{fakeNft: nft, reached: make(chan struct{}), release: make(chan struct{})}
+			s.nft = blocking
+			var release sync.Once
+			t.Cleanup(func() { release.Do(func() { close(blocking.release) }) })
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- readinessHook(t, s, testUID, testFenceR, testFenceA) }()
+			select {
+			case <-blocking.reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("nft ApplyPolicy not reached")
+			}
+			s.detachSubjectClient(old.client)
+			nft.mu.Lock()
+			nft.denyFirstErr = fmt.Errorf("injected rollback nft failure")
+			denied := len(nft.denyFirst)
+			nft.mu.Unlock()
+			release.Do(func() { close(blocking.release) })
+			select {
+			case response := <-done:
+				require.Equal(t, 500, response.Code, response.Body.String())
+				require.Contains(t, response.Body.String(), "injected rollback nft failure")
+			case <-time.After(5 * time.Second):
+				t.Fatal("hook did not finish")
+			}
+			state, ok := reg.Get(subj)
+			require.True(t, ok)
+			require.Equal(t, subject.StateActive, state)
+			require.NotNil(t, reg.EffectivePolicy(subj))
+			s.mu.Lock()
+			require.Same(t, mirror, s.subjectDrain.snapshots[subj])
+			require.Same(t, pending, s.pendingPolicies[subj])
+			s.mu.Unlock()
+			if mode == "unload" || mode == "fence-change" {
+				// Exercise the exact lifecycle bookkeeping seams separately:
+				// fence replacement must clear even without an earlier Unload.
+				s.policyCommitMu.Lock()
+				s.mu.Lock()
+				fence := subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA}
+				if mode == "fence-change" {
+					fence.AttachmentID = "replacement"
+				}
+				s.recordSubjectIntentLocked(subj, fence, mode == "unload")
+				s.mu.Unlock()
+				s.policyCommitMu.Unlock()
+				// The nft failure remains armed: stale retry bookkeeping would
+				// return 500 here instead of reaching the normal ACK gate.
+				requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+				return
+			}
+			if mode == "persistent" {
+				for i := 0; i < 2; i++ {
+					response := readinessHook(t, s, testUID, testFenceR, testFenceA)
+					require.Equal(t, 500, response.Code, "retry %d: %s", i, response.Body.String())
+					require.Contains(t, response.Body.String(), "injected rollback nft failure")
+				}
+			}
+			nft.mu.Lock()
+			nft.denyFirstErr = nil
+			nft.mu.Unlock()
+			requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+			state, _ = reg.Get(subj)
+			require.Equal(t, subject.StateDenying, state)
+			require.Nil(t, reg.EffectivePolicy(subj))
+			nft.mu.Lock()
+			require.Len(t, nft.denyFirst, denied+1)
+			// A successful revert cleared the marker: a still-unacknowledged
+			// replay must not attempt another revert with this failure armed.
+			nft.denyFirstErr = fmt.Errorf("unexpected extra revert")
+			nft.mu.Unlock()
+			requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+			readinessReceiver(t, s)
+			waitReadinessACK(t, s)
+			require.Equal(t, 200, readinessHook(t, s, testUID, testFenceR, testFenceA).Code)
+			state, _ = reg.Get(subj)
+			require.Equal(t, subject.StateActive, state)
+		})
+	}
+}
+
+func TestFastSandboxSubjectReadinessActiveUnacknowledgedReplay(t *testing.T) {
+	s, reg, nft := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+	readinessReceiver(t, s)
+	waitReadinessACK(t, s)
+	require.Equal(t, 200, readinessHook(t, s, testUID, testFenceR, testFenceA).Code)
+	subj := subject.FromSandboxUID(testUID)
+	s.mu.Lock()
+	old, mirror := s.subjectDrain.current, s.subjectDrain.snapshots[subj]
+	s.mu.Unlock()
+	s.detachSubjectClient(old.client)
+	require.Equal(t, 201, doVault(t, s, "POST", testUID, vaultCredential(), "").Code)
+	s.mu.Lock()
+	require.NotEqual(t, mirror.digest, s.subjectDrain.snapshots[subj].digest)
+	s.mu.Unlock()
+	nft.mu.Lock()
+	denied := len(nft.denyFirst)
+	nft.denyFirstErr = fmt.Errorf("active subject must not be reverted")
+	nft.mu.Unlock()
+	requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+	state, _ := reg.Get(subj)
+	require.Equal(t, subject.StateActive, state)
+	require.NotNil(t, reg.EffectivePolicy(subj))
+	nft.mu.Lock()
+	require.Len(t, nft.denyFirst, denied)
+	nft.mu.Unlock()
+	readinessReceiver(t, s)
+	waitReadinessACK(t, s)
+	require.Equal(t, 200, readinessHook(t, s, testUID, testFenceR, testFenceA).Code)
+}

@@ -719,6 +719,22 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		// ever consume.
 		s.policyCommitMu.Lock()
 		defer s.policyCommitMu.Unlock()
+		// A failed activation rollback must be retried before the ACK gate,
+		// even while no child can acknowledge a snapshot. Do not infer this
+		// from registry Active: a healthy active subject may await a new ACK.
+		s.mu.Lock()
+		retryRevert := s.fenceMatchesLocked(subj, fence) && s.subjectDrain != nil && s.subjectDrain.revertPending[subj]
+		att := s.subjAtt[subj]
+		s.mu.Unlock()
+		if retryRevert {
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
+				return http.StatusInternalServerError, err
+			}
+			s.mu.Lock()
+			delete(s.subjectDrain.revertPending, subj)
+			s.mu.Unlock()
+		}
 		// Fence re-validation AND the pending peek under one s.mu hold
 		// (policyCommitMu → s.mu, the established order): fenceMatchesLocked
 		// reads subjFence, which terminal cleanup deletes under s.mu. An
@@ -734,7 +750,7 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		if d := s.subjectDrain; d != nil {
 			checkedEpoch, checkedACK = d.current, d.acked[subj]
 		}
-		att := s.subjAtt[subj]
+		att = s.subjAtt[subj]
 		s.mu.Unlock()
 		if stale {
 			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
@@ -765,10 +781,22 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 			// Keep pending policy for a retried hook. Kernel I/O stays outside mu;
 			// the existing primitive resets nft before unsetting registry policy.
 			if err := s.revertToDenyFirst(subj, att); err != nil {
+				s.mu.Lock()
+				if s.subjectDrain.revertPending == nil {
+					s.subjectDrain.revertPending = make(map[subject.Subject]bool)
+				}
+				s.subjectDrain.revertPending[subj] = true
+				s.mu.Unlock()
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
 				return http.StatusInternalServerError, err
 			}
 			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
 		}
+		s.mu.Lock()
+		if s.subjectDrain != nil {
+			delete(s.subjectDrain.revertPending, subj)
+		}
+		s.mu.Unlock()
 		s.recordBindingSnapshot(subj, fence)
 		// The pending slot stays: it now mirrors what is enforced, so a
 		// data-plane-ready replayed after a lost ack is idempotent (same

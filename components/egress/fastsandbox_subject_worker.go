@@ -48,6 +48,7 @@ type fastSandboxSubjectDrain struct {
 	degraded         map[string]bool
 	unknownVaults    map[subject.Subject]bool // live Vaults invalidated under the current registered fence
 	snapshotFailures map[subject.Subject]bool // current committed inputs could not produce a replayable snapshot
+	revertPending    map[subject.Subject]bool // failed readiness rollback; retry before the next ACK gate
 	deadline         time.Duration
 	snapshots        map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
 	fences           map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
@@ -201,6 +202,7 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
 			delete(d.snapshotFailures, subj)
+			delete(d.revertPending, subj)
 		}
 	} else {
 		if old, exists := d.fences[subj]; exists && !old.Matches(fence) {
@@ -209,6 +211,7 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
 			delete(d.snapshotFailures, subj)
+			delete(d.revertPending, subj)
 		}
 		d.fences[subj] = fence
 		d.nextRegistration++
