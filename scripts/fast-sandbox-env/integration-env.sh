@@ -231,6 +231,12 @@ image_tag() { printf '%s' "${1##*:}"; }
 OSB_NS="opensandbox-system"
 IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
 IMG_INGRESS="${INGRESS_IMAGE:-docker.io/opensandbox/ingress:env}"
+# Source-built node-agent local tag (no registry behind it; NODEAGENT_IMAGE is
+# the override knob, same convention as SERVER_IMAGE/INGRESS_IMAGE).
+IMG_NODEAGENT="${NODEAGENT_IMAGE:-opensandbox/nodeagent:env}"
+# Cluster name stamped into collected records and the file-sink family root;
+# the vm-console verify assertions derive the sink tree from it.
+NODEAGENT_CLUSTER_ID="${NODEAGENT_CLUSTER_ID:-fsb-integration}"
 FASTPATH_ENDPOINT="fast-sandbox-fastpath.opensandbox-system.svc:9090"
 SERVER_API_KEY="fast-sandbox-env"
 
@@ -547,6 +553,19 @@ failure_dump() {
 		kubectl logs -n "$OSB_NS" deploy/opensandbox-server --tail=80 2>&1 || true
 		echo "--- ingress gateway logs (tail) ---"
 		kubectl logs -n "$OSB_NS" deploy/opensandbox-ingress-gateway --tail=80 2>&1 || true
+		echo "--- node-agent pods + logs (every pod, tail) ---"
+		local npod
+		for npod in $(node_agent_pods 2>/dev/null || true); do
+			echo "### $npod"
+			kubectl get pod -n "$OSB_NS" "$npod" -o wide 2>&1 || true
+			kubectl logs -n "$OSB_NS" "$npod" -c nodeagent --tail=80 2>&1 || true
+		done
+		echo "--- node-agent file-sink tree (collected vm-console families) ---"
+		for npod in $(node_agent_pods 2>/dev/null || true); do
+			echo "### $npod"
+			kubectl exec -n "$OSB_NS" "$npod" -c nodeagent -- \
+				find "/var/lib/opensandbox/nodeagent-data" -maxdepth 6 2>&1 || true
+		done
 		echo "--- pool ---"
 		kubectl get sandboxpool -n "$RESOURCE_NS" -o yaml 2>&1 || true
 		echo "--- rustfs docker logs (tail) ---"
@@ -772,6 +791,13 @@ build_images() {
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 		-f "$OSB_ROOT/components/ingress/Dockerfile" -t "$IMG_INGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "ingress image build failed"
+	log "building the OpenSandbox node-agent image from source ($IMG_NODEAGENT)"
+	# Context is the repo root: the Dockerfile multi-stage-builds
+	# components/nodeagent + components/internal with its pinned Go toolchain.
+	# shellcheck disable=SC2086
+	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		-f "$OSB_ROOT/components/nodeagent/Dockerfile" -t "$IMG_NODEAGENT" "$OSB_ROOT" >/dev/null \
+		|| die "node-agent image build failed"
 	pass "images built (fast-sandbox + OpenSandbox)"
 }
 
@@ -2511,6 +2537,33 @@ opensandbox_up() {
 	pass "server + ingress gateway up (fsb runtime, gateway routes signed with key 'a')"
 }
 
+# --- stage: node-agent (vm-console collection) ------------------------------------------------
+
+# Source-built DaemonSet on both kind nodes (the control-plane taint is
+# removed in kind_up). The chart's vmConsole root equals the fast-sandbox
+# chart's runtime.stateRoot, which every kind node exposes through its
+# per-node bind (control-plane/ or worker/), so the agent sees exactly the
+# jailer layout the FC driver writes —
+# jails/firecracker/<uid[:32]>/root/{firecracker.log,fast-sandbox.json}.
+# vm-console needs no Kubernetes RBAC; the file sink writes inside each node
+# container and the verify assertions read it back through kubectl exec.
+node_agent_up() {
+	kind load docker-image "$IMG_NODEAGENT" --name "$KIND_CLUSTER" >/dev/null
+	apply_ns "$OSB_NS"
+	helm_render node-agent "$OSB_ROOT/manifests/charts/node-agent" "$OSB_NS" \
+		"$GEN_DIR/osb-node-agent.yaml" \
+		--set fullnameOverride=node-agent \
+		--set image.repository="$(image_repo "$IMG_NODEAGENT")" \
+		--set image.tag="$(image_tag "$IMG_NODEAGENT")" \
+		--set 'config.sources[0]=vm-console' \
+		--set config.clusterID="$NODEAGENT_CLUSTER_ID" \
+		--set hostPaths.vmConsole=/var/lib/fast-sandbox/firecracker
+	kubectl apply -f "$GEN_DIR/osb-node-agent.yaml" >/dev/null
+	wait_for "node-agent daemonset ready" 120 \
+		kubectl -n "$OSB_NS" rollout status daemonset/node-agent --timeout=10s
+	pass "node-agent up (source=vm-console, sink=file, cluster=$NODEAGENT_CLUSTER_ID, vmConsoleRoot=/var/lib/fast-sandbox/firecracker)"
+}
+
 # Raw curl, kept for the calls the CLI cannot express (networkpolicy
 # replace PUT, metadata merge-patch, snapshot re-entry fence).
 server_api() { # method path [json-body]
@@ -2743,6 +2796,97 @@ dump_latency_evidence() {
 	cat "$out"
 }
 
+# --- vm-console collection assertions (ride the e2e matrix's own sandboxes) ----
+#
+# The node-agent DaemonSet (deployed by up) collects each sandbox's
+# Firecracker guest serial through the driver-owned firecracker.log,
+# discovered by directory scan of fast-sandbox.json. Two assertions:
+#
+#   collect — vm_console_collect_check runs inside opensandbox_verify on a
+#     sandbox the matrix already created (ids[0], still alive): a marker
+#     echoed to /dev/console in-guest must surface as raw bytes in the
+#     file-sink family
+#     <cluster>/_streams/vm-console/<ns>/<sandbox_id>/<sandbox_uid>/console.log
+#     within seconds (1s scan + 1s batch cadence). No dedicated sandbox.
+#
+#   finalize — vm_console_finalize_verify runs as the verify matrix's LAST
+#     stage: the e2e kill loop already removed the VM directory, and the
+#     source's 30s disappearance grace elapsed for free while the remaining
+#     stages ran, so the closing marker check is a confirmation, not a wait.
+#     The sink must have published console.finalized.1.json with status
+#     "complete" (no gaps, no drops).
+VMCONSOLE_SINK_ROOT="/var/lib/opensandbox/nodeagent-data/$NODEAGENT_CLUSTER_ID/_streams/vm-console"
+VMCONSOLE_FAMILY=""
+
+node_agent_pods() {
+	kubectl -n "$OSB_NS" get pods -l app.kubernetes.io/component=node-agent \
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+}
+
+# Read a collected-sink file from whichever agent pod holds it (the sandbox
+# may live on either kind node; the DS runs on both).
+vm_console_read_file() { # <path>
+	local pod
+	for pod in $(node_agent_pods); do
+		if kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- test -f "$1" 2>/dev/null; then
+			kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- cat "$1" && return 0
+		fi
+	done
+	return 1
+}
+
+vm_console_marker_collected() { # <marker>
+	local pod
+	for pod in $(node_agent_pods); do
+		if kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- \
+			grep -rq -- "$1" "$VMCONSOLE_SINK_ROOT" 2>/dev/null; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+vm_console_finalize_check() { # reads VMCONSOLE_FAMILY
+	local closing status
+	closing="$(vm_console_read_file "$VMCONSOLE_FAMILY/console.finalized.1.json")" || return 1
+	status="$(printf '%s' "$closing" | jq -r '.status // empty')"
+	[[ "$status" == "complete" ]]
+}
+
+vm_console_collect_check() { # <sandbox-id> — a live e2e-matrix sandbox
+	local id="$1" marker family
+	kubectl -n "$OSB_NS" get daemonset node-agent >/dev/null 2>&1 \
+		|| die "node-agent daemonset not found (re-run 'up' to deploy it; vm-console collection is part of the verify matrix)"
+	# Unique guest serial byte: execd-shelled echo straight to /dev/console —
+	# exactly the firecracker.log line the Source tails.
+	marker="vm-console-marker-$id"
+	osb_api command run "$id" -- "echo $marker > /dev/console" >/dev/null \
+		|| fail "vm-console verify: guest console marker write failed for $id"
+	wait_for "node-agent collected the guest console marker" 30 vm_console_marker_collected "$marker"
+	# Locate the collected file across BOTH agent pods: the sandbox may live
+	# on either kind node, and the pod that holds the marker is not known
+	# before the grep answers.
+	family=""
+	local pod
+	for pod in $(node_agent_pods); do
+		family="$(kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- \
+			grep -rl -- "$marker" "$VMCONSOLE_SINK_ROOT" 2>/dev/null | head -1)"
+		[[ -n "$family" ]] && break
+	done
+	[[ "$family" == *"/_streams/vm-console/"*"/$id/"*"/console.log" ]] \
+		|| fail "vm-console verify: unexpected family layout: ${family:-none}"
+	VMCONSOLE_FAMILY="${family%/*}"
+	pass "vm-console collected: ${family#"$VMCONSOLE_SINK_ROOT"/} (marker $marker)"
+}
+
+vm_console_finalize_verify() {
+	[[ -n "$VMCONSOLE_FAMILY" ]] \
+		|| fail "vm-console finalize verify: no family recorded by the e2e stage"
+	wait_for "vm-console stream finalized (status=complete) for ${VMCONSOLE_FAMILY#"$VMCONSOLE_SINK_ROOT"/}" 15 \
+		vm_console_finalize_check
+	pass "vm-console closing marker complete (raw bytes, no gaps, no drops)"
+}
+
 opensandbox_verify() {
 	# Optional template override: the overlaybd second pass calls this with
 	# the OCI template id; the default stays the native template. Cold create
@@ -2764,6 +2908,12 @@ opensandbox_verify() {
 	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
 	dump_latency_evidence
 	verify_lifecycle_ops "${ids[0]}"
+	# vm-console collection rides this stage's own sandbox (ids[0], still
+	# alive): the marker assertion costs seconds. The finalize assertion for
+	# the same stream runs as the matrix's last stage — the kill loop below
+	# starts the source's 30s disappearance grace, which elapses for free
+	# behind the later stages.
+	vm_console_collect_check "${ids[0]}"
 	for id in "${ids[@]}"; do
 		VERIFY_ID="$id"
 		osb_api sandbox kill "$id" >/dev/null 2>&1 \
@@ -3837,6 +3987,9 @@ verify_native() {
 	run_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" exchange_resolver_verify
 	run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
 	run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
+	# Last on purpose: the e2e kill loop started the source's 30s disappearance
+	# grace; every stage above consumed it, so this is a near-free confirmation.
+	run_stage "vm-console finalize verify (node-agent completeness marker)" vm_console_finalize_verify
 }
 
 # Capture each node's counters so successful CI logs prove warm-device reuse.
@@ -3895,6 +4048,9 @@ verify_overlaybd() {
 	run_stage "exchange resolver verify (overlaybd template, OSEP-0025)" exchange_resolver_verify "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
+	# Same placement rationale as verify_native: the family recorded by this
+	# matrix's opensandbox_verify pass was killed stages ago.
+	run_stage "vm-console finalize verify (overlaybd, node-agent completeness marker)" vm_console_finalize_verify
 }
 
 # --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware) ---------------
@@ -4422,7 +4578,7 @@ case "$ACTION" in
 			echo "sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES ociStack=$OCI_STACK registry=$([[ "$OCI_STACK" == 1 ]] && echo "$OCI_REGISTRY_HOST" || echo off)"
 			echo "pool=$POOL_NAME mode=$POOL_MODE poolMin=$POOL_MIN egress=$IMG_EGRESS"
 			echo "server=$IMG_SERVER ingress=$IMG_INGRESS fastpath=$FASTPATH_ENDPOINT"
-			echo "images: controller=$IMG_CONTROLLER runtime=$IMG_RUNTIME"
+			echo "images: controller=$IMG_CONTROLLER runtime=$IMG_RUNTIME nodeagent=$IMG_NODEAGENT"
 		} > "$LOGS_DIR/environment.txt" 2>&1 || true
 		if [[ -n "$(kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" || true)" ]] \
 			|| docker ps -a --format '{{.Names}}' | grep -qx "$RUSTFS_CONTAINER"; then
@@ -4453,6 +4609,7 @@ case "$ACTION" in
 		run_stage "firecracker runtime readiness + DART (P2P)" runtime_up
 		run_stage "idle-pause Redis (OSEP-0024 profile)" redis_up
 		run_stage "OpenSandbox server + ingress gateway" opensandbox_up
+		run_stage "OpenSandbox node-agent (vm-console collection)" node_agent_up
 		run_stage "TLS echo endpoint (cert signed by the pinned CA)" mitm_echo_up
 		run_stage "SandboxTemplate build (opensandbox CLI)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
