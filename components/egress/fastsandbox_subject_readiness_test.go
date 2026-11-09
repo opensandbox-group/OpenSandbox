@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -732,6 +733,163 @@ func TestFastSandboxSubjectReadinessRebindPurgeRealState(t *testing.T) {
 			waitReadiness(t, s, testUID, "next-r", "next-a")
 			waitSubjectKnown(t, h, target, false)
 			waitLifecycleIdle(t, s, h, 4)
+		})
+	}
+}
+
+// Wait for the worker's stamp without activating policy or queuing a duplicate.
+func waitReadinessACK(t *testing.T, s *fastSandboxPolicyServer) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subject.FromSandboxUID(testUID), subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+	}, 5*time.Second, 5*time.Millisecond)
+}
+
+func TestFastSandboxSubjectReadinessConfirmedFailureClearsACK(t *testing.T) {
+	for _, outcome := range []string{"subject_failed", "subject_unknown", "subject_generation_mismatch", "control_generation_mismatch", "revision_rejected", "unauthorized", "malformed_request", "request_too_large", "not_found", "method_not_allowed"} {
+		t.Run(outcome, func(t *testing.T) {
+			s, h, fault := snapshotFaultHarness(t, outcome, "duplicate-commit")
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), latestSubjectSnapshot(t, s, testUID))
+			waitReadinessACK(t, s)
+			subj := subject.FromSandboxUID(testUID)
+			s.mu.Lock()
+			before := s.subjectDrain.acked[subj]
+			s.mu.Unlock()
+			require.Equal(t, 200, readinessHook(t, s, testUID, testFenceR, testFenceA).Code)
+			select {
+			case <-fault.reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("duplicate Commit not reached")
+			}
+			reason := outcome
+			switch outcome {
+			case "revision_rejected":
+				reason = "subject_prepare_rejected"
+			case "unauthorized", "malformed_request", "request_too_large", "not_found", "method_not_allowed":
+				reason = "subject_install_rejected"
+			}
+			require.Eventually(t, func() bool {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.subjectDrain.degraded[reason]
+			}, 5*time.Second, 5*time.Millisecond)
+			s.mu.Lock()
+			_, acked := s.subjectDrain.acked[subj]
+			registration := s.subjectDrain.registrations[subj]
+			digest := s.subjectDrain.snapshots[subj].digest
+			s.mu.Unlock()
+			require.Equal(t, before.registration, registration)
+			require.Equal(t, before.digest, digest, "failure is for the same payload and registration")
+			require.False(t, acked, "confirmed rejection must revoke the old ACK")
+			requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+			// The proxy rejects only the duplicate Commit. A fresh registration
+			// must install through the same production addon before reopening.
+			require.Equal(t, 200, doAction(t, s, removeBody(t, testUID, testFenceR, testFenceA)).Code)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, vaultAllowPolicy())).Code)
+			waitReadinessACK(t, s)
+			s.mu.Lock()
+			after := s.subjectDrain.acked[subj]
+			s.mu.Unlock()
+			require.Greater(t, after.registration, before.registration)
+			require.Equal(t, 200, readinessHook(t, s, testUID, testFenceR, testFenceA).Code)
+		})
+	}
+}
+
+// Block at the nft boundary, outside s.mu, exactly where the watcher can
+// detach or publish a child while policy activation is in flight.
+type readinessBlockingNft struct {
+	*fakeNft
+	once             sync.Once
+	reached, release chan struct{}
+}
+
+func (n *readinessBlockingNft) ApplyPolicy(ctx context.Context, subj subject.Subject, pol *policy.NetworkPolicy) error {
+	n.once.Do(func() {
+		close(n.reached)
+		select {
+		case <-n.release:
+		case <-ctx.Done():
+		}
+	})
+	return n.fakeNft.ApplyPolicy(ctx, subj, pol)
+}
+
+func TestFastSandboxSubjectReadinessChildChangeDuringPolicy(t *testing.T) {
+	for _, change := range []string{"detach", "publish", "unchanged"} {
+		t.Run(change, func(t *testing.T) {
+			s, reg, nft := fastSandboxTestServer(t)
+			readinessDrain(t, s)
+			require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
+			h := readinessReceiver(t, s)
+			waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), latestSubjectSnapshot(t, s, testUID))
+			waitReadinessACK(t, s)
+			subj := subject.FromSandboxUID(testUID)
+			s.mu.Lock()
+			old := s.subjectDrain.current
+			mirror := s.subjectDrain.snapshots[subj]
+			pending := s.pendingPolicies[subj]
+			s.mu.Unlock()
+			nft.mu.Lock()
+			denied := len(nft.denyFirst)
+			nft.mu.Unlock()
+			blocking := &readinessBlockingNft{fakeNft: nft, reached: make(chan struct{}), release: make(chan struct{})}
+			s.nft = blocking
+			var release sync.Once
+			t.Cleanup(func() { release.Do(func() { close(blocking.release) }) })
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- readinessHook(t, s, testUID, testFenceR, testFenceA) }()
+			select {
+			case <-blocking.reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("nft ApplyPolicy not reached")
+			}
+			switch change {
+			case "detach":
+				s.detachSubjectClient(old.client)
+			case "publish":
+				ghost := *h
+				ghost.SocketPath = filepath.Join(t.TempDir(), "missing.sock")
+				ghost.ControlGeneration = "unavailable-replacement"
+				client, err := revision.NewSubjectLifecycleClient(ghost.SocketPath, ghost.SessionToken, ghost.ControlGeneration)
+				require.NoError(t, err)
+				s.publishSubjectClient(client, ghost)
+			}
+			release.Do(func() { close(blocking.release) })
+			var response *httptest.ResponseRecorder
+			select {
+			case response = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("hook did not finish")
+			}
+			state, ok := reg.Get(subj)
+			require.True(t, ok)
+			if change == "unchanged" {
+				require.Equal(t, 200, response.Code, response.Body.String())
+				require.Equal(t, subject.StateActive, state)
+				require.NotNil(t, reg.EffectivePolicy(subj))
+			} else {
+				require.Equal(t, 503, response.Code, response.Body.String())
+				require.Contains(t, response.Body.String(), "subject snapshot not acknowledged")
+				require.Equal(t, subject.StateDenying, state)
+				require.Nil(t, reg.EffectivePolicy(subj))
+				s.mu.Lock()
+				currentMirror, currentPending := s.subjectDrain.snapshots[subj], s.pendingPolicies[subj]
+				s.mu.Unlock()
+				require.Same(t, mirror, currentMirror, "failed activation must not record a snapshot")
+				require.Same(t, pending, currentPending, "pending policy must survive for hook retry")
+				nft.mu.Lock()
+				restored := len(nft.denyFirst)
+				nft.mu.Unlock()
+				require.Equal(t, denied+1, restored, "nft deny-first must be restored")
+				requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+				readinessReceiver(t, s)
+				waitReadinessACK(t, s)
+			}
+			require.Equal(t, 200, readinessHook(t, s, testUID, testFenceR, testFenceA).Code)
 		})
 	}
 }

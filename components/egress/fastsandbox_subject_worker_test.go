@@ -834,7 +834,7 @@ type snapshotFault struct {
 	reached, release                         chan struct{}
 	abortReached, retryReached, retryRelease chan struct{}
 	abortOnce, retryOnce                     sync.Once
-	prepareCount                             int
+	prepareCount, commitCount                int
 }
 
 func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, outcome, failOperation string) (*snapshotFault, mitmproxy.SubjectRevisionIPCConfig) {
@@ -867,7 +867,19 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 			fault.prepareCount++
 			firstPrepare = fault.prepareCount == 1
 		}
+		duplicateCommit := false
+		if event.Target.SubjectKey == "s-"+testUID && event.Path == "/v2/revisions/commit" {
+			fault.commitCount++
+			duplicateCommit = fault.commitCount == 2
+		}
 		fault.mu.Unlock()
+		if failOperation == "duplicate-commit" && duplicateCommit {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": outcome})
+			fault.once.Do(func() { close(fault.reached) })
+			return
+		}
 		isTarget := event.Target.SubjectKey == "s-"+testUID
 		if failOperation == "prepare-disconnect" && isTarget {
 			if firstPrepare {

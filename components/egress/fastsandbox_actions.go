@@ -729,6 +729,12 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		stale := !s.fenceMatchesLocked(subj, fence)
 		pol := s.pendingPolicies[subj]
 		acknowledged := s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		var checkedEpoch *fastSandboxSubjectEpoch
+		var checkedACK fastSandboxSubjectACK
+		if d := s.subjectDrain; d != nil {
+			checkedEpoch, checkedACK = d.current, d.acked[subj]
+		}
+		att := s.subjAtt[subj]
 		s.mu.Unlock()
 		if stale {
 			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
@@ -745,6 +751,23 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		applyStarted := time.Now()
 		if err := s.applyPolicy(subj, pol); err != nil {
 			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
+		}
+		// Child publication/detach and worker failures do not take policyCommitMu.
+		// Fence completion against the exact epoch, registration and digest that
+		// passed the gate; a replacement's ACK cannot complete this activation.
+		s.mu.Lock()
+		if checkedEpoch != nil {
+			d := s.subjectDrain
+			acknowledged = d != nil && d.current == checkedEpoch && d.acked[subj] == checkedACK && s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		}
+		s.mu.Unlock()
+		if !acknowledged {
+			// Keep pending policy for a retried hook. Kernel I/O stays outside mu;
+			// the existing primitive resets nft before unsetting registry policy.
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				return http.StatusInternalServerError, err
+			}
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
 		}
 		s.recordBindingSnapshot(subj, fence)
 		// The pending slot stays: it now mirrors what is enforced, so a

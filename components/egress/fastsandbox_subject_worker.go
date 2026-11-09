@@ -731,6 +731,12 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				d.degradeLocked(reason)
 			}
 			if terminal {
+				// A confirmed rejection revokes prior success for this registration,
+				// even when the rejected payload has the same digest. A late result
+				// from a retired registration must not revoke its successor's ACK.
+				if d.acked[intent.subj].registration == intent.registration {
+					delete(d.acked, intent.subj)
+				}
 				d.dropInstallsLocked(intent.target)
 			}
 		}
