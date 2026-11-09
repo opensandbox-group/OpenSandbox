@@ -28,7 +28,7 @@ import os
 import re
 import string
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 from urllib.parse import urlparse, urlsplit
 
 from kubernetes.utils.quantity import parse_quantity
@@ -848,6 +848,20 @@ class KubernetesRuntimeConfig(BaseModel):
             "kubernetes.template_mitm_ca_secret is set."
         ),
     )
+    egress_signing_key_secrets: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Fast-sandbox egress caller-authentication signing Secrets "
+            "(OSEP-0025 D5), listed current-version-first; keep the previous "
+            "version listed until pool rollout plus credential TTL + leeway "
+            "has passed (dual-kid rotation grace). Each Secret must carry "
+            "signing.pub (raw base64url Ed25519 public key) and kid "
+            "(<pool>:v<version>, the JWKS lookup key) entries — public "
+            "material only; the server never touches a private key, and "
+            "these Secrets must be separate objects from the MITM CA seed. "
+            "When unset, the JWKS endpoint serves no fast-sandbox kids."
+        ),
+    )
     workload_provider: Optional[str] = Field(
         default=None,
         description="Workload provider type. If not specified, uses the first registered provider.",
@@ -889,6 +903,32 @@ class KubernetesRuntimeConfig(BaseModel):
             "Can be overridden per-sandbox via image.pull_policy in create request."
         ),
     )
+
+
+    @model_validator(mode="after")
+    def validate_egress_signing_key_secrets(self) -> "KubernetesRuntimeConfig":
+        seen: set[str] = set()
+        for name in self.egress_signing_key_secrets:
+            if not name.strip():
+                raise ValueError(
+                    "kubernetes.egress_signing_key_secrets entries must be "
+                    "non-empty Secret names."
+                )
+            if name in seen:
+                raise ValueError(
+                    "kubernetes.egress_signing_key_secrets entries must be "
+                    f"unique; {name!r} appears twice."
+                )
+            seen.add(name)
+        overlap = seen & {self.template_mitm_ca_secret} - {None}
+        if overlap:
+            raise ValueError(
+                "kubernetes.egress_signing_key_secrets must reference "
+                "dedicated Secrets separate from template_mitm_ca_secret "
+                f"(OSEP-0025: independent version lines and reader sets); "
+                f"shared: {sorted(overlap)}."
+            )
+        return self
 
 
 class ExecdInitResources(BaseModel):
