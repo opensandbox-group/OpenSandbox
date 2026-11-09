@@ -53,7 +53,7 @@ Status separates sandbox health from task progress: `replicas` / `allocated` / `
 | `template` | The pod template warm pods start from |
 | `capacitySpec` | `bufferMin`/`bufferMax` govern the ready band; `poolMin`/`poolMax` bound the whole pool |
 | `scaleStrategy` | `maxUnavailable` caps how fast the pool scales (absolute or percentage, default 25%) |
-| `updateStrategy` | Same cap for rolling out template changes across existing pods |
+| `updateStrategy` | `maxUnavailable` caps how many idle pods a template rollout takes out at once (absolute or percentage of idle pods, default 25%) |
 | `recycleStrategy` | What happens when an allocated pod is released back: `Delete` (default), `Restart`, or `Noop` |
 
 Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template.
@@ -75,7 +75,7 @@ Scaling is deliberately paced: each reconcile creates or deletes at most `maxUna
 - `Restart` — containers restart in place: cheaper than a full pod churn, still scrubbing process state.
 - `Noop` — returned as-is: fastest, but filesystem and process state leak into the next allocation.
 
-**Template updates.** Editing the pool template changes the revision; the controller deletes idle pods still on the old revision (never pods allocated to a sandbox) and replenishes at the new revision under `updateStrategy` caps, with `status.updated` tracking progress.
+**Template updates.** Editing the pool template changes the revision; the controller deletes idle pods still on the old revision (never pods allocated to a sandbox) and replenishes at the new revision under `updateStrategy` caps, with `status.updated` tracking progress. The cap is computed over idle pods only, because those are the only pods an update recreates and the only ones allocations draw from: for example, a pool with 16 allocated and 4 idle pods at the default 25% takes out at most 1 idle pod per batch (25% of 4); replacements that are still starting are idle and unready, so they hold back the next batch. Unready allocated pods do not consume the budget.
 
 **Eviction.** Labeling an idle pool pod with `pool.opensandbox.io/evict` requests its removal. The controller protects pods already allocated to a `BatchSandbox`, deletes idle ones, and lets replenishment restore the buffer.
 

@@ -53,20 +53,11 @@ type recreateUpdateStrategy struct {
 
 func (s *recreateUpdateStrategy) Compute(ctx context.Context, updateRevision string, pods []*corev1.Pod, idlePods []string) *updateResult {
 	log := logf.FromContext(ctx)
-	maxUnavailable := getUpdateMaxUnavailable(s.pool, int32(len(pods)))
 
 	podMap := make(map[string]*corev1.Pod, len(pods))
 	for _, pod := range pods {
 		podMap[pod.Name] = pod
 	}
-
-	curUnavailable := int32(0)
-	for _, pod := range pods {
-		if !utils.IsPodReady(pod) {
-			curUnavailable++
-		}
-	}
-	unavailableBudget := max(maxUnavailable-curUnavailable, 0)
 
 	idlePodList := make([]*corev1.Pod, 0, len(idlePods))
 	for _, name := range idlePods {
@@ -74,6 +65,24 @@ func (s *recreateUpdateStrategy) Compute(ctx context.Context, updateRevision str
 			idlePodList = append(idlePodList, pod)
 		}
 	}
+
+	// The update only ever recreates idle pods, and allocations are served
+	// only from ready idle pods, so the budget is computed over idle pods:
+	// both the base that a percentage is resolved against and the count of
+	// pods already unavailable. Using all pods (allocated included) made the
+	// cap too loose on busy pools (16 allocated + 4 idle at 25% allowed all 4
+	// warm pods to go at once) and let unready allocated pods, which the
+	// update never touches, eat the budget and stall the rollout.
+	// Unready idle pods include update-revision replacements still starting,
+	// so a batch must become ready before the next one begins.
+	maxUnavailable := getUpdateMaxUnavailable(s.pool, int32(len(idlePodList)))
+	curUnavailable := int32(0)
+	for _, pod := range idlePodList {
+		if !utils.IsPodReady(pod) {
+			curUnavailable++
+		}
+	}
+	unavailableBudget := max(maxUnavailable-curUnavailable, 0)
 
 	sort.SliceStable(idlePodList, func(i, j int) bool {
 		return utils.ComparePodsForDeletion(idlePodList[i], idlePodList[j])
