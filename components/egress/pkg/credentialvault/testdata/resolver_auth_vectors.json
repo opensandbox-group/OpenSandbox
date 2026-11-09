@@ -15,6 +15,7 @@
     "env_sidecar_private_key": "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY",
     "env_fastsandbox_key_dir": "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR",
     "env_fastsandbox_signing_kid": "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID",
+    "audience_derivation": "web origin of the resolver endpoint, scheme://host[:port], path prefix excluded; the egress mints it as aud and the verifying resolver configures the identical string as expected_aud",
     "signing_key_file": "signing.key",
     "key_format": "PKCS8 PEM (Ed25519); the env value and the signing.key file carry the same PEM form",
     "jwks_path_template": "/jwks/{kid}",

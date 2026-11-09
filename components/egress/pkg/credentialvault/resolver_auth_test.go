@@ -35,16 +35,16 @@ import (
 // way the resolver-side verifier will.
 
 type vectorsContract struct {
-	HeaderName           string `json:"header_name"`
-	Issuer               string `json:"issuer"`
-	KidGrammar           string `json:"kid_grammar"`
-	TTLMaxSeconds        int    `json:"ttl_max_seconds"`
-	LeewaySeconds        int    `json:"leeway_seconds"`
-	JtiBytes             int    `json:"jti_bytes"`
-	EnvSidecarPrivateKey string `json:"env_sidecar_private_key"`
-	EnvFastsandboxKeyDir string `json:"env_fastsandbox_key_dir"`
+	HeaderName               string `json:"header_name"`
+	Issuer                   string `json:"issuer"`
+	KidGrammar               string `json:"kid_grammar"`
+	TTLMaxSeconds            int    `json:"ttl_max_seconds"`
+	LeewaySeconds            int    `json:"leeway_seconds"`
+	JtiBytes                 int    `json:"jti_bytes"`
+	EnvSidecarPrivateKey     string `json:"env_sidecar_private_key"`
+	EnvFastsandboxKeyDir     string `json:"env_fastsandbox_key_dir"`
 	EnvFastsandboxSigningKid string `json:"env_fastsandbox_signing_kid"`
-	SigningKeyFile       string `json:"signing_key_file"`
+	SigningKeyFile           string `json:"signing_key_file"`
 }
 
 type vectorsKey struct {

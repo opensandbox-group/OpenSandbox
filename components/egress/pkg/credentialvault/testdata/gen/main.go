@@ -76,6 +76,7 @@ type contract struct {
 	EnvSidecarPrivateKey     string            `json:"env_sidecar_private_key"`
 	EnvFastsandboxKeyDir     string            `json:"env_fastsandbox_key_dir"`
 	EnvFastsandboxSigningKid string            `json:"env_fastsandbox_signing_kid"`
+	AudienceDerivation       string            `json:"audience_derivation"`
 	SigningKeyFile           string            `json:"signing_key_file"`
 	KeyFormat                string            `json:"key_format"`
 	JWKSPathTemplate         string            `json:"jwks_path_template"`
@@ -436,6 +437,7 @@ func main() {
 			EnvSidecarPrivateKey:     "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY",
 			EnvFastsandboxKeyDir:     "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR",
 			EnvFastsandboxSigningKid: "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID",
+			AudienceDerivation:       "web origin of the resolver endpoint, scheme://host[:port], path prefix excluded; the egress mints it as aud and the verifying resolver configures the identical string as expected_aud",
 			SigningKeyFile:           "signing.key",
 			KeyFormat:                "PKCS8 PEM (Ed25519); the env value and the signing.key file carry the same PEM form",
 			JWKSPathTemplate:         "/jwks/{kid}",

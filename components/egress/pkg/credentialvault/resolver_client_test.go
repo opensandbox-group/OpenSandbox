@@ -16,7 +16,10 @@ package credentialvault
 
 import (
 	"context"
+	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -254,6 +257,7 @@ type capturedRequest struct {
 	path    string
 	host    string
 	auth    string
+	cred    string
 	content string
 	body    map[string]any
 }
@@ -265,6 +269,7 @@ func (c *capturedRequest) record(r *http.Request, raw []byte) {
 	c.path = r.URL.RequestURI()
 	c.host = r.Host
 	c.auth = r.Header.Get("Authorization")
+	c.cred = r.Header.Get(EgressCredentialHeader)
 	c.content = r.Header.Get("Content-Type")
 	_ = json.Unmarshal(raw, &c.body)
 }
@@ -272,11 +277,52 @@ func (c *capturedRequest) record(r *http.Request, raw []byte) {
 func (c *capturedRequest) snapshot() capturedRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return capturedRequest{method: c.method, path: c.path, host: c.host, auth: c.auth, content: c.content, body: c.body}
+	return capturedRequest{method: c.method, path: c.path, host: c.host, auth: c.auth, cred: c.cred, content: c.content, body: c.body}
+}
+
+// testResolverCredentialProvider builds a throwaway signer + manager and
+// returns them with the public key so tests can verify dial-time credentials.
+func testResolverCredentialProvider(t *testing.T) (CredentialProvider, ed25519.PublicKey) {
+	t.Helper()
+	pub, key, err := ed25519.GenerateKey(cryptorand.Reader)
+	require.NoError(t, err)
+	return newResolverCredentialManager(&ResolverCredentialSigner{key: key, kid: "sbx-test1"}), pub
+}
+
+// credProvider is the single-value form for inline option literals.
+func credProvider(t *testing.T) CredentialProvider {
+	t.Helper()
+	provider, _ := testResolverCredentialProvider(t)
+	return provider
+}
+
+// requireCredential decodes a dial-time credential, verifies its Ed25519
+// signature, and checks the two bindings the resolver enforces: aud = this
+// resolver origin, sub = the egress-authoritative subject.
+func requireCredential(t *testing.T, jwt string, pub ed25519.PublicKey, origin, subject string) {
+	t.Helper()
+	parts := strings.Split(jwt, ".")
+	require.Len(t, parts, 3, "compact JWS has three segments")
+	headerRaw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	claimsRaw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	require.NoError(t, err)
+	require.True(t, ed25519.Verify(pub, []byte(parts[0]+"."+parts[1]), sig), "credential signature must verify")
+	require.Contains(t, string(headerRaw), `"alg":"EdDSA"`)
+	var claims struct {
+		Aud string `json:"aud"`
+		Sub string `json:"sub"`
+	}
+	require.NoError(t, json.Unmarshal(claimsRaw, &claims))
+	require.Equal(t, origin, claims.Aud)
+	require.Equal(t, subject, claims.Sub)
 }
 
 func TestHTTPSFrameAndHappyPath(t *testing.T) {
 	var captured capturedRequest
+	provider, verifier := testResolverCredentialProvider(t)
 	envelope := `{"headers":{"X-Test-Signature":"abc","authorization":"Bearer test-spi-signer"},"redactions":{"X-Test-Signature":["abc"]}}`
 	endpoint, tlsConfig := startEnvelopeServer(t, http.StatusOK, envelope, &captured)
 	client, err := NewResolverClient(ResolverClientOptions{
@@ -284,6 +330,7 @@ func TestHTTPSFrameAndHappyPath(t *testing.T) {
 		Timeout:         time.Second,
 		MaxConcurrency:  1,
 		TLSClientConfig: tlsConfig,
+		Credentials:     provider,
 	})
 	require.NoError(t, err)
 
@@ -296,9 +343,12 @@ func TestHTTPSFrameAndHappyPath(t *testing.T) {
 	require.Equal(t, "/egress-resolver/resolve", frame.path)
 	require.Equal(t, strings.TrimPrefix(endpoint, "https://"), frame.host)
 	require.Equal(t, "application/json", frame.content)
-	// Caller authentication is deferred (D5 not implemented): resolver dials
-	// carry no Authorization header.
-	require.Empty(t, frame.auth)
+	// D5: every TCP dial carries exactly one credential header — a compact
+	// EdDSA JWT whose aud is this resolver origin and whose sub is the
+	// egress-authoritative subject.
+	require.NotEmpty(t, frame.cred)
+	requireCredential(t, frame.cred, verifier, endpoint, "sbx_01HZYEXAMPLE")
+	require.Empty(t, frame.auth, "no Authorization header is synthesized")
 	require.NotNil(t, frame.body)
 	keys := make([]string, 0, len(frame.body))
 	for key := range frame.body {
@@ -316,7 +366,7 @@ func TestResolveHeaderlessFrameWireShape(t *testing.T) {
 	// nil must serialize as {} — a contract-compliant resolver rejects null.
 	var captured capturedRequest
 	endpoint, tlsConfig := startEnvelopeServer(t, http.StatusOK, `{"headers":{}}`, &captured)
-	client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+	client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 	require.NoError(t, err)
 	input := resolverTestInput()
 	input.Request.Headers = nil
@@ -393,7 +443,7 @@ func TestResolverDeniedLimits(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			endpoint, tlsConfig := startEnvelopeServer(t, http.StatusOK, testCase.body, nil)
-			client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: 2 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+			client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: 2 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 			require.NoError(t, err)
 			_, err = client.Resolve(context.Background(), resolverTestInput())
 			resolverErr := requireKind(t, err, ResolverDenied)
@@ -406,7 +456,7 @@ func TestResolverDeniedResponseTooLarge(t *testing.T) {
 	// A 200 body over the 64KiB cap is a per-request denial.
 	large := `{"headers":{"x-a":"` + strings.Repeat("v", maxResolverResponseBytes) + `"}}`
 	endpoint, tlsConfig := startEnvelopeServer(t, http.StatusOK, large, nil)
-	client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: 5 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+	client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: 5 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 	require.NoError(t, err)
 	_, err = client.Resolve(context.Background(), resolverTestInput())
 	resolverErr := requireKind(t, err, ResolverDenied)
@@ -448,7 +498,7 @@ func TestResolverInvalidAndRejectedClasses(t *testing.T) {
 			server.StartTLS()
 			defer server.Close()
 			tlsConfig := server.Client().Transport.(*http.Transport).TLSClientConfig
-			client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 2 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+			client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 2 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 			require.NoError(t, err)
 			_, err = client.Resolve(context.Background(), resolverTestInput())
 			resolverErr := requireKind(t, err, testCase.kind)
@@ -471,7 +521,7 @@ func TestResolveTimeoutClass(t *testing.T) {
 	defer close(release)
 	tlsConfig := server.Client().Transport.(*http.Transport).TLSClientConfig
 
-	client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 100 * time.Millisecond, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+	client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 100 * time.Millisecond, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 	require.NoError(t, err)
 
 	start := time.Now()
@@ -489,7 +539,7 @@ func TestResolveCallerDeadlineHonored(t *testing.T) {
 	server.StartTLS()
 	defer server.Close()
 	tlsConfig := server.Client().Transport.(*http.Transport).TLSClientConfig
-	client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 10 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+	client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 10 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -519,7 +569,7 @@ func TestResolverMaxConcurrencyBounded(t *testing.T) {
 	defer server.Close()
 	tlsConfig := server.Client().Transport.(*http.Transport).TLSClientConfig
 
-	client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 5 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+	client, err := NewResolverClient(ResolverClientOptions{Endpoint: server.URL, Timeout: 5 * time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 	require.NoError(t, err)
 
 	const calls = 4
@@ -546,7 +596,7 @@ func TestResolverClientInterfaceContract(t *testing.T) {
 	// redactions.
 	envelope := `{"headers":{"X-Signature":"sig","X-Token":"tok"},"redactions":{"X-Signature":["sig"]}}`
 	endpoint, tlsConfig := startEnvelopeServer(t, http.StatusOK, envelope, nil)
-	client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig})
+	client, err := NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Timeout: time.Second, MaxConcurrency: 1, TLSClientConfig: tlsConfig, Credentials: credProvider(t)})
 	require.NoError(t, err)
 	decision, err := client.Resolve(context.Background(), resolverTestInput())
 	require.NoError(t, err)

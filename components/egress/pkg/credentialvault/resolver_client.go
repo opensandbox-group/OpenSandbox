@@ -29,11 +29,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
 // Egress → credential header resolver client (OSEP-0025 frozen contract).
@@ -143,6 +145,11 @@ type ResolverClientOptions struct {
 	// TLSClientConfig overrides HTTPS TLS (test/deployment seam); nil keeps
 	// system verification.
 	TLSClientConfig *tls.Config
+	// Credentials mints the caller-authentication JWT attached to every TCP
+	// resolve dial (D5); unix:// dials carry none. Required for https://
+	// endpoints: a TCP dial without a credential provider fails closed
+	// rather than reaching the resolver unauthenticated.
+	Credentials CredentialProvider
 }
 
 // NewResolverClient validates the endpoint; no connection is dialed.
@@ -199,6 +206,11 @@ func NewResolverClient(options ResolverClientOptions) (ResolverClient, error) {
 		}
 		client.requestURL = (&url.URL{Scheme: "https", Host: parsed.authority, Path: parsed.resolvePath}).String()
 		client.hostHeader = parsed.authority
+		// D5 caller authentication: the JWT aud is the resolver origin —
+		// scheme://authority, path prefix excluded — so the verifying
+		// resolver configures the identical string as its expected audience.
+		client.origin = "https://" + parsed.authority
+		client.credentials = options.Credentials
 	}
 	httpClient.Transport = transport
 	client.http = httpClient
@@ -277,17 +289,46 @@ func ResolverMaxConcurrencyFromEnv() int {
 	)
 }
 
+// defaultCredentialProvider memoizes the process-wide caller-auth provider:
+// the signer loads once from the operator channels; an unconfigured egress
+// keeps a nil provider (unix dials unaffected, TCP dials fail closed).
+var defaultCredentialProvider struct {
+	once     sync.Once
+	provider CredentialProvider
+}
+
+// DefaultResolverCredentialProvider returns the process-wide provider built
+// from LoadResolverCredentialSigner; nil when no channel is configured.
+func DefaultResolverCredentialProvider() CredentialProvider {
+	defaultCredentialProvider.once.Do(func() {
+		signer, err := LoadResolverCredentialSigner()
+		if err != nil {
+			log.Warnf("resolver caller-authentication signer unloadable: %v", err)
+			return
+		}
+		if signer == nil {
+			return
+		}
+		defaultCredentialProvider.provider = newResolverCredentialManager(signer)
+	})
+	return defaultCredentialProvider.provider
+}
+
 // NewResolverClientFromEnv builds a client from the resolver envs; wiring
-// supplies the endpoint.
+// supplies the endpoint. TCP endpoints carry the process caller credential.
 func NewResolverClientFromEnv(endpoint string) (ResolverClient, error) {
-	return NewResolverClient(ResolverClientOptions{Endpoint: endpoint})
+	return NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Credentials: DefaultResolverCredentialProvider()})
 }
 
 // resolverClient is the UDS/HTTPS transport; construct via NewResolverClient.
 type resolverClient struct {
-	http        *http.Client
-	requestURL  string
-	hostHeader  string // https: endpoint authority; empty for unix (localhost)
+	http       *http.Client
+	requestURL string
+	hostHeader string // https: endpoint authority; empty for unix (localhost)
+	// origin is the https resolver origin (scheme://authority) used as the
+	// credential aud; empty for unix dials, which carry no credential.
+	origin      string
+	credentials CredentialProvider
 	timeout     time.Duration
 	concurrency chan struct{}
 }
@@ -323,6 +364,20 @@ func (c *resolverClient) Resolve(ctx context.Context, input ResolveInput) (*Reso
 	if c.hostHeader != "" {
 		// D15: Host is the endpoint authority (localhost over unix).
 		request.Host = c.hostHeader
+	}
+	// D5 caller authentication: every TCP dial carries exactly one
+	// credential header; unix dials carry none (socket permissions are the
+	// boundary). A TCP dial without a provisioned signer fails closed
+	// before reaching the wire.
+	if c.origin != "" {
+		if c.credentials == nil {
+			return nil, resolverErrorf(ResolverUnavailable, "egress_credential_not_provisioned")
+		}
+		jwt, err := c.credentials.Credential(input.Subject, c.origin)
+		if err != nil {
+			return nil, resolverErrorf(ResolverUnavailable, "egress_credential_mint_failed")
+		}
+		request.Header.Set(EgressCredentialHeader, jwt)
 	}
 	request.Close = true
 
