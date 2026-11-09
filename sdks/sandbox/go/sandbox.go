@@ -614,6 +614,11 @@ func (s *Sandbox) waitForRunning(ctx context.Context, timeout time.Duration) err
 
 		info, err := s.lifecycle.GetSandbox(waitCtx, s.id)
 		if err != nil {
+			if waitCtx.Err() != nil {
+				// Classify a deadline or cancellation during the request the
+				// same way as one observed between status polls.
+				continue
+			}
 			return fmt.Errorf("opensandbox: get sandbox status: %w", err)
 		}
 		if info.Status.State == StateRunning {
