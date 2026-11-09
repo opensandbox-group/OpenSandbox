@@ -109,6 +109,7 @@ from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
 from opensandbox_server.api.network_policy import router as policy_router  # noqa: E402
 from opensandbox_server.api.credential_vault import router as credential_vault_router  # noqa: E402
 from opensandbox_server.api.templates import router as templates_router  # noqa: E402
+from opensandbox_server.api.jwks import router as jwks_router  # noqa: E402
 from opensandbox_server.integrations.otel import setup_otel_metrics, shutdown_otel_metrics  # noqa: E402
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator  # noqa: E402
 from opensandbox_server.middleware.auth import AuthMiddleware  # noqa: E402
@@ -184,6 +185,21 @@ async def lifespan(app: FastAPI):
 
             k8s_client = K8sClient(app_config.kubernetes)
             logger.info("Validating secure runtime for Kubernetes backend")
+
+        if runtime_type == "kubernetes" and app_config.kubernetes.egress_signing_key_secrets:
+            # OSEP-0025 D5: publish the fast-sandbox pool signing keys. Lazy
+            # first read — an unreachable API server delays the first JWKS
+            # response, not startup.
+            from opensandbox_server.services.jwks import build_jwks_service_from_config
+
+            app.state.jwks_service = build_jwks_service_from_config(
+                app_config.kubernetes,
+                k8s_client.get_core_v1_api(),
+            )
+            logger.info(
+                "JWKS publication enabled for %d egress signing Secret(s)",
+                len(app_config.kubernetes.egress_signing_key_secrets),
+            )
 
         await validate_secure_runtime_on_startup(
             app_config,
@@ -282,6 +298,7 @@ app.include_router(templates_router)
 app.include_router(proxy_router)
 app.include_router(policy_router)
 app.include_router(credential_vault_router)
+app.include_router(jwks_router)
 app.include_router(router, prefix="/v1")
 app.include_router(devops_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
