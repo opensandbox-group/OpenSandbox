@@ -41,11 +41,21 @@ const (
 
 // Credential header resolver client (OSEP-0025); owned by
 // pkg/credentialvault/resolver_client.go — consumers use the client interface
-// only. Caller authentication (D5) is deferred: resolver dials carry no
-// Authorization header.
+// only. Caller authentication (D5): TCP resolve dials carry an
+// OpenSandbox-Egress-Credential JWT minted from the Ed25519 signing key;
+// unix:// dials carry none (socket permissions are the boundary).
 const (
 	EnvCredentialResolverTimeout        = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"         // seconds, 1..120
 	EnvCredentialResolverMaxConcurrency = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY" // 1..1024
+	// Sidecar/docker profile: PKCS8 PEM private key injected through the
+	// OPENSANDBOX_EGRESS_TOKEN env channel (server-generated per sandbox).
+	EnvCredentialResolverSigningKey = "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY"
+	// Fast-sandbox profile: read-only Secret volume holding signing.key
+	// (PKCS8 PEM), one keypair per pool, ops-provisioned.
+	EnvCredentialResolverSigningKeyDir = "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR"
+	// SigningKeyFile is the single entry the fast-sandbox signing Secret
+	// projects; the private key never travels through any other name.
+	CredentialResolverSigningKeyFile = "signing.key"
 )
 
 // Fast Sandbox profile: the egress control plane serves N sandboxes
