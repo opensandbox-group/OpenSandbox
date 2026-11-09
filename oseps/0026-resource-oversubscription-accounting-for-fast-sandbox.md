@@ -4,8 +4,8 @@ authors:
   - "@Pangjiping"
   - "@fengcone"
 creation-date: 2026-11-05
-last-updated: 2026-11-06
-status: implementing
+last-updated: 2026-11-09
+status: implemented
 ---
 
 # OSEP-0026: Resource Oversubscription Accounting for Fast Sandbox
