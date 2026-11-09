@@ -14,7 +14,7 @@
 
 //go:build !linux && !darwin
 
-package containerlogs
+package fileidentity
 
 import (
 	"errors"
@@ -23,8 +23,8 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 )
 
-var errUnsupportedFileIdentity = api.Permanent(errors.New("container log fingerprinting is supported only on Linux and Darwin"))
+var errUnsupportedFileIdentity = api.Permanent(errors.New("source file fingerprinting is supported only on Linux and Darwin"))
 
-func sourceFileIdentity(os.FileInfo) (uint64, uint64, error) {
+func Read(os.FileInfo) (uint64, uint64, error) {
 	return 0, 0, errUnsupportedFileIdentity
 }
