@@ -3,7 +3,7 @@ title: Credential Vault Exchange and Delegated Header Resolution
 authors:
   - "@Pangjiping"
 creation-date: 2026-10-28
-last-updated: 2026-11-06
+last-updated: 2026-11-09
 status: implementing
 ---
 
@@ -348,7 +348,7 @@ Hard requirements on a resolver endpoint, none of which dictate an implementatio
 | Per-request semantics | input includes request context; output differs per request |
 | Absent/unreachable = denial | no fallback to uncredentialed pass-through |
 
-Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: designed, not yet implemented** — the adopted design (an Ed25519 JWT minted by the egress and verified offline against a server-published JWKS) is specified in [Resolver Caller Authentication](#resolver-caller-authentication); until it lands, resolver dials carry no caller credential and the egress exposes no auth configuration. Interim posture: `unix://` endpoints (socket permissions) are the only resolver transport with an egress-only trust boundary; network-level scoping of `https://` resolvers (UID-scoped exclusions) unblocks the egress's own dials under default-deny but does **not** isolate the resolver from the sandbox, because transparent interception re-originates sandbox dials from the same uid. Treat `https://` resolvers as sandbox-reachable until caller authentication lands.
+Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: implemented for the fast-sandbox profile** (per-pool signing Secret projected into the egress, JWT minting on every TCP resolve dial, and the server-published JWKS endpoint; see the [Credential Vault guide](../docs/guides/credential-vault.md#resolver-caller-authentication-fast-sandbox)). The sidecar profile's per-sandbox key provisioning is follow-up work; until it lands, sidecar `https://` resolvers keep the interim posture below. Interim posture (sidecar): `unix://` endpoints (socket permissions) are the only resolver transport with an egress-only trust boundary; network-level scoping of `https://` resolvers (UID-scoped exclusions) unblocks the egress's own dials under default-deny but does **not** isolate the resolver from the sandbox, because transparent interception re-originates sandbox dials from the same uid. Treat sidecar `https://` resolvers as sandbox-reachable until caller authentication lands there.
 
 ### Resolver Caller Authentication
 
