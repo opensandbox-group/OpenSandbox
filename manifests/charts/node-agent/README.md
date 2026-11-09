@@ -19,6 +19,13 @@ Node-local checkpoint state and source-data retention jointly define the
 delivery guarantee. Do not remove the state host path, rotate durable-file
 outputs externally, or change a sink target without draining the Agent.
 
+Rendered resource names join the release and chart names: a standalone
+`helm install node-agent ...` yields `node-agent-node-agent` — set
+`fullnameOverride=node-agent` (or another name) when scripting against the
+DaemonSet. Enabling the `vm-console` Source renders no RBAC rules; the
+DaemonSet must still schedule on every firecracker runtime node, so set
+`nodeSelector`/`tolerations` when those nodes carry taints.
+
 ## Configuration
 
 The following table lists the configurable parameters of the chart and their default values.
@@ -52,7 +59,7 @@ The following table lists the configurable parameters of the chart and their def
 | hostPaths.logs | string | `"/var/log/pods"` | Pod-log host path used only by the container-logs Source. |
 | hostPaths.state | string | `"/var/lib/opensandbox/nodeagent"` | Host path for checkpoint state (must match config.stateDir). |
 | hostPaths.tracing | string | `"/sys/kernel/tracing"` | Host tracefs used only by the syscalls Source. |
-| hostPaths.vmConsole | string | `"/var/lib/fast-sandbox/firecracker"` | Firecracker state root used only by the vm-console Source; GC remains owned by the FC driver. |
+| hostPaths.vmConsole | string | `"/var/lib/fast-sandbox/firecracker"` | Firecracker state root used only by the vm-console Source; must equal the fast-sandbox chart's runtime.stateRoot and must not overlap state or output paths; GC remains owned by the FC driver. |
 | image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent","tag":""}` | Node agent image configuration. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent"` | Node agent image repository. |
