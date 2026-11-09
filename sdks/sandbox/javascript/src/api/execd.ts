@@ -1455,12 +1455,12 @@ export interface components {
             /** @description Execution error details if an error occurred */
             error?: {
                 /**
-                 * @description Error name/type
+                 * @description Error name/type. Foreground commands that fail after their execution deadline use `CommandTimeout`; other command failures use `CommandExecError`.
                  * @example NameError
                  */
                 ename?: string;
                 /**
-                 * @description Error value/message. For `CommandExecError` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when the process could not be started; use `exit_code` to tell the two apart.
+                 * @description Error value/message. For `CommandExecError` and `CommandTimeout` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when no exit status is available; use `exit_code` to tell the two apart.
                  * @example name 'undefined_var' is not defined
                  */
                 evalue?: string;
@@ -1474,7 +1474,7 @@ export interface components {
                  */
                 traceback?: string[];
                 /**
-                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` events emitted after the process ran; omitted when the process failed to start and for non-command errors.
+                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` and `CommandTimeout` events emitted after the process ran; omitted when the process failed to start, no exit status was observed, or the error is not from a command.
                  * @example 3
                  */
                 exit_code?: number;

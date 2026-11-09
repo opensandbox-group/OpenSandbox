@@ -332,42 +332,47 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	})
 
 	err = mp.Wait()
+	// Capture the deadline before output callbacks finish draining.
+	timedOut := ctx.Err() == context.DeadlineExceeded
 	close(done)
 	wg.Wait()
-	if err != nil {
-		var eName, eValue string
-		var eCode int
-		var exitCodePtr *int
-		var traceback []string
-
-		var exitCodeErr exitCoder
-		if errors.As(err, &exitCodeErr) {
-			exitCode := exitCodeErr.ExitCode()
-			eName = "CommandExecError"
-			eValue = strconv.Itoa(exitCode)
-			eCode = exitCode
-			exitCodePtr = &exitCode
-		} else {
-			eName = "CommandExecError"
-			eValue = err.Error()
-			eCode = 1
-		}
-		traceback = []string{err.Error()}
-
-		request.Hooks.OnExecuteError(&execute.ErrorOutput{
-			EName:     eName,
-			EValue:    eValue,
-			Traceback: traceback,
-			ExitCode:  exitCodePtr,
-		})
-
-		log.Error("command: run failed: %v", err)
-		c.markCommandFinished(session, eCode, err.Error())
+	if err == nil {
+		c.markCommandFinished(session, 0, "")
+		request.Hooks.OnExecuteComplete(time.Since(startAt))
 		return nil
 	}
 
-	c.markCommandFinished(session, 0, "")
-	request.Hooks.OnExecuteComplete(time.Since(startAt))
+	var eName, eValue string
+	var eCode int
+	var exitCodePtr *int
+	var traceback []string
+
+	var exitCodeErr exitCoder
+	if errors.As(err, &exitCodeErr) {
+		exitCode := exitCodeErr.ExitCode()
+		eName = "CommandExecError"
+		eValue = strconv.Itoa(exitCode)
+		eCode = exitCode
+		exitCodePtr = &exitCode
+	} else {
+		eName = "CommandExecError"
+		eValue = err.Error()
+		eCode = 1
+	}
+	traceback = []string{err.Error()}
+	if timedOut {
+		eName = "CommandTimeout"
+	}
+
+	request.Hooks.OnExecuteError(&execute.ErrorOutput{
+		EName:     eName,
+		EValue:    eValue,
+		Traceback: traceback,
+		ExitCode:  exitCodePtr,
+	})
+
+	log.Error("command: run failed: %v", err)
+	c.markCommandFinished(session, eCode, err.Error())
 	return nil
 }
 

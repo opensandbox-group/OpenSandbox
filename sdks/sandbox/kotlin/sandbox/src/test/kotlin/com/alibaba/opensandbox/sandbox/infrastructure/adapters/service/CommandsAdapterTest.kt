@@ -259,29 +259,38 @@ class CommandsAdapterTest {
 
     @Test
     fun `run should infer non-zero exit code from command error event`() {
-        val initEvent = """{"type":"init","text":"cmd-123","timestamp":1672531200000}"""
-        val errorEvent =
-            """{"type":"error","error":{"ename":"CommandExecError",""" +
-                """"evalue":"7","traceback":["exit status 7"]},"timestamp":1672531201000}"""
+        for ((name, exitCode, traceback) in listOf(
+            Triple("CommandExecError", 7, "exit status 7"),
+            Triple("CommandTimeout", -1, "signal: terminated"),
+            Triple("CommandTimeout", 137, "exit status 137"),
+        )) {
+            val wireExitCode = if (name == "CommandTimeout") ",\"exit_code\":$exitCode" else ""
+            val initEvent = """{"type":"init","text":"cmd-123","timestamp":1672531200000}"""
+            val errorEvent =
+                """{"type":"error","error":{"ename":"$name",""" +
+                    """"evalue":"$exitCode","traceback":["$traceback"]$wireExitCode},"timestamp":1672531201000}"""
 
-        mockWebServer.enqueue(
-            MockResponse()
-                .setResponseCode(200)
-                .setBody("$initEvent\n$errorEvent\n"),
-        )
-
-        val execution =
-            commandsAdapter.run(
-                RunCommandRequest.builder()
-                    .command("exit 7")
-                    .build(),
+            mockWebServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("$initEvent\n$errorEvent\n"),
             )
 
-        assertEquals("cmd-123", execution.id)
-        assertEquals(7, execution.exitCode)
-        assertEquals("CommandExecError", execution.error?.name)
-        assertEquals("7", execution.error?.value)
-        assertEquals(null, execution.complete)
+            val execution =
+                commandsAdapter.run(
+                    RunCommandRequest.builder()
+                        .command("exit 7")
+                        .build(),
+                )
+
+            assertEquals("cmd-123", execution.id)
+            assertEquals(exitCode, execution.exitCode)
+            assertEquals(if (name == "CommandTimeout") exitCode else null, execution.error?.exitCode)
+            assertEquals(name, execution.error?.name)
+            assertEquals(exitCode.toString(), execution.error?.value)
+            assertEquals(listOf(traceback), execution.error?.traceback)
+            assertEquals(null, execution.complete)
+        }
     }
 
     @Test

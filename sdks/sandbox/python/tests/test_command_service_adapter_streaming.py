@@ -493,7 +493,7 @@ async def test_foreground_drains_terminal_response_and_closes_stream(
 
 
 class _ErrorEventTransport(httpx.AsyncBaseTransport):
-    """Replies to any request with a single CommandExecError event."""
+    """Replies to any request with a single execution error event."""
 
     def __init__(self, error: dict) -> None:
         self._error = error
@@ -522,6 +522,16 @@ class _ErrorEventTransport(httpx.AsyncBaseTransport):
         ({"ename": "CommandExecError", "evalue": "3", "exit_code": 3}, 3, 3),
         # A shell killed by a signal is a failure with exit_code -1.
         ({"ename": "CommandExecError", "evalue": "-1", "exit_code": -1}, -1, -1),
+        (
+            {"ename": "CommandTimeout", "evalue": "-1", "traceback": ["signal: terminated"], "exit_code": -1},
+            -1,
+            -1,
+        ),
+        (
+            {"ename": "CommandTimeout", "evalue": "137", "traceback": ["exit status 137"], "exit_code": 137},
+            137,
+            137,
+        ),
         # Start failure: no exit_code and a free-form evalue.
         ({"ename": "CommandExecError", "evalue": "fork/exec /bin/sh: argument list too long"}, None, None),
         # Older servers without exit_code: fall back to parsing evalue.
@@ -544,6 +554,9 @@ async def test_error_exit_code_propagates_to_execution(
         execution = await adapter.run("cmd")
 
     assert execution.error is not None
+    assert execution.error.name == error["ename"]
+    assert execution.error.value == error["evalue"]
+    assert execution.error.traceback == error.get("traceback", [])
     assert execution.error.exit_code == expected_error_exit_code
     assert execution.exit_code == expected_exit_code
     assert execution.complete is None
