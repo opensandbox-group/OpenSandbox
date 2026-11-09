@@ -5,7 +5,7 @@ description: Pools and Fastlets — the create hot path, capacity and placement,
 
 # Scheduling
 
-Fast Sandbox schedules sandboxes into **pools** of pre-warmed **Fastlet** pods. A pool fixes the runtime profile and the resource policy; a Fastlet hosts many sandboxes; a sandbox claims a slice of one Fastlet. The result: creating a sandbox is a constant-time admission into capacity that already exists, instead of a fresh scheduling round.
+Fast Sandbox schedules sandboxes into **pools** of pre-warmed **Fastlet** pods. A pool fixes the runtime profile and the resource policy; a Fastlet hosts many sandboxes; a sandbox claims a slice of one Fastlet. The result: creating a sandbox is a constant-time admission into capacity that already exists, instead of a fresh scheduling round. The two resource policies (`LegacySlot` and `ResourceAware`) are compared and configured in [Resource-Aware Scheduling](/guides/resource-aware-scheduling).
 
 ![The create hot path](../../public/images/fast-sandbox-create-path.svg)
 

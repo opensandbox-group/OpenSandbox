@@ -250,6 +250,10 @@ export default withMermaid(defineConfig({
               link: "/guides/egress-sse-truncation",
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
+            {
+              text: "Resource-Aware Scheduling",
+              link: "/guides/resource-aware-scheduling",
+            },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             {
               text: "Node Agent Configuration",
