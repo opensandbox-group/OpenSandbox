@@ -33,6 +33,14 @@ type exchangeSource struct {
 
 func (s *exchangeSource) Type() string { return "exchange" }
 
+// usesTCPTransport reports whether resolver dials for this endpoint are TCP
+// (https:// today; loopback http:// if ever admitted) and therefore carry the
+// caller credential (W1.4) and pass through the caller-auth admission gate
+// (W1.2). unix:// dials carry none — socket permissions are their boundary.
+func (s *exchangeSource) usesTCPTransport() bool {
+	return !strings.HasPrefix(s.endpoint, "unix://")
+}
+
 func (s *exchangeSource) Resolve(_ context.Context) (string, error) {
 	return "", fmt.Errorf("exchange credential cannot be resolved inline; it resolves per request via the credential resolver")
 }

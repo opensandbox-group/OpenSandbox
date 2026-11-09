@@ -43,6 +43,7 @@ type vectorsContract struct {
 	JtiBytes             int    `json:"jti_bytes"`
 	EnvSidecarPrivateKey string `json:"env_sidecar_private_key"`
 	EnvFastsandboxKeyDir string `json:"env_fastsandbox_key_dir"`
+	EnvFastsandboxSigningKid string `json:"env_fastsandbox_signing_kid"`
 	SigningKeyFile       string `json:"signing_key_file"`
 }
 
@@ -111,6 +112,7 @@ func TestResolverAuthContractSync(t *testing.T) {
 	sidecarEnv, dirEnv := resolverCredentialEnvNames()
 	require.Equal(t, c.EnvSidecarPrivateKey, sidecarEnv)
 	require.Equal(t, c.EnvFastsandboxKeyDir, dirEnv)
+	require.Equal(t, c.EnvFastsandboxSigningKid, constants.EnvCredentialResolverSigningKid)
 	require.Equal(t, c.SigningKeyFile, constants.CredentialResolverSigningKeyFile)
 }
 

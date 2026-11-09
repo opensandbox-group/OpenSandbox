@@ -53,6 +53,10 @@ const (
 	// Fast-sandbox profile: read-only Secret volume holding signing.key
 	// (PKCS8 PEM), one keypair per pool, ops-provisioned.
 	EnvCredentialResolverSigningKeyDir = "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR"
+	// Fast-sandbox profile: this egress's pool kid (<pool>:v<version>),
+	// required together with the signing-key dir; the JWKS kid and the
+	// Secret's pool/version identity are the same string.
+	EnvCredentialResolverSigningKid = "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID"
 	// SigningKeyFile is the single entry the fast-sandbox signing Secret
 	// projects; the private key never travels through any other name.
 	CredentialResolverSigningKeyFile = "signing.key"

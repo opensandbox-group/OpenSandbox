@@ -63,24 +63,25 @@ const (
 )
 
 type contract struct {
-	HeaderName           string            `json:"header_name"`
-	Alg                  string            `json:"alg"`
-	Typ                  string            `json:"typ,omitempty"`
-	Issuer               string            `json:"issuer"`
-	DefaultAudience      string            `json:"default_expected_audience"`
-	KidGrammar           string            `json:"kid_grammar"`
-	KidNotes             string            `json:"kid_notes"`
-	TTLMaxSeconds        int               `json:"ttl_max_seconds"`
-	LeewaySeconds        int               `json:"leeway_seconds"`
-	JtiBytes             int               `json:"jti_bytes"`
-	EnvSidecarPrivateKey string            `json:"env_sidecar_private_key"`
-	EnvFastsandboxKeyDir string            `json:"env_fastsandbox_key_dir"`
-	SigningKeyFile       string            `json:"signing_key_file"`
-	KeyFormat            string            `json:"key_format"`
-	JWKSPathTemplate     string            `json:"jwks_path_template"`
-	RejectedHeaderParams []string          `json:"rejected_header_params"`
-	Errors               map[string]string `json:"errors"`
-	AllowedHeaderParams  []string          `json:"allowed_header_params"`
+	HeaderName               string            `json:"header_name"`
+	Alg                      string            `json:"alg"`
+	Typ                      string            `json:"typ,omitempty"`
+	Issuer                   string            `json:"issuer"`
+	DefaultAudience          string            `json:"default_expected_audience"`
+	KidGrammar               string            `json:"kid_grammar"`
+	KidNotes                 string            `json:"kid_notes"`
+	TTLMaxSeconds            int               `json:"ttl_max_seconds"`
+	LeewaySeconds            int               `json:"leeway_seconds"`
+	JtiBytes                 int               `json:"jti_bytes"`
+	EnvSidecarPrivateKey     string            `json:"env_sidecar_private_key"`
+	EnvFastsandboxKeyDir     string            `json:"env_fastsandbox_key_dir"`
+	EnvFastsandboxSigningKid string            `json:"env_fastsandbox_signing_kid"`
+	SigningKeyFile           string            `json:"signing_key_file"`
+	KeyFormat                string            `json:"key_format"`
+	JWKSPathTemplate         string            `json:"jwks_path_template"`
+	RejectedHeaderParams     []string          `json:"rejected_header_params"`
+	Errors                   map[string]string `json:"errors"`
+	AllowedHeaderParams      []string          `json:"allowed_header_params"`
 }
 
 type jwk struct {
@@ -422,23 +423,24 @@ func main() {
 		Schema:      "opensandbox.resolver-auth.vectors/v1",
 		GeneratedBy: "go run ./testdata/gen/main.go (components/egress/pkg/credentialvault)",
 		Contract: contract{
-			HeaderName:           "OpenSandbox-Egress-Credential",
-			Alg:                  "EdDSA",
-			Typ:                  "JWT",
-			Issuer:               defaultIssuer,
-			DefaultAudience:      defaultAud,
-			KidGrammar:           `^[a-z][a-z0-9-]{0,62}(:v[0-9]{1,8})?$`,
-			KidNotes:             "sidecar: sandboxId (incarnation suffix grammar lands with batch 2 / W2.2); fast-sandbox: <pool>:v<version>; delimiter is path-safe so kid substitutes into the JWKS lookup path",
-			TTLMaxSeconds:        3600,
-			LeewaySeconds:        leeway,
-			JtiBytes:             16,
-			EnvSidecarPrivateKey: "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY",
-			EnvFastsandboxKeyDir: "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR",
-			SigningKeyFile:       "signing.key",
-			KeyFormat:            "PKCS8 PEM (Ed25519); the env value and the signing.key file carry the same PEM form",
-			JWKSPathTemplate:     "/jwks/{kid}",
-			RejectedHeaderParams: []string{"jku", "x5u", "jwk"},
-			AllowedHeaderParams:  []string{"alg", "kid", "typ"},
+			HeaderName:               "OpenSandbox-Egress-Credential",
+			Alg:                      "EdDSA",
+			Typ:                      "JWT",
+			Issuer:                   defaultIssuer,
+			DefaultAudience:          defaultAud,
+			KidGrammar:               `^[a-z][a-z0-9-]{0,62}(:v[0-9]{1,8})?$`,
+			KidNotes:                 "sidecar: sandboxId (incarnation suffix grammar lands with batch 2 / W2.2); fast-sandbox: <pool>:v<version>; delimiter is path-safe so kid substitutes into the JWKS lookup path",
+			TTLMaxSeconds:            3600,
+			LeewaySeconds:            leeway,
+			JtiBytes:                 16,
+			EnvSidecarPrivateKey:     "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY",
+			EnvFastsandboxKeyDir:     "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR",
+			EnvFastsandboxSigningKid: "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID",
+			SigningKeyFile:           "signing.key",
+			KeyFormat:                "PKCS8 PEM (Ed25519); the env value and the signing.key file carry the same PEM form",
+			JWKSPathTemplate:         "/jwks/{kid}",
+			RejectedHeaderParams:     []string{"jku", "x5u", "jwk"},
+			AllowedHeaderParams:      []string{"alg", "kid", "typ"},
 			Errors: map[string]string{
 				"alg_pinned":       "alg is not EdDSA",
 				"typ_invalid":      "typ present but not JWT",

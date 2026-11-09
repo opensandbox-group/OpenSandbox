@@ -126,6 +126,13 @@ func startPolicyServer(
 		log.Warnf("credential resolver operator configuration not ready: %v", resolverConfigErr)
 	}
 	handler.credentialVault.SetResolverConfig(resolverConfig)
+	// D5 caller-auth gate: https:// exchange credentials fail closed until
+	// the signing key is provisioned (transport-aware; unix:// unaffected).
+	resolverAuth := credentialvault.ResolverAuthConfigFromEnv()
+	if resolverAuth.Problem != nil {
+		log.Warnf("resolver caller-authentication not ready: %v", resolverAuth.Problem)
+	}
+	handler.credentialVault.SetResolverAuthConfig(resolverAuth)
 	handler.credentialVaultRequireTLS = constants.IsTruthy(os.Getenv(constants.EnvCredentialVaultRequireTLS))
 	handler.setAlwaysRules(alwaysDeny, alwaysAllow)
 	if liveRevision {

@@ -90,6 +90,7 @@ type Store struct {
 	liveAdmission     bool
 	staticPassthrough mitmpassthrough.Config
 	resolverConfig    ResolverConfig
+	resolverAuth      ResolverAuthConfig
 }
 
 type record struct {
@@ -286,6 +287,30 @@ func (v *Store) SetResolverConfig(config ResolverConfig) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.resolverConfig = config
+}
+
+// ResolverAuthConfig reports whether the caller-authentication signer is
+// provisioned (D5). The zero value is not ready: vault writes containing
+// https:// exchange credentials fail closed until a signer is injected.
+// unix:// exchange credentials are unaffected — socket permissions remain
+// their boundary (transport-aware gate).
+type ResolverAuthConfig struct {
+	// Signer is the loaded signing identity; nil means not provisioned.
+	Signer *ResolverCredentialSigner
+	// Problem carries the diagnostic when a provisioning channel is
+	// configured but the key is unloadable. The gate fails closed either
+	// way; Problem only improves the error.
+	Problem error
+}
+
+func (c ResolverAuthConfig) Ready() bool { return c.Signer != nil }
+
+// SetResolverAuthConfig installs the caller-authentication gate. Call before
+// serving vault mutations.
+func (v *Store) SetResolverAuthConfig(config ResolverAuthConfig) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.resolverAuth = config
 }
 
 func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
@@ -549,10 +574,14 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 // resolver operator configuration (D13). Inline-only vaults are unaffected.
 func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	hasExchange := false
+	hasTCPExchange := false
 	for _, credential := range credentials {
-		if credential.SourceType == "exchange" {
-			hasExchange = true
-			break
+		if credential.SourceType != "exchange" {
+			continue
+		}
+		hasExchange = true
+		if src, ok := credential.Source.(*exchangeSource); ok && src.usesTCPTransport() {
+			hasTCPExchange = true
 		}
 	}
 	if !hasExchange {
@@ -563,6 +592,15 @@ func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	}
 	if !v.resolverConfig.Ready() {
 		return fmt.Errorf("exchange credentials are not supported until the credential resolver operator configuration is ready")
+	}
+	// Transport-aware caller-auth gate (D5): only https:// exchange
+	// credentials need the signer; unix:// keeps socket permissions as its
+	// boundary and stays writable without one.
+	if hasTCPExchange && !v.resolverAuth.Ready() {
+		if v.resolverAuth.Problem != nil {
+			return fmt.Errorf("https exchange credentials are not supported: resolver caller-authentication signing key is configured but unloadable: %v", v.resolverAuth.Problem)
+		}
+		return fmt.Errorf("https exchange credentials are not supported without the resolver caller-authentication signing key (%s or %s)", constants.EnvCredentialResolverSigningKeyDir, constants.EnvCredentialResolverSigningKey)
 	}
 	return nil
 }
