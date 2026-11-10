@@ -37,6 +37,7 @@ def snapshot_record(
     state: SnapshotState = SnapshotState.CREATING,
     *,
     namespace: str | None = None,
+    mode: str | None = None,
 ) -> SnapshotRecord:
     return SnapshotRecord(
         id=snapshot_id,
@@ -44,6 +45,7 @@ def snapshot_record(
         namespace=namespace,
         name=f"name-{snapshot_id}",
         description=f"description-{snapshot_id}",
+        mode=mode,
         restore_config=SnapshotRestoreConfig(
             image=f"registry.example.com/snapshots/{snapshot_id}:latest"
         ),
