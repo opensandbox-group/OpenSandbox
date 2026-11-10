@@ -1112,6 +1112,11 @@ paths:
                 summary: Create a named snapshot
                 value:
                   name: checkpoint-before-import
+              rootfsOnly:
+                summary: Create a rootfs-only snapshot
+                value:
+                  name: workspace-state
+                  mode: rootfsOnly
       responses:
         '202':
           description: |
@@ -1700,6 +1705,20 @@ components:
           type: string
           description: Optional human-readable snapshot name.
           minLength: 1
+        mode:
+          type: string
+          description: |
+            What the snapshot persists.
+
+            - `full` (default): captures the writable filesystem plus memory and
+              process state; restoring resumes the sandbox in place.
+            - `rootfsOnly`: captures only the writable filesystem; restoring
+              boots a fresh sandbox from the disk. Running processes and
+              in-memory state are discarded, and the entrypoint re-runs on
+              restore. Supported only on the fast-sandbox backend with
+              OCI-backed sandboxes; rejected otherwise.
+          enum: [full, rootfsOnly]
+          default: full
       additionalProperties: false
 
     Snapshot:
@@ -1717,6 +1736,14 @@ components:
         name:
           type: string
           description: Optional human-readable snapshot name
+
+        mode:
+          type: string
+          description: |
+            Artifact class of the snapshot: `full` preserves memory and process
+            state, `rootfsOnly` preserves only the writable filesystem.
+            Snapshots created before this field existed report `full`.
+          enum: [full, rootfsOnly]
 
         status:
           $ref: '#/components/schemas/SnapshotStatus'
