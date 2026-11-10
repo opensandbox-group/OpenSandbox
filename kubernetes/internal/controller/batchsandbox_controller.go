@@ -210,9 +210,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}).Sort)
 	// Normal mode owns pod lifecycle except while a sandbox is fully paused. In Paused, the
 	// snapshot-backed runtime is quiesced and pods must stay absent until resume rewrites the
-	// template images and transitions back through Resuming.
+	// template images and transitions back through Resuming. Completed sandboxes skip scaling
+	// too: a finished workload must not re-run, so a removed pod stays removed until expireTime.
 	if !poolStrategy.IsPooledMode() &&
 		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused &&
+		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseCompleted &&
 		!hasTerminalPodFailureCondition(batchSbx.Status.Conditions) {
 		// Bounded replacement of stuck provisioning pods; scale recreates them.
 		r.recoverStuckPods(ctx, batchSbx, pods)

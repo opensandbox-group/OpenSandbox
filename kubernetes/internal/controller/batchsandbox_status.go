@@ -42,6 +42,7 @@ const (
 	terminalPodFailedReason           = "PodFailed"
 	terminalContainerFailedReason     = "ContainerFailed"
 	terminalInitContainerFailedReason = "InitContainerFailed"
+	containerCompletedReason          = "Completed"
 )
 
 func setConditionInStatus(
@@ -84,6 +85,30 @@ func setConditionInStatus(
 	status.Conditions = filtered
 }
 
+// recordCompletedReadyCondition upserts the Ready condition as False with
+// reason=Completed and the completion detail (pod, container, exit code,
+// finishedAt) in the message. Unlike setConditionInStatus — which represents
+// False by removing the condition — completion must stay legible on the object:
+// it is the only exit-code observability a retained terminal sandbox carries.
+// applyBatchSandboxPhaseConditions deliberately leaves Ready untouched for the
+// Completed phase so the detail survives later reconciles.
+func recordCompletedReadyCondition(status *sandboxv1alpha1.BatchSandboxStatus, message string) {
+	updated := sandboxv1alpha1.BatchSandboxCondition{
+		Type:               sandboxv1alpha1.BatchSandboxConditionReady,
+		Status:             sandboxv1alpha1.ConditionFalse,
+		Reason:             containerCompletedReason,
+		Message:            message,
+		LastTransitionTime: ptr.To(metav1.Now()),
+	}
+	for i := range status.Conditions {
+		if status.Conditions[i].Type == sandboxv1alpha1.BatchSandboxConditionReady {
+			status.Conditions[i] = updated
+			return
+		}
+	}
+	status.Conditions = append(status.Conditions, updated)
+}
+
 func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus) {
 	switch status.Phase {
 	case sandboxv1alpha1.BatchSandboxPhasePending:
@@ -108,6 +133,12 @@ func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
 	case sandboxv1alpha1.BatchSandboxPhaseFailed:
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "Failed", "Sandbox is unavailable")
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionFalse, "", "")
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
+	case sandboxv1alpha1.BatchSandboxPhaseCompleted:
+		// Ready is left untouched here: the transition in applySteadyRuntimePhase
+		// records the completing container, exit code, and finishedAt in the Ready
+		// condition message, and that detail must survive later reconciles.
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionFalse, "", "")
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
 	}
@@ -217,6 +248,54 @@ func terminatedContainerFailure(pod *corev1.Pod, status *corev1.ContainerStatus,
 		message += ": " + terminated.Message
 	}
 	return reason, message, true
+}
+
+// terminatedMainContainerCompletion reports whether the sandbox's main container
+// terminated successfully (exit code 0) under a restart policy that will not
+// restart it (Never), mirroring terminatedMainContainerFailure for the clean
+// exit. This is the exit-0 counterpart of the #1741 failure path: without it a
+// finished workload never converges to a terminal phase — the pod's Ready count
+// drops to zero once the main container is gone (sidecars keep the pod Running),
+// and the phase would regress from Succeed back to Pending until expireTime.
+// RestartPolicyAlways and RestartPolicyOnFailure pods are excluded: the kubelet
+// may restart the container, so a termination is not final there. Pods that are
+// already terminating are excluded too — deletion may signal-kill the main
+// container, and that must not be reported as a successful completion.
+func terminatedMainContainerCompletion(pod *corev1.Pod) (string, bool) {
+	if pod.DeletionTimestamp != nil ||
+		pod.Spec.RestartPolicy != corev1.RestartPolicyNever ||
+		len(pod.Spec.Containers) == 0 {
+		return "", false
+	}
+	mainName := pod.Spec.Containers[0].Name
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name != mainName {
+			continue
+		}
+		terminated := status.State.Terminated
+		if terminated == nil || terminated.ExitCode != 0 {
+			return "", false
+		}
+		message := fmt.Sprintf("Pod %s container %s exited with code 0", pod.Name, status.Name)
+		if !terminated.FinishedAt.IsZero() {
+			message += fmt.Sprintf(" at %s", terminated.FinishedAt.UTC().Format(time.RFC3339))
+		}
+		return message, true
+	}
+	return "", false
+}
+
+// summarizePodCompletions finds the first pod whose main container completed
+// successfully. Failure detection always runs first (see applySteadyRuntimePhase),
+// so this only classifies workloads with no observed failures.
+func summarizePodCompletions(pods []*corev1.Pod) (string, bool) {
+	for _, pod := range pods {
+		if message, completed := terminatedMainContainerCompletion(pod); completed {
+			return message, true
+		}
+	}
+	return "", false
 }
 
 type podFailureSummary struct {
@@ -360,6 +439,24 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	}
 
 	if status.Phase == sandboxv1alpha1.BatchSandboxPhaseFailed {
+		return
+	}
+
+	// A completed sandbox is terminal: once the clean exit has been recorded, a
+	// later Ready=0 reconcile (sidecar teardown, informer lag, pod removal) must
+	// not regress the phase to Pending.
+	if status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted {
+		return
+	}
+
+	// Completion detection runs after failure detection so a non-zero exit keeps
+	// precedence and converges to Failed. A clean exit of the main container under
+	// restartPolicy=Never is final: converge to the sticky Completed phase within
+	// one reconcile instead of regressing to Pending until expireTime.
+	if message, completed := summarizePodCompletions(pods); completed {
+		status.Phase = sandboxv1alpha1.BatchSandboxPhaseCompleted
+		recordCompletedReadyCondition(status, message)
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
 		return
 	}
 

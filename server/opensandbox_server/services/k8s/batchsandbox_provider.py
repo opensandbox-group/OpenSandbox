@@ -73,6 +73,9 @@ _PUBLIC_STATE_BY_PHASE = {
     "Paused": "Paused",
     "Resuming": "Resuming",
     "Failed": "Failed",
+    # A workload whose main container exited 0 is terminal; report it with the
+    # existing terminal vocabulary instead of a running state.
+    "Completed": "Terminated",
 }
 
 
@@ -694,6 +697,17 @@ class BatchSandboxProvider(WorkloadProvider):
                         return message
         return None
 
+    @staticmethod
+    def _completed_condition(conditions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """The Ready condition (reason=Completed) that the controller records when
+        the main container exits 0. Its message carries the exit detail (pod,
+        container, exit code, finishedAt) and its lastTransitionTime marks the
+        completion moment."""
+        for cond in conditions or []:
+            if cond.get("type") == "Ready" and cond.get("reason") == "Completed":
+                return cond
+        return None
+
     def _patch_pause_with_retry_bridge(self, sandbox_id: str, namespace: str, target: Optional[bool]) -> None:
         self.patch_workload(sandbox_id, namespace, {"spec": {"pause": None}})
         try:
@@ -748,6 +762,7 @@ class BatchSandboxProvider(WorkloadProvider):
         - Paused: not allowed (already paused)
         - Failed: not allowed (sandbox unavailable)
         - Failed + PauseFailed=True: not allowed (sandbox unavailable)
+        - Completed: not allowed (workload finished, terminal)
         """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -774,6 +789,8 @@ class BatchSandboxProvider(WorkloadProvider):
                 raise ValueError("Cannot pause: sandbox is not available")
         elif phase == "Pending":
             raise ValueError(f"Cannot pause: sandbox is being created (phase={phase})")
+        elif phase == "Completed":
+            raise ValueError("Cannot pause: sandbox has completed (phase=Completed)")
         else:
             raise ValueError(f"Cannot pause sandbox in phase {phase}")
 
@@ -793,6 +810,7 @@ class BatchSandboxProvider(WorkloadProvider):
         - Resuming/Pausing: not allowed (operation in progress)
         - Succeed: not allowed (not paused)
         - Failed: not allowed (sandbox unavailable)
+        - Completed: not allowed (workload finished, terminal)
         """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -824,6 +842,8 @@ class BatchSandboxProvider(WorkloadProvider):
                 raise ValueError("Cannot resume: sandbox is not available")
         elif phase == "Pending":
             raise ValueError(f"Cannot resume: sandbox is being created (phase={phase})")
+        elif phase == "Completed":
+            raise ValueError("Cannot resume: sandbox has completed (phase=Completed)")
         else:
             raise ValueError(f"Cannot resume sandbox in phase {phase}, expected Paused")
 
@@ -930,7 +950,7 @@ class BatchSandboxProvider(WorkloadProvider):
         status = workload.get("status", {})
         creation_timestamp = metadata.get("creationTimestamp")
 
-        # Phase is authoritative when set (Pausing/Paused/Resuming/Failed)
+        # Phase is authoritative when set (Pausing/Paused/Resuming/Failed/Completed)
         phase = status.get("phase", "")
         failed_message = self._first_true_condition_message(
             status.get("conditions", []),
@@ -944,6 +964,7 @@ class BatchSandboxProvider(WorkloadProvider):
             "Paused": ("PAUSED", "Sandbox is paused"),
             "Resuming": ("RESUMING", "Resuming sandbox"),
             "Failed": ("FAILED", failed_message or "Operation failed"),
+            "Completed": ("SANDBOX_COMPLETED", "Sandbox workload completed"),
         }
         # A failed task must not be reported as a healthy sandbox. Neither signal below can
         # see it: `ready` counts Ready PODS, and a Pool pod is Ready before any sandbox is
@@ -969,11 +990,24 @@ class BatchSandboxProvider(WorkloadProvider):
 
         if phase in phase_map and phase != "Pending":
             reason, message = phase_map[phase]
+            last_transition_at = creation_timestamp
+            if phase == "Completed":
+                # Prefer the controller's completion detail (pod, container, exit
+                # code, finishedAt) recorded on the Ready condition, and report the
+                # completion moment instead of the creation time.
+                completed_condition = self._completed_condition(status.get("conditions", []))
+                if completed_condition is not None:
+                    condition_message = completed_condition.get("message")
+                    if isinstance(condition_message, str) and condition_message.strip():
+                        message = condition_message
+                    last_transition_at = (
+                        completed_condition.get("lastTransitionTime") or creation_timestamp
+                    )
             return {
                 "state": _PUBLIC_STATE_BY_PHASE[phase],
                 "reason": reason,
                 "message": message,
-                "last_transition_at": creation_timestamp,
+                "last_transition_at": last_transition_at,
             }
 
         conditions = status.get("conditions", [])

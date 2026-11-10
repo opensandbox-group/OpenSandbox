@@ -117,6 +117,7 @@ The phase reports sandbox runtime health; the conditions explain it. Both are Ku
 | `Succeed` | At least one sandbox pod is running and ready — the steady state, **not** task completion |
 | `Pausing` / `Paused` / `Resuming` | Pause/resume transitions |
 | `Failed` | Terminal runtime failure — inspect conditions and pod events |
+| `Completed` | Terminal: the main container exited 0 under `restartPolicy: Never`. The `Ready` condition carries the pod, exit code, and finish time; the pod and CRD are retained until `expireTime`, and pause/resume are refused |
 
 Conditions (`Ready`, `Progressing`, `Paused`, `PauseFailed`, `ResumeFailed`, `PodFailed`, `PoolAllocationPending`) carry reasons and messages; count a condition only when it exists with status `True`, and check `status.observedGeneration` against `metadata.generation` before trusting post-update status.
 
