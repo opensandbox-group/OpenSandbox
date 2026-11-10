@@ -8,8 +8,10 @@
 from copy import deepcopy
 
 import pytest
+from fastapi import HTTPException
 
 from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
+from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.fast_sandbox.network_policy import (
     delete_policy_rules,
     merge_policy_rules,
@@ -182,3 +184,18 @@ def test_delete_empty_target_removes_only_port_only_rules(default_action, empty_
         "defaultAction": default_action, "egress": [],
     }
     assert policy == before
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        NetworkPolicy(defaultAction="block", egress=[]),
+        NetworkPolicy(egress=[NetworkRule(action="block", target="a.com")]),
+    ],
+)
+def test_invalid_policy_returns_structured_invalid_parameter(policy):
+    with pytest.raises(HTTPException) as exc_info:
+        normalized_policy(policy)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER

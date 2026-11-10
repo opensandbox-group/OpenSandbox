@@ -33,7 +33,7 @@ from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_INGRESS_HEADER
-from opensandbox_server.services.constants import OPEN_SANDBOX_SECURE_ACCESS_HEADER
+from opensandbox_server.services.constants import OPEN_SANDBOX_SECURE_ACCESS_HEADER, SandboxErrorCodes
 from opensandbox_server.tenants.context import get_current_tenant
 from opensandbox_server.tenants.models import TenantEntry
 
@@ -2001,3 +2001,23 @@ def test_proxy_renew_skip_header_unknown_value_still_renews_but_strips(
     assert coordinator.scheduled == ["sbx-renew"]
     forwarded = fake_client.built["headers"]
     assert all(k.lower() != "opensandbox-access-renew" for k in forwarded)
+
+
+@pytest.mark.parametrize(
+    "path", ["/v1/sandboxes/fsb-abc/networkpolicy", "/v1/sandboxes/fsb-abc/credential-vault"]
+)
+def test_fsb_routes_without_fast_sandbox_return_structured_not_found(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    path: str,
+) -> None:
+    monkeypatch.setattr(lifecycle, "sandbox_service", object())
+
+    response = client.get(path, headers=auth_headers)
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": SandboxErrorCodes.FSB_SANDBOX_NOT_FOUND,
+        "message": "Fsb sandbox not found.",
+    }
