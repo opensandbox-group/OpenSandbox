@@ -3924,14 +3924,35 @@ snapshot_verify() {
 # so every mode assertion reads the server row with raw curl — the
 # documented escape hatch for calls the CLI cannot express.
 
-# Ready with the mode echoed: the server converges the row from the
-# SandboxSnapshot CR; mode is the fastlet-confirmed artifact class once the
-# fastlet reports it.
-rootfs_only_ready() { # <snapshot-id>
-	local out
-	out="$(server_api GET "/snapshots/$1" 2>/dev/null)" || return 1
-	[[ "$(printf '%s' "$out" | jq -r '.status.state // empty')" == "Ready" ]] || return 1
-	[[ "$(printf '%s' "$out" | jq -r '.mode // empty')" == "rootfsOnly" ]]
+# Poll the snapshot row to Ready with progress logs and fail-fast on the
+# terminal Failed phase: a rejected capture (capability gate, guest-contract
+# rejection, capture quarantine) resolves in seconds, and silently burning
+# the whole poll budget on a Failed row both hides the reason and stalls
+# the lane. Plain wait_for cannot do this (single predicate, no progress).
+rootfs_only_wait_ready() { # <snapshot-id> <max-attempts>
+	local id="$1" attempts="$2" attempt=0 last="" state mode detail cr
+	while :; do
+		local out
+		out="$(server_api GET "/snapshots/$id" 2>/dev/null || true)"
+		state="$(printf '%s' "$out" | jq -r '.status.state // "unknown"' 2>/dev/null)"
+		mode="$(printf '%s' "$out" | jq -r '.mode // "<none>"' 2>/dev/null)"
+		if [[ "$last" != "$state $mode" ]]; then
+			log "verify (rootfs-only): snapshot $id state=$state mode=$mode"
+			last="$state $mode"
+		fi
+		if [[ "$state" == "Ready" && "$mode" == "rootfsOnly" ]]; then
+			return 0
+		fi
+		if [[ "$state" == "Failed" ]]; then
+			detail="$(printf '%s' "$out" | jq -r '.status.message // empty')"
+			cr="osb-snap-$(printf '%s' "$id" | tr -d '-')"
+			fail "rootfs-only snapshot $id Failed: ${detail:-<no server message>}" \
+				"(SandboxSnapshot CR message: $(kubectl_get "sandboxsnapshot/$cr" '{.status.message}' 2>/dev/null || echo '<none>'))"
+		fi
+		attempt=$((attempt + 1))
+		(( attempt >= attempts )) && fail "rootfs-only snapshot $id never reached Ready (last state: $last)"
+		sleep 2
+	done
 }
 
 rootfs_only_verify() {
@@ -3976,7 +3997,9 @@ rootfs_only_verify() {
 		|| fail "rootfs-only snapshot create did not echo mode=rootfsOnly: $(printf '%s' "$out" | head -c 300)"
 	pass "rootfs-only snapshot: accepted (Creating + mode=rootfsOnly echo)"
 
-	wait_for "rootfs-only snapshot Ready with mode rootfsOnly" 300 rootfs_only_ready "$snapshot_id"
+	# Rootfs-only capture has no memory dump: Ready should be quick. The
+	# poll fails fast on Failed and prints every state change.
+	rootfs_only_wait_ready "$snapshot_id" 180
 	t2="$(now_ms)"
 	log "verify (rootfs-only): $snapshot_id create->Ready $(( (t2 - t1) / 1000000 ))ms"
 
@@ -4008,10 +4031,12 @@ rootfs_only_verify() {
 	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
 	VERIFY_ID="$restore_id"
-	wait_for "cold-booted sandbox Running" 600 sandbox_running
+	# Cold boot is seconds-scale; the generous ceiling only covers a slow
+	# registry pull of the artifact pair.
+	wait_for "cold-booted sandbox Running" 300 sandbox_running
 	t3="$(now_ms)"
 	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t2) / 1000000 ))ms"
-	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 300 execd_ping_ok
+	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 180 execd_ping_ok
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
 
 	# One pause/resume round on the cold-booted descendant: PauseSandbox is
