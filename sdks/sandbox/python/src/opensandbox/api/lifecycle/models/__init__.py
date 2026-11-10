@@ -32,6 +32,7 @@ from .create_sandbox_response import CreateSandboxResponse
 from .create_sandbox_response_extensions import CreateSandboxResponseExtensions
 from .create_sandbox_response_metadata import CreateSandboxResponseMetadata
 from .create_snapshot_request import CreateSnapshotRequest
+from .create_snapshot_request_mode import CreateSnapshotRequestMode
 from .credential import Credential
 from .credential_auth import CredentialAuth
 from .credential_auth_metadata import CredentialAuthMetadata
@@ -101,6 +102,7 @@ from .sandbox_lifecycle import SandboxLifecycle
 from .sandbox_metadata import SandboxMetadata
 from .sandbox_status import SandboxStatus
 from .snapshot import Snapshot
+from .snapshot_mode import SnapshotMode
 from .snapshot_status import SnapshotStatus
 from .volume import Volume
 
@@ -121,6 +123,7 @@ __all__ = (
     "CreateSandboxResponseExtensions",
     "CreateSandboxResponseMetadata",
     "CreateSnapshotRequest",
+    "CreateSnapshotRequestMode",
     "Credential",
     "CredentialAuth",
     "CredentialAuthMetadata",
@@ -190,6 +193,7 @@ __all__ = (
     "SandboxMetadata",
     "SandboxStatus",
     "Snapshot",
+    "SnapshotMode",
     "SnapshotStatus",
     "Volume",
 )

@@ -490,7 +490,7 @@ Read current sandbox resource usage with `await sandbox.get_metrics()`. This is 
 
 | Operation | Public API |
 | --- | --- |
-| Snapshot a sandbox | `sandbox.create_snapshot(name=...)` or `manager.create_snapshot(sandbox_id, name=...)` |
+| Snapshot a sandbox | `sandbox.create_snapshot(name=..., mode=...)` or `manager.create_snapshot(sandbox_id, name=..., mode=...)` |
 | Inspect/list/delete snapshots | `manager.get_snapshot`, `list_snapshots`, `delete_snapshot` |
 | Restore a snapshot | `Sandbox.create(snapshot_id=..., connection_config=config)` |
 | Manage Fsb templates | `manager.create_template`, `get_template`, `list_templates`, `delete_template` |
@@ -498,6 +498,13 @@ Read current sandbox resource usage with `await sandbox.get_metrics()`. This is 
 | Patch metadata | `sandbox.patch_metadata` or `manager.patch_sandbox_metadata` |
 
 These APIs also exist on the synchronous SDK. Snapshot creation and template builds are asynchronous: inspect status before restoring or using a template. Templates must reach `Succeeded`; template-backed creation requires a TTL and inherits environment, resources, volumes, and lifecycle hooks from the template. Metadata patch values add/replace keys; `None` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot `mode` selects what the snapshot persists:
+
+- `"full"` (default): the writable filesystem plus memory and process state. Restoring resumes the sandbox in place.
+- `"rootfsOnly"`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — running processes and in-memory state are discarded and the entrypoint re-runs, so anything that must survive belongs on disk. The artifact is smaller and CPU-portable, but resume latency moves from milliseconds (restore) to seconds (cold boot). Requires the fast-sandbox backend with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+
+`SnapshotInfo.mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `"full"`.
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes, restores a new sandbox, and retains the snapshot for reuse:
 
@@ -524,6 +531,16 @@ async with await SandboxManager.create(connection_config=config) as manager:
     finally:
         await restored.destroy()
     # When no longer needed: await manager.delete_snapshot(snapshot.id)
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```python
+snapshot = await sandbox.create_snapshot(name="workspace-state", mode="rootfsOnly")
+# ... poll manager.get_snapshot(snapshot.id) until Ready, then:
+restored = await Sandbox.create(snapshot_id=snapshot.id, connection_config=config)
+# Files written before the snapshot are present; processes were not preserved
+# and the entrypoint re-ran on boot.
 ```
 
 Create from an existing template after its build reaches `Succeeded`:

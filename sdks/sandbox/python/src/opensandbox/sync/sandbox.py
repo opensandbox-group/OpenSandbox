@@ -21,7 +21,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
@@ -366,10 +366,18 @@ class SandboxSync:
         """
         return self._sandbox_service.patch_sandbox_metadata(self.id, patch)
 
-    def create_snapshot(self, name: str | None = None) -> SnapshotInfo:
-        """Create a persistent snapshot from this sandbox (blocking)."""
+    def create_snapshot(
+        self,
+        name: str | None = None,
+        mode: Literal["full", "rootfsOnly"] | None = None,
+    ) -> SnapshotInfo:
+        """Create a persistent snapshot from this sandbox (blocking).
+
+        ``mode`` selects what the snapshot persists; see the async
+        :meth:`Sandbox.create_snapshot` for details.
+        """
         return self._sandbox_service.create_snapshot(
-            self.id, CreateSnapshotRequest(name=name)
+            self.id, CreateSnapshotRequest(name=name, mode=mode)
         )
 
     def get_egress_policy(self) -> NetworkPolicy:

@@ -21,6 +21,7 @@ from typing import Any, TypeVar
 
 from attrs import define as _attrs_define
 
+from ..models.create_snapshot_request_mode import CreateSnapshotRequestMode
 from ..types import UNSET, Unset
 
 T = TypeVar("T", bound="CreateSnapshotRequest")
@@ -32,18 +33,35 @@ class CreateSnapshotRequest:
 
     Attributes:
         name (str | Unset): Optional human-readable snapshot name.
+        mode (CreateSnapshotRequestMode | Unset): What the snapshot persists.
+
+            - `full` (default): captures the writable filesystem plus memory and
+              process state; restoring resumes the sandbox in place.
+            - `rootfsOnly`: captures only the writable filesystem; restoring
+              boots a fresh sandbox from the disk. Running processes and
+              in-memory state are discarded, and the entrypoint re-runs on
+              restore. Supported only on the fast-sandbox backend with
+              OCI-backed sandboxes; rejected otherwise.
+             Default: CreateSnapshotRequestMode.FULL.
     """
 
     name: str | Unset = UNSET
+    mode: CreateSnapshotRequestMode | Unset = CreateSnapshotRequestMode.FULL
 
     def to_dict(self) -> dict[str, Any]:
         name = self.name
+
+        mode: str | Unset = UNSET
+        if not isinstance(self.mode, Unset):
+            mode = self.mode.value
 
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
         if name is not UNSET:
             field_dict["name"] = name
+        if mode is not UNSET:
+            field_dict["mode"] = mode
 
         return field_dict
 
@@ -52,8 +70,16 @@ class CreateSnapshotRequest:
         d = dict(src_dict)
         name = d.pop("name", UNSET)
 
+        _mode = d.pop("mode", UNSET)
+        mode: CreateSnapshotRequestMode | Unset
+        if isinstance(_mode, Unset):
+            mode = UNSET
+        else:
+            mode = CreateSnapshotRequestMode(_mode)
+
         create_snapshot_request = cls(
             name=name,
+            mode=mode,
         )
 
         return create_snapshot_request
