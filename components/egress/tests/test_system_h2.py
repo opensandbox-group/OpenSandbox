@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -25,6 +26,18 @@ spec = importlib.util.spec_from_file_location(
 )
 system = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(system)
+
+
+def _drive_async_hook(hook):
+    """Run the async requestheaders hook synchronously, like mitmproxy."""
+
+    def run(*args, **kwargs):
+        return asyncio.run(hook(*args, **kwargs))
+
+    return run
+
+
+system.requestheaders = _drive_async_hook(system.requestheaders)
 
 HOST = "bound.example.com"
 SECRET = "synthetic-h2-old-value"
@@ -162,7 +175,7 @@ class SystemH2Hooks(unittest.TestCase):
         self.client.alpn = b"h2"
         self.client.tls = True
         self.client.sni = HOST
-        self.token = self.runtime.admit_tls(HOST).token
+        self.token = self.runtime.admit_tls(HOST, destination_port=443).token
         self.runtime.track(self.token, self.client)
         self.adapter = HookAdapter(self.token)
         self.runtime.adapter = self.adapter
@@ -368,7 +381,7 @@ class SystemH2Hooks(unittest.TestCase):
         with patch(__name__ + ".HOST", "xn--bcher-kva.example"):
             install(self.receiver, 2)
             self.client.sni = HOST
-            self.token = self.runtime.admit_tls(HOST).token
+            self.token = self.runtime.admit_tls(HOST, destination_port=443).token
             self.runtime.track(self.token, self.client)
             self.adapter.token = self.token
             flow = self.flow()

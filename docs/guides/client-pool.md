@@ -34,7 +34,7 @@ The warmup path — the leader-only replenish flow above — is worth zooming in
 
 ### Lifecycle model
 
-During graceful operation, each pool instance moves through `NOT_STARTED → STARTING → RUNNING → DRAINING → STOPPED`. A failed start or non-graceful shutdown can transition directly to `STOPPED`. If awaiting Python's `SandboxPoolAsync.start()` is cancelled, it waits for startup-owned resource cleanup, even if the caller cancels repeatedly during cleanup. Successful cleanup returns the pool to `STOPPED` before propagating `CancelledError`, so the same instance can then be started again. If cleanup itself fails after a further caller cancellation, `CancelledError` takes precedence and retains the cleanup error as its cause. Without a further cancellation, the cleanup error propagates normally. In either case the lifecycle state is `STOPPED`, allowing another `start()` attempt instead of silently returning in `STARTING`. Resource cleanup may still be incomplete when closing fails. Health is tracked separately as `HEALTHY | DEGRADED | DRAINING | STOPPED`; after `degraded_threshold` consecutive warmup or reconcile failures the pool enters `DEGRADED`. Go applies exponential replenish backoff while degraded. Python, JavaScript, and Kotlin continue attempting reconciliation at their nominal one-second cadence: `warmup_create_qps` is their pressure control, and `snapshot().backoff_active` / `snapshot().backoffActive` is retained only for compatibility and is always `false`. Callers do not need to observe these states directly — `snapshot()` exposes them for diagnostics.
+During graceful operation, each pool instance moves through `NOT_STARTED → STARTING → RUNNING → DRAINING → STOPPED`. A failed start or non-graceful shutdown can transition directly to `STOPPED`. If awaiting Python's `SandboxPoolAsync.start()` is cancelled, it waits for startup-owned resource cleanup, even if the caller cancels repeatedly during cleanup. Successful cleanup returns the pool to `STOPPED` before propagating `CancelledError`, so the same instance can then be started again. If cleanup itself fails after a further caller cancellation, `CancelledError` takes precedence and retains the cleanup error as its cause. Without a further cancellation, the cleanup error propagates normally. In either case the lifecycle state is `STOPPED`, allowing another `start()` attempt instead of silently returning in `STARTING`. Resource cleanup may still be incomplete when closing fails. Health is tracked separately as `HEALTHY | DEGRADED | DRAINING | STOPPED`; after `degraded_threshold` consecutive warmup or reconcile failures the pool enters `DEGRADED`. Go applies exponential replenish backoff while degraded. Its periodic reconciliation still observes namespace retirement, reaps idle entries, and shrinks excess capacity during backoff; only new warmup creation is delayed. Python, JavaScript, and Kotlin continue attempting reconciliation at their nominal one-second cadence: `warmup_create_qps` is their pressure control, and `snapshot().backoff_active` / `snapshot().backoffActive` is retained only for compatibility and is always `false`. Callers do not need to observe these states directly — `snapshot()` exposes them for diagnostics.
 
 Python, JavaScript, and Kotlin built-in warmup creates make a single lifecycle request. Python and Kotlin disable the connection-level retry policy for HTTP 429, other retryable statuses, and transport recovery; JavaScript's lifecycle transport does not add automatic retries. There is no pool-level `Retry-After` throttle. A custom `PooledSandboxCreator` receives the warmup connection configuration through `PooledSandboxCreateContext.connection_config` or `createConnectionConfig` and must honor it, together with `skipHealthCheck`, to preserve the staged behavior. A failed create is recorded and a later tick may admit replacement work. Normal standalone creation and `AcquirePolicy.DIRECT_CREATE` retain their usual transport behavior.
 
@@ -117,6 +117,8 @@ for the required network policy and credential configuration.
 All four standalone sandbox creation APIs accept these fields. Use a custom `sandbox_creator` / `sandboxCreator` when the default pool spec is insufficient, and honor the supplied connection config, readiness controls, and timeout.
 
 JavaScript and Go also accept minimum remaining TTL and skip-health-check overrides on each acquire. Python and Kotlin expose these as pool-level configuration.
+
+Go checks the acquire context before taking an idle entry and before falling back to direct creation. An already-cancelled request returns a `PoolAcquireFailedError` wrapping the context error without consuming idle capacity or invoking a custom creator. Cancellation after an idle entry has been taken still follows the existing best-effort cleanup path.
 
 ### Staged warmup
 
@@ -256,6 +258,10 @@ try {
 
 ### Go
 
+When a Go `Start(ctx)` restart or concurrent `Shutdown(ctx, ...)` waits for an earlier shutdown to finish, cancelling its context stops only that wait and returns the context error. It does not interrupt or mark the earlier cleanup complete.
+
+The Go shutdown owner also observes its context while gracefully waiting for in-flight acquires to drain. Cancellation ends that drain wait, marks the pool `STOPPED`, signals shutdown completion, and returns the context error. It does not cancel the independently owned acquire calls. This applies to the drain phase after reconciliation has stopped; custom reconciliation callbacks must still honor their own cancellation.
+
 Inside a function returning `error`, with `ctx` and the usual `context`, `fmt`, `time`, and `opensandbox` imports:
 
 ```go
@@ -302,7 +308,7 @@ import { AcquirePolicy, SandboxPool } from "@alibaba-group/opensandbox";
 const pool = SandboxPool.create({
   poolName: "demo-pool",
   maxIdle: 2,
-  connectionConfig: { domain: "localhost:8080", useServerProxy: true },
+  connectionConfig: { domain: "localhost:8080" },
   creationSpec: { image: "python:3.12" },
   warmupCreateQps: 10,
   warmupConcurrency: 128,
@@ -399,7 +405,7 @@ log.Printf("retired %s: drained=%d killed=%d",
     result.PoolName, result.DrainedIdleCount, result.KilledIdleCount)
 ```
 
-`PoolDestroyOptions` mirrors the other SDKs. `Strategy` selects the algorithm and only `PoolDestroyForce` is implemented. `DrainTimeout` and `TombstoneTTL` are `*time.Duration`: leave them nil for the defaults (30s and 7 days), or set an explicit zero to drain without a deadline and to write a tombstone that never expires.
+`PoolDestroyOptions` mirrors the other SDKs. `Strategy` selects the algorithm and only `PoolDestroyForce` is implemented. `DrainTimeout` and `TombstoneTTL` are `*time.Duration`: leave them nil for the defaults (30s and 7 days), or set an explicit zero to drain without a deadline and to write a tombstone that never expires. The drain deadline also bounds context-aware state-store reads; a timed-out drain leaves the namespace `DESTROYING` so it can be retried.
 
 The fence is what makes retirement safe without stopping every writer first, and it is enforced on two levels. The state store refuses `PutIdle`, `SetMaxIdle` and `SetIdleEntryTTL` with a `*PoolDestroyedError` and hands out no primary lock, which stops replenishment. The pool itself also checks the fence when it starts, before every acquire, again once an acquire holds a live sandbox, and on each reconcile tick: a surviving peer stops outright on its next tick, an in-flight acquire fails rather than minting a fresh sandbox into the retired namespace through the direct-create fallthrough, and a sandbox obtained just before the fence landed is killed instead of handed out. The post-acquire check matters because the idle take is deliberately left unfenced so `destroy` can drain: once an ID has been taken, `destroy` can no longer reach it, so the acquire has to dispose of it itself. Starting a fresh pool against a tombstoned `PoolName` fails for the same reason, so rebinding the name requires either waiting out the tombstone TTL or rotating to a new `PoolName`.
 

@@ -22,10 +22,6 @@ from opensandbox_server.services.k8s.provider_common import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers for _workload_platform_constraint_scope tests
-# ---------------------------------------------------------------------------
-
 def _analyzer(pod_spec):
     """Return whether pod_spec has nodeSelector / nodeName (platform constraints)."""
     has_platform = bool(pod_spec.get("nodeSelector") or pod_spec.get("nodeName"))
@@ -85,10 +81,6 @@ def test_translate_resource_limits_drops_invalid_gpu(bad_value):
 def test_translate_resource_limits_empty_dict():
     assert _translate_resource_limits_for_k8s({}) == {}
 
-
-# ---------------------------------------------------------------------------
-# _workload_platform_constraint_scope
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("workload", [
     {"spec": {"template": None, "poolRef": "pool-runc"}},  # key exists, value None (pool mode)

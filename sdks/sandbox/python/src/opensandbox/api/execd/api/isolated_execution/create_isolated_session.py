@@ -55,12 +55,18 @@ def _parse_response(
         return response_201
 
     if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+        try:
+            response_400 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_400
 
     if response.status_code == 503:
-        response_503 = ErrorResponse.from_dict(response.json())
+        try:
+            response_503 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_503
 
@@ -96,7 +102,9 @@ def sync_detailed(
             overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
             absolute paths outside every overlay or bind are rejected instead of resolving against the
             workspace (unlike binds, extra_writable paths are not served by the files API unless an
-            overlay covers them).
+            overlay covers them). The strict profile's private `/tmp` is a session-owned bind under
+            the upper root and is part of that view; a caller bind or overlay on `/tmp` shadows it as
+            inside the namespace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -132,7 +140,9 @@ def sync(
             overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
             absolute paths outside every overlay or bind are rejected instead of resolving against the
             workspace (unlike binds, extra_writable paths are not served by the files API unless an
-            overlay covers them).
+            overlay covers them). The strict profile's private `/tmp` is a session-owned bind under
+            the upper root and is part of that view; a caller bind or overlay on `/tmp` shadows it as
+            inside the namespace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -163,7 +173,9 @@ async def asyncio_detailed(
             overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
             absolute paths outside every overlay or bind are rejected instead of resolving against the
             workspace (unlike binds, extra_writable paths are not served by the files API unless an
-            overlay covers them).
+            overlay covers them). The strict profile's private `/tmp` is a session-owned bind under
+            the upper root and is part of that view; a caller bind or overlay on `/tmp` shadows it as
+            inside the namespace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -197,7 +209,9 @@ async def asyncio(
             overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
             absolute paths outside every overlay or bind are rejected instead of resolving against the
             workspace (unlike binds, extra_writable paths are not served by the files API unless an
-            overlay covers them).
+            overlay covers them). The strict profile's private `/tmp` is a session-owned bind under
+            the upper root and is part of that view; a caller bind or overlay on `/tmp` shadows it as
+            inside the namespace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

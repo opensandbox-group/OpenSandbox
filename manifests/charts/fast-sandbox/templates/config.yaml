@@ -41,7 +41,7 @@ data:
   podSpec.yaml: |
     {{- . | nindent 4 }}
 {{- end }}
-{{- if .Values.routeKeys.create }}
+{{- if and .Values.routeKeys.create (not .Values.routeKeys.existingSecret) }}
 ---
 apiVersion: v1
 kind: Secret

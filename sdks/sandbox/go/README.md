@@ -16,7 +16,7 @@ go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 
 ## Retry Behavior
 
-Idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`) retry `429`, `502`, `503`, and `504` by default. `POST` and `PATCH` retry only dial, proxy-connect, and TLS-handshake failures that are provably pre-send; status-code retries for writes are opt-in because a replay can duplicate a sandbox, session, command, or file mutation. Set `RetryableStatusCodesNonIdempotent` only when the operation is idempotent at the application layer or duplicate execution is acceptable. SSE bootstraps are never retried.
+Idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`) retry `429`, `502`, `503`, and `504` by default. `POST` and `PATCH` retry only dial, proxy-connect, and TLS-handshake failures that are provably pre-send; status-code retries for writes are opt-in because a replay can duplicate a sandbox, session, command, or file mutation. Set `RetryableStatusCodesNonIdempotent` only when the operation is idempotent at the application layer or duplicate execution is acceptable. SSE bootstraps never use the generic retry loop; only the OSEP-0024 wake retry covers the request that starts a stream, because its marker proves the gateway never forwarded it.
 
 ## Quick Start
 
@@ -69,6 +69,49 @@ func main() {
     _ = lc.ResumeSandbox(ctx, sbx.ID)
 
     _ = lc.DeleteSandbox(ctx, sbx.ID)
+}
+```
+
+Renew on access instead of on a timer (OSEP-0009): `Lifecycle.RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects `lifecycle.renewalPolicy` outright (HTTP 400); on Docker and Kubernetes the policy takes effect only when the operator enables the `[renew_intent]` integration. Like every image-mode create, the request needs `ResourceLimits`, and the policy only moves an expiration that exists — set `Timeout` too.
+
+```go
+tenMinutes := 600
+sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+    Image:          &opensandbox.ImageSpec{URI: "ubuntu"},
+    ResourceLimits: opensandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
+    Timeout:        &tenMinutes,
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        RenewalPolicy: &opensandbox.RenewalPolicy{ExtendSeconds: 3600},
+    },
+})
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `Lifecycle.IdlePolicy` pauses the sandbox after `IdleTimeoutSeconds` continuously idle seconds (30–86400; `OnIdle` only takes `"pause"` today). Incoming traffic then wakes it:
+
+```go
+idle := 600
+sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+    Image:          &opensandbox.ImageSpec{URI: "ubuntu"},
+    ResourceLimits: opensandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        IdlePolicy: &opensandbox.IdlePolicy{
+            IdleTimeoutSeconds: &idle,
+            OnIdle:              opensandbox.OnIdlePause,
+        },
+    },
+})
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`WakeRetryEnabled` / `WakeMaxAttempts` / `WakeOverallDeadline` on the `RetryConfig` installed via `WithRetry`; defaults `DefaultWakeMaxAttempts` / 60 seconds; bare `503` responses are never affected). Wake retry requires `WithRetry` to be configured — a client built with a plain `NewLifecycleClient` has no retry loop and returns a marked `503` immediately. When the budget runs out, the request fails with `SandboxWakeTimeoutError`; for direct inspection, the non-2xx error type is `*opensandbox.APIError`, whose `WakeExpired` field reports the marker (also reachable as the wrapped last error of `SandboxWakeTimeoutError`). The request that starts a stream wake-retries too; an established stream is never replayed.
+
+A `NetworkRule` can scope by TCP destination ports instead of a target — `Ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `Target` entirely, and combining a domain `Target` with `Ports` is rejected. Docker, Kubernetes, and Fast Sandbox backends all enforce `Ports` rules; a targetless `Ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it:
+
+```go
+policy := &opensandbox.NetworkPolicy{
+    DefaultAction: "deny",
+    Egress: []opensandbox.NetworkRule{
+        {Action: "allow", Ports: []int{443, 8443}},
+    },
 }
 ```
 
@@ -248,6 +291,31 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 })
 ```
 
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — a `CredentialAuth` with only `Credential` set (the static-only fields stay zero; the typeless form never emits a forced `"type"` key).
+
+```go
+_, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
+    Credentials: []opensandbox.Credential{
+        {
+            Name:   "spi-signer",
+            Source: opensandbox.CredentialSource{
+                Type:     opensandbox.CredentialSourceExchange,
+                Endpoint: "unix:///run/spi/spi.sock",
+            },
+        },
+    },
+    Bindings: []opensandbox.CredentialBinding{
+        {
+            Name:  "internal-api",
+            Match: opensandbox.CredentialMatch{Hosts: []string{"*.internal.example.com"}},
+            Auth:  opensandbox.CredentialAuth{Credential: "spi-signer"},
+        },
+    },
+})
+```
+
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.
 
 ### Work with files
@@ -341,6 +409,7 @@ mgr := opensandbox.NewSandboxManager(config)
 tpl, err := mgr.CreateTemplate(ctx, opensandbox.CreateTemplateRequest{
     Image:   "python:3.11",
     Publish: "s3://bucket/templates/py311",
+    Format:  opensandbox.TemplateFormatNative,
     ResourceLimits: map[string]string{
         "cpu": "1", "memory": "512Mi", "disk": "2Gi",
     },
@@ -490,6 +559,7 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `UploadFile(ctx, file, opts)` | Upload a file to the sandbox |
 | `UploadFiles(ctx, entries)` | Upload multiple files to the sandbox |
 | `DownloadFile(ctx, remotePath, rangeHeader, opts...)` | Download a file from the sandbox (optional `DownloadFileOptions` reads by line) |
+| `DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)` | Download a file with HTTP status and range metadata |
 
 **Directory Operations:**
 | Method | Description |

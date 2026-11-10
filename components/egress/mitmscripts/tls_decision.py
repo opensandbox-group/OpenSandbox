@@ -33,6 +33,7 @@ Reason = Literal[
     "no_sni",
     "invalid_sni",
     "static_ignore",
+    "non_canonical_port",
     "snapshot_missing",
     "generation_mismatch",
     "no_binding_host",
@@ -134,6 +135,10 @@ def _classify(
         return _decision("passthrough", "no_sni")
     if not _valid_sni(sni):
         return _decision("deny", "invalid_sni")
+    if type(destination_port) is not int or not 1 <= destination_port <= 65535:
+        return _decision("deny", "invalid_input")
+    if destination_port != 443:
+        return _decision("deny", "non_canonical_port")
     startup_tuple = (
         type(_static_config) is StaticPassthrough
         and static_passthrough is _static_config.selectors
@@ -141,10 +146,7 @@ def _classify(
     if not startup_tuple and not _valid_static_passthrough(static_passthrough):
         return _decision("deny", "invalid_input")
     if any(selector.matches(sni) for selector in static_passthrough):
-        if type(destination_port) is not int or not 1 <= destination_port <= 65535:
-            return _decision("deny", "invalid_input")
-        if destination_port == 443:
-            return _decision("passthrough", "static_ignore")
+        return _decision("passthrough", "static_ignore")
     if type(view) is not TLSSelectorView:
         return _decision("deny", "snapshot_missing")
     if identity != (

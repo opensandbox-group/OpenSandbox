@@ -96,6 +96,10 @@ jobs:
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback
+          bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
+            TestResolvedIPRenewalExtendsKernelExpiry
+          bash scripts/ci-nft-go-test.sh ./pkg/iptables \
+            TestGatewayDNSRedirectKernelPrivateNS
           bash scripts/ci-nft-go-test.sh . \
             TestRevisionNftEffectsRealFileAndKernel \
             TestTransitionRealNftChangedIPKernelRules
@@ -139,10 +143,50 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+      - name: Run exchange sidecar resolver image regression
+        run: |
+          docker build -f components/egress/Dockerfile \
+            -t opensandbox-egress:exchange-sidecar-ci .
+          python components/egress/scripts/test_exchange_sidecar_image.py \
+            --image opensandbox-egress:exchange-sidecar-ci --artifacts /tmp/exchange-sidecar-image-evidence
+
+      - name: Upload exchange sidecar image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exchange-sidecar-image-evidence
+          path: /tmp/exchange-sidecar-image-evidence
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Run mitmscripts unit and runtime tests
         working-directory: components/egress
         run: |
           python -m unittest discover -v -s tests -p "test_*.py"
+
+      - name: Set up exact Go for held-old HTTP/2 fixture
+        # Keep the repository's Go 1.25.9 tests above on their pinned toolchain.
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Test and build held-old Go fixture
+        env:
+          GOTOOLCHAIN: local
+          GOWORK: off
+          GOPROXY: off
+          GO111MODULE: off
+          GOCACHE: ${{ runner.temp }}/go1272-cache
+          GOMODCACHE: ${{ runner.temp }}/go1272-modcache
+        run: |
+          test "$(go version)" = "go version go1.27.2 linux/amd64"
+          mkdir -p "$GOCACHE" "$GOMODCACHE"
+          go test components/egress/tests/fixtures/h2_retry_client.go \
+            components/egress/tests/fixtures/h2_retry_client_test.go
+          go build -trimpath \
+            -o "$RUNNER_TEMP/h2_retry_client-go1.27.2" \
+            components/egress/tests/fixtures/h2_retry_client.go
 
       - name: Set up Python for H2 runtime coverage
         # Unit discovery above covers 3.10; exercise real runtime on 3.11 too.
@@ -164,24 +208,59 @@ jobs:
             -s components/egress/tests -p 'test_credential_bound_h2*.py'
 
       - name: Run H2 loopback runtime regressions
+        id: h2_loopback_runtime
         # A real loopback destination on port 443 is part of this fixture.
         # This does not cover transparent redirects, the production UID or quarantine.
+        # With no --go-client, this selects only the manual-peer denominator,
+        # including the real pre_admission_barrier_h2 runtime case; it does not
+        # select optional Go diagnostics or imply client interoperability.
         run: |
           sudo "$RUNNER_TEMP/h2-runtime-venv/bin/python" \
             components/egress/tests/test_credential_bound_h2_runtime.py \
             --run-real-runtime --artifacts "$RUNNER_TEMP/h2-runtime-evidence"
+
+      - name: Run Go held-old early-notice H1 and H2 cases
+        # Only the two explicit early-notice cases provide standard-client
+        # parser/interoperability evidence. Historical go_retry cases remain
+        # non-gating diagnostics and are not selected here. Raw stderr is
+        # discarded by the fixture; only filtered GOAWAY JSON enters artifacts.
+        if: steps.h2_loopback_runtime.outcome == 'success'
+        run: |
+          sudo env -u GODEBUG \
+            "$RUNNER_TEMP/h2-runtime-venv/bin/python" \
+            components/egress/tests/test_credential_bound_h2_runtime.py \
+            --run-real-runtime \
+            --artifacts "$RUNNER_TEMP/h2-runtime-evidence/go-early-notice" \
+            --case go_early_notice_h1_origin \
+            --case go_early_notice_h2_origin \
+            --go-client "$RUNNER_TEMP/h2_retry_client-go1.27.2" \
+            --require-go-version go1.27.2
 
       - name: Run static TLS passthrough runtime regressions
         # Actual destination 443 and authenticated Unix IPC are required here.
         # Explicit CONNECT proves neither transparent redirects nor nft enforcement.
         # REQUIRE converts unavailable prerequisites to failures, never green skips.
         run: |
+          expected_parent_netns="$(readlink /proc/self/ns/net)"
           sudo env \
+            EXPECTED_PARENT_NETNS="$expected_parent_netns" \
+            H2_RUNTIME_PYTHON="$RUNNER_TEMP/h2-runtime-venv/bin/python" \
             PATH="$RUNNER_TEMP/h2-runtime-venv/bin:$PATH" \
             OPENSANDBOX_STATIC_RUNTIME_TESTS=1 \
             OPENSANDBOX_STATIC_RUNTIME_REQUIRE=1 \
-            "$RUNNER_TEMP/h2-runtime-venv/bin/python" -m unittest discover -v \
-            -s components/egress/tests -p 'static_passthrough_runtime_test.py'
+            unshare --net bash -euo pipefail -c '
+              parent_netns="$(readlink "/proc/$PPID/ns/net")"
+              child_netns="$(readlink /proc/self/ns/net)"
+              pid1_netns="$(readlink /proc/1/ns/net)"
+              printf "netns_guard child=%s expected_parent=%s actual_parent=%s pid1=%s\\n" \
+                "$child_netns" "$EXPECTED_PARENT_NETNS" "$parent_netns" "$pid1_netns"
+              test "$parent_netns" = "$EXPECTED_PARENT_NETNS"
+              test "$child_netns" != "$EXPECTED_PARENT_NETNS"
+              test "$child_netns" != "$pid1_netns"
+              ip link set lo up
+              exec "$H2_RUNTIME_PYTHON" -m unittest discover -v \
+                -s components/egress/tests -p "static_passthrough_runtime_test.py"
+            '
 
       - name: Make H2 runtime evidence readable by the runner
         if: always()
@@ -286,6 +365,9 @@ jobs:
 
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: Record nft version
+        run: nft --version
 
       - name: Install mitmproxy (MITM smoke phase, mirrors the egress image)
         run: |

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from attrs import define as _attrs_define
 
 if TYPE_CHECKING:
-    from ..models.inline_credential_source import InlineCredentialSource
+    from ..models.credential_source import CredentialSource
 
 
 T = TypeVar("T", bound="Credential")
@@ -33,11 +33,23 @@ class Credential:
     """
     Attributes:
         name (str):
-        source (InlineCredentialSource):
+        source (CredentialSource): Where the credential material comes from. Exactly one kind, selected
+            by `type`:
+
+            - `inline`: the secret value travels in this request via `value`.
+              Inline values are write-only and never appear in reads.
+            - `exchange`: no local material. Egress resolves header sets per
+              request from a header-resolver service addressed by `endpoint`.
+              Supported endpoint forms are `unix:///absolute/path` (HTTP over a
+              Unix domain socket) and `https://host[:port]` (TLS); anything else
+              is rejected with 400.
+
+            Fields of the other kind must be absent; for example `value` together
+            with `type: exchange` is rejected with 400.
     """
 
     name: str
-    source: InlineCredentialSource
+    source: CredentialSource
 
     def to_dict(self) -> dict[str, Any]:
         name = self.name
@@ -57,12 +69,12 @@ class Credential:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.inline_credential_source import InlineCredentialSource
+        from ..models.credential_source import CredentialSource
 
         d = dict(src_dict)
         name = d.pop("name")
 
-        source = InlineCredentialSource.from_dict(d.pop("source"))
+        source = CredentialSource.from_dict(d.pop("source"))
 
         credential = cls(
             name=name,

@@ -117,15 +117,21 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
+	// Status expectations are keyed by UID, and a deleted or replaced
+	// BatchSandbox is never reconciled again under its old UID, so drop them
+	// here. This runs after any earlier reconcile of this key that recorded
+	// one, since the workqueue never processes the same key concurrently.
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: req.Namespace,
 		Name:      req.Name,
 	}, batchSbx); err != nil {
 		if errors.IsNotFound(err) {
+			r.StatusRVExpectation.DeleteOthers(req.NamespacedName, "")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+	r.StatusRVExpectation.DeleteOthers(req.NamespacedName, batchSbx.UID)
 	if batchSbx.DeletionTimestamp != nil {
 		return r.reconcileDeletion(ctx, batchSbx)
 	}

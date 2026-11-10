@@ -280,6 +280,44 @@ func TestPolicyRelayInvalidPolicyKeepsLastGood(t *testing.T) {
 	assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("other.example.com"), "last-good policy untouched")
 }
 
+func TestPolicyRelayInvalidPortRulesKeepLastGood(t *testing.T) {
+	invalidRules := []string{
+		`{"action":"deny","ports":[0]}`,
+		`{"action":"deny","ports":[65536]}`,
+		`{"action":"deny","ports":[25,25]}`,
+		`{"action":"allow","target":"example.com","ports":[443]}`,
+		`{"action":"deny","target":"","ports":[]}`,
+		`{"action":"deny","ports":["25"]}`,
+	}
+	ports := make([]string, 257)
+	for i := range ports {
+		ports[i] = strconv.Itoa(i + 1)
+	}
+	invalidRules = append(invalidRules, `{"action":"allow","ports":[`+strings.Join(ports, ",")+`]}`)
+	for _, rule := range invalidRules {
+		t.Run(rule, func(t *testing.T) {
+			srv, reg, nft := fastSandboxTestServer(t)
+			good := `{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.9","ports":[443]}]}`
+			s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(good))
+			before := nft.appliedCount()
+			rec := doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(`{"defaultAction":"deny","egress":[`+rule+`]}`, 1, false, true), "")
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Equal(t, before, nft.appliedCount())
+			rec = doPolicy(t, srv, http.MethodGet, policyTestUID, "", "")
+			rev, doc := mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(1), rev)
+			pol, err := policy.ParsePolicy(string(doc.Policy))
+			require.NoError(t, err)
+			deny, allow := pol.PortScopedRules()
+			assert.Empty(t, deny)
+			require.Len(t, allow, 1)
+			assert.Equal(t, []int{443}, allow[0].Ports)
+			assert.Equal(t, "10.0.0.9", allow[0].Target)
+			assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+		})
+	}
+}
+
 func TestPolicyRelayDeleteEnforcesDenyTombstone(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))
@@ -413,8 +451,7 @@ func TestRelayPutRacingRebindNeverActivatesPredecessorPolicy(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	hnft := &hookNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, hnft)
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
-	srv.dnsRedirectRemove = func() error { return nil }
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 	pp, err := newPolicyPersistence(t.TempDir())
 	require.NoError(t, err)
 	files := make(map[string]*fakeVaultFile)

@@ -125,7 +125,7 @@ class TemplateStatus(
  * reaches [TemplatePhase.SUCCEEDED] or [TemplatePhase.FAILED].
  *
  * @property image Source OCI image reference
- * @property publish S3-compatible publish target (e.g. `s3://bucket/publish`)
+ * @property publish `s3://bucket/publish` (native) or `oci://registry/repository` (overlaybd, without a tag or digest)
  * @property resourceLimits Runtime resource constraints (e.g. cpu/memory/disk)
  * @property entrypoint Guest business command (argv); defaults server-side when omitted
  * @property env Environment variables baked into the golden image (literal values only;
@@ -256,7 +256,7 @@ class CreateTemplateRequest private constructor(
  *
  * @property templateId Server-generated template ID (`tpl_<uuid>`)
  * @property image Source OCI image reference
- * @property publish S3-compatible publish target
+ * @property publish S3-compatible or repository-only OCI publish target
  * @property format Snapshot storage encoding
  * @property status Current build status
  * @property createdAt Timestamp when the template was created

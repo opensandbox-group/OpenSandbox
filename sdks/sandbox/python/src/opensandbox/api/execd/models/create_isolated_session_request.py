@@ -43,10 +43,13 @@ class CreateIsolatedSessionRequest:
     present `workspace` is prepended to `overlays`. The session files API serves exactly the overlay and bind mounts:
     paths under each mount resolve as the namespace sees them, and absolute paths outside every overlay or bind are
     rejected instead of resolving against the workspace (unlike binds, extra_writable paths are not served by the files
-    API unless an overlay covers them).
+    API unless an overlay covers them). The strict profile's private `/tmp` is a session-owned bind under the upper root
+    and is part of that view; a caller bind or overlay on `/tmp` shadows it as inside the namespace.
 
         Attributes:
-            profile (CreateIsolatedSessionRequestProfile | Unset):
+            profile (CreateIsolatedSessionRequestProfile | Unset): Isolation profile. `strict` (default) gives the session a
+                private `/tmp` backed by a host directory that the session files API also serves; `balanced` shares the
+                sandbox's own `/tmp`, which the files API does not serve.
             workspace (IsolatedWorkspaceSpec | Unset):
             overlays (list[IsolatedOverlaySpec] | Unset): Independent overlay mounts inside one namespace. Each entry gets
                 its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a

@@ -47,7 +47,7 @@ func InitFlags() {
 	flag.DurationVar(&WakeParkBudget, "wake-park-budget", 5*time.Second, "Park budget Y per wake flight; must exceed the FastPath wait timeout plus one GetSandbox RPC")
 	flag.IntVar(&WakeParkMax, "wake-park-max", 1024, "Parking lot capacity: max concurrently parked requests per replica")
 	flag.IntVar(&WakeRestoreMax, "wake-restore-max", 256, "Concurrent restore permits per replica (must be <= --wake-park-max); a flight holds its permit until the restore reaches a terminal outcome, so this bounds actual restores, not held requests")
-	flag.DurationVar(&WakeMaxFlightLifetime, "wake-max-flight-lifetime", 5*time.Minute, "Max lifetime of one wake flight (establish + poll); expiry releases the restore permit while the resume converges server-side")
+	flag.DurationVar(&WakeMaxFlightLifetime, "wake-max-flight-lifetime", 5*time.Minute, "Max lifetime of one wake flight (establish + poll); expiry releases the restore permit while the resume converges server-side. Must exceed --wake-park-budget")
 	flag.DurationVar(&WakeRetryInterval, "wake-retry-interval", 50*time.Millisecond, "First readiness-poll interval of a wake flight")
 	flag.Float64Var(&WakeRetryFactor, "wake-retry-factor", 1.3, "Exponential growth factor of the wake poll interval")
 	flag.Float64Var(&WakeRetryJitter, "wake-retry-jitter", 0.1, "Relative jitter applied to the wake poll interval")

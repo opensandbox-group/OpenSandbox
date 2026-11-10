@@ -122,8 +122,19 @@ class RetryAsyncTransport(httpx.AsyncBaseTransport):
 
     @property
     def inner(self) -> httpx.AsyncBaseTransport:
-        """The wrapped raw transport, safe to hand to SSE clients."""
+        """The wrapped raw transport."""
         return self._inner
+
+    def for_streaming(self) -> httpx.AsyncBaseTransport:
+        """Transport for streaming (SSE) clients; see :meth:`RetryPolicy.wake_only`."""
+        if not self._policy.wake_retry_enabled:
+            return self._inner
+        return RetryAsyncTransport(
+            self._inner,
+            self._policy.wake_only(),
+            owns_inner=self._owns_inner,
+            rng=self._rng,
+        )
 
     async def handle_async_request(
         self, request: httpx.Request

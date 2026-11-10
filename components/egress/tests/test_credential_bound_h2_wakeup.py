@@ -15,7 +15,7 @@ from credential_bound_h2 import BoundH2Server, dependency_versions_supported
 from revision_receiver import Revision
 from mitmproxy import connection, http
 from mitmproxy.addons.proxyserver import Proxyserver
-from mitmproxy.proxy import commands, events, server, server_hooks
+from mitmproxy.proxy import commands, server, server_hooks
 from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.layers import http as layers
 import h2.config
@@ -45,7 +45,7 @@ class WakeupTests(unittest.TestCase):
         context.client.sni = 'example.test'
         context.server.address = ('example.test', 443)
         context.server.tls = True
-        token = self.runtime.admit_tls('example.test').token
+        token = self.runtime.admit_tls('example.test', destination_port=443).token
         self.runtime.track(token, context.client)
         self.root = layers.HttpLayer(context, layers.HTTPMode.transparent)
         self.adapter = BoundH2Server(context.fork(), self.runtime, self.root, token)
@@ -166,7 +166,14 @@ class WakeupTests(unittest.TestCase):
         state = self.runtime.registry.drain_state(self.adapter.token)
         self.assertTrue(state.fenced)
         self.assertIsNotNone(state.deadline)
-        self.assertFalse(self.adapter.maintenance_needed())
+        self.assertTrue(self.adapter.maintenance_needed())
+        first_deadline = state.deadline
+        self.advance()
+        self.assertTrue(self.adapter.retirement_notice_sent)
+        self.assertFalse(self.adapter.goaway_sent)
+        self.assertEqual(self.runtime.registry.drain_state(self.adapter.token).deadline,
+                         first_deadline)
+        self.assertEqual(self.runtime.registry.request_count, 1)
         self.assert_timeout_and_release()
 
     def test_retirement_deadline_closes_held_stream_without_network(self):

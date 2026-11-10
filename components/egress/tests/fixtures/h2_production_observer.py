@@ -1,11 +1,13 @@
 # Copyright 2026 The OpenSandbox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read-only P2 metadata observer; never an adapter or publication owner.
+"""P2 test observer; never an adapter or publication owner.
 
-Load AFTER the actual system.py. The sole fault is an explicitly named async
-ServerConnectedHook gate in an isolated child. It never closes a writer,
-changes library queues, changes destinations, or replaces production methods.
+Load AFTER the actual system.py. Its only scenario faults are an explicitly
+named async ServerConnectedHook gate and a one-stream barrier immediately
+before the real LiveRuntime admission method. The barrier delegates to that
+same method after parent release. It never closes a writer, changes library
+queues, changes destinations, or alters shared production code.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +26,10 @@ _SCENARIO = os.environ.get("H2_PRODUCTION_SCENARIO", "normal")
 _sequence = 0
 _task = None
 _last = None
+_barrier_release_value = os.environ.get("H2_PRODUCTION_BARRIER_RELEASE")
+_barrier_release = None if _barrier_release_value is None else Path(_barrier_release_value)
+_barrier_used = False
+_barrier_stop = threading.Event()
 
 
 def emit(kind, **metadata):
@@ -109,10 +116,44 @@ def running():
     if not _DIRECTORY.is_dir():
         raise RuntimeError("P2 observation directory is missing")
     emit("observer_ready", scenario=_SCENARIO)
+    if _SCENARIO == "pre_admission_barrier_h2":
+        live = credential_bound.runtime()
+        if live is None or _barrier_release is None:
+            raise RuntimeError("pre-admission test barrier has no live runtime or release path")
+        original = live.acquire_request
+
+        def gated_acquire(token, *, client_stream_id=None):
+            global _barrier_used
+            if client_stream_id == 3 and not _barrier_used:
+                _barrier_used = True
+                emit("pre_admission_barrier_entered", stream_id=client_stream_id,
+                     before_registry_acquire=True)
+                deadline = time.monotonic() + 20
+                while not _barrier_release.exists() and time.monotonic() < deadline:
+                    if _barrier_stop.wait(0.01):
+                        break
+                if not _barrier_release.exists():
+                    emit("pre_admission_barrier_timeout", stream_id=client_stream_id)
+                    raise RuntimeError("pre-admission test barrier timed out")
+                emit("pre_admission_release_observed", stream_id=client_stream_id,
+                     before_registry_acquire=True)
+                admission = original(token, client_stream_id=client_stream_id)
+                state = live.registry.drain_state(token)
+                emit("pre_admission_result", stream_id=client_stream_id,
+                     action=admission.action, reason=admission.reason,
+                     handle_created=admission.handle is not None,
+                     fenced=None if state is None else state.fenced,
+                     frozen=None if state is None else state.frozen_last_stream_id,
+                     registry_request_count=live.registry.request_count)
+                return admission
+            return original(token, client_stream_id=client_stream_id)
+
+        live.acquire_request = gated_acquire
     _task = asyncio.create_task(observe())
 
 
 def done():
+    _barrier_stop.set()
     if _task is not None:
         _task.cancel()
 
@@ -130,7 +171,8 @@ def requestheaders(flow):
          fenced=None if state is None else state.fenced,
          stream_id=None if handle is None else handle.client_stream_id,
          epoch=None if handle is None else handle.revision.decision_epoch,
-         admitted=handle is not None)
+         admitted=handle is not None,
+         private_token_present=bool(flow.request.headers.get_all("private-token")))
 
 
 def response(flow):

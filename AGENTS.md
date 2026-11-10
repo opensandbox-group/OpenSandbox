@@ -14,6 +14,7 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - `kubernetes/`: Kubernetes operator, CRDs, task-executor, and Kind e2e tests
 - `manifests/charts/`: Helm charts (base, controller, server, ingress-gateway, node-agent, fast-sandbox, opensandbox umbrella)
 - `cli/`: `osb` command-line client and bundled CLI skills
+- `console/`: developer console (React SPA + FastAPI BFF), optional K8s examples; no server/spec changes
 - `tests/`: cross-language end-to-end SDK tests
 - `docs/`, `examples/`, `oseps/`: documentation, samples, and proposals
 
@@ -26,6 +27,7 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - For cross-cutting changes spanning spec, server, and SDKs, start with `specs/AGENTS.md` and then read affected consumer guides.
 - For runtime component changes under `components/**`, read the nearest `README.md` or `DEVELOPMENT.md`; keep component APIs aligned with `specs/` and SDK consumers.
 - For CLI changes under `cli/**`, read `cli/README.md` and verify command help/output behavior alongside unit tests.
+- For console changes under `console/**`, read `console/README.md` and `console/docs/`; run `console/web` build and keep BFF env docs aligned with `console/k8s/*.example.yaml`.
 - For cross-language e2e tests under `tests/**`, read the language-local README and keep test assumptions aligned with current server and SDK behavior.
 - For areas without a local `AGENTS.md`, use the nearest `README.md`, `DEVELOPMENT.md`, and CI workflow as the next source of truth.
 
@@ -71,7 +73,7 @@ Never:
 | SDK, CLI, Helm, and other publishable package READMEs | package directory | Keep install, quick start, and package entry points; no long-form docs |
 | Non-publishable component/module READMEs | component/module directory | Keep minimal pointers to `docs/` when a docs page exists |
 | Examples | `docs/examples/` + runnable code under `examples/` | Put docs in `docs/examples/`; keep example READMEs as thin pointers |
-| OSEPs | `oseps/` | `docs/community/oseps.md` only indexes GitHub proposals |
+| OSEPs | `oseps/` | Proposals live only here; there is no docs-site page |
 | CONTRIBUTING, CODE_OF_CONDUCT, DEVELOPMENT | repo root / component directory | `docs/community/` links to them, does not duplicate them |
 
 **When adding design/how-it-works content**: high-level architecture design and implementation principles go under `docs/architecture/`; user-facing usage instructions go under `docs/guides/`. Do not mix usage how-tos into architecture pages, or internals into guides.

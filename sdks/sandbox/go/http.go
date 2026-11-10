@@ -303,7 +303,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, r
 // non-nil. It exists for callers that need server-reported response metadata
 // (e.g. the OPEN-SANDBOX-ORIGIN header) that is not part of the JSON body.
 func (c *Client) doRequestCapture(ctx context.Context, method, path string, body, result any, capture func(http.Header)) error {
-	return c.withRetryMethod(ctx, method, func() error {
+	return c.withRetryMethod(ctx, method, func(ctx context.Context) error {
 		var reused bool
 		err := c.doRequestOnce(ctx, method, path, body, result, &reused, capture)
 		if err != nil && reused && c.shouldRetryOnFreshConn(ctx, method, err) {
@@ -409,7 +409,7 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doAttempt(c.httpClient, req)
 	if err != nil {
 		if sent.Load() {
 			err = &requestSentError{err: err}
@@ -442,14 +442,18 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 }
 
 // doStreamRequest builds an HTTP request, executes it, and streams SSE events
-// through handler. SSE bootstraps deliberately bypass the generic retry loop:
-// the stream may already have delivered partial data or submitted a command,
-// and OSEP-0017 requires the bootstrap to stay unwrapped. Once streaming begins,
-// errors are not retried.
+// through handler. SSE bootstraps bypass the generic retry loop: the stream may
+// already have delivered partial data or submitted a command, and OSEP-0017
+// requires the bootstrap to stay unwrapped by it. The OSEP-0024 wake retry
+// still applies, as it does to every other request: the marker proves the
+// gateway parked the bootstrap and never forwarded it, so replaying it cannot
+// run anything twice, and older behavior that failed the call fast left the
+// primary execution path unable to wake an auto-paused sandbox. Once streaming
+// begins, errors are not retried.
 func (c *Client) doStreamRequest(ctx context.Context, method, path string, body any, handler EventHandler) error {
 	var resp *http.Response
 
-	connectErr := func() error {
+	connectErr := c.withWakeRetry(ctx, method, func(ctx context.Context) error {
 		var bodyReader io.Reader
 		if body != nil {
 			buf, err := json.Marshal(body)
@@ -479,7 +483,7 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 		// SSE uses a dedicated non-pooled, timeout-free client so long streams
 		// are not killed by the overall request timeout and are never carried
 		// over a stale pooled connection.
-		r, err := c.streamHTTPClient().Do(req)
+		r, err := doAttempt(c.streamHTTPClient(), req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}
@@ -489,9 +493,10 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 			return handleError(r)
 		}
 
+		r.Body = keepAttemptBody(ctx, r.Body)
 		resp = r
 		return nil
-	}()
+	})
 	if connectErr != nil {
 		return connectErr
 	}
@@ -504,12 +509,21 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 // gateway-owned OSEP-0024 wake marker for the wake retry contract.
 func handleError(resp *http.Response) error {
 	retryAfter, retryAfterPresent := parseRetryAfterValue(resp.Header.Get("Retry-After"))
+	wakeExpired := resp.StatusCode == http.StatusServiceUnavailable &&
+		resp.Header.Get(wakeMarkerHeader) == wakeMarkerExpired
+	// The marker only proves that the final hop never forwarded the request.
+	// When the client followed a redirect first, an earlier hop already
+	// received the request (and may have processed it), so replaying the
+	// original request is no longer provably free of a second execution.
+	if wakeExpired && resp.Request != nil && resp.Request.Response != nil {
+		wakeExpired = false
+	}
 	apiErr := &APIError{
 		StatusCode:        resp.StatusCode,
 		RequestID:         resp.Header.Get("X-Request-Id"),
 		RetryAfter:        retryAfter,
 		RetryAfterPresent: retryAfterPresent,
-		WakeExpired:       resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(wakeMarkerHeader) == wakeMarkerExpired,
+		WakeExpired:       wakeExpired,
 	}
 	data, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {

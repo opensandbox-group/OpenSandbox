@@ -2,6 +2,7 @@
 title: Multi-Sandbox Egress Control Plane
 authors:
   - "@Pangjiping"
+  - "@hpliStartAgain"
 creation-date: 2026-08-21
 last-updated: 2026-10-19
 status: implementing
@@ -23,6 +24,7 @@ status: implementing
     - [Vault Sealing (deferred)](#vault-sealing-deferred)
   - [MITM Trust Anchor](#mitm-trust-anchor)
   - [Lifecycle and Fail-Closed Guarantee](#lifecycle-and-fail-closed-guarantee)
+  - [Strict ownership domain (Actions v2)](#strict-ownership-domain-actions-v2)
   - [Per-Subject Policy Consumption](#per-subject-policy-consumption)
   - [Sequences](#sequences)
 - [System Boundaries](#system-boundaries)
@@ -242,6 +244,28 @@ The Fastlet is the only lifecycle dispatcher; egress is the Handler.
 - **Races**: fence mismatch discards all prior state — a reset never carries old policy or credentials into a new sandbox. Relay vault ops validate point-in-time: unregistered subject → 404, consistency failure → NACK keeps last-good (see [Vault Lifecycle](#vault-lifecycle)).
 - **Stale-subject defense (slot reuse — takeover)**: the dispatch key is the slot IP, and slots are reused. Slot release is deliberately **not** ack-gated — the fastlet delete path stays best-effort (ack-gated release was considered and rejected as too heavy a platform ask) — so a reused slot IP can meet a stale (dead-but-registered) subject whenever `REMOVE_BINDING` fails or is lost in a crash window. This is an expected case, and the defense is **egress-side takeover**: a `SET_BINDING` claiming a dispatch key held by a different live subject is authoritative that the previous owner is gone (the Fastlet is the only lifecycle authority) — egress tears down the stale subject's enforcement and vault, then registers the successor deny-first, all under the same per-subject lock. Traffic is never dispatched to the stale rules — with or without a live successor. Unloads stay fence-guarded: a late `REMOVE_BINDING` can never disturb a successor (index drops clear only mappings that still point to that subject).
 - **Recovery**: egress restart → new `instanceId` → Fastlet replays binding + reached hooks → vault files reload at registration → deny → activate. No server reconciliation.
+
+### Strict ownership domain (Actions v2)
+
+Actions v2 (`sandbox.fast.io/actions/v2`) defines a versioned strict ownership domain alongside the legacy Actions v1 lifecycle above. The durable owner and Vault writer foundations described here are implemented; they do not establish credential-bound TLS admission or complete Fast Sandbox integration. Subject fencing, owner lifecycle, and Vault persistence belong to this OSEP. [OSEP-0023](0023-credential-bound-tls-interception.md#fast-sandbox-integration-contract) consumes that subject identity to install decision snapshots; it does not introduce a second fence authority or Vault storage format.
+
+| Concern | Legacy Actions v1 domain | Strict Actions v2 domain |
+|---------|--------------------------|--------------------------|
+| Owner lifetime | Runtime fence guards the registered subject; a changed fence initiates rebind | A durable owner record survives policy/Vault deletion and records `active`, `retiring`, or `retired` |
+| Identity changes | Either `runtimeInstanceId` or `attachmentId` may change through the rebind path above | The complete owner must match exactly; mismatched owners and same-UID rebind are rejected. A retired UID cannot be reused; create a new UID |
+| Retirement | Best-effort platform slot release and stale-subject takeover are the legacy lifecycle contract | Exact-owner retirement must be confirmed through the strict management protocol; legacy best-effort release is not evidence of strict retirement |
+| State transfer | The v1 export/import and pause/resume paths above apply | Actions v2 does not support snapshot or state-transfer operations; its status disables Vault, Policy, and template-state transfer capabilities |
+
+The complete Actions v2 owner includes `sandboxUid`, `fastletPodUid`, `runtimeInstanceId`, `instanceGeneration`, `assignmentAttempt`, `routeGeneration`, and `attachmentId`. Exact-owner comparison is a fence check, not caller authentication. `SET_BINDING` persists `active` before dispatch. `REMOVE_BINDING` persists `retiring`, retires the matching writer Vault when selected, performs terminal action cleanup, and only then persists `retired`. A REMOVE with no previous owner still persists a terminal fence, preventing a delayed initial SET from reviving that UID. Failure to confirm retirement must remain distinguishable from successful retirement.
+
+The strict Vault writer is separately versioned as `sandbox.fast.io/vault-writer/v2`; selecting Actions v2 alone does not authorize initialization. The currently accepted owner/writer mode is `legacy`, which does not confirm an OSEP-0023 effective interception mode. Its contract is:
+
+- **Identity and state:** the durable owner records the writer `initializationId` and `lineage`. Vault file v2 carries the runtime fence, `initializationId`, `stateLineage`, `stateRevision`, and explicit `empty`, `active`, or `deleted` state. The private state token is `{lineage, sequence}`; it is distinct from the public Vault revision. Initialization writes sequence 1; each accepted state mutation advances the sequence, including deletion, which retains a state file.
+- **Fresh versus verify:** `fresh=true` is a transient grant from the trusted paired manager for a confirmed fresh source, scoped to the current Handler incarnation and exact active owner. It persists the initialization contract before publishing empty state. An existing contract refuses another fresh grant, including after a crash between owner and Vault writes; only confirmed rollback within the failed request permits a fresh retry. `fresh=false` verifies the existing contract and persisted file before re-establishing the in-process acknowledgement. A missing file is not authorization to initialize or replace previously owned state with empty state.
+- **Conditional writes:** GET and mutations require verified state, the matching active owner, and no unknown, sealed, recovery, or rebind condition. Mutations compare `expectedState` to the exact private state token; mismatch returns **412**, requiring readback before constructing another write. The candidate is persisted before local Store commit. These acknowledgements do not install an OSEP-0023 decision snapshot.
+- **Recovery and compatibility:** matching writer state requires explicit verification after restart. A v2 owner/fence mismatch preserves the file and leaves the Vault unavailable; recognized v2 or unknown formats cannot be purged through the legacy v1 path. The legacy stale-v1 discard and unconditional-create semantics above do not authorize v2 recovery or downgrade. Vault file v2 is the state/lineage format implemented here, not the deferred AEAD sealing envelope sketched in [Vault Sealing](#vault-sealing-deferred); that future format/version allocation still needs reconciliation.
+
+A strict management domain requires a coordinated upgrade of its managers, callers, and persistence readers/writers. A compatible egress refuses to start in Actions v1 mode while strict owner records exist in the policy directory; this is not a safety guarantee for older binaries. Strict owner records must survive credential/policy deletion, and disabling an opt-in must not turn the same domain into a legacy writer. The legacy slot-release, arbitrary-fence rebind, and snapshot diagrams remain scoped to the v1 domain; they are not a migration procedure for strict state.
 
 ### Per-Subject Policy Consumption
 

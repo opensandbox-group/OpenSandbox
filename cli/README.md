@@ -202,7 +202,8 @@ osb sandbox create -f sandbox-request.json -o json
 Templates are golden-image builds; the build runs asynchronously, so poll `template get` until the status phase is `Succeeded`. Template management requires a Kubernetes-backed runtime.
 
 ```bash
-osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template create --image python:3.12 --publish s3://bucket/publish --format native -o json
+osb template create --image python:3.12 --publish oci://registry.example.com/sandbox/templates --format overlaybd -o json
 osb template get <template-id> -o json
 osb template list -o json
 osb template delete <template-id> -o json
@@ -218,10 +219,13 @@ osb template create -f template-request.json -o json
 {
   "image": "python:3.12",
   "publish": "s3://bucket/publish",
+  "format": "native",
   "resourceLimits": { "cpu": "1", "memory": "512Mi" },
   "readiness": { "probe": "tcp://127.0.0.1:44772", "warmupSeconds": 60 }
 }
 ```
+
+OCI targets must name a repository without a tag or digest. Use `overlaybd` (the default) for OCI and explicitly select `native` for S3. The builder returns an immutable OCI reference in `status.manifestRef`; `sandbox create --template` uses that reference automatically. See [OCI template setup](../docs/guides/oci-templates.md) for Registry Secrets and runtime prerequisites.
 
 ### Manage snapshots
 
@@ -278,7 +282,7 @@ osb command logs <sandbox-id> <execution-id> -o json
 
 Background start errors or a stream ending before startup confirmation make the CLI exit non-zero without success metadata. After a successful start, use `command status` and `command logs` to check the process's eventual result.
 
-By default the payload after `--` is joined into one shell command string, so pipelines, redirection, and `$VAR` expansion work as in a terminal. Add `--argv` to pass the arguments to the executable as a literal argv list (no shell) when values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the process unchanged. `--argv` needs a sandbox image whose execd accepts argv requests:
+By default each payload word after `--` is quoted as a single shell token and the tokens are joined into one shell command line that the sandbox's shell runs. Shell syntax such as pipelines or redirection must therefore ride inside an explicit word (`-- sh -c 'echo hi > /tmp/x'`); an unquoted `$VAR` is expanded by your own terminal before the CLI sees it, while a quoted one reaches the sandbox shell literally. Add `--argv` to pass the arguments to the executable as a literal argv list (no shell) when values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the process unchanged. `--argv` needs a sandbox image whose execd accepts argv requests:
 
 ```bash
 osb command run <sandbox-id> -o raw --argv -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""
@@ -500,7 +504,8 @@ api_key = "your-api-key"
 domain = "localhost:8080"
 protocol = "http"
 request_timeout = 30
-use_server_proxy = false
+# use_server_proxy is deprecated (maintenance mode); prefer the ingress gateway for data-plane traffic.
+# use_server_proxy = false
 
 [output]
 color = true

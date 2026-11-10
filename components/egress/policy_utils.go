@@ -64,24 +64,23 @@ func mergeEgressRules(base, additions []policy.EgressRule) []policy.EgressRule {
 		return base
 	}
 	out := make([]policy.EgressRule, 0, len(base)+len(additions))
-	seen := make(map[string]struct{})
+	patched := make(map[string]struct{}, len(additions))
 
-	// patch rules win on same target; base fills the rest
+	// patch rules win on same scope; base fills the rest
 	for _, r := range additions {
 		key := mergeKey(r)
-		if _, ok := seen[key]; ok {
+		if _, ok := patched[key]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		patched[key] = struct{}{}
 		out = append(out, r)
 	}
+	// Only patched scopes are replaced: dropping an untouched same-scope base
+	// duplicate could remove a shadowing deny (nft is deny-wins) and fail open.
 	for _, r := range base {
-		key := mergeKey(r)
-		if _, ok := seen[key]; ok {
-			continue
+		if _, ok := patched[mergeKey(r)]; !ok {
+			out = append(out, r)
 		}
-		seen[key] = struct{}{}
-		out = append(out, r)
 	}
 	return out
 }

@@ -554,7 +554,15 @@ def get_sandbox_endpoint(
     request: Request,
     sandbox_id: str,
     port: int,
-    use_server_proxy: bool = Query(False, description="Whether to return a server-proxied URL"),
+    use_server_proxy: bool = Query(
+        False,
+        deprecated=True,
+        description=(
+            "Deprecated: the server-proxied data path is in maintenance mode "
+            "(security and bug fixes only); deploy the ingress gateway for "
+            "data-plane traffic. When true, returns a server-proxied URL."
+        ),
+    ),
     expires: Optional[int] = Query(None, description="Request a signed route token with this Unix epoch second expiration. Requires ingress gateway with secure_access configured."),
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
     response: Response = None,  # type: ignore[assignment]
@@ -574,7 +582,8 @@ def get_sandbox_endpoint(
         request: FastAPI request object
         sandbox_id: Unique sandbox identifier
         port: Port number where the service is listening inside the sandbox (1-65535)
-        use_server_proxy: Whether to return a server-proxied URL
+        use_server_proxy: Deprecated: requests a server-proxied URL from the
+            maintenance-mode server proxy; prefer the ingress gateway route.
         expires: Unix epoch seconds for signed route token expiration. Must be a
             non-negative uint64 value. When omitted or invalid, a plain (unsigned)
             endpoint is returned.

@@ -155,6 +155,9 @@ type SourceStream struct {
 	LatePending          bool               `json:"late_pending,omitempty"`
 	Ended                bool               `json:"ended,omitempty"`
 	RepairDeadline       *time.Time         `json:"repair_deadline,omitempty"`
+	// UnadoptedDeadline is when a terminated stream whose log directory never
+	// appeared may be forgotten. It is unset once the stream is adopted.
+	UnadoptedDeadline *time.Time `json:"unadopted_deadline,omitempty"`
 }
 
 // OutcomeSnapshot is the persisted decoupled form of api.SourceOutcome. It is

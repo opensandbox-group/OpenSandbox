@@ -72,7 +72,9 @@ func TestTransitionChangedIPRebuildRemovesCumulativeOldDispatch(t *testing.T) {
 			srv.nft = fastsandboxnft.NewApplier(model.run, fastsandboxnft.Options{MitmRedirectPort: 18080})
 			subj := subject.FromSandboxUID(testUID)
 			if unknownAfterPartialInstall {
-				srv.dnsRedirectInstall = func(netip.Addr, int) error { return errors.New("gateway redirect failure after nft install") }
+				srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error {
+					return errors.New("gateway redirect failure after nft install")
+				}
 			}
 			initial := doAction(t, srv, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy()))
 			if unknownAfterPartialInstall {
@@ -82,7 +84,7 @@ func TestTransitionChangedIPRebuildRemovesCumulativeOldDispatch(t *testing.T) {
 				srv.mu.Lock()
 				delete(srv.subjAtt, subj)
 				srv.mu.Unlock()
-				srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
+				srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 			} else {
 				require.Equal(t, http.StatusOK, initial.Code)
 				require.Equal(t, http.StatusOK, doAction(t, srv, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)

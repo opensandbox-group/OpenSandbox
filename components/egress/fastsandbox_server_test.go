@@ -25,6 +25,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,6 +49,53 @@ type fakeNft struct {
 	denyFirstErr  error
 	policyErr     error
 	removeErr     error
+}
+
+// fakeGatewayDNSRedirectApplier models the entire owned nft table, not only
+// callback counts. A failure can occur either before the replacement or
+// after it took effect (a lost/ambiguous result).
+type fakeGatewayDNSRedirectApplier struct {
+	gateways      map[netip.Addr]struct{}
+	calls         int
+	failAt        int
+	failErr       error
+	applyThenFail bool
+}
+
+func newFakeGatewayDNSRedirectApplier() *fakeGatewayDNSRedirectApplier {
+	return &fakeGatewayDNSRedirectApplier{gateways: make(map[netip.Addr]struct{})}
+}
+
+func (f *fakeGatewayDNSRedirectApplier) apply(_ context.Context, gateways []netip.Addr, _ int) error {
+	f.calls++
+	fail := f.calls == f.failAt
+	if fail && !f.applyThenFail {
+		return f.failErr
+	}
+	f.gateways = make(map[netip.Addr]struct{}, len(gateways))
+	for _, gateway := range gateways {
+		f.gateways[gateway.Unmap()] = struct{}{}
+	}
+	if fail {
+		return f.failErr
+	}
+	return nil
+}
+
+func (f *fakeGatewayDNSRedirectApplier) failOnCall(call int, err error, afterApply bool) {
+	f.failAt, f.failErr, f.applyThenFail = call, err, afterApply
+}
+
+func (f *fakeGatewayDNSRedirectApplier) clearFailures() {
+	f.failAt, f.failErr, f.applyThenFail = 0, nil, false
+}
+
+func (f *fakeGatewayDNSRedirectApplier) snapshot() map[netip.Addr]struct{} {
+	return f.gateways
+}
+
+func (f *fakeGatewayDNSRedirectApplier) callCount() int {
+	return f.calls
 }
 
 func (f *fakeNft) ApplyDenyFirst(_ context.Context, s subject.Subject, _ actionhandler.NetworkAttachment) error {
@@ -93,8 +141,7 @@ func fastSandboxTestServer(t *testing.T) (*fastSandboxPolicyServer, *subject.Mem
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	// no-op the gateway DNS redirect (no iptables/nft in unit tests)
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
-	srv.dnsRedirectRemove = func() error { return nil }
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 	// Policy persistence is REQUIRED in the fast-sandbox profile — every
 	// test server carries a store, mirroring the production posture (no
 	// memory-only mode). The file seam defaults to a cross-platform fake
@@ -382,6 +429,21 @@ func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
 	rec = doAction(t, srv, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+}
+
+// TestActionsDataPlaneReadyReplayIsIdempotent: hooks are delivered
+// at-least-once, so a data-plane-ready retried after a lost ack must succeed
+// and leave the subject active under the same policy.
+func TestActionsDataPlaneReadyReplayIsIdempotent(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
+	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
+
+	rec := doAction(t, srv, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("other.com"))
 }
 
 func TestActionsDataPlaneReadyWithoutPendingPolicyFailsClosed(t *testing.T) {
@@ -696,9 +758,8 @@ func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	wireTestPolicyPersistence(t, srv)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 	inst := &fakeMitmInstaller{}
 	srv.mitmInstall = inst.install
 	srv.mitmRemove = inst.remove
@@ -707,13 +768,13 @@ func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	input := `{"defaultAction":"deny"}`
 	rec := doAction(t, srv, bindBody(t, staleUID, testIP, testFenceR, testFenceA, 1, &input))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, 1, installs)
+	require.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
 
 	rec = doAction(t, srv, bindBody(t, takeUID, testIP, "runtime-2", "attachment-2", 1, &input))
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	assert.Equal(t, 2, installs, "the successor reinstalls the shared gateway redirect")
-	assert.Equal(t, 1, removes, "the stale subject releases its refcount exactly once")
+	assert.Equal(t, 3, dns.callCount(), "stale release and successor install each reconcile the full set")
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
 	srv.gwMu.Lock()
 	_, hasStale := srv.gatewayDNSRefs[subject.FromSandboxUID(staleUID)]
 	succ, hasSucc := srv.gatewayDNSRefs[subject.FromSandboxUID(takeUID)]
@@ -1092,8 +1153,7 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	wireTestPolicyPersistence(t, srv)
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
-	srv.dnsRedirectRemove = func() error { return nil }
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 
 	// activation through the action protocol; the binding policy reaches nft
 	// merged with the always overlay
@@ -1152,17 +1212,15 @@ func TestFastSandboxServerNftFailureKeepsRegistryState(t *testing.T) {
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
 }
 
-// TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting REDIRECT
-// installs once per gateway and is removed when the last subject using it is
-// unloaded.
+// TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting table
+// keeps every active gateway and removes only gateways without owners.
 func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	wireTestPolicyPersistence(t, srv)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 
 	attA := mitmAtt(t, "10.0.0.5", "10.10.0.1")
 	attB := mitmAtt(t, "10.0.0.6", "10.10.0.1")
@@ -1171,14 +1229,169 @@ func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	require.NoError(t, srv.OnRegistered(subject.FromSandboxUID("a"), attA))
 	require.NoError(t, srv.OnRegistered(subject.FromSandboxUID("b"), attB))
 	require.NoError(t, srv.OnRegistered(subject.FromSandboxUID("c"), attC))
-	assert.Equal(t, 2, installs, "shared gateway installs once; distinct gateway installs again")
+	wantBoth := map[netip.Addr]struct{}{
+		netip.MustParseAddr("10.10.0.1"): {},
+		netip.MustParseAddr("10.20.0.1"): {},
+	}
+	assert.Equal(t, wantBoth, dns.snapshot())
 
 	require.NoError(t, srv.OnUnloaded(subject.FromSandboxUID("a"), attA))
+	assert.Equal(t, wantBoth, dns.snapshot(), "a non-final shared-gateway release preserves the whole table")
 	require.NoError(t, srv.OnUnloaded(subject.FromSandboxUID("b"), attB))
-	assert.Equal(t, 1, removes, "remove only when the LAST subject of the shared gateway unloads")
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.20.0.1"): {}}, dns.snapshot(), "removing gw1 must preserve gw2")
 
 	require.NoError(t, srv.OnUnloaded(subject.FromSandboxUID("c"), attC))
-	assert.Equal(t, 2, removes)
+	assert.Empty(t, dns.snapshot(), "the final release removes the DNS table contents")
+}
+
+func TestFastSandboxServerGatewayRedirectUsesLifecycleDeadline(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	var contexts []context.Context
+	srv.dnsRedirectApply = func(ctx context.Context, _ []netip.Addr, _ int) error {
+		contexts = append(contexts, ctx)
+		return nil
+	}
+	subj := subject.FromSandboxUID("dns-context")
+	att := mitmAtt(t, "10.0.0.5", "10.10.0.1")
+
+	require.NoError(t, srv.OnRegistered(subj, att))
+	require.NoError(t, srv.OnUnloaded(subj, att))
+	require.Len(t, contexts, 2)
+	for i, maxTimeout := range []time.Duration{policyApplyTimeout, 30 * time.Second} {
+		deadline, ok := contexts[i].Deadline()
+		require.True(t, ok, "lifecycle operation %d must have a deadline", i)
+		remaining := time.Until(deadline)
+		assert.Positive(t, remaining, "lifecycle context should still be within its deadline")
+		assert.LessOrEqual(t, remaining, maxTimeout, "lifecycle context must preserve its existing timeout")
+	}
+}
+
+func TestFastSandboxServerReleaseCleansUncommittedInstallAfterLostResult(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	subj, gw := subject.FromSandboxUID("uncommitted"), netip.MustParseAddr("10.10.0.1")
+	dns.failOnCall(1, errors.New("result lost"), true)
+	require.Error(t, srv.installGatewayDNSRedirect(context.Background(), subj, gw))
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs)
+	srv.gwMu.Unlock()
+	assert.Equal(t, map[netip.Addr]struct{}{gw: {}}, dns.snapshot())
+
+	require.NoError(t, srv.releaseGatewayDNSRedirect(context.Background(), subj))
+	assert.Empty(t, dns.snapshot(), "release reconciles even though install ownership was not committed")
+}
+
+func TestActionsSetAndRemoveRetryAfterGatewayDNSFailures(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	input := `{"defaultAction":"deny"}`
+	subj := subject.FromSandboxUID("dns-remove")
+	dns.failOnCall(1, errors.New("nft busy"), false)
+	rec := doAction(t, srv, bindBody(t, "dns-remove", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, subject.StateDenying, mustState(reg.Get(subj)))
+	assert.Empty(t, dns.snapshot())
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs, "failed install does not commit ownership")
+	srv.gwMu.Unlock()
+
+	dns.clearFailures()
+	rec = doAction(t, srv, bindBody(t, "dns-remove", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
+	dns.failOnCall(3, errors.New("nft result lost"), true)
+
+	rec = doAction(t, srv, removeBody(t, "dns-remove", testFenceR, testFenceA))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	state, ok := reg.Get(subj)
+	require.True(t, ok, "REMOVE_BINDING must not unregister after a failed DNS reconcile")
+	assert.Equal(t, subject.StateDenying, state)
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr(testGW), srv.gatewayDNSRefs[subj], "failed release retains retry ownership")
+	srv.gwMu.Unlock()
+	assert.Empty(t, dns.snapshot(), "the apply-then-error fake makes the kernel result ambiguous")
+
+	dns.clearFailures()
+	rec = doAction(t, srv, removeBody(t, "dns-remove", testFenceR, testFenceA))
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, ok = reg.Get(subj)
+	assert.False(t, ok)
+	assert.Empty(t, dns.snapshot())
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs)
+	srv.gwMu.Unlock()
+}
+
+func TestActionsSetBindingTakeoverRetriesAfterGatewayDNSFailure(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	staleUID, successorUID := "dns-stale", "dns-successor"
+	stale, successor := subject.FromSandboxUID(staleUID), subject.FromSandboxUID(successorUID)
+	input := `{"defaultAction":"deny"}`
+	setBindingAndReady(t, srv, reg, staleUID, testIP, &input)
+	dns.failOnCall(2, errors.New("nft result lost"), true)
+
+	rec := doAction(t, srv, bindBody(t, successorUID, testIP, "runtime-2", "attachment-2", 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(stale)), "failed DNS release must not evict the old owner")
+	_, ok := reg.Get(successor)
+	assert.False(t, ok, "takeover must not publish its successor before DNS cleanup succeeds")
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr(testGW), srv.gatewayDNSRefs[stale])
+	srv.gwMu.Unlock()
+
+	dns.clearFailures()
+	rec = doAction(t, srv, bindBody(t, successorUID, testIP, "runtime-2", "attachment-2", 1, strPtr(input)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, ok = reg.Get(stale)
+	assert.False(t, ok)
+	require.Equal(t, subject.StateDenying, mustState(reg.Get(successor)))
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
+}
+
+func TestActionsMITMFailureRollbackAndTerminalCleanup(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	srv.mitmInstall = func([]iptables.MitmRedirectEntry) error { return errors.New("mitm failed") }
+	input := `{"defaultAction":"deny"}`
+
+	rec := doAction(t, srv, bindBody(t, "mitm-dns", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "mitm failed")
+	subj := subject.FromSandboxUID("mitm-dns")
+	state, ok := reg.Get(subj)
+	require.True(t, ok, "failed registration remains denying and retryable")
+	assert.Equal(t, subject.StateDenying, state)
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs, "successful rollback commits the empty ownership map")
+	srv.gwMu.Unlock()
+	assert.Empty(t, dns.snapshot(), "successful rollback removes the newly installed redirect")
+
+	// Retry the same deny-first registration; this time rollback applies but
+	// returns an error, so ownership remains available to terminal cleanup.
+	dns.failOnCall(4, errors.New("DNS rollback failed"), true)
+	rec = doAction(t, srv, bindBody(t, "mitm-dns", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "mitm failed")
+	assert.Contains(t, rec.Body.String(), "DNS rollback failed")
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr(testGW), srv.gatewayDNSRefs[subj], "failed rollback retains ownership")
+	srv.gwMu.Unlock()
+	assert.Empty(t, dns.snapshot(), "the rollback result is ambiguous")
+
+	dns.clearFailures()
+	rec = doAction(t, srv, removeBody(t, "mitm-dns", testFenceR, testFenceA))
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, ok = reg.Get(subj)
+	assert.False(t, ok)
+	assert.Empty(t, dns.snapshot())
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs)
+	srv.gwMu.Unlock()
 }
 
 func strPtr(s string) *string { return &s }
@@ -1290,18 +1503,25 @@ func TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent(t *testin
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	wireTestPolicyPersistence(t, srv)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 
 	att := mitmAtt(t, "10.0.0.5", "10.10.0.1")
 	s := subject.FromSandboxUID("a")
-	require.NoError(t, srv.OnRegistered(s, att))
+	dns.failOnCall(1, errors.New("result lost"), true)
+	require.Error(t, srv.OnRegistered(s, att))
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs, "failed install does not commit the map")
+	srv.gwMu.Unlock()
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot())
+	dns.clearFailures()
+	require.NoError(t, srv.OnRegistered(s, att), "the same desired set must be reconciled after an ambiguous error")
 	require.NoError(t, srv.OnRegistered(s, att), "duplicate SET_BINDING delivery")
-	assert.Equal(t, 1, installs, "duplicate registration must not re-install the redirect")
+	assert.Equal(t, 3, dns.callCount(), "duplicate registration still reconciles the complete desired set")
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot())
 
 	require.NoError(t, srv.OnUnloaded(s, att))
-	assert.Equal(t, 1, removes, "one unload must fully release the gateway")
+	assert.Empty(t, dns.snapshot(), "one unload must fully release the gateway")
 }
 
 // TestFastSandboxServerGatewayRedirectRebindMovesGateway: a rebind that moved the
@@ -1311,17 +1531,24 @@ func TestFastSandboxServerGatewayRedirectRebindMovesGateway(t *testing.T) {
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	wireTestPolicyPersistence(t, srv)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 
 	s := subject.FromSandboxUID("a")
 	att1 := mitmAtt(t, "10.0.0.5", "10.10.0.1")
 	att2 := mitmAtt(t, "10.0.0.5", "10.20.0.1")
 	require.NoError(t, srv.OnRegistered(s, att1))
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot())
+	dns.failOnCall(2, errors.New("replacement rejected"), false)
+	require.Error(t, srv.OnRegistered(s, att2))
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr("10.10.0.1"), srv.gatewayDNSRefs[s], "failed replacement does not commit the new gateway")
+	srv.gwMu.Unlock()
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot(), "a rejected batch keeps the prior table")
+	dns.clearFailures()
 	require.NoError(t, srv.OnRegistered(s, att2), "rebind with a new gateway")
-	assert.Equal(t, 2, installs)
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.20.0.1"): {}}, dns.snapshot(), "one replacement drops the old gateway")
 
 	require.NoError(t, srv.OnUnloaded(s, att2))
-	assert.Equal(t, 2, removes, "both gateways must be released")
+	assert.Empty(t, dns.snapshot(), "the re-bound gateway must be released")
 }

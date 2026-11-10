@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -22,7 +23,13 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
-from opensandbox.models.execd import Execution, RunCommandOpts
+from opensandbox.exceptions import SandboxException
+from opensandbox.models.execd import (
+    CommandLogs,
+    CommandStatus,
+    Execution,
+    RunCommandOpts,
+)
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
     ContentReplaceResult,
@@ -50,7 +57,9 @@ class ServerState:
     sandboxes: dict[str, Sandbox] = field(default_factory=dict)
     connection_config: ConnectionConfig = field(default_factory=ConnectionConfig)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    connecting: dict[str, asyncio.Task[Sandbox]] = field(default_factory=dict)
+    connecting: dict[str, asyncio.Task[Sandbox | Exception]] = field(
+        default_factory=dict
+    )
 
     async def add(self, sandbox: Sandbox) -> None:
         async with self.lock:
@@ -66,7 +75,7 @@ class ServerState:
 
 
 def _discard_connecting(
-    state: ServerState, sandbox_id: str, task: asyncio.Task[Sandbox]
+    state: ServerState, sandbox_id: str, task: asyncio.Task[Sandbox | Exception]
 ) -> None:
     # Only pop if this task is still the mapped entry (a stale callback
     # must not evict a newer connect).
@@ -121,9 +130,33 @@ def register_tools(
         def decorator(func):
             if name_prefix:
                 func.__name__ = f"{name_prefix}{func.__name__}"
-            return mcp.tool()(func)
+
+            # MCP 2.x reports any exception other than ToolError as a bare
+            # "Error executing tool"; SDK errors (not found, auth, ...) are
+            # expected outcomes the client needs to see.
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
+                try:
+                    return await func(*args, **kwargs)
+                except SandboxException as exc:
+                    raise ToolError(str(exc)) from exc
+
+            return mcp.tool()(wrapper)
 
         return decorator
+
+    async def _connect_and_register(sandbox_id: str) -> Sandbox | Exception:
+        # A failure is returned, not raised: once every caller is cancelled,
+        # asyncio.shield (Python 3.14+) reports a failed task to the loop
+        # exception handler, although nobody waits for it any more.
+        try:
+            sandbox = await Sandbox.connect(
+                sandbox_id, connection_config=_borrowed_config(state)
+            )
+        except Exception as exc:
+            return exc
+        await state.add(sandbox)
+        return sandbox
 
     async def _get_or_connect_sandbox(
         sandbox_id: str,
@@ -144,18 +177,17 @@ def register_tools(
                         "Sandbox not found in local registry. Call sandbox_connect or "
                         "set connect_if_missing=True with connection parameters."
                     )
-                task = asyncio.ensure_future(
-                    Sandbox.connect(
-                        sandbox_id, connection_config=_borrowed_config(state)
-                    )
-                )
+                task = asyncio.ensure_future(_connect_and_register(sandbox_id))
                 state.connecting[sandbox_id] = task
                 task.add_done_callback(
                     lambda t: _discard_connecting(state, sandbox_id, t)
                 )
-        sandbox = await task
-        await state.add(sandbox)
-        return sandbox
+        # Other tool calls may be waiting on the same task, so cancelling this
+        # call (e.g. the client cancelled the request) must not cancel it.
+        result = await asyncio.shield(task)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     @tool()
     async def sandbox_create(
@@ -514,6 +546,81 @@ def register_tools(
         return StatusResponse(status="interrupted")
 
     @tool()
+    async def command_get_status(
+        sandbox_id: str,
+        execution_id: str,
+        *,
+        connect_if_missing: bool = False,
+    ) -> CommandStatus:
+        """Get the status of a command started by command_run.
+
+        Works for both foreground and background executions.
+
+        Parameters:
+            sandbox_id: Target sandbox identifier.
+            execution_id: Execution identifier returned by command_run.
+            connect_if_missing: Connect if sandbox not in local registry.
+
+        Returns:
+            Command status with running flag, exit code, error, and
+            start/finish timestamps. ``running=False`` means the command has
+            finished; check ``exit_code`` and ``error`` for the outcome.
+            ``running=None`` means the state is unknown, not that the command
+            failed. Completed command records are retained for at least 24
+            hours, so a "not found" error can mean the record expired.
+
+        Example:
+            status = await command_get_status("sbx_123", "cmd_abc")
+        """
+        sandbox = await _get_or_connect_sandbox(
+            sandbox_id,
+            connect_if_missing=connect_if_missing,
+        )
+        return await sandbox.commands.get_command_status(execution_id)
+
+    @tool()
+    async def command_get_logs(
+        sandbox_id: str,
+        execution_id: str,
+        *,
+        cursor: int | None = None,
+        connect_if_missing: bool = False,
+    ) -> CommandLogs:
+        """Read the combined stdout/stderr of a background command.
+
+        Pass the returned ``cursor`` back on the next call to read only new
+        output; omit it to read the full log. Treat ``cursor`` as an opaque
+        server-side position and never derive it from the content length.
+        Empty ``content`` does not mean the command finished; use
+        command_get_status for that. Once command_get_status reports
+        ``running=False``, call this tool once more with the last cursor to
+        read the remaining output.
+
+        Parameters:
+            sandbox_id: Target sandbox identifier.
+            execution_id: Execution identifier returned by command_run with
+                background=True.
+            cursor: Cursor returned by a previous call; omit to read from the
+                start of the log.
+            connect_if_missing: Connect if sandbox not in local registry.
+
+        Returns:
+            Command logs with ``content`` (stdout and stderr combined) and the
+            ``cursor`` for the next incremental read. ``cursor`` is null when
+            the server does not report one; keep the previous cursor then.
+
+        Example:
+            logs = await command_get_logs("sbx_123", "cmd_abc", cursor=128)
+        """
+        sandbox = await _get_or_connect_sandbox(
+            sandbox_id,
+            connect_if_missing=connect_if_missing,
+        )
+        return await sandbox.commands.get_background_command_logs(
+            execution_id, cursor=cursor
+        )
+
+    @tool()
     async def file_read(
         sandbox_id: str,
         path: str,
@@ -773,7 +880,10 @@ def create_server(connection_config: ConnectionConfig | None = None) -> MCPServe
             "Always keep track of the sandbox_id returned by sandbox_create/connect. "
             "Use command_run for execution, file_read/file_write for file IO, and "
             "sandbox_kill to terminate remote sandboxes. Use sandbox_get_endpoint to "
-            "expose sandbox ports; for large files, prefer range reads."
+            "expose sandbox ports; for large files, prefer range reads. "
+            "For command_run with background=True, poll command_get_status and read "
+            "new output with command_get_logs, passing back the returned cursor; "
+            "once the status reports running=false, read the logs one last time."
         ),
     )
     register_tools(mcp, connection_config=connection_config)

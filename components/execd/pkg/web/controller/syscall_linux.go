@@ -21,9 +21,18 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-func getFileCreateTime(fileInfo os.FileInfo) time.Time {
+func getFileCreateTime(filePath string, fileInfo os.FileInfo) time.Time {
+	var statx unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, filePath, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BTIME, &statx); err == nil && statx.Mask&unix.STATX_BTIME != 0 {
+		return time.Unix(statx.Btime.Sec, int64(statx.Btime.Nsec))
+	}
+
+	// Preserve the legacy fallback on kernels/filesystems without birth time.
+	// Inode change time is not creation time and can change after metadata updates.
 	stat, ok := fileInfo.Sys().(*syscall.Stat_t)
 	if !ok || stat == nil {
 		return fileInfo.ModTime()

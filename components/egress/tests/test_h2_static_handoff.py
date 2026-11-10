@@ -24,6 +24,7 @@ class StaticHandoffTests(unittest.TestCase):
             harness.protocol = "h2"
             harness.scenario = "normal"
             harness.drain_seconds = 8
+            harness.barrier_release_path = root / "release-pre-admission"
             harness.ipc = object.__new__(LiveRuntimeHarness)
             harness.ipc.socket_path = str(root / "receiver.sock")
             harness.socket_path = harness.ipc.socket_path
@@ -41,6 +42,7 @@ class StaticHandoffTests(unittest.TestCase):
                 "OPENSANDBOX_UNRELATED": "untrusted",
                 "H2_PRODUCTION_OBSERVATIONS": "/untrusted",
                 "H2_PRODUCTION_SCENARIO": "untrusted",
+                "H2_PRODUCTION_BARRIER_RELEASE": "/untrusted/release",
                 "H2_PRODUCTION_UNRECOGNIZED": "untrusted",
                 "SSLKEYLOGFILE": "/untrusted/keys",
                 "MITMPROXY_SSLKEYLOGFILE": "/untrusted/keys",
@@ -68,11 +70,14 @@ class StaticHandoffTests(unittest.TestCase):
                 self.assertEqual(environment["OPENSANDBOX_EGRESS_REVISION_DRAIN_TIMEOUT_SECONDS"], "8")
                 self.assertEqual(environment["H2_PRODUCTION_OBSERVATIONS"], str(root))
                 self.assertEqual(environment["H2_PRODUCTION_SCENARIO"], "normal")
+                self.assertEqual(environment["H2_PRODUCTION_BARRIER_RELEASE"],
+                                 str(root / "release-pre-admission"))
                 self.assertEqual(environment["PATH"], "/synthetic/bin")
                 for key in inherited.keys() - {
                     "PATH", "OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS",
                     "OPENSANDBOX_EGRESS_REVISION_IPC_TOKEN",
                     "H2_PRODUCTION_OBSERVATIONS", "H2_PRODUCTION_SCENARIO",
+                    "H2_PRODUCTION_BARRIER_RELEASE",
                 }:
                     self.assertNotIn(key, environment)
                 self.assertEqual(harness.combined_ca.read_bytes(), b"proxy-ca\norigin-ca\n")

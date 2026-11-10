@@ -51,6 +51,8 @@ class SnapshotRestoreConfig:
 
     image: str | None = None
     backend: str | None = None
+    # Source sandbox's per-sandbox limits, replayed on restore.
+    limits: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

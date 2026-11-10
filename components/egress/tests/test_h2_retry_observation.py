@@ -52,16 +52,30 @@ class RetryObservationTest(unittest.TestCase):
         # Even a post-ACK event is stale when it precedes this new command.
         self.assertIsNone(runner.go_fence_event([good], 7, 201))
 
-    def test_manual_and_both_go_denominators_remain_separate_not_run(self):
+    def test_manual_barrier_and_go_denominators_remain_separate_not_run(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(0, runner.main(["--list"]))
         value = json.loads(output.getvalue())
         self.assertEqual("NOT_RUN", value["status"])
-        self.assertEqual(15, len(value["manual_denominator"]))
-        self.assertEqual(["go_retry", "go_retry_bounded_old"], value["optional_client_cases"])
-        self.assertIn("old never finishes", value["go_scope"]["go_retry_bounded_old"])
-        self.assertIn("outlasts", value["go_scope"]["go_retry_bounded_old"])
+        self.assertEqual(16, len(value["manual_denominator"]))
+        self.assertEqual(15, len(value["manual_peer_stress_denominator"]))
+        self.assertEqual(1, len(value["real_runtime_cases"]))
+        self.assertEqual(
+            ["go_retry", "go_retry_bounded_old",
+             "go_early_notice_h1_origin", "go_early_notice_h2_origin"],
+            value["optional_client_cases"],
+        )
+        self.assertEqual(
+            20,
+            len(value["manual_peer_stress_denominator"])
+            + len(value["real_runtime_cases"])
+            + len(value["optional_client_cases"]),
+        )
+        self.assertIn("not a candidate gate after early GOAWAY",
+                      value["go_scope"]["go_retry"])
+        self.assertIn("does not prove arbitrary held-old migration",
+                      value["go_scope"]["go_retry_bounded_old"])
 
     def test_bounded_success_cannot_promote_held_old_failure(self):
         cases = [{"case": name, "status": "PASS"} for name in runner.CASES]
@@ -70,17 +84,40 @@ class RetryObservationTest(unittest.TestCase):
         summary = runner.summarize_results(cases, [item["case"] for item in cases])
         self.assertEqual("FAIL", summary["status"])
         groups = summary["denominator_summaries"]
-        self.assertEqual({"manual_peer", "go_held_old", "go_bounded_old"}, set(groups))
-        self.assertEqual(15, groups["manual_peer"]["denominator"])
-        self.assertEqual("PASS", groups["manual_peer"]["status"])
-        self.assertEqual(1, groups["go_held_old"]["denominator"])
-        self.assertEqual("FAIL", groups["go_held_old"]["status"])
-        self.assertEqual(1, groups["go_held_old"]["counts"]["FAIL"])
-        self.assertEqual("PASS", groups["go_bounded_old"]["status"])
+        self.assertEqual({
+            "manual_peer_late_goaway_stress",
+            "real_live_runtime_pre_admission_barrier",
+            "candidate_acceptance",
+            "go_delayed_held_old_diagnostic_not_candidate_gate",
+            "go_bounded_old_diagnostic_not_candidate_gate",
+            "go_early_notice_h1_origin",
+            "go_early_notice_h2_origin",
+        }, set(groups))
+        manual = groups["manual_peer_late_goaway_stress"]
+        self.assertEqual(15, manual["denominator"])
+        self.assertEqual("PASS", manual["status"])
+        barrier = groups["real_live_runtime_pre_admission_barrier"]
+        self.assertEqual(1, barrier["denominator"])
+        self.assertEqual("PASS", barrier["status"])
+        candidate = groups["candidate_acceptance"]
+        self.assertEqual(3, candidate["denominator"])
+        self.assertEqual("NOT_RUN", candidate["status"])
+        self.assertEqual(
+            {"PASS": 1, "FAIL": 0, "BLOCKED": 0, "NOT_RUN": 2},
+            candidate["counts"],
+        )
+        delayed_group = groups["go_delayed_held_old_diagnostic_not_candidate_gate"]
+        self.assertEqual("FAIL", delayed_group["status"])
+        self.assertEqual(1, delayed_group["counts"]["FAIL"])
+        bounded_group = groups["go_bounded_old_diagnostic_not_candidate_gate"]
+        self.assertEqual("PASS", bounded_group["status"])
+        self.assertEqual(1, bounded_group["counts"]["PASS"])
         cases[-2]["status"] = "NOT_RUN"
         summary = runner.summarize_results(cases, [item["case"] for item in cases])
         self.assertEqual("NOT_RUN", summary["status"])
-        self.assertEqual(1, summary["denominator_summaries"]["go_held_old"]["counts"]["NOT_RUN"])
+        delayed = summary["denominator_summaries"]["go_delayed_held_old_diagnostic_not_candidate_gate"]
+        self.assertEqual(1, delayed["counts"]["NOT_RUN"])
+        self.assertEqual(3, summary["denominator_summaries"]["candidate_acceptance"]["denominator"])
 
     def exercise_go_observation(self, *, bounded, cleanup_fails=False):
         """Drive the real wrapper with memory-only child output and controls."""

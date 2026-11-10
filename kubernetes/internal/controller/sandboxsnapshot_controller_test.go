@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
@@ -54,9 +55,10 @@ func newTestSnapshotReconciler(objs ...client.Object) *SandboxSnapshotReconciler
 		Build()
 
 	return &SandboxSnapshotReconciler{
-		Client:   fakeClient,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:    fakeClient,
+		APIReader: fakeClient,
+		Scheme:    scheme,
+		Recorder:  record.NewFakeRecorder(10),
 	}
 }
 
@@ -166,6 +168,244 @@ func TestSandboxSnapshotHandleCommitting_PersistsImageDigestsFromTerminationMess
 	require.Len(t, updated.Status.Containers, 2)
 	assert.Equal(t, "sha256:main", updated.Status.Containers[0].ImageDigest)
 	assert.Equal(t, "sha256:sidecar", updated.Status.Containers[1].ImageDigest)
+}
+
+func TestSandboxSnapshotHandleCommitting_RootfsCommitWithoutResultFails(t *testing.T) {
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot",
+			Namespace: "default",
+		},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseCommitting,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry/test-main:tag"},
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot-commit",
+			Namespace: "default",
+		},
+		Status: batchv1.JobStatus{
+			Succeeded: 1,
+		},
+	}
+
+	r := newTestSnapshotReconciler(snapshot, job)
+
+	result, err := r.handleCommitting(context.Background(), snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	updated := &sandboxv1alpha1.SandboxSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-snapshot", Namespace: "default"}, updated))
+	assert.Equal(t, sandboxv1alpha1.SandboxSnapshotPhaseFailed, updated.Status.Phase)
+
+	failedCond := findSnapshotCondition(updated.Status.Conditions, sandboxv1alpha1.SandboxSnapshotConditionFailed)
+	require.NotNil(t, failedCond)
+	assert.Equal(t, sandboxv1alpha1.ConditionTrue, failedCond.Status)
+	assert.Equal(t, "CommitResultUnavailable", failedCond.Reason)
+	assert.Contains(t, failedCond.Message, "main")
+}
+
+func TestSandboxSnapshotHandleCommitting_RootfsCommitWithIncompleteResultFails(t *testing.T) {
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot",
+			Namespace: "default",
+		},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseCommitting,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry/test-main:tag"},
+				{ContainerName: "sidecar", ImageURI: "registry/test-sidecar:tag"},
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot-commit",
+			Namespace: "default",
+		},
+		Status: batchv1.JobStatus{
+			Succeeded: 1,
+		},
+	}
+	commitPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot-commit-abcde",
+			Namespace: "default",
+			Labels: map[string]string{
+				"job-name": "test-snapshot-commit",
+			},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: commitJobContainerName,
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 0,
+							Message:  `{"containers":[{"name":"main","image":"registry/test-main:tag","digest":"sha256:main"}]}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newTestSnapshotReconciler(snapshot, job, commitPod)
+
+	result, err := r.handleCommitting(context.Background(), snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	updated := &sandboxv1alpha1.SandboxSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-snapshot", Namespace: "default"}, updated))
+	assert.Equal(t, sandboxv1alpha1.SandboxSnapshotPhaseFailed, updated.Status.Phase)
+
+	failedCond := findSnapshotCondition(updated.Status.Conditions, sandboxv1alpha1.SandboxSnapshotConditionFailed)
+	require.NotNil(t, failedCond)
+	assert.Equal(t, sandboxv1alpha1.ConditionTrue, failedCond.Status)
+	assert.Equal(t, "CommitResultIncomplete", failedCond.Reason)
+	assert.Contains(t, failedCond.Message, "sidecar")
+}
+
+func TestSandboxSnapshotHandleCommitting_RootfsCommitWithAllDigestsSucceeds(t *testing.T) {
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot",
+			Namespace: "default",
+		},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseCommitting,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry/test-main:tag"},
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot-commit",
+			Namespace: "default",
+		},
+		Status: batchv1.JobStatus{
+			Succeeded: 1,
+		},
+	}
+	commitPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot-commit-abcde",
+			Namespace: "default",
+			Labels: map[string]string{
+				"job-name": "test-snapshot-commit",
+			},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: commitJobContainerName,
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 0,
+							Message:  `{"containers":[{"name":"main","image":"registry/test-main:tag","digest":"sha256:main"}]}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newTestSnapshotReconciler(snapshot, job, commitPod)
+
+	result, err := r.handleCommitting(context.Background(), snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	updated := &sandboxv1alpha1.SandboxSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-snapshot", Namespace: "default"}, updated))
+	assert.Equal(t, sandboxv1alpha1.SandboxSnapshotPhaseSucceed, updated.Status.Phase)
+	require.Len(t, updated.Status.Containers, 1)
+	assert.Equal(t, "sha256:main", updated.Status.Containers[0].ImageDigest)
+}
+
+func TestSandboxSnapshotHandleCommitting_StaleCacheReadsResultFromAPIServer(t *testing.T) {
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot",
+			Namespace: "default",
+		},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseCommitting,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry/test-main:tag"},
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot-commit",
+			Namespace: "default",
+		},
+		Status: batchv1.JobStatus{
+			Succeeded: 1,
+		},
+	}
+	commitPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot-commit-abcde",
+			Namespace: "default",
+			Labels: map[string]string{
+				"job-name": "test-snapshot-commit",
+			},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: commitJobContainerName,
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 0,
+							Message:  `{"containers":[{"name":"main","image":"registry/test-main:tag","digest":"sha256:main"}]}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newTestSnapshotReconciler(snapshot, job, commitPod)
+	live := r.Client.(client.WithWatch)
+	// The informer cache has not observed the commit Pod yet, while the API
+	// server already holds its termination message.
+	r.Client = interceptor.NewClient(live, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error { return nil },
+	})
+
+	result, err := r.handleCommitting(context.Background(), snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	updated := &sandboxv1alpha1.SandboxSnapshot{}
+	require.NoError(t, live.Get(context.Background(), types.NamespacedName{Name: "test-snapshot", Namespace: "default"}, updated))
+	assert.Equal(t, sandboxv1alpha1.SandboxSnapshotPhaseSucceed, updated.Status.Phase)
+	require.Len(t, updated.Status.Containers, 1)
+	assert.Equal(t, "sha256:main", updated.Status.Containers[0].ImageDigest)
+}
+
+func findSnapshotCondition(conditions []sandboxv1alpha1.SandboxSnapshotCondition, conditionType sandboxv1alpha1.SandboxSnapshotConditionType) *sandboxv1alpha1.SandboxSnapshotCondition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
 }
 
 func TestUpdateSnapshotStatus_DoesNotDowngradeSucceededSnapshot(t *testing.T) {

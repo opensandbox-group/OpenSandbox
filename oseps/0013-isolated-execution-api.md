@@ -183,7 +183,7 @@ execd proxies filesystem operations outside the bwrap namespace, simulating the 
 | Mount order sensitivity — argv builder is a bug-prone area | Fixed segment order with unit test coverage for every segment |
 | seccomp blocklist only — does not prevent 0-day syscalls | Defense-in-depth; primary boundary remains namespace isolation |
 | No per-execution cgroup — CPU/memory/pids quota falls to outer Pod | Accept for v1; cgroup wrapper planned for v2 |
-| gVisor mount restrictions — commit unavailable | Capabilities endpoint marks `commit_supported = false`; diff and isolated execution still work |
+| Mount restrictions — commit unavailable | Capabilities endpoint marks `commit_supported = false`; diff and isolated execution still work |
 | Overlay upper not persistent across Pods | Upper lives on Pod filesystem; cross-Pod persistence requires caller-side upload to object storage |
 
 ## Design Details
@@ -341,7 +341,7 @@ AWS_*, ALI_*, ALIYUN_*, K8S_*, KUBE_*
 
 - `available = false`: all `/v1/isolated/*` write operations return `503 Service Unavailable`. Callers should fall back to the existing API or error. **SDK does not silently fall back.**
 - `persist.available = false`: `--isolation-upper-root` emptyDir not mounted. diff/commit/`persist.enabled=true` unavailable; isolated execution still works (upper on tmpfs).
-- `commit_supported = false`: no mount permission (typical in gVisor). diff still works; commit returns 503.
+- `commit_supported = false`: no mount permission (can be caused by missing `CAP_SYS_ADMIN` or a restrictive seccomp/AppArmor profile). diff still works; commit returns 503.
 
 ### 6. Isolator Interface
 
@@ -434,7 +434,7 @@ Handles whiteout (character device 0,0 → delete corresponding workspace path) 
 
 v1 supports only `strategy = overwrite`. `skip-existing`, `fail-on-conflict`, and selective commit (path whitelist) are deferred to v2.
 
-gVisor typically cannot mount overlayfs — commit is marked `commit_supported = false` in capabilities; diff and isolated execution remain available.
+Where overlayfs cannot be mounted (either missing `CAP_SYS_ADMIN` or a restrictive seccomp/AppArmor profile), commit is marked `commit_supported = false` in capabilities; diff and isolated execution remain available.
 
 Diff output: `GET .../diff` streams tar.gz via `Transfer-Encoding: chunked`. execd flag `--isolation-diff-max-bytes` (default 4 GiB) rejects oversized downloads with 413.
 
@@ -528,7 +528,7 @@ Cost: execd binary grows by ~800KB (negligible).
 - `/tmp` isolation: files written to `/tmp` in one session are invisible to another.
 - Filesystem proxy: upload → download round-trip through overlay; delete creates whiteout; search merges upper + lower.
 - `persist.enabled = false`: upper destroyed on session close; diff returns 404.
-- `commit_supported = false` (simulated gVisor): commit returns 503; diff works.
+- `commit_supported = false` (simulated mount denial): commit returns 503; diff works.
 - Multi-session: two concurrent sessions have independent namespaces.
 - Idle GC: session auto-destroyed after timeout; `run` resets timer.
 
@@ -565,7 +565,7 @@ cgroup provides resource limits but not filesystem or PID isolation. bwrap names
 
 bwrap natively supports `--unshare-user` with `--uid`/`--gid` for user namespace UID mapping. This would allow execd to run as non-root. Rejected because:
 
-- Nested user namespaces require CRI/runtime support (`user.max_user_namespaces`, runtime seccomp profiles allowing `clone(CLONE_NEWUSER)`). gVisor and hardened runtimes often restrict this.
+- Nested user namespaces require CRI/runtime support (`user.max_user_namespaces`, runtime seccomp profiles allowing `clone(CLONE_NEWUSER)`). Hardened runtimes often restrict this.
 - User namespace UID mapping is virtual — all sessions map to the same host UID, so file permissions do not provide real isolation between sessions.
 - Real setuid provides stronger guarantees: different sessions have different host UIDs, so file permission checks are enforced by the kernel at the host level.
 - The tradeoff (execd must run as root) is acceptable because execd already runs in a dedicated sandbox container, not on shared infrastructure.

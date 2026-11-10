@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -109,6 +110,8 @@ type Config struct {
 	// private socket parent and must not reuse this configuration after the
 	// child exits. Nil keeps the receiver disabled and removes inherited values.
 	RevisionIPC *RevisionIPCConfig
+	// SubjectRevisionIPC selects the independent shared-process installation receiver.
+	SubjectRevisionIPC *SubjectRevisionIPCConfig
 }
 
 // RevisionIPCConfig is handed only to the mitmdump child. The bearer token is
@@ -128,6 +131,88 @@ type RevisionIPCConfig struct {
 	TLSCapacity         int
 	RequestCapacity     int
 	DrainTimeoutSeconds int
+}
+
+// SubjectRevisionScriptPath is the bundled installation-only shared receiver addon.
+const SubjectRevisionScriptPath = "/var/egress/mitmscripts/subject_runtime.py"
+
+const subjectRevisionEnvPrefix = "OPENSANDBOX_EGRESS_SUBJECT_REVISION_"
+
+// SubjectRevisionIPCConfig is an internal handoff, never an operator setting.
+// It deliberately has no single SubjectGeneration or live admission fields.
+type SubjectRevisionIPCConfig struct {
+	SocketPath            string
+	SessionToken          string
+	ControlGeneration     string
+	MaxSubjects           int
+	MaxSnapshotBytes      int
+	RetainedPayloadBudget int64
+}
+
+func validateSubjectRevisionIPCConfig(cfg Config) error {
+	subject := cfg.SubjectRevisionIPC
+	if subject == nil {
+		return nil
+	}
+	if cfg.RevisionIPC != nil || !filepath.IsAbs(subject.SocketPath) ||
+		strings.IndexByte(subject.SocketPath, 0) >= 0 || len(subject.SocketPath) > 103 ||
+		!validRevisionIPCToken(subject.SessionToken) || !validRevisionIPCGeneration(subject.ControlGeneration) ||
+		subject.MaxSubjects <= 0 || subject.MaxSnapshotBytes <= 0 ||
+		int64(subject.MaxSubjects) > math.MaxInt64/2/int64(subject.MaxSnapshotBytes) ||
+		subject.RetainedPayloadBudget < 2*int64(subject.MaxSubjects)*int64(subject.MaxSnapshotBytes) {
+		return errInvalidRevisionIPCConfig
+	}
+	count := 0
+	for _, path := range cfg.ScriptPaths {
+		if path == SubjectRevisionScriptPath {
+			count++
+		}
+	}
+	if count != 1 {
+		return errInvalidRevisionIPCConfig
+	}
+	return nil
+}
+
+// WithSubjectRevision returns an owned launch config; the template is reusable
+// only without its per-child session. The system addon receives no v1 bundle.
+func WithSubjectRevision(cfg Config, handoff SubjectRevisionIPCConfig) (Config, error) {
+	if cfg.RevisionIPC != nil || cfg.SubjectRevisionIPC != nil {
+		return Config{}, errInvalidRevisionIPCConfig
+	}
+	cfg.ScriptPaths = append(append([]string(nil), cfg.ScriptPaths...), SubjectRevisionScriptPath)
+	cfg.SubjectRevisionIPC = &handoff
+	if err := validateSubjectRevisionIPCConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Nil subject configuration delegates verbatim to the existing sidecar builder.
+func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
+	env := buildMitmdumpEnv(base, home, cfg.RevisionIPC)
+	if cfg.SubjectRevisionIPC == nil {
+		// Preserve inherited OPENSANDBOX_EGRESS_SUBJECT_REVISION_* values
+		// intentionally: the disabled path has no reader for this prefix.
+		return env
+	}
+	clean := make([]string, 0, len(env)+7)
+	for _, value := range env {
+		name, _, _ := strings.Cut(value, "=")
+		if !strings.HasPrefix(name, subjectRevisionEnvPrefix) {
+			clean = append(clean, value)
+		}
+	}
+	s := cfg.SubjectRevisionIPC
+	return append(clean,
+		subjectRevisionEnvPrefix+"MODE=subject-v2",
+		subjectRevisionEnvPrefix+"SOCKET="+s.SocketPath,
+		subjectRevisionEnvPrefix+"TOKEN="+s.SessionToken,
+		subjectRevisionEnvPrefix+"CONTROL_GENERATION="+s.ControlGeneration,
+		subjectRevisionEnvPrefix+"MAX_SUBJECTS="+strconv.Itoa(s.MaxSubjects),
+		subjectRevisionEnvPrefix+"MAX_SNAPSHOT_BYTES="+strconv.Itoa(s.MaxSnapshotBytes),
+		subjectRevisionEnvPrefix+"RETAINED_PAYLOAD_BUDGET="+strconv.FormatInt(s.RetainedPayloadBudget, 10),
+	)
 }
 
 // Running: child mitmdump; use GracefulShutdown to SIGTERM+reap before process exit.
@@ -170,6 +255,9 @@ func Launch(cfg Config) (*Running, error) {
 	if err := validateRevisionIPCConfig(cfg.RevisionIPC); err != nil {
 		return nil, err
 	}
+	if err := validateSubjectRevisionIPCConfig(cfg); err != nil {
+		return nil, err
+	}
 	uname := cfg.UserName
 	if strings.TrimSpace(uname) == "" {
 		uname = RunAsUser
@@ -194,7 +282,7 @@ func Launch(cfg Config) (*Running, error) {
 	}
 	// HOME determines mitm's confdir (~/.mitmproxy) which holds both the CA
 	// and the baked-in config.yaml.
-	cmd.Env = buildMitmdumpEnv(os.Environ(), home, cfg.RevisionIPC)
+	cmd.Env = buildMitmdumpChildEnv(os.Environ(), home, cfg)
 
 	if err := cmd.Start(); err != nil {
 		_ = mitmIn.Close()

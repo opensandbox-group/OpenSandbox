@@ -15,6 +15,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 function exportedDeclarationNames(declarations) {
   const names = new Set(
@@ -33,11 +35,46 @@ function exportedDeclarationNames(declarations) {
   return names;
 }
 
-test("public type declarations export credential substitution models", async () => {
+test("public type declarations export stable models", async () => {
   const declarations = await readFile(new URL("../dist/index.d.ts", import.meta.url), "utf8");
 
   assert.match(declarations, /\bCredentialSubstitution\b/);
   assert.match(declarations, /\bCredentialSubstitutionSurface\b/);
+});
+
+test("legacy filesystem adapters remain assignable to the public filesystem interface", () => {
+  const filename = fileURLToPath(new URL("./filesystem-compatibility.mts", import.meta.url));
+  const source = `
+    import type { ByteRange, ReadBytesResponse, ReadBytesStream, Sandbox, SandboxFiles } from "../dist/index.js";
+    type LegacyFiles = Omit<SandboxFiles, "readBytesDetailed" | "readBytesStreamDetailed">;
+    function configure(files: LegacyFiles): Sandbox["files"] { return files; }
+    async function download(files: SandboxFiles) {
+      if (files.readBytesDetailed && files.readBytesStreamDetailed) {
+        await files.readBytesDetailed("/data.bin");
+        const response: ReadBytesResponse<ReadBytesStream> = await files.readBytesStreamDetailed("/data.bin");
+        const range: ByteRange | undefined = response.contentRange;
+        await response.body.close();
+      }
+    }
+  `;
+  const options = {
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  };
+  const host = ts.createCompilerHost(options);
+  const getSourceFile = host.getSourceFile;
+  host.getSourceFile = (path, ...args) => path === filename
+    ? ts.createSourceFile(path, source, options.target, true)
+    : getSourceFile(path, ...args);
+  const program = ts.createProgram([filename], options, host);
+  const errors = ts.getPreEmitDiagnostics(program).map(
+    (diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
+  );
+  assert.deepEqual(errors, []);
 });
 
 test("public type declarations export lifecycle models", async () => {

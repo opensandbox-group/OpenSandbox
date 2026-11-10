@@ -91,6 +91,10 @@ def _is_valid_label_value(value: str) -> bool:
     return bool(LABEL_VALUE_RE.fullmatch(value))
 
 
+is_valid_label_key = _is_valid_label_key
+is_valid_label_value = _is_valid_label_value
+
+
 def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
     """
     Validate metadata keys/values against Kubernetes label rules.
@@ -423,7 +427,7 @@ def ensure_valid_host_path(
         norm_path = _normalize_prefix_path(path)
         is_allowed = any(
             norm_path == _normalize_prefix_path(prefix)
-            or norm_path.startswith(_normalize_prefix_path(prefix) + "/")
+            or norm_path.startswith(_normalize_prefix_path(prefix).rstrip("/") + "/")
             for prefix in allowed_prefixes
         )
         if not is_allowed:
@@ -611,10 +615,7 @@ def ensure_egress_runtime_compatible(
     effective_runtime_class: Optional[str] = None,
 ) -> None:
     """
-    Reject network_policy when the secure runtime lacks iptables nat table support.
-
-    gVisor's netstack does not implement the iptables nat table, which the egress
-    sidecar requires for DNS redirect (REDIRECT target on port 53).
+    Reject network_policy when the secure runtime cannot run the egress sidecar.
     """
     if not network_policy:
         return
@@ -632,7 +633,7 @@ def ensure_egress_runtime_compatible(
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
                 "message": (
                     f"networkPolicy is not compatible with runtime '{runtime_type}': "
-                    f"gVisor does not support the iptables nat table required by the egress sidecar. "
+                    f"gVisor does not support the nftables rules required by the egress sidecar. "
                     f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
                 ),
             },

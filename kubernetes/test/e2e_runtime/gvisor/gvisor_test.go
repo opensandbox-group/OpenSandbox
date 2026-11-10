@@ -139,7 +139,7 @@ spec:
 			}
 		})
 
-		It("should fail to start the egress sidecar under gVisor due to missing iptables nat table", func() {
+		It("should fail to start the egress sidecar under gVisor due to missing nftables support", func() {
 			egressImage := os.Getenv("EGRESS_IMG")
 			if egressImage == "" {
 				Skip("EGRESS_IMG not set; skipping gVisor + egress incompatibility test")
@@ -187,7 +187,7 @@ spec:
 				g.Expect(output).NotTo(Equal("0"), "egress container should exit with non-zero code")
 			}, 2*time.Minute).Should(Succeed())
 
-			By("verifying egress logs mention iptables nat failure")
+			By("verifying egress logs mention the nftables failure")
 			output, err := runKubectl("logs", podName, "-n", testNamespace, "-c", "egress")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(SatisfyAny(

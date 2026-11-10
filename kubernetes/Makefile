@@ -186,7 +186,7 @@ setup-gvisor: download-gvisor ## Set up Kind cluster with gVisor (runsc) for e2e
 		"$(KIND)" create cluster --config -
 	@echo "Creating runsc.toml on Kind nodes..."
 	@for node in $$(docker ps --filter "name=$(GVISOR_KIND_CLUSTER)-" --format "{{.Names}}"); do \
-		docker exec $$node sh -c 'mkdir -p /etc/containerd && echo "[runsc]" > /etc/containerd/runsc.toml && echo "  platform = \"ptrace\"" >> /etc/containerd/runsc.toml'; \
+		docker exec $$node sh -c 'mkdir -p /etc/containerd && echo "[runsc_config]" > /etc/containerd/runsc.toml'; \
 	done
 
 .PHONY: cleanup-gvisor

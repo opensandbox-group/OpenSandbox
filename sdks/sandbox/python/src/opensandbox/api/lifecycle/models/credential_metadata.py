@@ -29,7 +29,7 @@ class CredentialMetadata:
     """
     Attributes:
         name (str):
-        source_type (str):
+        source_type (str): Credential source kind (`inline` or `exchange`).
         revision (int): Revision that last touched this record. Fsb stamps records with
             the read revision (the relay surface does not carry per-record
             revisions); other backends track per-record revisions.

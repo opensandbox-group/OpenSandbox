@@ -259,9 +259,12 @@ async def _connect_and_stream(
     stdout_write: WriteFn,
     get_size: SizeFn,
     error_write: WriteFn | None = None,
+    on_connected: Callable[[], None] | None = None,
 ) -> tuple[int | None, list[str]]:
     """Connect to the PTY WebSocket, drive the relay loop, handle resize."""
     async with websockets.connect(ws_url, additional_headers=headers or None) as ws:
+        if on_connected is not None:
+            on_connected()
         # websockets forbids concurrent sends: stdin frames and SIGWINCH
         # resize frames share one lock, and fire-and-forget resize tasks get
         # their results consumed so failures never surface as task warnings.
@@ -364,6 +367,12 @@ def terminal(
     exit_code: int | None = None
     errors: list[str] = []
     teardown = False
+    connected = False
+
+    def mark_connected() -> None:
+        nonlocal connected
+        connected = True
+
     try:
         with _raw_mode(stdin_fd):
             exit_code, errors = asyncio.run(
@@ -374,6 +383,7 @@ def terminal(
                     stdout_write=stdout_write,
                     get_size=get_size,
                     error_write=report_error,
+                    on_connected=mark_connected,
                 )
             )
         teardown = exit_code is not None or bool(errors)
@@ -385,9 +395,10 @@ def terminal(
         raise click.ClickException(f"Terminal connection failed: {exc}") from exc
     finally:
         # Clean exit tears the session down, as does a reported failure (e.g.
-        # START_FAILED: the shell never ran, so there is nothing to preserve).
-        # A lost connection on a live shell is the one case worth keeping.
-        if teardown:
+        # START_FAILED: the shell never ran, so there is nothing to preserve)
+        # or a WebSocket that never opened (the shell starts on the first
+        # one). A lost connection on a live shell is the one case worth keeping.
+        if teardown or not connected:
             _delete_pty_session(http_base, headers, session_id, timeout=timeout)
 
     if exit_code is None:

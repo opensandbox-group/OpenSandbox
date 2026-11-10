@@ -70,6 +70,31 @@ func startFastSandboxMitmproxyIfEnabled(gate *mitmproxy.HealthGate) (*mitmTransp
 		UserName:    mitmproxy.RunAsUser,
 		ScriptPaths: parseScriptPaths(os.Getenv(constants.EnvMitmproxyScript)),
 	}
+	// Keep the legacy launch path byte-for-byte when the experiment is off.
+	subjectOwner, err := newFastSandboxSubjectLaunchOwner(
+		constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)), int(mpUID), int(mpGID))
+	if err != nil {
+		return nil, fmt.Errorf("configure subject receiver: %w", err)
+	}
+	if subjectOwner != nil {
+		m := &mitmTransparent{
+			port: mpPort, uid: mpUID, cfg: cfg, subjectOwner: subjectOwner,
+			restartCh: make(chan exitEvent, 64), shutdownCh: make(chan struct{}), watchDone: make(chan struct{}),
+		}
+		err := m.startInitial(context.Background(), defaultMitmLaunchDependencies(), func() error {
+			if err := mitmproxy.VerifyConfdirPinnedCA(confDir, fp); err != nil {
+				gate.MarkDown(fmt.Sprintf("confdir CA mismatch: %v", err))
+				return fmt.Errorf("pinned CA consistency check: %w", err)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		log.Infof("fast-sandbox mitmproxy: shared listener with installation-only subject receiver (fingerprint %s)", fp)
+		return m, nil
+	}
+
 	restartCh := make(chan exitEvent, 64)
 	shutdownCh := make(chan struct{})
 	const initialGen uint64 = 1
@@ -126,7 +151,10 @@ func startFastSandboxActiveSocket(ctx context.Context, srv *fastSandboxPolicySer
 		log.Fatalf("lookup credential proxy user %q: %v (ensure this user exists in the image)", mitmproxy.RunAsUser, err)
 	}
 	socketPath := fastSandboxActiveSocketPath()
-	activeSrv, cleanup, err := credentialvault.StartActiveSocketServerRequestAware(srv.handleCredentialVaultActive, socketPath, int(mitmGID))
+	activeSrv, cleanup, err := credentialvault.StartActiveSocketServerRequestAware(
+		srv.handleCredentialVaultActive,
+		credentialvault.NewResolveHandler(srv.resolveVaultAccess),
+		socketPath, int(mitmGID))
 	if err != nil {
 		log.Fatalf("credential vault active socket: %v", err)
 	}

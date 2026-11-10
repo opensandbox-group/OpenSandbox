@@ -130,11 +130,14 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
 
 # Python mitmproxy (transparent mode): mitmdump runs as user mitmproxy; iptables skips this uid.
 # /var/lib/mitmproxy is mitm's home, used as the confdir (CA + config.yaml live under .mitmproxy/).
+# Optional PyPI index for restricted build networks (e.g.
+# https://mirrors.aliyun.com/pypi/simple/); empty keeps the default index.
+ARG PIP_INDEX_URL=
 COPY components/egress/requirements-mitmproxy.txt /tmp/requirements-mitmproxy.txt
 RUN useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy \
     && mkdir -p /var/lib/mitmproxy/.mitmproxy \
     && chown -R mitmproxy:mitmproxy /var/lib/mitmproxy \
-    && pip3 install --no-cache-dir --break-system-packages \
+    && PIP_INDEX_URL="${PIP_INDEX_URL}" pip3 install --no-cache-dir --break-system-packages \
         -r /tmp/requirements-mitmproxy.txt \
     && (command -v mitmdump && mitmdump --version) \
     && mkdir -p /var/egress/mitmscripts

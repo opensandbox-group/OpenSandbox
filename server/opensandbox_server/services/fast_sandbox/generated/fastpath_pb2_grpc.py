@@ -173,7 +173,7 @@ class FastPathServiceServicer:
 
     def CreateSandboxSnapshot(self, request, context):
         """CreateSandboxSnapshot snapshots a running Sandbox and publishes the
-        artifact set to the artifact store under the snapshot's template name.
+        artifact set to the native artifact store or an OCI registry.
         It returns after the intent is persisted and the snapshot is triggered;
         completion is observed via GetSandboxSnapshot.
         """

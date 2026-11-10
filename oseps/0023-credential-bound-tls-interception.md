@@ -34,6 +34,7 @@ Tracking issue: [#1713](https://github.com/opensandbox-group/OpenSandbox/issues/
   - [Concurrency](#concurrency)
   - [Failure Semantics](#failure-semantics)
   - [Sidecar and Fast Sandbox Profiles](#sidecar-and-fast-sandbox-profiles)
+    - [Fast Sandbox integration contract](#fast-sandbox-integration-contract)
   - [SNI, ECH, and Destination Identity](#sni-ech-and-destination-identity)
   - [Security and Privacy Model](#security-and-privacy-model)
   - [Observability](#observability)
@@ -393,6 +394,63 @@ The decision registry contains only live decrypted connections, including those 
 Replace the fixed 65,536/1,024 ceilings with operator-configured finite process and per-subject budgets. Both may be raised or lowered within the provisioned memory budget. Before selecting release defaults, benchmarks must measure incremental bytes per entry, peak handshake/drain overhead, expected bound connections per subject, and process memory headroom. The global budget must cover the intended concurrency: 4,096 subjects at 32 bound connections require at least 131,072 entries plus measured headroom. Any oversubscription must be explicit; a per-subject limit is not a reserved allocation.
 
 On exhaustion, immediately close a new bound connection before TLS termination; the client observes connection termination, not an indefinite timeout. Existing tracked connections and new opaque connections continue. Emit `registry_exhausted`, occupancy, and configured-budget metrics using bounded labels. Sustained exhaustion is a paging-worthy bound-HTTPS availability signal; operators increase provisioned budget or reduce workload concurrency. Limits and defaults are deployment controls, not a new sandbox-user API.
+
+#### Fast Sandbox integration contract
+
+The subject fence, durable owner lifecycle, and Vault persistence contract are owned by [OSEP-0022's strict ownership domain (Actions v2)](0022-multi-sandbox-egress-control-plane.md#strict-ownership-domain-actions-v2). This OSEP consumes subject identity for decision installation and eventual TLS admission; neither source IP nor the revision receiver becomes an owner authority. The legacy Actions v1 lifecycle remains a separate domain with different rebind and slot-release semantics.
+
+**Implementation boundary:** the current subject-scoped Go/Python IPC is installation-only and has no production Fast Sandbox caller. The shared Fast Sandbox launcher does not yet supply a subject revision session. The following B1 contract is planned integration work, not a claim that R4/R9 or shared-live TLS isolation already works. Register creates known/uninstalled state; it does not install even an empty snapshot. Unload closes only an installation owner, whose admission is permanently disabled; zero transport obligations are not evidence that live sockets were drained.
+
+**Subject identity.** B1 must derive the target in Go from the existing registered fence, using this exact encoding:
+
+```text
+SubjectKey = string(subject.FromSandboxUID(uid)) = "s-" + uid
+fenceJSON = encoding/json.Marshal([2]string{runtimeInstanceId, attachmentId})
+SubjectGeneration = lowercase_hex(SHA-256(UTF8("fsb-subject-generation/v1:") || fenceJSON))
+```
+
+`fenceJSON` is the byte output of Go `encoding/json` for the two-element string array in that order, with no extra whitespace or trailing newline; Go `encoding/json.Marshal`'s default escaping applies, including escaping `<`, `>`, `&`, U+2028, and U+2029. Concatenate the prefix bytes and JSON bytes before hashing. The result is exactly 64 lowercase hexadecimal characters. `SubjectKey` must be nonempty valid UTF-8 and at most 256 Unicode code points (including `s-`); the generation fits the IPC limit of 128 code points. Go computes the generation; Python validates the transported identity format without independently deriving it from a fence. Neither the source IP nor `specGeneration` participates. A change in either fence field changes the encoded identity; strict-domain same-UID rebind remains forbidden by 0022. Legacy rebind uses a new generation and never transfers the old installation. This mapping relies on the platform's fence uniqueness; it does not authorize fence reuse or replace exact-owner validation.
+
+**Child session and replay.** Each mitmdump child launch must receive a fresh random `controlGeneration` and a fresh authenticated process session. A child restart invalidates all old process-generation installations even when subject fences are unchanged. After the existing restart publication seam, the single lifecycle worker switches to a new client/control generation, enumerates the currently registered subjects and records Register replay under `s.mu`. Later SET intents follow replay in the same FIFO. Before sending, the worker rechecks the target against the current fence and drops stale intents; old-generation Unload targets must remain distinguishable from successor Register targets. This is process-local reconstruction for B1, not durable replay of decision snapshots. Subject-mode session/launch variants must preserve the existing sidecar `ProcessSession` and `revisionLaunchOwner` semantics.
+
+**Lifecycle intent and lock boundaries.** B1b must record intents under `s.mu` at existing state transitions, rather than call the lifecycle client from apply functions:
+
+| Transition | Intent registration point |
+|------------|---------------------------|
+| `applySetBinding` | Register only after `RegisterAndEnforce` succeeds with deny-first enforcement and the fence is published |
+| `applyRemoveBinding` | Unload only on the branch that actually completed `unloadEnforcement` and `reg.Unregister`; the three early-success branches (pending-rebind fence mismatch, registered-fence mismatch, already unregistered) record no intent |
+| `subjectRebind` | Record Unload for the old fence encoded as the old target before Register for the successor; do not derive the Unload target from the new fence |
+| `takeoverStaleSubject` | Capture evicted victims through the existing `victims` collection and defer intent registration until outside the registry callback; unload the victim generation before registering the successor |
+| Child restart | After publication, record Register replay of the current registered set as described above |
+
+One drain worker is the sole goroutine that owns `SubjectLifecycleClient`. It consumes the FIFO with an independent deadline for each command. It sends without holding `s.mu`, `policyCommitMu`, an owner stripe, or `actionGate`; handlers and the action gate never wait for `client.mu`, including through `Pending()`. Result recording takes `s.mu` and revalidates the fence, with only the `client.mu` → `s.mu` lock direction permitted. Slow IPC must not block any subject's SET/REMOVE/hooks or Vault/Policy relay. Registry callbacks must not acquire `s.mu` or send IPC.
+
+**B1 failure and readiness contract.** An indeterminate result retains the exact frozen command; the worker must Reconcile that command before allocating another lifecycle sequence, leaving later intents queued. Confirmed failures such as `subject_conflict`, `subject_failed`, and `subject_capacity_exhausted` consume their sequence, record a bounded degraded status/log outcome, and are not automatically retried in B1. Receiver/egress divergence is tolerated only for this installation-only observation stage: subject admission stays disabled, traffic remains in `all` mode, and IPC degradation alone must not block the runtime-ready or data-plane-ready hooks, and must not set the actions status `Ready` field to false. Existing readiness failures retain their effects. A new child rebuilds receiver registration from the current set. B2 must introduce repair and the acknowledged-empty readiness gate before credential-bound admission can satisfy R4; B1 readiness is not that guarantee.
+
+**Internal handoff.** The planned subject-mode selection is the `fast-sandbox` profile with the existing `OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME=true` gate. False or unset must preserve current behavior. No new operator configuration is introduced. Go must pass a subject-mode discriminator and the following internal resource envelope to the child:
+
+| Internal field | Value source |
+|----------------|--------------|
+| `max_subjects` | Reuse an existing Fast Sandbox subject-capacity constant if present; otherwise define an internal constant of 4096 |
+| `max_snapshot_bytes` | Reuse the sidecar's internal `defaultRevisionMaxSnapshotSize` (currently `8 << 20` bytes) |
+| `retained_payload_budget` | `2 × max_subjects × max_snapshot_bytes`, with overflow checks and the Python constructor's envelope constraints satisfied |
+
+These are process handoff fields derived from Go constants, not environment knobs or sandbox-user settings. B1a must load the authenticated subject IPC server and `SubjectRevisionOwner` through a subject-mode addon/session variant, without live TLS hooks. The existing single-subject sidecar handoff does not already provide this subject envelope. Installation resource bounds do not establish live connection-budget defaults or override the transport-budget requirements above.
+
+**Integration increments and acceptance.** These Fast Sandbox increments refine the existing phased plan; they do not replace it or expose the public lifecycle option early:
+
+| Increment | Deliverable and acceptance boundary | R4 / R9 relationship |
+|-----------|-------------------------------------|-----------------------|
+| B0 | Document ownership and this integration contract | Defines boundaries; no runtime acceptance |
+| B1a | Subject-mode child session, internal handoff, installation receiver, `controlGeneration`, and restart generation change; check disabled-path compatibility, receiver startup and generation format | Installation foundation only; no admission or R4/R9 parity |
+| B1b | After B1a merges, build on the new main: single drain worker and transition/replay wiring; verify exact target mapping, REMOVE early returns, rebind/takeover isolation, Reconcile ordering, degraded status and slow-IPC lock behavior | Known/uninstalled lifecycle only; no empty-snapshot or readiness guarantee |
+| B2 | Install first-create authoritative empty and per-subject Vault/Policy decision snapshots; add repair and acknowledgement-based readiness | Establishes the empty-before-ready prerequisite in R4; trusted initialization/recovery inputs remain to be designed |
+| B3 | Per-subject TLS admission and fenced dispatch | Enforces unknown-identity deny and known-identity TLS decisions in R4; contributes to R9 |
+| B4 | Transport ownership and teardown, including tracked and opaque transports before identity reuse | Establishes cross-generation connection isolation required for R9 |
+| B5 | Recovery and replay of authoritative decision state across restart | Establishes replay safety for R4 and R9 beyond B1's process-local registration replay |
+| B6 | Real shared-launcher, multi-subject TLS/rebind/recovery E2E and profile-parity acceptance | Required runtime evidence for R4/R9; installation tests alone cannot close it |
+
+**Open integration questions.** The trusted source and protocol for first-create empty intent, loss/unknown recovery, and immutable effective mode remain undecided; a missing Vault file or successful Register is insufficient. The paired fast-sandbox writer/control-plane work (FS-W), its owner and target branch, and its v2 initialization/state-token callers still require maintainer confirmation. Shared-live E2E, including subjects A/B using the same SNI, revocation/rotation, opaque teardown, and restart/replay, remains unverified. Vault v2 writer support and merged exchange work do not themselves establish those decision-snapshot interactions or R9 parity.
 
 ### SNI, ECH, and Destination Identity
 

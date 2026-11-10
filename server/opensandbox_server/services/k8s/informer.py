@@ -18,7 +18,8 @@ import logging
 import math
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from collections import deque
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from kubernetes import watch
 from kubernetes.client import ApiException
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 _WATCH_READ_TIMEOUT_BUFFER_SECONDS = 10
 _WATCH_CONNECT_TIMEOUT_SECONDS = 10
 _MAX_BACKOFF_SECONDS = 30.0
+# Per-object resourceVersions applied since the last LIST, kept so a write
+# response that arrives after its own WATCH event is recognised as observed.
+_OBSERVED_RESOURCE_VERSIONS_PER_OBJECT = 16
+# Pending-write token for a delete whose response does not carry the object.
+_DELETED = object()
 
 
 class WorkloadInformer:
@@ -77,6 +83,10 @@ class WorkloadInformer:
         self._has_synced = False
         self._last_contact_at: Optional[float] = None
         self._invalidation_generation = 0
+        # name -> {resourceVersion or _DELETED: write sequence number}
+        self._pending_writes: Dict[str, Dict[Any, int]] = {}
+        self._observed_resource_versions: Dict[str, Deque[str]] = {}
+        self._write_sequence = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -104,16 +114,25 @@ class WorkloadInformer:
     def get_if_synced(self, name: str) -> Optional[Dict[str, Any]]:
         """Return a cached object only while the cache is safe to publish."""
         with self._lock:
-            if not self._cache_is_available():
+            if not self._cache_is_available() or name in self._pending_writes:
                 return None
             return self._cache.get(name)
 
     def list_if_synced(self) -> Optional[List[Dict[str, Any]]]:
         """Return a cache snapshot, or None when callers must use the live API."""
         with self._lock:
-            if not self._cache_is_available():
+            if not self._cache_is_available() or self._has_unobserved_writes():
                 return None
             return list(self._cache.values())
+
+    def _has_unobserved_writes(self) -> bool:
+        """Return whether a snapshot could miss a completed write. Caller must hold ``_lock``."""
+        for name, tokens in self._pending_writes.items():
+            # A pending delete of an object already absent from the cache
+            # cannot make a snapshot stale.
+            if name in self._cache or any(token is not _DELETED for token in tokens):
+                return True
+        return False
 
     def _cache_is_available(self) -> bool:
         """Return whether cache reads are publishable. Caller must hold ``_lock``."""
@@ -161,7 +180,10 @@ class WorkloadInformer:
         return unsubscribe
 
     def invalidate(self) -> None:
-        """Make the published cache unavailable after a successful direct mutation.
+        """Make the published cache unavailable after a mutation it cannot track per object.
+
+        Used for writes made by an external control plane and for write
+        responses that do not identify the written object.
 
         The cached objects and watch cursor remain owned exclusively by LIST/WATCH.
         A generation change also prevents an in-flight LIST from publishing a
@@ -170,6 +192,65 @@ class WorkloadInformer:
         with self._lock:
             self._invalidation_generation += 1
             self._has_synced = False
+
+    def track_write(self, response: Any) -> None:
+        """Bypass the cache for one object until WATCH or LIST reflects a write.
+
+        ``response`` is the object returned by a successful create or patch.
+        Its resourceVersion is only compared for equality with WATCH and LIST
+        state, and never written into the cache. Other objects stay cached.
+        """
+        metadata = response.get("metadata") if isinstance(response, dict) else None
+        name = metadata.get("name") if isinstance(metadata, dict) else None
+        resource_version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
+        if not name or not resource_version:
+            self.invalidate()
+            return
+        self._add_pending_write(name, resource_version)
+
+    def track_delete(self, name: str, response: Any) -> None:
+        """Bypass the cache for one object until WATCH or LIST reflects a delete.
+
+        A delete that returns the object (for example one held by finalizers)
+        is confirmed by its resourceVersion; any other response waits for the
+        object's DELETED event.
+        """
+        metadata = response.get("metadata") if isinstance(response, dict) else None
+        if (
+            isinstance(metadata, dict)
+            and metadata.get("name") == name
+            and metadata.get("resourceVersion")
+        ):
+            self._add_pending_write(name, metadata["resourceVersion"])
+        else:
+            self._add_pending_write(name, _DELETED)
+
+    def _add_pending_write(self, name: str, token: Any) -> None:
+        with self._lock:
+            self._write_sequence += 1
+            # The WATCH event may have been applied before the write returned;
+            # a no-op patch returns the resourceVersion already cached.
+            if token in self._observed_resource_versions.get(name, ()):
+                return
+            self._pending_writes.setdefault(name, {})[token] = self._write_sequence
+
+    def _confirm_pending_write(self, name: str, resource_version: Optional[str], deleted: bool) -> None:
+        """Drop pending writes that a WATCH event reflects. Caller must hold ``_lock``."""
+        if resource_version:
+            observed = self._observed_resource_versions.get(name)
+            if observed is None:
+                observed = deque(maxlen=_OBSERVED_RESOURCE_VERSIONS_PER_OBJECT)
+                self._observed_resource_versions[name] = observed
+            observed.append(resource_version)
+        tokens = self._pending_writes.get(name)
+        if tokens is None:
+            return
+        if resource_version:
+            tokens.pop(resource_version, None)
+        if deleted:
+            tokens.pop(_DELETED, None)
+        if not tokens:
+            del self._pending_writes[name]
 
     def _run(self) -> None:
         backoff = 1.0
@@ -230,6 +311,7 @@ class WorkloadInformer:
         """Atomically publish a full LIST snapshot unless a mutation invalidated it."""
         with self._lock:
             start_generation = self._invalidation_generation
+            start_write_sequence = self._write_sequence
 
         resp = self.list_fn()
 
@@ -253,6 +335,26 @@ class WorkloadInformer:
             self._resource_version = resource_version
             self._has_synced = True
             self._last_contact_at = time.monotonic()
+            self._observed_resource_versions = {}
+            for name, item in new_cache.items():
+                item_resource_version = item.get("metadata", {}).get("resourceVersion")
+                if item_resource_version:
+                    observed = deque(maxlen=_OBSERVED_RESOURCE_VERSIONS_PER_OBJECT)
+                    observed.append(item_resource_version)
+                    self._observed_resource_versions[name] = observed
+            # A LIST that started after a write returned reflects it. Writes that
+            # returned during the LIST stay pending unless the snapshot shows them.
+            pending_writes: Dict[str, Dict[Any, int]] = {}
+            for name, tokens in self._pending_writes.items():
+                observed_tokens = self._observed_resource_versions.get(name, ())
+                remaining = {
+                    token: sequence
+                    for token, sequence in tokens.items()
+                    if sequence > start_write_sequence and token not in observed_tokens
+                }
+                if remaining:
+                    pending_writes[name] = remaining
+            self._pending_writes = pending_writes
 
         # React to the snapshot outside the lock: a LIST reconciles objects
         # that changed while no watch was connected (startup, reconnect).
@@ -309,6 +411,7 @@ class WorkloadInformer:
             else:
                 self._cache[name] = obj
             resource_version = metadata.get("resourceVersion")
+            self._confirm_pending_write(name, resource_version, deleted=event_type == "DELETED")
             if resource_version:
                 # resourceVersion is opaque. Watch stream order, not numeric
                 # comparison, determines the last consumed cursor.

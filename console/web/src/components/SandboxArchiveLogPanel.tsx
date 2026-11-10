@@ -48,7 +48,7 @@ export function SandboxArchiveLogPanel({
   const fetchArchive = useCallback(async () => {
     if (!sandboxId.trim()) return;
     if (user?.role === 'admin' && !tenant) {
-      message.warning('Admin 查看归档日志需指定 tenant');
+      message.warning('Admins must specify a tenant to view archived logs');
       return;
     }
     const seq = ++requestSeq.current;
@@ -68,7 +68,7 @@ export function SandboxArchiveLogPanel({
       if (e instanceof ApiError && ARCHIVE_DISABLED_CODES.has(e.code)) {
         setDisabledNote(e.message);
       } else {
-        message.error(e instanceof Error ? e.message : '加载归档失败');
+        message.error(e instanceof Error ? e.message : 'Failed to load archived logs');
       }
     } finally {
       if (seq === requestSeq.current) setLoading(false);
@@ -84,18 +84,18 @@ export function SandboxArchiveLogPanel({
       <Alert
         type="info"
         showIcon
-        message="归档日志未启用"
+        message="Archived logs are not enabled"
         description={
           <>
             {disabledNote}
             <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              需在集群启用 node-agent 且 BFF 配置 OSS 只读凭证（file sink 无法被 BFF 统一读取）。当前仍可使用「实时日志」Tab。
+              Enable node-agent in the cluster and configure read-only OSS credentials in the BFF to use archived logs. The BFF cannot centrally read file sinks. You can still use the Live Logs tab.
             </Typography.Paragraph>
           </>
         }
         action={
           <Button size="small" onClick={() => void fetchArchive()}>
-            重试
+            Retry
           </Button>
         }
       />
@@ -106,7 +106,7 @@ export function SandboxArchiveLogPanel({
     <div>
       <Space style={{ marginBottom: 12 }}>
         <Button type="primary" loading={loading} onClick={() => void fetchArchive()}>
-          刷新归档
+          Refresh Archive
         </Button>
         {data?.archive?.objectKey && (
           <Typography.Text type="secondary" copyable={{ text: data.archive.objectKey }}>
@@ -122,11 +122,11 @@ export function SandboxArchiveLogPanel({
           type="warning"
           showIcon
           style={{ marginBottom: 8 }}
-          message="内容已按 maxBytes 截断，请在 OSS 下载完整对象"
+          message="Content was truncated to maxBytes. Download the complete object from OSS."
         />
       )}
       {!data && !loading && (
-        <Typography.Text type="secondary">点击「刷新归档」从 node-agent 持久化存储加载</Typography.Text>
+        <Typography.Text type="secondary">Select “Refresh Archive” to load logs from node-agent storage</Typography.Text>
       )}
       {data?.content != null && (
         <SandboxColoredLogViewer

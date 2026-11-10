@@ -18,9 +18,10 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
-from docker.errors import APIError, DockerException, NotFound as DockerNotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound as DockerNotFound
+from docker.models.containers import ContainerCollection
 import pytest
 from fastapi import HTTPException, status
 from pydantic import SecretStr, ValidationError
@@ -1151,6 +1152,57 @@ async def test_credential_proxy_requires_dns_nft_mode(mock_docker):
     assert "dns+nft" in exc.value.detail["message"]
 
 
+@pytest.mark.parametrize("mount_path", ["/opt/opensandbox", "/opt/opensandbox/", "//opt/opensandbox"])
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_request_volume_at_runtime_path_replaces_runtime_mount(mock_docker, mount_path):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.inspect_volume.return_value = {"Name": "user-runtime"}
+    mock_client.api.create_host_config.side_effect = lambda **kwargs: kwargs
+    mock_client.api.create_container.side_effect = [
+        {"Id": "sidecar-id"},
+        {"Id": "main-id"},
+    ]
+    mock_client.containers.get.side_effect = [MagicMock(id="sidecar-id"), MagicMock(id="main-id")]
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest")
+    service = DockerSandboxService(config=cfg)
+
+    req = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        entrypoint=["python"],
+        networkPolicy=NetworkPolicy(default_action="deny", egress=[]),
+        volumes=[
+            Volume(name="runtime", pvc=PVC(claim_name="user-runtime"), mount_path=mount_path),
+        ],
+    )
+
+    with (
+        patch("opensandbox_server.services.docker.docker_service.generate_egress_token", return_value="egress-token"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 44772),
+                "8080": ("0.0.0.0", 8080),
+                "18080": ("0.0.0.0", 18080),
+            },
+        ),
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch.object(service, "_wait_for_egress_sidecar_ready"),
+    ):
+        await service.create_sandbox(req)
+
+    main_kwargs = mock_client.api.create_container.call_args_list[1].kwargs
+    assert main_kwargs["host_config"]["binds"] == [f"user-runtime:{mount_path}:rw"]
+
+
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
 async def test_egress_sidecar_injection_and_capabilities(mock_docker):
@@ -1995,6 +2047,50 @@ def test_egress_sidecar_injects_upstream_proxy_env_when_configured(mock_docker):
         "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH=Basic dGVzdDp0ZXN0"
         in sidecar_env
     )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_forwards_credential_resolver_env(mock_docker):
+    """OSEP-0025: the resolver tuning env accepted by split_egress_env must
+    reach the Docker egress sidecar container environment."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+    mock_client.api.create_container.return_value = {"Id": "sidecar-id"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest", disable_ipv6=False)
+    service = DockerSandboxService(config=cfg)
+
+    resolver_env = {
+        "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "5",
+        "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "8",
+    }
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        service._start_egress_sidecar(
+            "sbx-abc123",
+            NetworkPolicy(defaultAction="deny", egress=[]),
+            egress_token="egress-token",
+            host_execd_port=44772,
+            host_http_port=8080,
+            extra_env=resolver_env,
+        )
+
+    sidecar_env = mock_client.api.create_container.call_args.kwargs["environment"]
+    assert "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT=5" in sidecar_env
+    assert "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY=8" in sidecar_env
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -2848,6 +2944,7 @@ def test_container_to_sandbox_returns_extensions(mock_docker):
                 "opensandbox.io/access-renew-extend-seconds": "1800",
             },
             "Cmd": ["python"],
+            "Image": "python:3.11",
         },
         "Created": "2025-01-01T00:00:00Z",
         "State": {
@@ -2857,7 +2954,6 @@ def test_container_to_sandbox_returns_extensions(mock_docker):
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
 
     sandbox = service._container_to_sandbox(container)
 
@@ -2877,7 +2973,11 @@ def test_container_to_sandbox_keeps_docker_times_with_trimmed_fraction(mock_dock
     service = DockerSandboxService(config=_app_config())
     container = MagicMock()
     container.attrs = {
-        "Config": {"Labels": {SANDBOX_ID_LABEL: "sandbox-frac"}, "Cmd": ["python"]},
+        "Config": {
+            "Labels": {SANDBOX_ID_LABEL: "sandbox-frac"},
+            "Cmd": ["python"],
+            "Image": "python:3.11",
+        },
         "Created": "2025-01-01T00:00:00.12345Z",
         "State": {
             "Status": "exited",
@@ -2886,7 +2986,6 @@ def test_container_to_sandbox_keeps_docker_times_with_trimmed_fraction(mock_dock
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
 
     sandbox = service._container_to_sandbox(container)
 
@@ -3267,6 +3366,7 @@ def test_container_to_sandbox_ignores_blanked_system_labels(mock_docker):
                 "opensandbox.io/extensions.custom": "",
             },
             "Cmd": ["python"],
+            "Image": "python:3.11",
         },
         "Created": "2025-01-01T00:00:00Z",
         "State": {
@@ -3276,7 +3376,6 @@ def test_container_to_sandbox_ignores_blanked_system_labels(mock_docker):
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
 
     with patch.object(service._metadata_store, "get_expiration", return_value=None):
         sandbox = service._container_to_sandbox(container)
@@ -3650,6 +3749,64 @@ def test_restore_existing_sandboxes_ignores_manual_cleanup_without_warning():
     mock_schedule.assert_not_called()
     mock_warning.assert_not_called()
 
+
+def test_restore_existing_sandboxes_lists_with_ignore_removed():
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service.docker_client.containers, "list", return_value=[]) as mock_list:
+        service._restore_existing_sandboxes()
+
+    mock_list.assert_called_once_with(all=True, ignore_removed=True)
+
+
+def test_restore_existing_sandboxes_skips_container_removed_during_listing(tmp_path):
+    """A container removed between list and inspect must not abort the restore."""
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    client = MagicMock()
+    client.api.containers.return_value = [{"Id": "removed-id"}, {"Id": "alive-id"}]
+
+    def inspect_container(container_id):
+        if container_id == "removed-id":
+            raise DockerNotFound("No such container: removed-id")
+        return {
+            "Id": container_id,
+            "Config": {
+                "Labels": {
+                    SANDBOX_ID_LABEL: "alive-sandbox",
+                    SANDBOX_EXPIRES_AT_LABEL: expires_at.isoformat(),
+                }
+            },
+        }
+
+    client.api.inspect_container.side_effect = inspect_container
+
+    with (
+        patch.object(service.docker_client, "containers", ContainerCollection(client=client)),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        service._restore_existing_sandboxes()
+
+    mock_schedule.assert_called_once_with("alive-sandbox", expires_at)
+
+
+def test_restore_existing_sandboxes_raises_on_docker_list_error():
+    """A daemon error must fail startup instead of silently skipping all timers."""
+    service = DockerSandboxService(config=_app_config())
+
+    with (
+        patch.object(
+            service.docker_client.containers, "list", side_effect=APIError("daemon error")
+        ),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        with pytest.raises(APIError):
+            service._restore_existing_sandboxes()
+
+    mock_schedule.assert_not_called()
+
+
 @patch("opensandbox_server.services.docker.docker_service.docker")
 def test_container_snapshot_restore_reports_snapshot_id_without_image(mock_docker):
     mock_client = MagicMock()
@@ -3674,7 +3831,6 @@ def test_container_snapshot_restore_reports_snapshot_id_without_image(mock_docke
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["opensandbox-snapshots:snap-001"], short_id="sha-image")
 
     sandbox = service._container_to_sandbox(container)
 
@@ -4044,6 +4200,172 @@ class TestBuildVolumeBinds:
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
 class TestDockerVolumeValidation:
+
+    @pytest.mark.parametrize("network_mode", ["host", "test-network"])
+    @pytest.mark.parametrize(
+        "name,mount_path,error_code",
+        [
+            ("data", "/mnt/other", SandboxErrorCodes.DUPLICATE_VOLUME_NAME),
+            ("other", "/mnt/data", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/mnt/data/", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/mnt/data/.", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/mnt/./data", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/mnt/cache/../data", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "//mnt/data", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "//", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/.", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/mnt/..", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/\\", SandboxErrorCodes.INVALID_MOUNT_PATH),
+            ("other", "/mnt/..\\", SandboxErrorCodes.INVALID_MOUNT_PATH),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_volumes_rejected_before_docker_calls(
+        self, mock_docker, name, mount_path, error_code, network_mode
+    ):
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.api.inspect_volume.return_value = {"Name": "shared-data"}
+        mock_client.api.create_host_config.return_value = {}
+        mock_client.api.create_container.side_effect = DockerException("invalid mount destination")
+        mock_docker.from_env.return_value = mock_client
+        cfg = _app_config()
+        cfg.docker.network_mode = network_mode
+        service = DockerSandboxService(config=cfg)
+        mock_client.reset_mock()
+
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            timeout=120,
+            resourceLimits=ResourceLimits(root={}),
+            entrypoint=["python"],
+            volumes=[
+                Volume(
+                    name="data",
+                    pvc=PVC(claim_name="shared-data"),
+                    mount_path="/mnt/data",
+                ),
+                Volume(
+                    name=name,
+                    pvc=PVC(claim_name="shared-data"),
+                    mount_path=mount_path,
+                ),
+            ],
+        )
+
+        with (
+            patch.object(service, "_ensure_image_available"),
+            patch.object(service, "_prepare_sandbox_runtime"),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await service.create_sandbox(request)
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+        assert exc_info.value.detail["code"] == error_code
+        assert isinstance(exc_info.value.detail["message"], str)
+        mock_client.containers.create.assert_not_called()
+        mock_client.api.create_container.assert_not_called()
+        mock_client.api.inspect_volume.assert_not_called()
+        mock_client.api.create_volume.assert_not_called()
+        assert mock_client.mock_calls == []
+
+    @pytest.mark.parametrize(
+        "mount_path",
+        ["/mnt/data/cache", "/mnt/other", "/tmp/opensandbox-execd", "/mnt\\data", "/mnt/data\\"],
+    )
+    @pytest.mark.asyncio
+    async def test_nested_and_repeated_source_mounts_allowed(self, mock_docker, mount_path):
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.api.inspect_volume.return_value = {"Name": "shared-data"}
+        mock_client.api.create_host_config.return_value = {}
+        mock_client.api.create_container.return_value = {"Id": "cid"}
+        mock_client.containers.get.return_value = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        service = DockerSandboxService(config=_app_config())
+
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            timeout=120,
+            resourceLimits=ResourceLimits(root={}),
+            entrypoint=["python"],
+            volumes=[
+                Volume(
+                    name="data",
+                    pvc=PVC(claim_name="shared-data"),
+                    mount_path="/mnt/data",
+                ),
+                Volume(
+                    name="other",
+                    pvc=PVC(claim_name="shared-data"),
+                    mount_path=mount_path,
+                ),
+            ],
+        )
+
+        with (
+            patch.object(service, "_ensure_image_available"),
+            patch.object(service, "_prepare_sandbox_runtime"),
+        ):
+            response = await service.create_sandbox(request)
+
+        assert response.status.state == "Running"
+        mock_client.api.create_container.assert_called_once()
+        assert mock_client.api.create_host_config.call_args.kwargs["binds"] == [
+            "shared-data:/mnt/data:rw",
+            f"shared-data:{mount_path}:rw",
+        ]
+
+    @pytest.mark.parametrize(
+        "mount_path,sandbox_binds,extensions,platform",
+        [
+            (
+                "/etc/ssl/private-ca/root-ca.crt/",
+                ["/opt/certs/root-ca.crt:/etc/ssl//private-ca/root-ca.crt:ro"],
+                None,
+                None,
+            ),
+            ("/var/lib/execd/isolation", [], {"bootstrap.execd.isolation": "enable"}, None),
+            ("/oem", [], None, PlatformSpec(os="windows", arch="amd64")),
+            ("/data:ro", [], None, None),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_mount_paths_docker_rejects_are_400(
+        self, mock_docker, mount_path, sandbox_binds, extensions, platform
+    ):
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.api.create_container.side_effect = DockerException("Duplicate mount point")
+        mock_docker.from_env.return_value = mock_client
+        cfg = _app_config()
+        cfg.docker.sandbox_binds = sandbox_binds
+        service = DockerSandboxService(config=cfg)
+        mock_client.reset_mock()
+
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            timeout=120,
+            resourceLimits=ResourceLimits(root={}),
+            entrypoint=["python"],
+            extensions=extensions,
+            platform=platform,
+            volumes=[
+                Volume(name="data", pvc=PVC(claim_name="shared-data"), mount_path=mount_path),
+            ],
+        )
+
+        with (
+            patch.object(service, "_ensure_image_available"),
+            patch.object(service, "_prepare_sandbox_runtime"),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await service.create_sandbox(request)
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_MOUNT_PATH
+        assert mock_client.mock_calls == []
 
     @pytest.mark.asyncio
     async def test_pvc_volume_not_found_rejected(self, mock_docker):
@@ -5341,12 +5663,13 @@ def _mock_container(
     extra_labels: dict | None = None,
 ) -> MagicMock:
     """Build a MagicMock container matching what ``_container_to_sandbox``
-    expects to read from ``container.attrs`` and ``container.image``."""
+    expects to read from ``container.attrs``."""
     labels = {SANDBOX_ID_LABEL: sandbox_id, **(extra_labels or {})}
     container = MagicMock()
     container.attrs = {
         "Created": "2024-01-01T00:00:00Z",
         "Config": {
+            "Image": image,
             "Labels": labels,
             "Cmd": entrypoint if entrypoint is not None else ["python", "-V"],
         },
@@ -5360,9 +5683,6 @@ def _mock_container(
         },
     }
     container.status = docker_status
-    container.image.tags = [image]
-    container.image.short_id = f"sha256:{sandbox_id}"
-    container.image.attrs = {}
     return container
 
 
@@ -5835,7 +6155,7 @@ def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
     item = response.items[0]
     assert item.id == "sbx-1"
     assert item.status.state == "Running"
-    # Full fidelity: entrypoint from Config.Cmd, image from image.tags.
+    # Full fidelity: entrypoint from Config.Cmd, image from Config.Image.
     assert item.entrypoint == ["python", "app.py"]
     assert item.image is not None
     assert item.image.uri == "python:3.11"
@@ -5873,6 +6193,30 @@ def test_list_sandboxes_skips_concurrently_deleted_sandbox(mock_docker):
 
     ids = {item.id for item in response.items}
     assert ids == {"sbx-alive"}
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_list_sandboxes_reports_image_of_container_whose_image_was_removed(mock_docker):
+    """An image can be removed (``docker rmi -f``) while a container still
+    uses it. Listing must not look the image up: that raises ImageNotFound
+    and fails the whole request. The image comes from the container config.
+    """
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    container = _mock_container("sbx-1", image="python:3.11")
+    type(container).image = PropertyMock(side_effect=ImageNotFound("no such image"))
+    _wire_list_mocks(mock_client, [container])
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+
+    response = service.list_sandboxes(
+        ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=50))
+    )
+
+    (item,) = response.items
+    assert item.image is not None
+    assert item.image.uri == "python:3.11"
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")

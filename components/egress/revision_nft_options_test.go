@@ -56,3 +56,20 @@ func TestNftOptionsRevisionQuiescence(t *testing.T) {
 		})
 	}
 }
+
+// The exemption port must follow the transparent-MITM env, and only when enabled.
+func TestNftOptionsMitmRedirectPortFollowsTransparentMode(t *testing.T) {
+	opts, err := parseNftOptions(nil)
+	require.NoError(t, err)
+	require.Zero(t, opts.MitmRedirectPort, "no exemption when transparent MITM is disabled")
+
+	t.Setenv(constants.EnvMitmproxyTransparent, "true")
+	opts, err = parseNftOptions(nil)
+	require.NoError(t, err)
+	require.Equal(t, constants.DefaultMitmproxyPort, opts.MitmRedirectPort)
+
+	t.Setenv(constants.EnvMitmproxyPort, "18443")
+	opts, err = parseNftOptions(nil)
+	require.NoError(t, err)
+	require.Equal(t, 18443, opts.MitmRedirectPort)
+}

@@ -64,6 +64,11 @@ type Options struct {
 	// IP-only and unscoped by UID, so putting the proxy there would let
 	// sandbox workloads CONNECT it directly and bounce to denied destinations.
 	UpstreamProxy *UpstreamProxyEndpoint
+	// MitmRedirectPort, when > 0, is the transparent-MITM listener port the
+	// nat OUTPUT REDIRECT rewrites intercepted dports to; the chain must
+	// exempt that rewritten tuple ahead of port-scoped rules or every
+	// intercepted flow is dropped (see the rule below). 0 emits nothing.
+	MitmRedirectPort int
 }
 
 type Manager struct {
@@ -294,6 +299,14 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	// The ip6 OUTPUT REDIRECTs (DNS → :15353, MITM → :18081) land on ::1 with the original egress
 	// interface still selected, so oifname "lo" does not match them: ::1 is the v6 loopback rule.
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr ::1 accept\n", tableName, chainName)
+	// The v4 MITM redirect lands on 127.0.0.1 with the original egress interface
+	// still selected, so oifname "lo" does not match: exempt the rewritten dport
+	// ahead of port-scoped rules (mirrors the dnsproxy rules above). Enforcement
+	// is intact — mitmproxy's own re-originated connections are not exempt — and
+	// direct workload dials already pass via oifname "lo"; v6 is covered by ::1.
+	if opts.MitmRedirectPort > 0 {
+		fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport %d accept\n", tableName, chainName, opts.MitmRedirectPort)
+	}
 	if ep := opts.UpstreamProxy; ep != nil {
 		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
 	}

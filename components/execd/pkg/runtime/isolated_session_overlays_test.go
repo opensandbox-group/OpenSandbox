@@ -144,8 +144,10 @@ func TestCreateIsolatedSession_MultiOverlayAllocation(t *testing.T) {
 	}
 }
 
-func TestCreateIsolatedSession_AllEphemeralOverlaysSkipUpperAllocation(t *testing.T) {
+func TestCreateIsolatedSession_AllEphemeralOverlaysStillOwnHostState(t *testing.T) {
 	runner := newTestRunner(t)
+	iso := &capturingIsolator{stubIsolator: *newStubIsolator()}
+	runner.isolator = iso
 	ephemeral := false
 	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
 		Overlays: []IsolatedOverlayOptions{
@@ -161,11 +163,103 @@ func TestCreateIsolatedSession_AllEphemeralOverlaysSkipUpperAllocation(t *testin
 	if session == nil {
 		t.Fatal("created session was not published")
 	}
-	if session.upperID != "" {
-		t.Errorf("ephemeral-only session allocated upper entry %q", session.upperID)
+	// Ephemeral overlays need no upper pairs, but the session still owns an
+	// upper-root subtree: it holds the /tmp backing dir and the durable
+	// cleanup record.
+	if session.upperID == "" {
+		t.Fatal("ephemeral-only session did not allocate its upper-root subtree")
 	}
 	if session.overlays[0].upperDir != "" {
 		t.Errorf("ephemeral overlay upper = %q, want empty", session.overlays[0].upperDir)
+	}
+
+	// Strict profile (default) hosts /tmp on a bind from that subtree.
+	if session.tmpDir != runner.upperMgr.TmpDir(session.upperID) {
+		t.Errorf("session.tmpDir = %q, want %q", session.tmpDir, runner.upperMgr.TmpDir(session.upperID))
+	}
+	if info, err := os.Stat(session.tmpDir); err != nil || !info.IsDir() {
+		t.Fatalf("/tmp backing dir missing: %v", err)
+	}
+	wrap, ok := iso.lastWrap()
+	if !ok {
+		t.Fatal("isolator did not receive WrapOptions")
+	}
+	if wrap.TmpDir != session.tmpDir {
+		t.Errorf("WrapOptions.TmpDir = %q, want %q", wrap.TmpDir, session.tmpDir)
+	}
+}
+
+func TestCreateIsolatedSession_TmpBindHostedShapes(t *testing.T) {
+	cases := []struct {
+		name       string
+		profile    string
+		overlays   []IsolatedOverlayOptions
+		wantHosted bool
+	}{
+		{
+			name:       "strict_ephemeral_hosts_tmp",
+			profile:    string(isolation.ProfileStrict),
+			overlays:   []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			wantHosted: true,
+		},
+		{
+			name:       "balanced_keeps_shared_tmp",
+			profile:    string(isolation.ProfileBalanced),
+			overlays:   []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			wantHosted: false,
+		},
+		{
+			name:    "overlay_on_tmp_suppresses_host_bind",
+			profile: string(isolation.ProfileStrict),
+			overlays: []IsolatedOverlayOptions{
+				{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"},
+				{Path: "/tmp", Mode: "rw"},
+			},
+			wantHosted: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newTestRunner(t)
+			iso := &capturingIsolator{stubIsolator: *newStubIsolator()}
+			runner.isolator = iso
+			id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+				Profile:  tc.profile,
+				Overlays: tc.overlays,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runner.DeleteIsolatedSession(id)
+
+			session := runner.lookup(id)
+			if session == nil {
+				t.Fatal("created session was not published")
+			}
+			if !tc.wantHosted {
+				// Non-hosted sessions keep the historical no-allocation
+				// path and stay independent of the upper quota.
+				if session.upperID != "" {
+					t.Fatalf("non-hosted session allocated upper entry %q", session.upperID)
+				}
+			} else if session.upperID == "" {
+				t.Fatal("hosted session must own its upper-root subtree")
+			}
+			if tc.wantHosted && session.tmpDir == "" {
+				t.Fatal("strict session without /tmp overlay must host /tmp")
+			}
+			if !tc.wantHosted && session.tmpDir != "" {
+				t.Fatalf("session.tmpDir = %q, want empty", session.tmpDir)
+			}
+			wrap, ok := iso.lastWrap()
+			if !ok {
+				t.Fatal("isolator did not receive WrapOptions")
+			}
+			if wrap.TmpDir != session.tmpDir {
+				t.Errorf("WrapOptions.TmpDir = %q, want %q", wrap.TmpDir, session.tmpDir)
+			}
+		})
 	}
 }
 
@@ -423,4 +517,66 @@ func TestNewMergedView_MultiOverlayRouting(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(rootUpper, "relative.txt")); err != nil {
 		t.Fatalf("relative write did not resolve against the primary overlay: %v", err)
 	}
+}
+
+// TestCreateIsolatedSession_ExtraWritableOnTmpRejected: an extra_writable
+// under /tmp shadows the hosted /tmp in the namespace while the files view
+// keeps serving the backing dir, so hosted sessions must reject the overlap.
+func TestCreateIsolatedSession_ExtraWritableOnTmpRejected(t *testing.T) {
+	allowTmp := func(r *IsolatedRunner) {
+		r.allowedWritable = []string{"/tmp"}
+	}
+	// extra_writable validation requires an existing host path.
+	requireTmpCache := func(t *testing.T) {
+		t.Helper()
+		if err := os.MkdirAll("/tmp/extra-writable-test-cache", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll("/tmp/extra-writable-test-cache") })
+	}
+
+	t.Run("hosted_strict_rejects_tmp_extra_writable", func(t *testing.T) {
+		requireTmpCache(t)
+		runner := newTestRunner(t)
+		allowTmp(runner)
+		_, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+			Overlays:      []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			ExtraWritable: []string{"/tmp/extra-writable-test-cache"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "shadows the session's private /tmp") {
+			t.Fatalf("error = %v, want private /tmp shadow rejection", err)
+		}
+	})
+
+	t.Run("balanced_allows_tmp_extra_writable", func(t *testing.T) {
+		requireTmpCache(t)
+		runner := newTestRunner(t)
+		allowTmp(runner)
+		id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+			Profile:       string(isolation.ProfileBalanced),
+			Overlays:      []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			ExtraWritable: []string{"/tmp/extra-writable-test-cache"},
+		})
+		if err != nil {
+			t.Fatalf("balanced sessions share the sandbox /tmp and need no hosted dir: %v", err)
+		}
+		_ = runner.DeleteIsolatedSession(id)
+	})
+
+	t.Run("overlay_covering_tmp_allows_extra_writable", func(t *testing.T) {
+		requireTmpCache(t)
+		runner := newTestRunner(t)
+		allowTmp(runner)
+		id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+			Overlays: []IsolatedOverlayOptions{
+				{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"},
+				{Path: "/tmp", Mode: "rw"},
+			},
+			ExtraWritable: []string{"/tmp/extra-writable-test-cache"},
+		})
+		if err != nil {
+			t.Fatalf("an overlay on /tmp replaces the hosted bind, so no divergence: %v", err)
+		}
+		_ = runner.DeleteIsolatedSession(id)
+	})
 }

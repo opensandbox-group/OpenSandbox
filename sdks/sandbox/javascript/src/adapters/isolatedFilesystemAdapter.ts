@@ -34,13 +34,16 @@ import type {
   Permission,
   RenameFileItem,
   ReplaceFileContentItem,
+  ReadBytesResponse,
+  ReadBytesStream,
   SearchEntry,
   SearchFilesResponse,
   SetPermissionEntry,
   WriteEntry,
 } from "../models/filesystem.js";
 import { SandboxApiException, SandboxError } from "../core/exceptions.js";
-import { iterateBodyStream } from "../core/streams.js";
+import { throwOnUploadFailure } from "./uploadFailure.js";
+import { createReadBytesResponse, readResponseBody } from "./downloadResponse.js";
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -75,12 +78,12 @@ async function collectBytes(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value) { chunks.push(value); total += value.length; }
+        if (value) { chunks.push(Uint8Array.from(value)); total += value.length; }
       }
     } finally { reader.releaseLock(); }
   } else {
     for await (const chunk of source) {
-      chunks.push(chunk);
+      chunks.push(Uint8Array.from(chunk));
       total += chunk.length;
     }
   }
@@ -350,52 +353,33 @@ export class IsolatedFilesystemAdapter implements SandboxFiles {
       method: "POST",
       headers: { ...(this.opts.headers ?? {}) },
       body: form,
+      // Uploads never follow redirects: the multipart body cannot always be
+      // replayed, and a redirect could otherwise replay credentials. A 3xx is
+      // surfaced below as a SandboxApiException with the original status.
+      redirect: "manual",
     });
 
-    if (!res.ok) {
-      const requestId = res.headers.get("x-request-id") ?? undefined;
-      const rawBody = await res.text().catch(() => undefined);
-      throw new SandboxApiException({
-        message: `Upload failed (status=${res.status})`,
-        statusCode: res.status,
-        requestId,
-        error: new SandboxError(SandboxError.UNEXPECTED_RESPONSE, "Upload failed"),
-        rawBody,
-      });
-    }
+    await throwOnUploadFailure(res);
   }
 
   async readBytes(
     path: string,
     opts?: { range?: string; offset?: number; limit?: number },
   ): Promise<Uint8Array> {
-    let url =
-      joinUrl(
-        this.opts.baseUrl,
-        `/v1/isolated/session/${encodeURIComponent(this.sessionId)}/files/download`,
-      ) + `?path=${encodeURIComponent(path)}`;
-    if (opts?.offset != null) url += `&offset=${opts.offset}`;
-    if (opts?.limit != null) url += `&limit=${opts.limit}`;
-    const res = await this.fetch(url, {
-      method: "GET",
-      headers: {
-        ...(this.opts.headers ?? {}),
-        ...(opts?.range ? { Range: opts.range } : {}),
-      },
-    });
-    if (!res.ok) {
-      const requestId = res.headers.get("x-request-id") ?? undefined;
-      const rawBody = await res.text().catch(() => undefined);
-      throw new SandboxApiException({
-        message: "Download failed",
-        statusCode: res.status,
-        requestId,
-        error: new SandboxError(SandboxError.UNEXPECTED_RESPONSE, "Download failed"),
-        rawBody,
-      });
-    }
+    return (await this.readBytesDetailed(path, opts)).body;
+  }
+
+  async readBytesDetailed(
+    path: string,
+    opts?: { range?: string; offset?: number; limit?: number },
+  ): Promise<ReadBytesResponse<Uint8Array>> {
+    const res = await this.fetchDownload(path, opts, "Download failed");
     const ab = await res.arrayBuffer();
-    return new Uint8Array(ab);
+    return createReadBytesResponse(
+      res,
+      new Uint8Array(ab),
+      opts?.offset != null || opts?.limit != null,
+    );
   }
 
   readBytesStream(
@@ -405,10 +389,23 @@ export class IsolatedFilesystemAdapter implements SandboxFiles {
     return this.downloadStream(path, opts);
   }
 
-  private async *downloadStream(
+  async readBytesStreamDetailed(
     path: string,
     opts?: { range?: string; offset?: number; limit?: number },
-  ): AsyncIterable<Uint8Array> {
+  ): Promise<ReadBytesResponse<ReadBytesStream>> {
+    const res = await this.fetchDownload(path, opts, "Download stream failed");
+    return createReadBytesResponse(
+      res,
+      readResponseBody(res),
+      opts?.offset != null || opts?.limit != null,
+    );
+  }
+
+  private async fetchDownload(
+    path: string,
+    opts: { range?: string; offset?: number; limit?: number } | undefined,
+    errorMessage: string,
+  ): Promise<Response> {
     let url =
       joinUrl(
         this.opts.baseUrl,
@@ -427,16 +424,22 @@ export class IsolatedFilesystemAdapter implements SandboxFiles {
       const requestId = res.headers.get("x-request-id") ?? undefined;
       const rawBody = await res.text().catch(() => undefined);
       throw new SandboxApiException({
-        message: "Download stream failed",
+        message: errorMessage,
         statusCode: res.status,
         requestId,
-        error: new SandboxError(SandboxError.UNEXPECTED_RESPONSE, "Download stream failed"),
+        error: new SandboxError(SandboxError.UNEXPECTED_RESPONSE, errorMessage),
         rawBody,
       });
     }
-    const body = res.body as ReadableStream<Uint8Array> | null;
-    if (!body) return;
-    yield* iterateBodyStream(body);
+    return res;
+  }
+
+  private async *downloadStream(
+    path: string,
+    opts?: { range?: string; offset?: number; limit?: number },
+  ): AsyncIterable<Uint8Array> {
+    const response = await this.readBytesStreamDetailed(path, opts);
+    yield* response.body;
   }
 
   async readFile(

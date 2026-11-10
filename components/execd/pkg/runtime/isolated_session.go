@@ -131,12 +131,16 @@ type isolatedSession struct {
 	doneCh               chan struct{} // closed after process wait and lifecycle drain
 	lifecycleMonitorDone chan struct{} // closed after drain-failure monitor exits
 	upperID              string        // key in UpperManager, used for Release/Remove
-	overlays             []sessionOverlay
-	createdAt            time.Time
-	lastRunAt            time.Time
-	isolator             isolation.Isolator
-	lifecycle            isolation.WorkloadLifecycle
-	identity             isolation.WorkloadIdentity
+	// tmpDir is the host dir backing the namespace /tmp bind (strict
+	// profile); empty when /tmp is not hosted. Served by the files view.
+	// Immutable after allocation.
+	tmpDir    string
+	overlays  []sessionOverlay
+	createdAt time.Time
+	lastRunAt time.Time
+	isolator  isolation.Isolator
+	lifecycle isolation.WorkloadLifecycle
+	identity  isolation.WorkloadIdentity
 	// activeBackgroundRuns: in-flight detached runs. While non-zero, idle GC
 	// must not collect the session (background processes die with the bwrap
 	// process group).
@@ -193,7 +197,10 @@ func (s *isolatedSession) start() error {
 	wrapOpts := isolation.WrapOptions{
 		ExtraWritable: s.opts.ExtraWritable,
 		Binds:         s.opts.Binds,
-		ShareNet:      true,
+		// Empty when /tmp is not hosted; bwrap falls back to the profile
+		// segment.
+		TmpDir:   s.tmpDir,
+		ShareNet: true,
 	}
 
 	switch s.opts.Profile {

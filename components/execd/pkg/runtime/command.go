@@ -394,12 +394,14 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		return fmt.Errorf("build credential: %w", err)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -429,6 +431,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	}
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		startErr := credentialStartHint(err, cred)
 		log.Error("command: start failed: %v", startErr)
 		kernel.running = false

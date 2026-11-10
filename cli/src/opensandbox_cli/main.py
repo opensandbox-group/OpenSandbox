@@ -104,7 +104,10 @@ class BannerGroup(click.Group):
 @click.option(
     "--use-server-proxy/--no-use-server-proxy",
     default=None,
-    help="Route execd and endpoint traffic through the sandbox server proxy.",
+    help=(
+        "DEPRECATED: the server proxy is in maintenance mode (security/bugfix only); "
+        "route data-plane traffic through the ingress gateway instead."
+    ),
 )
 @click.option("--config", "config_path", type=click.Path(exists=False, path_type=Path), default=None, help="Config file path.")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose/debug output.")
@@ -157,6 +160,14 @@ def cli(
             config_path=config_path,
         )
     resolved["color"] = not no_color and resolved.get("color", True)
+
+    if ctx.invoked_subcommand != "config" and resolved.get("use_server_proxy"):
+        click.echo(
+            "Warning: connection.use_server_proxy is deprecated: the server proxy "
+            "data path is in maintenance mode (security and bug fixes only); route "
+            "data-plane traffic through the ingress gateway instead.",
+            err=True,
+        )
 
     effective_config_path = config_path or Path.home() / ".opensandbox" / "config.toml"
     ctx.obj = ClientContext(

@@ -21,7 +21,7 @@ for request/response validation and serialization.
 
 import ipaddress
 from datetime import datetime
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr, RootModel, field_validator, model_validator
 
@@ -68,6 +68,9 @@ class ImageAuth(BaseModel):
     username: str = Field(..., description="Registry username or service account")
     password: str = Field(..., description="Registry password or authentication token")
 
+    class Config:
+        extra = "forbid"
+
 
 class ImageSpec(BaseModel):
     """
@@ -84,6 +87,9 @@ class ImageSpec(BaseModel):
         description="Registry authentication credentials (required for private registries)",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class PlatformSpec(BaseModel):
     """
@@ -98,6 +104,9 @@ class PlatformSpec(BaseModel):
         ...,
         description="Target CPU architecture (for example 'amd64' or 'arm64').",
     )
+
+    class Config:
+        extra = "forbid"
 
 
 # ============================================================================
@@ -215,6 +224,7 @@ class CredentialProxyConfig(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 # ============================================================================
@@ -234,9 +244,25 @@ class InlineCredentialSource(BaseModel):
         extra = "forbid"
 
 
+class ExchangeCredentialSource(BaseModel):
+    """Exchange source (OSEP-0025); endpoint semantics stay with the egress."""
+
+    type: Literal["exchange"] = Field(..., description="Credential source type.")
+    endpoint: str = Field(
+        ...,
+        description="Header-resolver endpoint; egress validates the scheme.",
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
 class Credential(BaseModel):
     name: str = Field(..., min_length=1, description="Unique credential name.")
-    source: InlineCredentialSource = Field(..., description="Credential value source.")
+    source: InlineCredentialSource | ExchangeCredentialSource = Field(
+        ..., description="Credential value source."
+    )
 
     class Config:
         populate_by_name = True
@@ -333,14 +359,30 @@ class PassthroughCredentialAuth(BaseModel):
         extra = "forbid"
 
 
-CredentialAuth = Annotated[
+class ExchangeCredentialAuth(BaseModel):
+    """Typeless exchange auth (OSEP-0025); the cross-lock is egress-owned."""
+
+    credential: str = Field(
+        ...,
+        min_length=1,
+        description="Name of the exchange-sourced credential to resolve per request.",
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+# No discriminator: the typeless variant carries no `type` key, so union
+# members are mutually exclusive by shape.
+CredentialAuth = (
     BearerCredentialAuth
     | BasicCredentialAuth
     | ApiKeyCredentialAuth
     | CustomHeadersCredentialAuth
-    | PassthroughCredentialAuth,
-    Field(discriminator="type"),
-]
+    | PassthroughCredentialAuth
+    | ExchangeCredentialAuth
+)
 
 
 class CredentialMatch(BaseModel):
@@ -440,9 +482,17 @@ class CredentialVaultMutationRequest(BaseModel):
 
 
 class CredentialAuthMetadata(BaseModel):
-    type: str = Field(..., description="Injected credential shape type.")
+    """Sanitized auth shape; the typeless form carries `credential` only."""
+
+    type: Optional[str] = Field(
+        default=None, description="Injected credential shape type."
+    )
     name: Optional[str] = Field(
         default=None, description="Header name, for the apiKey shape only."
+    )
+    credential: Optional[str] = Field(
+        default=None,
+        description="Exchange-sourced credential name, typeless form only.",
     )
 
     class Config:
@@ -451,7 +501,11 @@ class CredentialAuthMetadata(BaseModel):
 
 class CredentialMetadata(BaseModel):
     name: str
-    source_type: str = Field(..., alias="sourceType", description="Credential source type.")
+    source_type: str = Field(
+        ...,
+        alias="sourceType",
+        description="Credential source kind (inline or exchange).",
+    )
     revision: int
 
     class Config:
@@ -705,6 +759,9 @@ class Host(BaseModel):
         pattern=r"^(/|[A-Za-z]:[\\/])",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class PVC(BaseModel):
     """
@@ -779,6 +836,7 @@ class PVC(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 class OSSFS(BaseModel):
@@ -828,6 +886,7 @@ class OSSFS(BaseModel):
     )
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
     @model_validator(mode="after")
     def validate_inline_credentials(self) -> "OSSFS":
@@ -886,6 +945,7 @@ class Volume(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
     @model_validator(mode="after")
     def validate_exactly_one_backend(self) -> "Volume":
@@ -941,6 +1001,8 @@ class CreateSandboxRequest(BaseModel):
     # Internal routing hint: set by snapshot restore resolution to the backend
     # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
     _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+    # The snapshot's recorded source limits, set by restore resolution.
+    _resolved_snapshot_limits: Optional[dict] = PrivateAttr(default=None)
 
     image: Optional[ImageSpec] = Field(
         None,
@@ -1147,6 +1209,11 @@ class CreateSandboxRequest(BaseModel):
         """Backend that produced the snapshot being restored, if resolved."""
         return self._resolved_snapshot_backend
 
+    @property
+    def resolved_snapshot_limits(self) -> Optional[dict]:
+        """Recorded source limits of the snapshot being restored, if any."""
+        return self._resolved_snapshot_limits
+
 
 class CreateSandboxResponse(BaseModel):
     """
@@ -1279,6 +1346,9 @@ class CreateSnapshotRequest(BaseModel):
         min_length=1,
         description="Optional human-readable snapshot name",
     )
+
+    class Config:
+        extra = "forbid"
 
 
 class Snapshot(BaseModel):
@@ -1440,6 +1510,7 @@ class RenewSandboxExpirationRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 class RenewSandboxExpirationResponse(BaseModel):

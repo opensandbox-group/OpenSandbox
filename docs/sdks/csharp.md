@@ -369,6 +369,8 @@ await sandbox.Files.DeleteDirectoriesAsync(new[] { "/tmp/demo" });
 
 For binary data, use `byte[]` or `Stream` in `WriteEntry.Data`, and download with `ReadBytesAsync()` or `ReadBytesStreamAsync()`. Read options support partial downloads.
 
+Use `ReadBytesDetailedAsync` or `ReadBytesStreamDetailedAsync` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `IsPartial` before appending a resumed download, and dispose a detailed stream body with `await using`. These extension methods are in `OpenSandbox`; custom adapters must implement `IDownloadSandboxFiles` or the methods throw `NotSupportedException`.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:
@@ -503,7 +505,6 @@ A 307/308 redirect resends the request body once per hop. A seekable upload sour
 | `Domain` | Sandbox service domain (`host[:port]`) | `localhost:8080` | `OPEN_SANDBOX_DOMAIN` |
 | `Protocol` | HTTP protocol (`Http`/`Https`) | `Http` | - |
 | `RequestTimeoutSeconds` | Request timeout applied to SDK HTTP calls | `30` | - |
-| `UseServerProxy` | Request server-proxied sandbox endpoint URLs | `false` | - |
 | `Headers` | Extra headers applied to every request | `{}` | - |
 | `DisableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
 
@@ -516,7 +517,6 @@ var config = new ConnectionConfig(new ConnectionConfigOptions
     Domain = "api.opensandbox.io",
     ApiKey = "your-key",
     RequestTimeoutSeconds = 60,
-    // UseServerProxy = true, // Useful when the client cannot access sandbox endpoint directly
 });
 
 // 2. Advanced: custom headers
@@ -534,6 +534,8 @@ var config2 = new ConnectionConfig(new ConnectionConfigOptions
 ::: tip SDK Telemetry
 `Sandbox.CreateAsync` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfigOptions.DisableMetrics = true` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
+
+The C# Code Interpreter SDK inherits the sandbox's connection configuration. With the deprecated `UseServerProxy = true` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not attach this key to code execution requests.
 
 ### 2. SDK Logging
 
@@ -704,6 +706,36 @@ See [Credential Vault](/guides/credential-vault) for auth types, binding guidanc
 - `ReadyTimeoutSeconds` controls readiness waits. For `ConnectAsync` / `ResumeAsync`, endpoint discovery and health checks share this timeout. Blocking custom code can delay timeout reporting.
 - The SDK does not automatically retry failed API requests; implement retries in caller code where appropriate.
 
+### Redirects
+
+SDK HTTP, SSE, and lifecycle-metrics clients follow up to 50 redirects. When the
+scheme, host, or port changes, they strip `OPEN-SANDBOX-*`, `OPENSANDBOX-*`,
+`X-EXECD-ACCESS-TOKEN`, and `X-API-Key` headers (case-insensitive). These headers
+remain removed if a later hop returns to the original origin. Same-origin hops
+retain them, and unrelated custom headers are unchanged.
+
+As with .NET's normal redirect handling, `Authorization` is cleared on every hop;
+explicit `Cookie` headers retain .NET's existing behavior. HTTPS-to-HTTP redirects
+are not followed. Request bodies are not buffered to make uploads replayable.
+
+The sandbox package includes a `net5.0` asset so .NET 5 synchronous `HttpClient.Send`
+calls use the same redirect policy. Its existing dependencies support .NET 6 and
+later; this asset does not extend their support policy.
+
+The package-consumer regression probe checks .NET 5 asset selection and synchronous
+and asynchronous redirects for both HTTP factories, including a return to the
+original origin. Run it against a locally packed fixture from `sdks/sandbox/csharp`:
+
+```bash
+dotnet pack src/OpenSandbox/OpenSandbox.csproj -c Release -p:PackageVersion=1.1.1-redirect-probe -o artifacts/redirect-probe
+dotnet restore tests/OpenSandbox.Net5.PackageProbe/OpenSandbox.Net5.PackageProbe.csproj -p:ProbePackageVersion=1.1.1-redirect-probe --source artifacts/redirect-probe --source https://api.nuget.org/v3/index.json
+dotnet run --project tests/OpenSandbox.Net5.PackageProbe/OpenSandbox.Net5.PackageProbe.csproj -c Release --no-restore -p:ProbePackageVersion=1.1.1-redirect-probe
+```
+
+The probe explicitly permits major runtime roll-forward and prints the selected
+asset and actual runtime. Passing on a newer runtime does not verify execution on
+the .NET 5 runtime. Existing dependency-support warnings remain visible to consumers.
+
 ### 7. Resource Cleanup
 
 Both `Sandbox` and `SandboxManager` implement `IAsyncDisposable`. Use `await using` or call `DisposeAsync()` when done.
@@ -750,4 +782,4 @@ catch (SandboxException ex)
 
 ## License
 
-Apache License 2.0
+The C# SDK code is licensed under [Apache 2.0](https://github.com/opensandbox-group/OpenSandbox/blob/main/LICENSE).

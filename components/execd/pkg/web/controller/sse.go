@@ -24,6 +24,7 @@ import (
 	"github.com/alibaba/opensandbox/internal/safego"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
@@ -56,6 +57,14 @@ func (c *basicController) setupSSEResponse() {
 			flusher.Flush()
 		}
 	})
+}
+
+// streamStarted reports whether the response has been committed. It takes the
+// event write lock because the ping goroutine may be writing concurrently.
+func (c *basicController) streamStarted() bool {
+	c.chunkWriter.Lock()
+	defer c.chunkWriter.Unlock()
+	return c.ctx.Writer.Written()
 }
 
 // setServerEventsHandler adapts runtime callbacks to SSE events.
@@ -130,11 +139,11 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 				return
 			}
 
-			event := model.ServerStreamEvent{
+			event := sseLegacyCompatEvent(model.ServerStreamEvent{
 				Type:      model.StreamEventTypeError,
 				Error:     err,
 				Timestamp: time.Now().UnixMilli(),
-			}
+			})
 			payload := event.ToJSON()
 			c.writeSingleEvent("OnExecuteError", payload, true, event.Summary())
 		},
@@ -182,13 +191,55 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	return hooks, stopSSE
 }
 
+// respondRunError reports an error returned by a run. Before any event has
+// been written it is a JSON error response. After that the status is already
+// committed, so it is sent as an SSE error event through hooks instead, unless
+// the run has already ended (ended is closed) with its own complete or error
+// event.
+func (c *CodeInterpretingController) respondRunError(hooks runtime.ExecuteResultHook, ended <-chan struct{}, message string) {
+	if !c.streamStarted() {
+		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, message)
+		return
+	}
+	select {
+	case <-ended:
+		return
+	default:
+	}
+	hooks.OnExecuteError(&execute.ErrorOutput{
+		EName:     "RuntimeError",
+		EValue:    message,
+		Traceback: []string{message},
+	})
+}
+
+// sseLegacyCompatEvent drops the exit_code field (top level and inside the
+// error payload) when --sse-legacy-compat is enabled. SDKs whose EventNode
+// schema predates the field treat unknown keys as a compatibility hazard, and
+// successful foreground commands carry no information in exit_code anyway
+// (it is a constant 0; failures are reported via the error event). Newer SDKs
+// infer 0 from a complete event without exit_code, so this is lossless for
+// successful commands.
+func sseLegacyCompatEvent(event model.ServerStreamEvent) model.ServerStreamEvent {
+	if !flag.SseLegacyCompat {
+		return event
+	}
+	event.ExitCode = nil
+	if event.Error != nil {
+		shallowCopy := *event.Error
+		shallowCopy.ExitCode = nil
+		event.Error = &shallowCopy
+	}
+	return event
+}
+
 func (c *CodeInterpretingController) writeExecutionComplete(executionTime time.Duration, exitCode *int) {
-	event := model.ServerStreamEvent{
+	event := sseLegacyCompatEvent(model.ServerStreamEvent{
 		Type:          model.StreamEventTypeComplete,
 		ExecutionTime: executionTime.Milliseconds(),
 		ExitCode:      exitCode,
 		Timestamp:     time.Now().UnixMilli(),
-	}
+	})
 	c.writeSingleEvent("OnExecuteComplete", event.ToJSON(), true, event.Summary())
 }
 

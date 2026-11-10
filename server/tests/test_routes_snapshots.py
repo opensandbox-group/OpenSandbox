@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -68,10 +70,12 @@ def test_create_snapshot_returns_202_and_location_header(
     assert calls[0][1].name == "checkpoint-before-import"
 
 
+@pytest.mark.parametrize("request_kwargs", [{}, {"json": {}}], ids=["no-body", "empty-object"])
 def test_create_snapshot_accepts_empty_body(
     client: TestClient,
     auth_headers: dict,
     monkeypatch,
+    request_kwargs: dict,
 ) -> None:
     now = datetime.now(timezone.utc)
 
@@ -84,9 +88,43 @@ def test_create_snapshot_accepts_empty_body(
 
     monkeypatch.setattr(lifecycle, "snapshot_service", StubService())
 
-    response = client.post("/v1/sandboxes/sbx-001/snapshots", headers=auth_headers)
+    response = client.post(
+        "/v1/sandboxes/sbx-001/snapshots", headers=auth_headers, **request_kwargs,
+    )
 
     assert response.status_code == 202
+
+
+@pytest.mark.parametrize(
+    ("body", "unknown_field"),
+    [
+        ({"nmae": "checkpoint-before-import"}, "nmae"),
+        ({"name": "checkpoint-before-import", "extra": 1}, "extra"),
+    ],
+)
+def test_create_snapshot_rejects_unknown_fields(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    body: dict,
+    unknown_field: str,
+) -> None:
+    create = MagicMock(return_value=_sample_snapshot(datetime.now(timezone.utc)))
+    monkeypatch.setattr(lifecycle.snapshot_service, "create_snapshot", create)
+
+    response = client.post("/v1/sandboxes/sbx-001/snapshots", headers=auth_headers, json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [
+            {
+                "type": "extra_forbidden",
+                "loc": ["body", unknown_field],
+                "msg": "Extra inputs are not permitted",
+            }
+        ]
+    }
+    create.assert_not_called()
 
 
 def test_list_snapshots_parses_filters_and_pagination(

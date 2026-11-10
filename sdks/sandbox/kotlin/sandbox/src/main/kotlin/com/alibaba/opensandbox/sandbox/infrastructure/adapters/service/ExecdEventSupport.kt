@@ -26,12 +26,15 @@ public object ExecdEventSupport {
      * Decode one SSE/NDJSON line into an [EventNode], skipping framing lines
      * and unwrapping the `data:` prefix. Returns null for non-payload lines.
      *
-     * [onError] is invoked for lines carrying a payload that fails to parse;
+     * [onError] is invoked with the raw line for payloads that fail to parse;
      * callers must pass it so malformed SSE lines are never dropped silently.
+     * A [LinkageError] is reported and rethrown instead of skipped, because
+     * skipping every event would turn the failure into a silent stream death.
      */
     public fun decodeEventLine(
         line: String,
-        onError: (String, Exception) -> Unit,
+        decodePayload: (String) -> EventNode = { jsonParser.decodeFromString(EventNode.serializer(), it) },
+        onError: (String, Throwable) -> Unit,
     ): EventNode? {
         if (line.isBlank()) {
             return null
@@ -52,10 +55,13 @@ public object ExecdEventSupport {
         }
 
         return try {
-            jsonParser.decodeFromString(EventNode.serializer(), payload)
+            decodePayload(payload)
         } catch (e: Exception) {
             onError(line, e)
             null
+        } catch (e: LinkageError) {
+            onError(line, e)
+            throw e
         }
     }
 

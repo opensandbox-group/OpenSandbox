@@ -44,6 +44,8 @@ uv run python examples/code-interpreter/main.py
 
 The script creates a Sandbox + CodeInterpreter, runs a Python code snippet and prints stdout/result, then terminates the remote instance. Cleanup is attempted in a `finally` block even if interpreter setup or code execution raises an exception.
 
+For `Execution` objects returned by the synchronous and asynchronous Python code-interpreter adapters, `execution.text` joins stdout fragments without inserting separators, so `"Loading"` followed by `"...done\n"` produces `"Loading...done"`. Formatted stdout and stderr retain the existing display normalization: CR/CRLF line endings become `\n` and trailing newlines are stripped; raw log messages and command-execution formatting are unchanged. The private formatting flag is not serialized: reconstructing an `Execution` from `model_dump()` or `model_dump_json()` output restores the default line formatting.
+
 ## Environment variables
 
 | Variable | Default | Description |

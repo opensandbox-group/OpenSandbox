@@ -1,6 +1,6 @@
 # ingress-gateway
 
-![Version: 1.2.0-rc.2](https://img.shields.io/badge/Version-1.2.0--rc.2-informational?style=flat-square) ![AppVersion: 1.2.0-rc.2](https://img.shields.io/badge/AppVersion-1.2.0--rc.2-informational?style=flat-square)
+![Version: 1.2.1-rc.1](https://img.shields.io/badge/Version-1.2.1--rc.1-informational?style=flat-square) ![AppVersion: 1.2.1-rc.1](https://img.shields.io/badge/AppVersion-1.2.1--rc.1-informational?style=flat-square)
 
 Helm chart for deploying the OpenSandbox ingress gateway (components/ingress)
 
@@ -59,7 +59,7 @@ Kubernetes: `>=1.21.1-0`
 | gateway.tolerations | list | `[]` | Tolerations for the gateway pod. |
 | gateway.topologySpreadConstraints | list | `[]` | Topology spread constraints for the gateway pod. |
 | gateway.wake.enabled | bool | `false` | Enable wake-on-access. |
-| gateway.wake.maxFlightLifetime | string | `"5m"` | Max lifetime of one wake flight; expiry releases the restore permit while the resume converges server-side. |
+| gateway.wake.maxFlightLifetime | string | `"5m"` | Max lifetime of one wake flight; expiry releases the restore permit while the resume converges server-side. Must exceed parkBudget. |
 | gateway.wake.parkBudget | string | `"5s"` | Park budget per wake flight (must exceed the FastPath wait timeout plus one GetSandbox RPC). |
 | gateway.wake.parkMax | int | `1024` | Parking lot capacity: max concurrently parked requests per replica. |
 | gateway.wake.restoreMax | int | `256` | Concurrent restore permits per replica (must be <= parkMax); a flight holds its permit until the restore reaches a terminal outcome. |

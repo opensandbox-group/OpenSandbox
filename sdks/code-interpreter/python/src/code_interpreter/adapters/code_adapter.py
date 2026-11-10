@@ -41,7 +41,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.sandboxes import SandboxEndpoint
-from opensandbox.transport import unwrap_retry_transport
+from opensandbox.transport import streaming_transport
 
 from code_interpreter.adapters.converter.code_execution_converter import (
     CodeExecutionConverter,
@@ -77,7 +77,6 @@ class CodesAdapter(Codes):
     """
 
     RUN_CODE_PATH = "/code"
-    CREATE_CONTEXT_PATH = "/code/context"
 
     def __init__(
         self, execd_endpoint: SandboxEndpoint, connection_config: ConnectionConfig
@@ -128,9 +127,8 @@ class CodesAdapter(Codes):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
-        # SSE bootstraps bypass the retry wrapper: request bodies are
-        # not replayable and a non-idempotent status opt-in would cause
-        # duplicate execution on a resent SSE POST.
+        # SSE bootstraps keep only the wake-timeout retry: a non-idempotent
+        # status opt-in would cause duplicate execution on a resent SSE POST.
         sse_transport = (
             self.connection_config.new_owned_transport()
             if self._owns_clients
@@ -144,7 +142,7 @@ class CodesAdapter(Codes):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=unwrap_retry_transport(sse_transport),
+            transport=streaming_transport(sse_transport),
         )
 
     async def _get_client(self):
@@ -316,6 +314,7 @@ class CodesAdapter(Codes):
                 result=[],
                 error=None,
             )
+            execution._is_code_execution = True
 
             # Use SSE client for streaming responses (read timeout disabled)
             client = await self._get_sse_client()

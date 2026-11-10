@@ -197,7 +197,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._lifecycle_locks_guard = Lock()
         self._lifecycle_locks: WeakValueDictionary[str, LockType] = WeakValueDictionary()
         self._execd_archive_lock = Lock()
-        self._bootstrap_script_lock = Lock()
         self._sandbox_expirations: Dict[str, datetime] = {}
         self._expiration_timers: Dict[str, Timer] = {}
         self._ossfs_mount_lock = Lock()
@@ -460,12 +459,18 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._metadata_store.delete(sandbox_id)
 
     def _restore_existing_sandboxes(self) -> None:
-        """On startup, rebuild expiration timers for containers already running."""
+        """On startup, rebuild expiration timers for containers already running.
+
+        ``ignore_removed=True`` skips containers removed between the list
+        summary and the per-container inspect (same race as ``list_sandboxes``).
+        Any other Docker error is re-raised so startup fails instead of
+        serving with no expiration timers for existing sandboxes.
+        """
         try:
-            containers = self.docker_client.containers.list(all=True)
+            containers = self.docker_client.containers.list(all=True, ignore_removed=True)
         except DockerException as exc:
-            logger.warning(f"Failed to restore existing sandboxes: {exc}")
-            return
+            logger.error(f"Failed to restore existing sandboxes: {exc}")
+            raise
 
         restored = 0
         seen_sidecars: set[str] = set()
@@ -568,8 +573,9 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         entrypoint = container.attrs.get("Config", {}).get("Cmd") or []
         if isinstance(entrypoint, str):
             entrypoint = [entrypoint]
-        image_tags = container.image.tags
-        image_uri = image_tags[0] if image_tags else container.image.short_id
+        # The image reference the container was created with. Do not look the
+        # image up via container.image: it may have been removed since.
+        image_uri = container.attrs.get("Config", {}).get("Image")
         snapshot_id = labels.get(SANDBOX_SNAPSHOT_ID_LABEL) or None
         image_spec = None if snapshot_id else ImageSpec(uri=image_uri)
 
@@ -656,6 +662,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._ensure_secure_access_support(request)
         self._ensure_network_policy_support(request)
         resource_limits = self._prepare_resource_limits(request)
+        self._validate_volume_definitions(request)
         # Docker API calls block; keep them off the event loop.
         await asyncio.to_thread(self._validate_network_exists)
 
@@ -904,17 +911,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 else:
                     exposed_ports = None
 
-            if runtime_volume_name:
-                runtime_mount_suffix = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}:"
-                runtime_mount_end = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}"
-                has_runtime_mount = any(
-                    runtime_mount_suffix in bind or bind.endswith(runtime_mount_end)
-                    for bind in volume_binds
+            # A request volume at the runtime path replaces the runtime mount.
+            if runtime_volume_name and not self._has_volume_at(
+                request, OPENSANDBOX_RUNTIME_MOUNT_PATH
+            ):
+                volume_binds.append(
+                    f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
                 )
-                if not has_runtime_mount:
-                    volume_binds.append(
-                        f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
-                    )
             # Config-level binds (docker.sandbox_binds) apply to every sandbox
             # and come first.
             all_binds = list(self.app_config.docker.sandbox_binds or []) + (volume_binds or [])

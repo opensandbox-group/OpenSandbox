@@ -30,6 +30,7 @@ from urllib.parse import quote
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.credential_payload import (
     dump_binding_mutation_set,
     dump_bindings,
@@ -97,12 +98,17 @@ class NetworkPolicyAdapterSync(EgressSync):
             prefix="",
             auth_header_name="OPEN-SANDBOX-API-KEY",
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._httpx_client = httpx.Client(
             base_url=self.connection_config.get_base_url(),
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(
+                self.connection_config,
+                self.connection_config.get_base_url(),
+            ),
         )
         self._client.set_httpx_client(self._httpx_client)
 

@@ -80,7 +80,20 @@ EXECD="${EXECD:-opensandbox/execd:latest}"
 # is the on-demand first-sandbox pull through DART.
 WARM_IMAGES="${WARM_IMAGES:-0}"
 
-POOL_NAME="${POOL_NAME:-firecracker-egress-pool}"
+# Pool profile (OSEP-0026 T4): mirrors integration-env.sh — POOL_MODE picks
+# the SandboxPool manifest/default name so standalone verify runs resolve the
+# same pool the env brought up (resource-aware = the ResourceAware fixture).
+POOL_MODE="${POOL_MODE:-legacy}"
+case "$POOL_MODE" in
+	legacy)
+		POOL_PROFILE="firecracker-egress-pool" ;;
+	resource-aware)
+		POOL_PROFILE="firecracker-egress-resource-aware-pool" ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: POOL_MODE must be legacy or resource-aware (got: %s)\n' "$POOL_MODE" >&2
+		exit 1 ;;
+esac
+POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -502,6 +515,29 @@ require_template_id() {
 	[[ -n "${TEMPLATE_ID:-}" ]] || TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] \
 		|| die "no template id at $WORK/template-id (run 'integration.sh up' first)"
+}
+
+# Shared verify preconditions: cluster up, server reachable, osb resolvable.
+require_live_stack() {
+	kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
+		|| die "cluster $KIND_CLUSTER is not up (run up first)"
+	curl -fsS -m 5 "$SERVER_URL/health" >/dev/null 2>&1 \
+		|| die "server $SERVER_URL is not reachable (run up first)"
+	[[ -n "$OSB_BIN" ]] || OSB_BIN="$OSB_VENV/bin/osb"
+	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
+}
+
+# Status-returning API call (curl -f hides codes; this prints the trailing one).
+server_api_status() { # method path [json-body]
+	local method="$1" path="$2" body="${3:-}" out
+	if [[ -n "$body" ]]; then
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-H "Content-Type: application/json" -d "$body" -w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	else
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	fi
+	printf '%s' "${out##*$'\n'}"
 }
 
 # --- artifact-store hygiene ---------------------------------------------------------

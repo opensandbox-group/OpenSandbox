@@ -675,7 +675,7 @@ class TestIsolatedSessionE2E:
             workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
         )
         async with self.sandbox.isolation.session(request) as session:
-            r1 = await session.run("export CTX_VAR=hello123")
+            await session.run("export CTX_VAR=hello123")
             r2 = await session.run("echo $CTX_VAR")
             assert "hello123" in r2.text
 

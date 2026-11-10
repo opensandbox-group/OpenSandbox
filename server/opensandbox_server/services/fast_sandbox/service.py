@@ -120,6 +120,10 @@ _POLICY_LOCK_SHARDS = 64
 
 logger = logging.getLogger(__name__)
 
+#: Pool mode is immutable for a pool's lifetime (spec.sandboxResources), so
+#: only a same-name delete-and-recreate can invalidate a cached entry.
+_POOL_MODE_CACHE_TTL_SECONDS = 15 * 60
+
 
 class FastSandboxService(SandboxService, ExtensionService):
     """sandbox fsb runtime backed by the fast-sandbox FastPath v2 API."""
@@ -142,6 +146,8 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._tenant_provider = None  # type: ignore[assignment]
         self._k8s_client = k8s_client
         self._k8s_client_lock = Lock()
+        self._pool_mode_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+        self._pool_mode_cache_lock = Lock()
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
         self._template_service = template_service
         self._activity_recorder: Optional[ActivityRecorder] = None
@@ -324,10 +330,10 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         return self._k8s.namespace or "default"
 
-    def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
-        """Return the resource profile declared by the selected SandboxPool."""
+    def _pool_info(self, namespace: str, pool_ref: str) -> pb2.PoolInfo:
+        """Fetch the selected SandboxPool via FastPath GetPool."""
         try:
-            pool = self._fastpath.get_pool(namespace, pool_ref)
+            return self._fastpath.get_pool(namespace, pool_ref)
         except FastPathNotFound:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -338,6 +344,38 @@ class FastSandboxService(SandboxService, ExtensionService):
             )
         except FastPathError as exc:
             raise self._fastpath_http_error(exc) from exc
+
+    @staticmethod
+    def _pool_is_resource_aware(pool: pb2.PoolInfo) -> bool:
+        """Only an explicitly reported ResourceAware profile passes; legacy,
+        unspecified, and unreported (older FastPath) fail safe to False."""
+        profile = pool.sandbox_resource_profile
+        return (
+            profile is not None
+            and profile.mode == pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+        )
+
+    def _pool_is_resource_aware_cached(self, namespace: str, pool_ref: str) -> bool:
+        """Pool-mode gate read, TTL-cached per pool. Only successful lookups
+        are cached; stale entries fail safe (FastPath rejects stale-aware,
+        stale-legacy forwards no resources)."""
+        key = (namespace, pool_ref)
+        now = time.monotonic()
+        with self._pool_mode_cache_lock:
+            cached = self._pool_mode_cache.get(key)
+        if cached is not None and now - cached[1] < _POOL_MODE_CACHE_TTL_SECONDS:
+            return cached[0]
+        aware = self._pool_is_resource_aware(self._pool_info(namespace, pool_ref))
+        with self._pool_mode_cache_lock:
+            self._pool_mode_cache[key] = (aware, time.monotonic())
+        return aware
+
+    def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
+        """Return the resource profile declared by the selected SandboxPool."""
+        return self._pool_resources_from_info(self._pool_info(namespace, pool_ref))
+
+    @staticmethod
+    def _pool_resources_from_info(pool: pb2.PoolInfo) -> dict:
         resources: dict = {}
         if pool.sandbox_cpu:
             resources["cpu"] = pool.sandbox_cpu
@@ -382,7 +420,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         audit_shape = None
         template_id = (request.template_id or "").strip()
         if template_id:
-            image_ref, template_entrypoint = (
+            image_ref, template_entrypoint, template_machine = (
                 self.resolve_template_service().resolve_template_artifact(template_id)
             )
             record = self.resolve_template_service().get_template(template_id)
@@ -409,6 +447,30 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
+            # OSEP-0026: pool mode is the forwarding gate; the second map
+            # reuses request_id and the first absolute expiry (idempotency).
+            try:
+                create_request = map_template_create_request(
+                    request,
+                    sandbox_id=create_request.request_id,
+                    namespace=create_request.namespace,
+                    image_ref=image_ref,
+                    entrypoint=template_entrypoint,
+                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
+                    expires_at_unix_seconds=create_request.expires_at_unix_seconds,
+                    template_machine=template_machine,
+                    pool_is_resource_aware=self._pool_is_resource_aware_cached(
+                        create_request.namespace, create_request.pool_ref
+                    ),
+                )
+            except UnsupportedFieldError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": str(exc),
+                    },
+                ) from exc
         else:
             try:
                 create_request = map_create_request(
@@ -425,12 +487,13 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
-            pool_resources = self._pool_resources(
-                create_request.namespace, create_request.pool_ref
-            )
+            pool = self._pool_info(create_request.namespace, create_request.pool_ref)
+            snapshot_limits = request.resolved_snapshot_limits
+            pool_resources = self._pool_resources_from_info(pool)
+            observed_limits = snapshot_limits or pool_resources
             pooled_limits = {
                 key: str(value)
-                for key, value in pool_resources.items()
+                for key, value in observed_limits.items()
                 if key in {"cpu", "memory"} and value
             }
             if pooled_limits:
@@ -449,7 +512,12 @@ class FastSandboxService(SandboxService, ExtensionService):
                     namespace=create_request.namespace,
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
                     expires_at_unix_seconds=create_request.expires_at_unix_seconds,
-                    pool_resources=pool_resources,
+                    # A snapshot restore fixes cpu/memory to the recorded
+                    # source limits; pids stays pool-owned (validated against
+                    # the same profile as a plain create).
+                    pool_resources=self._pool_resources_from_info(pool),
+                    snapshot_limits=snapshot_limits,
+                    pool_is_resource_aware=self._pool_is_resource_aware(pool),
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(

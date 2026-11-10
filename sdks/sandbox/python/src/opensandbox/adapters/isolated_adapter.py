@@ -56,7 +56,7 @@ from opensandbox.services.isolated import (
     IsolationServiceMixin,
     IsolationSession,
 )
-from opensandbox.transport import unwrap_retry_transport
+from opensandbox.transport import streaming_transport
 
 logger = logging.getLogger(__name__)
 
@@ -258,9 +258,8 @@ class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
-        # SSE bootstraps bypass the retry wrapper: request bodies are
-        # not replayable and a non-idempotent status opt-in would cause
-        # duplicate execution on a resent SSE POST.
+        # SSE bootstraps keep only the wake-timeout retry: a non-idempotent
+        # status opt-in would cause duplicate execution on a resent SSE POST.
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
             timeout=httpx.Timeout(
@@ -269,7 +268,7 @@ class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=unwrap_retry_transport(self.connection_config.transport),
+            transport=streaming_transport(self.connection_config.transport),
             **build_async_redirect_client_options(self.connection_config, base_url),
         )
 

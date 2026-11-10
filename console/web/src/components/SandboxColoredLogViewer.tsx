@@ -22,7 +22,7 @@ import './SandboxColoredLogViewer.css';
 type Props = {
   content: string;
   maxHeight?: number;
-  /** 每次成功拉取后递增，避免用文本长度当 key 时等长内容仍显示旧日志 */
+  /** Increment after each successful fetch so equal-length results do not reuse stale logs. */
   contentKey: string;
 };
 
@@ -52,10 +52,10 @@ export function SandboxColoredLogViewer({ content, maxHeight = 420, contentKey }
         searchBarClassName="sandbox-log-search"
         internacionalization={{
           searchBar: {
-            searchPlaceholder: '搜索日志…',
-            filterLinesTitle: '仅显示匹配行',
-            previousButtonTitle: '上一处',
-            nextButtonTitle: '下一处',
+            searchPlaceholder: 'Search logs…',
+            filterLinesTitle: 'Show matching lines only',
+            previousButtonTitle: 'Previous match',
+            nextButtonTitle: 'Next match',
           },
         }}
       />

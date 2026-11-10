@@ -205,6 +205,14 @@ func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, 
 	if recovery := s.vaultRecovery.Load(); recovery != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("vault persistence recovery required: %s", recovery.reason)
 	}
+	if entry, ok := s.vaults[subj]; ok {
+		if entry.vaultStateUnknown {
+			return nil, http.StatusServiceUnavailable, errors.New("vault state is unknown; refusing snapshot export")
+		}
+		if entry.fileMeta.version >= credentialvault.VaultFileVersion2 {
+			return nil, http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware restore is supported")
+		}
+	}
 	fs, err := s.vaultFiles.storeFor(subj)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("vault file store unavailable: %w", err)
@@ -214,16 +222,20 @@ func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, 
 		return nil, http.StatusInternalServerError, fmt.Errorf("vault file snapshot: %w", err)
 	}
 	if snap.Exists() {
-		// Carry only bytes attributable to the registered fence: a leftover
-		// from a previous incarnation (purge failed), a corrupt file, or a
-		// newer schema is treated as absent — never exported, or import
-		// would re-stamp foreign credentials as current.
+		// The current reader can expose v2 state read-only but cannot restore
+		// its ordering lineage. Refuse before copying, sealing, or deleting a
+		// stale bundle; treating it as absent would make a successful snapshot
+		// impossible to restore.
 		vf, _, decErr := credentialvault.DecodeVaultFile(snap.Data())
+		if errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion) || (decErr == nil && vf.Version >= credentialvault.VaultFileVersion2) {
+			return nil, http.StatusConflict, fmt.Errorf("v2 or unknown vault state cannot be exported before lineage-aware restore is supported")
+		}
+		// Carry only bytes attributable to the registered fence: a leftover
+		// from a previous incarnation (purge failed) or a corrupt v1 file is
+		// treated as absent, preserving the legacy behavior.
 		if decErr != nil || vf.Incarnation != regFence.RuntimeInstanceID || vf.AttachmentID != regFence.AttachmentID {
 			what := "unattributable fence"
-			if errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion) {
-				what = "newer schema (preserved for the newer writer)"
-			} else if decErr != nil {
+			if decErr != nil {
 				what = "unreadable"
 			}
 			log.Infof("subject %s: vault file not carried (%s)", subj, what)
@@ -273,6 +285,9 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 	if err != nil {
 		return http.StatusBadRequest, fmt.Errorf("invalid vault bundle file: %v", err)
 	}
+	if vf.Version != credentialvault.VaultFileVersion {
+		return http.StatusConflict, fmt.Errorf("v%d vault bundles are read-only until lineage-aware import is supported", vf.Version)
+	}
 	// The authorized incarnation transfer.
 	payload, err := credentialvault.EncodeVaultFile(fence.RuntimeInstanceID, fence.AttachmentID, vf.Revision, body)
 	if err != nil {
@@ -299,18 +314,37 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 	if recovery := s.vaultRecovery.Load(); recovery != nil {
 		return http.StatusServiceUnavailable, fmt.Errorf("vault persistence recovery required: %s", recovery.reason)
 	}
+	if entry, ok := s.vaults[subj]; ok {
+		if entry.vaultStateUnknown {
+			return http.StatusServiceUnavailable, errors.New("vault state is unknown; refusing snapshot import")
+		}
+		if entry.fileMeta.version >= credentialvault.VaultFileVersion2 {
+			return http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware writes are supported")
+		}
+	}
 	// At-least-once delivery: never roll a newer local revision back. The
 	// guard requires the stored fence to match the envelope — a newer file
 	// under an old incarnation is stale local state the import must
 	// supersede, not ack.
-	if fs, fsErr := s.vaultFiles.storeFor(subj); fsErr == nil {
-		if cur, snapErr := fs.Snapshot(); snapErr == nil && cur.Exists() {
-			if curVF, _, decErr := credentialvault.DecodeVaultFile(cur.Data()); decErr == nil &&
-				curVF.Incarnation == fence.RuntimeInstanceID && curVF.AttachmentID == fence.AttachmentID &&
-				curVF.Revision > vf.Revision {
-				log.Infof("subject %s: vault import superseded (local revision %d > bundle revision %d), idempotent ack", subj, curVF.Revision, vf.Revision)
-				return http.StatusOK, nil
-			}
+	fileStore, fsErr := s.vaultFiles.storeFor(subj)
+	if fsErr != nil {
+		return http.StatusInternalServerError, fmt.Errorf("vault file store unavailable: %w", fsErr)
+	}
+	current, snapErr := fileStore.Snapshot()
+	if snapErr != nil {
+		return http.StatusInternalServerError, fmt.Errorf("vault file snapshot: %w", snapErr)
+	}
+	if current.Exists() {
+		curVF, _, decErr := credentialvault.DecodeVaultFile(current.Data())
+		if decErr != nil && errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion) {
+			return http.StatusConflict, errors.New("local vault file uses an unsupported schema; refusing to overwrite it")
+		}
+		if decErr == nil && curVF.Version != credentialvault.VaultFileVersion {
+			return http.StatusConflict, errors.New("local v2 vault state is read-only until lineage-aware writes are supported")
+		}
+		if decErr == nil && curVF.Incarnation == fence.RuntimeInstanceID && curVF.AttachmentID == fence.AttachmentID && curVF.Revision > vf.Revision {
+			log.Infof("subject %s: vault import superseded (local revision %d > bundle revision %d), idempotent ack", subj, curVF.Revision, vf.Revision)
+			return http.StatusOK, nil
 		}
 	}
 	// Commit-time fence re-validation against our own record (subjFence —
@@ -349,6 +383,7 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 		return status, errors.New("vault import persistence failure")
 	}
 	if registered {
+		s.recordSubjectSnapshotLocked(subj, fence)
 		log.Infof("subject %s: vault imported from snapshot bundle (revision %d, re-stamped to %s/%s)",
 			subj, vf.Revision, fence.RuntimeInstanceID, fence.AttachmentID)
 	} else {
@@ -368,7 +403,7 @@ func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subjec
 	pol := validation
 	entry, ok := s.vaults[subj]
 	if !ok || entry.fence != fence {
-		entry = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence}
+		entry = vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence}
 	}
 	if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 		return err
@@ -386,7 +421,7 @@ func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subjec
 // validateImportedVault runs the imported revision through the exact Reload
 // the live install will use, on a scratch store.
 func validateImportedVault(vf credentialvault.VaultFile, body credentialvault.VaultFileBody, pol *policy.NetworkPolicy) error {
-	scratch := credentialvault.NewStore(nil, func() bool { return true })
+	scratch := credentialvault.NewSubjectStore()
 	return scratch.Reload(vf.Revision, credentialvault.CreateRequest(body), pol)
 }
 
