@@ -1355,6 +1355,22 @@ class DockerConfig(BaseModel):
             "Linux capabilities to drop from sandbox containers. Defaults to a conservative set to reduce host impact."
         ),
     )
+    add_capabilities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Linux capabilities to add to sandbox containers (Docker cap_add), e.g. SYS_ADMIN and "
+            "NET_ADMIN for a Docker daemon inside the sandbox. Only use with a VM-based secure "
+            "runtime such as Kata, where they apply inside the guest. NET_ADMIN is never added to "
+            "a sandbox behind the egress sidecar."
+        ),
+    )
+    device_cgroup_rules: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Device cgroup rules for sandbox containers (Docker --device-cgroup-rule), e.g. "
+            "'a *:* rwm' so that a nested container runtime can manage its own devices."
+        ),
+    )
     apparmor_profile: Optional[str] = Field(
         default=None,
         description=(

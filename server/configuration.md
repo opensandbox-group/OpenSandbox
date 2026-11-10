@@ -115,6 +115,8 @@ The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no 
 | `api_timeout` | integer \| omitted | `null` | Docker API timeout (s); default 180 when unset. |
 | `host_ip` | string \| omitted | `null` | Host/IP used when rewriting bridge-mode endpoint URLs (e.g. `host.docker.internal`). |
 | `drop_capabilities` | list of strings | See `config.py` | Linux capabilities dropped from sandbox containers. |
+| `add_capabilities` | list of strings | `[]` | Linux capabilities added to sandbox containers (`cap_add`), e.g. `SYS_ADMIN` and `NET_ADMIN` for Docker inside the sandbox. Only with a VM-based `secure_runtime` such as Kata. `NET_ADMIN` is never added behind the egress sidecar. |
+| `device_cgroup_rules` | list of strings | `[]` | Device cgroup rules for sandbox containers (`--device-cgroup-rule`), e.g. `"a *:* rwm"` for a nested container runtime. |
 | `apparmor_profile` | string \| omitted | `null` | AppArmor profile name; empty uses Docker default. Also applied to the execd cache container. |
 | `no_new_privileges` | boolean | `true` | Block privilege escalation. |
 | `seccomp_profile` | string \| omitted | `null` | Seccomp profile name or absolute path; empty uses Docker default. Also applied to the execd cache container (e.g. set `unconfined` on hosts whose default profile blocks execd). |
