@@ -485,12 +485,20 @@ try:
 except ImportError:  # pragma: no cover - environment-dependent
     _HAVE_CRYPTO = False
 
+# The enforcing stub lazily imports the sandbox SDK's resolver_auth; probe
+# the same import and skip when the environment cannot run it.
+try:
+    import opensandbox.resolver_auth  # noqa: F401
+    _HAVE_SDK = True
+except Exception:  # pragma: no cover - environment-dependent
+    _HAVE_SDK = False
+
 
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-@unittest.skipUnless(_HAVE_CRYPTO, "cryptography not available")
+@unittest.skipUnless(_HAVE_CRYPTO and _HAVE_SDK, "cryptography + the sandbox SDK are required")
 class ResolverRequireCredentialTest(unittest.TestCase):
     """--require-credential: 401 without a valid egress credential.
 
