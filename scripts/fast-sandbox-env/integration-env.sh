@@ -1439,11 +1439,6 @@ control_plane_up() {
 	apply_ns "$NS"
 	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml"
 	kubectl apply -f "$GEN_DIR/fsb-base.yaml" >/dev/null
-	# Keep poolSizeGB=2 in sync with the disk=2Gi template builds below.
-		--set runtime.oci.enabled="$([[ "$OCI_STACK" == 1 ]] && echo true || echo false)" \
-		--set runtime.oci.poolLow=4 \
-		--set runtime.oci.poolHigh=8 \
-		--set runtime.oci.poolSizeGB=2
 	# The ublkd qualification record digest comes from the qualification
 	# stage (digest of the deployed overlaybd-ublkd binary); without it the
 	# record is not published and rootfs-only captures are rejected.
@@ -1453,6 +1448,7 @@ control_plane_up() {
 		source "$WORK/rootfs-qualification.env"
 		rootfs_qualification_set=(--set "runtime.oci.rootfsQualifiedSHA256=$OVERLAYBD_QUALIFIED_SHA256")
 	fi
+	# Keep poolSizeGB=2 in sync with the disk=2Gi template builds below.
 	helm_render fast-sandbox "$OSB_ROOT/manifests/charts/fast-sandbox" "$NS" \
 		"$GEN_DIR/fast-sandbox.yaml" \
 		--set controller.image.repository="$(image_repo "$IMG_CONTROLLER")" \
