@@ -4248,6 +4248,14 @@ idle_e2e() {
 
 ROOTFS_QUALIFICATION_DIR="/var/lib/fast-sandbox-env"
 
+rootfs_only_sha256() { # <file> -> sha256 hex (coreutils name first, Perl shasum fallback)
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	else
+		shasum -a 256 "$1" | awk '{print $1}'
+	fi
+}
+
 rootfs_only_image_digest() { # <image> <path> -> sha256
 	local image="$1" path="$2" cid sum
 	cid="$(docker create --entrypoint /bin/true "$image" 2>/dev/null)" \
@@ -4255,7 +4263,7 @@ rootfs_only_image_digest() { # <image> <path> -> sha256
 	docker cp "$cid:$path" "$WORK/.rootfs-digest.tmp" >/dev/null 2>&1 \
 		|| { docker rm "$cid" >/dev/null 2>&1 || true; die "rootfs qualification: $path not found in $image"; }
 	docker rm "$cid" >/dev/null 2>&1 || true
-	sum="$(shasum -a 256 "$WORK/.rootfs-digest.tmp" | awk '{print $1}')"
+	sum="$(rootfs_only_sha256 "$WORK/.rootfs-digest.tmp")"
 	rm -f "$WORK/.rootfs-digest.tmp"
 	[[ "$sum" =~ ^[0-9a-f]{64}$ ]] || die "rootfs qualification: digest of $path in $image is not a sha256"
 	printf '%s' "$sum"
