@@ -20,7 +20,7 @@
  */
 
 import type { ExecdClient } from "../openapi/execdClient.js";
-import { throwOnOpenApiFetchError } from "./openapiError.js";
+import { throwOnFailedResponse, throwOnOpenApiFetchError } from "./openapiError.js";
 import type { SandboxFiles } from "../services/filesystem.js";
 import type { paths as ExecdPaths } from "../api/execd.js";
 import type {
@@ -41,7 +41,6 @@ import type {
   SetPermissionEntry,
   WriteEntry,
 } from "../models/filesystem.js";
-import { SandboxApiException, SandboxError } from "../core/exceptions.js";
 import { throwOnUploadFailure } from "./uploadFailure.js";
 import { createReadBytesResponse, readResponseBody } from "./downloadResponse.js";
 
@@ -421,15 +420,7 @@ export class IsolatedFilesystemAdapter implements SandboxFiles {
       },
     });
     if (!res.ok) {
-      const requestId = res.headers.get("x-request-id") ?? undefined;
-      const rawBody = await res.text().catch(() => undefined);
-      throw new SandboxApiException({
-        message: errorMessage,
-        statusCode: res.status,
-        requestId,
-        error: new SandboxError(SandboxError.UNEXPECTED_RESPONSE, errorMessage),
-        rawBody,
-      });
+      await throwOnFailedResponse(res, errorMessage);
     }
     return res;
   }
