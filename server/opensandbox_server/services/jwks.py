@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JWKS publication for egress caller-authentication keys (OSEP-0025 D5).
+"""JWKS publication for credential-vault resolver caller authentication
+(OSEP-0025 D5).
 
 The lifecycle server publishes one public Ed25519 key per fast-sandbox pool
-kid at ``GET /jwks/{kid}``. The endpoint is public by design — it serves
+kid at ``GET /credential-vault/jwks/{kid}``. The endpoint is public by design — it serves
 public keys only, exactly like an OIDC provider's ``/.well-known/jwks.json``
 — and relies on kid-grammar rejection plus rate limiting, never on resolver
 registration (which would reintroduce the static credential this design

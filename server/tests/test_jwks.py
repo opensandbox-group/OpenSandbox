@@ -252,10 +252,10 @@ class TestSidecarSource:
         service, _, _ = make_service({})
         service._sidecar_reader = lambda sid: material_jwk if sid == "sbx-side1" else None
         client = TestJWKSRoute().make_app(service)
-        ok = client.get("/jwks/sbx-side1")
+        ok = client.get("/credential-vault/jwks/sbx-side1")
         assert ok.status_code == 200
         assert ok.json() == material_jwk
-        assert client.get("/jwks/sbx-gone1").status_code == 404
+        assert client.get("/credential-vault/jwks/sbx-gone1").status_code == 404
 
 
 class TestJWKSRoute:
@@ -267,7 +267,7 @@ class TestJWKSRoute:
         return TestClient(app)
 
     def test_unconfigured_is_501(self) -> None:
-        response = self.make_app().get("/jwks/pool-a:v2")
+        response = self.make_app().get("/credential-vault/jwks/pool-a:v2")
         assert response.status_code == 501
 
     def test_known_kid_200_unknown_404(self) -> None:
@@ -276,15 +276,15 @@ class TestJWKSRoute:
             {"s": {"signing.pub": x.encode(), "kid": kid.encode()}}
         )
         client = self.make_app(service)
-        ok = client.get(f"/jwks/{kid}")
+        ok = client.get(f"/credential-vault/jwks/{kid}")
         assert ok.status_code == 200
         assert ok.json() == {
             "kty": "OKP", "crv": "Ed25519", "x": x, "kid": kid,
             "alg": "EdDSA", "use": "sig",
         }
         assert "PRIVATE" not in ok.text
-        assert client.get("/jwks/pool-z:v9").status_code == 404
-        assert client.get("/jwks/..%2Fescape").status_code == 404
+        assert client.get("/credential-vault/jwks/pool-z:v9").status_code == 404
+        assert client.get("/credential-vault/jwks/..%2Fescape").status_code == 404
 
     def test_rate_limited_is_429(self) -> None:
         kid, x = vectors_sidecar()
@@ -293,11 +293,11 @@ class TestJWKSRoute:
             max_lookups=2,
         )
         client = self.make_app(service)
-        assert client.get(f"/jwks/{kid}").status_code == 200
-        assert client.get(f"/jwks/{kid}").status_code == 200
-        assert client.get(f"/jwks/{kid}").status_code == 429
+        assert client.get(f"/credential-vault/jwks/{kid}").status_code == 200
+        assert client.get(f"/credential-vault/jwks/{kid}").status_code == 200
+        assert client.get(f"/credential-vault/jwks/{kid}").status_code == 429
 
     def test_endpoint_is_public(self) -> None:
         """No API key required (public-keys-only posture, OSEP-0025)."""
-        assert "/jwks" in AuthMiddleware.EXEMPT_PATHS
-        assert "/v1/jwks" in AuthMiddleware.EXEMPT_PATHS
+        assert "/credential-vault/jwks" in AuthMiddleware.EXEMPT_PATHS
+        assert "/v1/credential-vault/jwks" in AuthMiddleware.EXEMPT_PATHS

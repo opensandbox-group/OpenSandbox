@@ -31,7 +31,7 @@ def _get_kwargs(
 ) -> dict[str, Any]:
     _kwargs: dict[str, Any] = {
         "method": "get",
-        "url": "/jwks/{kid}".format(
+        "url": "/credential-vault/jwks/{kid}".format(
             kid=quote(str(kid), safe=""),
         ),
     }
@@ -79,17 +79,17 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
 ) -> Response[Any | EgressSigningJwk]:
-    """Publish one egress caller-authentication public key
+    """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 resolver caller authentication: credential resolvers verify
-    the `OpenSandbox-Egress-Credential` JWT offline against the Ed25519
-    public key identified by `kid`.
+     OSEP-0025 credential-vault resolver caller authentication: credential
+    resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
+    against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
     OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
     is bounded by local `kid` grammar validation and a per-window lookup
     budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or, in later revisions, a sidecar sandboxId.
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
     Off-grammar and unknown kids answer 404 without a backend read.
 
     Args:
@@ -119,17 +119,17 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
 ) -> Any | EgressSigningJwk | None:
-    """Publish one egress caller-authentication public key
+    """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 resolver caller authentication: credential resolvers verify
-    the `OpenSandbox-Egress-Credential` JWT offline against the Ed25519
-    public key identified by `kid`.
+     OSEP-0025 credential-vault resolver caller authentication: credential
+    resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
+    against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
     OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
     is bounded by local `kid` grammar validation and a per-window lookup
     budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or, in later revisions, a sidecar sandboxId.
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
     Off-grammar and unknown kids answer 404 without a backend read.
 
     Args:
@@ -154,17 +154,17 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
 ) -> Response[Any | EgressSigningJwk]:
-    """Publish one egress caller-authentication public key
+    """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 resolver caller authentication: credential resolvers verify
-    the `OpenSandbox-Egress-Credential` JWT offline against the Ed25519
-    public key identified by `kid`.
+     OSEP-0025 credential-vault resolver caller authentication: credential
+    resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
+    against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
     OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
     is bounded by local `kid` grammar validation and a per-window lookup
     budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or, in later revisions, a sidecar sandboxId.
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
     Off-grammar and unknown kids answer 404 without a backend read.
 
     Args:
@@ -192,17 +192,17 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
 ) -> Any | EgressSigningJwk | None:
-    """Publish one egress caller-authentication public key
+    """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 resolver caller authentication: credential resolvers verify
-    the `OpenSandbox-Egress-Credential` JWT offline against the Ed25519
-    public key identified by `kid`.
+     OSEP-0025 credential-vault resolver caller authentication: credential
+    resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
+    against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
     OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
     is bounded by local `kid` grammar validation and a per-window lookup
     budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or, in later revisions, a sidecar sandboxId.
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
     Off-grammar and unknown kids answer 404 without a backend read.
 
     Args:

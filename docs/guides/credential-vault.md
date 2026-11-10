@@ -338,7 +338,7 @@ A working resolver answers `200` with deterministic headers — `authorization: 
 
 ### Resolver Caller Authentication (fast-sandbox)
 
-Every TCP resolve dial carries one header, `OpenSandbox-Egress-Credential`, holding a compact Ed25519 JWT minted by the egress. The credential proves "this resolve call originated from the egress process" and binds the attested `sub` (the sandboxId); resolvers verify it offline against a JWKS published by the lifecycle server at `GET /jwks/{kid}`. Unix sockets keep using socket permissions as their boundary and carry no credential.
+Every TCP resolve dial carries one header, `OpenSandbox-Egress-Credential`, holding a compact Ed25519 JWT minted by the egress. The credential proves "this resolve call originated from the egress process" and binds the attested `sub` (the sandboxId); resolvers verify it offline against a JWKS published by the lifecycle server at `GET /credential-vault/jwks/{kid}`. Unix sockets keep using socket permissions as their boundary and carry no credential.
 
 Provisioning is operator-only and per-pool (fast-sandbox profile):
 
@@ -378,7 +378,7 @@ kubectl create secret generic opensandbox-egress-signing-<pool>-v1 \
 
 Only `signing.key` is mounted into the egress. Without a loadable key, vault writes containing `https://` exchange credentials are rejected (fail closed); `unix://` exchange credentials and static vaults keep working.
 
-3. **Publish the public key** — set `kubernetes.egress_signing_key_secrets` in the server config to the Secret name(s), current version first. The server serves the JWK at `/jwks/{kid}` — public keys only, no API key required.
+3. **Publish the public key** — set `kubernetes.egress_signing_key_secrets` in the server config to the Secret name(s), current version first. The server serves the JWK at `/credential-vault/jwks/{kid}` — public keys only, no API key required.
 
 4. **Verify on the resolver** with the Python SDK:
 
@@ -387,7 +387,7 @@ from opensandbox_resolver_auth import VerifierConfig
 from opensandbox_resolver_auth.jwks import JWKSClient
 
 config = VerifierConfig(
-    jwks_base="https://<lifecycle-server>",
+    jwks_base="https://<lifecycle-server>/credential-vault",
     expected_issuer="opensandbox",
     expected_audience="https://<this-resolver>:<port>",  # your own origin
 )
@@ -399,7 +399,7 @@ subject = client.verify(headers["OpenSandbox-Egress-Credential"],
 
 Every verification failure maps to HTTP 401. The test resolver enforces all of this behind `--require-credential --jwks-base <url>` (or `--jwks-file <path>` for self-contained runs).
 
-**Sidecar profile (per-sandbox keys, always on).** Every sandbox created with `networkPolicy` gets a fresh keypair — the private PEM is injected into its egress sidecar through the auth-token env channel and discarded server-side, and the public JWK is recorded on the workload (Kubernetes annotation `opensandbox.io/egress-signing-jwk` / Docker container label) where `GET /jwks/{sandboxId}` reads it. There is no configuration for this: turning it off would reopen the resolver trust-boundary gap this feature closes. No operator key management either — sandbox recreation replaces the keypair, and the JWKS entry follows the workload. The resolver integration is unchanged — the same three SDK config values, with `expected_audience` still the resolver's own origin.
+**Sidecar profile (per-sandbox keys, always on).** Every sandbox created with `networkPolicy` gets a fresh keypair — the private PEM is injected into its egress sidecar through the auth-token env channel and discarded server-side, and the public JWK is recorded on the workload (Kubernetes annotation `opensandbox.io/egress-signing-jwk` / Docker container label) where `GET /credential-vault/jwks/{sandboxId}` reads it. There is no configuration for this: turning it off would reopen the resolver trust-boundary gap this feature closes. No operator key management either — sandbox recreation replaces the keypair, and the JWKS entry follows the workload. The resolver integration is unchanged — the same three SDK config values, with `expected_audience` still the resolver's own origin.
 
 **Rotation** is the versioned-Secret runbook: create `-(v+1)` with its own kid, add it to `egress_signing_key_secrets` ahead of the old entry, update the SandboxPool reference, roll the pool, and remove the old Secret only after the rollout completes and credential TTL + leeway (about 1 hour) has passed — credentials minted by not-yet-rolled instances stay verifiable throughout. Resolvers re-validate cached keys at most hourly, so a retired kid stops verifying within that window; monitor resolver-side 401 rates and page the key owner on spikes.
 

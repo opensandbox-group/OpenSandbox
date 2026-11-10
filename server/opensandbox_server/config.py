@@ -1161,8 +1161,10 @@ class EgressConfig(BaseModel):
     )
     # NOTE: OSEP-0025 D5 sidecar caller authentication is unconditional —
     # every sandbox created with a networkPolicy gets a per-sandbox keypair
-    # (see services/egress_signing.py). There is deliberately no operator
-    # knob: turning it off would reopen the R4 gap for https:// resolvers.
+    # (see services/egress_signing.py), published via
+    # GET /credential-vault/jwks/{sandboxId}. There is deliberately no
+    # operator knob: turning it off would reopen the R4 gap for https://
+    # resolvers.
     mode: Literal[
         EGRESS_MODE_DNS,
         EGRESS_MODE_DNS_NFT,

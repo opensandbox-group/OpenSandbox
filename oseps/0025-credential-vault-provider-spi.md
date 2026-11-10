@@ -348,7 +348,7 @@ Hard requirements on a resolver endpoint, none of which dictate an implementatio
 | Per-request semantics | input includes request context; output differs per request |
 | Absent/unreachable = denial | no fallback to uncredentialed pass-through |
 
-Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: implemented in both profiles.** Fast-sandbox: per-pool signing Secret projected into the egress, JWT minting on every TCP resolve dial, and the server-published JWKS endpoint. Sidecar/docker: the server generates one Ed25519 keypair per sandbox at creation, injects the private key through the auth-token env channel, and records the public JWK on the workload — `GET /jwks/{sandboxId}` reads that record, so the entry lives and dies with the workload. See the [Credential Vault guide](../docs/guides/credential-vault.md#resolver-caller-authentication-fast-sandbox) for provisioning and rotation runbooks. `unix://` endpoints (socket permissions) remain their own egress-only trust boundary and carry no credential.
+Authentication material for `https://` resolvers is provisioned through operator configuration of the egress — origin-scoped, so a token is only ever presented to the endpoint it was configured for — never through the vault API and never into the sandbox. **Status: implemented in both profiles.** Fast-sandbox: per-pool signing Secret projected into the egress, JWT minting on every TCP resolve dial, and the server-published JWKS endpoint. Sidecar/docker: the server generates one Ed25519 keypair per sandbox at creation, injects the private key through the auth-token env channel, and records the public JWK on the workload — `GET /credential-vault/jwks/{sandboxId}` reads that record, so the entry lives and dies with the workload. See the [Credential Vault guide](../docs/guides/credential-vault.md#resolver-caller-authentication-fast-sandbox) for provisioning and rotation runbooks. `unix://` endpoints (socket permissions) remain their own egress-only trust boundary and carry no credential.
 
 ### Resolver Caller Authentication
 
@@ -427,7 +427,7 @@ sequenceDiagram
     alt kid cached
         SDK->>SDK: verify Ed25519 signature, iss/aud, exp (±30s leeway)
     else unknown kid
-        SDK->>Srv: GET /jwks/{kid}
+        SDK->>Srv: GET /credential-vault/jwks/{kid}
         Srv-->>SDK: JWK — public key only
         SDK->>SDK: verify and cache the key
     end
