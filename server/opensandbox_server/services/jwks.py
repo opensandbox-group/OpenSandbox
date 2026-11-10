@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 #: Platform identifier grammar — identical to the egress mint side and the
 #: resolver SDK (frozen in the shared vectors' contract block). Off-grammar
-#: kids are rejected locally: no Secret read, no rate-budget consumption.
+#: kids are rejected locally: no Secret read happens for them.
 KID_GRAMMAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}(:v[0-9]{1,8})?$")
 
 #: Signing Secret entries.

@@ -46,8 +46,6 @@ class CredentialVaultCallerAuth:
         now: Callable[[], float] | None = None,
         max_cache_age: float = 3600.0,
         negative_ttl: float = 300.0,
-        max_fetches: int = 60,
-        window_seconds: float = 60.0,
         fetch_timeout: float = 5.0,
     ) -> None:
         self._config = VerifierConfig(
@@ -61,8 +59,6 @@ class CredentialVaultCallerAuth:
             now=now,
             max_cache_age=max_cache_age,
             negative_ttl=negative_ttl,
-            max_fetches=max_fetches,
-            window_seconds=window_seconds,
             fetch_timeout=fetch_timeout,
         )
 

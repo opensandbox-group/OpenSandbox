@@ -68,16 +68,16 @@ def _sidecar_parts():
 
 
 def test_inflight_locks_are_reclaimed() -> None:
-    """Finished and budget-rejected flights must not accumulate locks."""
+    """Finished flights must not accumulate locks."""
 
     class Always404:
         def __call__(self, url: str, *, timeout: float):
             return 404, b"{}"
 
     clock = FakeClock()
-    client = JWKSClient(_cfg(), transport=Always404(), now=clock, max_fetches=1)
-    # First miss consumes the budget; every later kid is rejected at
-    # reservation — both paths must leave no flight behind.
+    client = JWKSClient(_cfg(), transport=Always404(), now=clock)
+    # Every kid misses authoritatively; each completed flight must leave no
+    # lock behind.
     import base64 as b64
 
     for i in range(100):

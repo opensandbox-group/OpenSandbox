@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Review-driven JWKS client hardening: lock discipline, budget accounting,
-transient-error semantics, and cache eviction."""
+"""Review-driven JWKS client hardening: lock discipline, transient-error
+semantics, and cache eviction."""
 
 from __future__ import annotations
 
@@ -88,26 +88,6 @@ def _cfg():
         expected_audience="credential-resolver@resolver.internal",
     )
 
-
-def test_failed_fetches_consume_budget(vectors) -> None:
-    """A down JWKS service cannot be retried without bound."""
-    case = next(c for c in vectors["cases"] if c["name"] == "valid_sidecar")
-
-    class Exploding:
-        calls = 0
-
-        def __call__(self, url: str, *, timeout: float):
-            self.calls += 1
-            raise OSError("server unreachable")
-
-    transport = Exploding()
-    client = make_client(transport, FakeClock(), max_fetches=1)
-    for _ in range(3):
-        with pytest.raises(VerifyError) as excinfo:
-            client.verify(case["jwt"], document_subject="sbx-7f3a2c", now=1_790_000_600)
-        assert excinfo.value.code == "unknown_kid"
-    assert transport.calls == 1, "failed attempts must count against the budget"
-    assert client.fetch_count == 1
 
 
 def test_transient_status_is_not_negative_cached(vectors) -> None:

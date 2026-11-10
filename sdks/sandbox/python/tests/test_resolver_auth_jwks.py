@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """JWKS client behavior: positive/negative caching, rotation-as-revocation,
-per-process fetch budget, local kid rejection, and forced HTTPS."""
+local kid rejection, and forced HTTPS."""
 
 from __future__ import annotations
 
@@ -165,27 +165,6 @@ def test_off_grammar_kid_never_fetches(vectors) -> None:
         client.verify(case["jwt"], document_subject="sbx-7f3a2c", now=1_790_000_600)
     assert excinfo.value.code == "kid_grammar"
     assert transport.calls == [], "grammar violations must be rejected locally, no fetch"
-
-
-def test_fetch_budget_exhaustion_fails_closed(sidecar_jwk) -> None:
-    clock = FakeClock()
-    transport = MapTransport({})
-    client = make_client(
-        base_config(), transport, clock, max_fetches=3, window_seconds=60.0
-    )
-    # Burn the budget with distinct well-formed unknown kids (each returns
-    # None quietly — only verify() maps a miss to unknown_kid).
-    for i in range(3):
-        assert client._key_for_kid(f"sbx-burn{i:03d}") is None
-    with pytest.raises(VerifyError) as excinfo:
-        client._key_for_kid("sbx-over1")
-    assert "budget" in excinfo.value.detail
-    assert len(transport.calls) == 3
-
-    # The window slides; the budget recovers.
-    clock.advance(61.0)
-    client._key_for_kid("sbx-over1")
-    assert len(transport.calls) == 4
 
 
 def test_http_jwks_base_rejected() -> None:

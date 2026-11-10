@@ -45,10 +45,6 @@ DEFAULT_MAX_CACHE_AGE_SECONDS = 3600.0
 #: A missed kid is re-fetched at most this often.
 DEFAULT_NEGATIVE_TTL_SECONDS = 300.0
 
-#: Fetch budget per window, per client (== per resolver process).
-DEFAULT_MAX_FETCHES = 60
-DEFAULT_WINDOW_SECONDS = 60.0
-
 #: Hard cap on cached kids (both maps); the oldest half is dropped when
 #: exceeded, bounding memory under sandbox churn.
 DEFAULT_CACHE_CAP = 4096
@@ -90,8 +86,6 @@ class JWKSClient:
         now: Callable[[], float] | None = None,
         max_cache_age: float = DEFAULT_MAX_CACHE_AGE_SECONDS,
         negative_ttl: float = DEFAULT_NEGATIVE_TTL_SECONDS,
-        max_fetches: int = DEFAULT_MAX_FETCHES,
-        window_seconds: float = DEFAULT_WINDOW_SECONDS,
         fetch_timeout: float = 5.0,
         cache_cap: int = DEFAULT_CACHE_CAP,
     ) -> None:
@@ -104,8 +98,6 @@ class JWKSClient:
         self._now = now or time.time
         self._max_cache_age = max_cache_age
         self._negative_ttl = negative_ttl
-        self._max_fetches = max_fetches
-        self._window_seconds = window_seconds
         self._fetch_timeout = fetch_timeout
         self._cache_cap = cache_cap
 
@@ -116,7 +108,6 @@ class JWKSClient:
         self._keys: dict[str, tuple[Mapping[str, Any], float]] = {}
         self._misses: dict[str, float] = {}
         self._inflight: dict[str, threading.Lock] = {}
-        self._fetch_times: list[float] = []
         self._total_fetches = 0
 
     # -- public API ---------------------------------------------------------
@@ -190,7 +181,6 @@ class JWKSClient:
                     missed_at = self._misses.get(kid)
                     if missed_at is not None and now - missed_at <= self._negative_ttl:
                         return None
-                    self._reserve_budget(now)
                 # Network I/O outside every shared lock.
                 try:
                     status, body = self._transport(
@@ -198,14 +188,10 @@ class JWKSClient:
                         timeout=self._fetch_timeout,
                     )
                 except Exception as exc:
-                    # Failed attempts still consume budget — otherwise a down
-                    # JWKS service would be retried without bound.
                     with self._lock:
-                        self._fetch_times.append(now)
                         self._total_fetches += 1
                     raise JWKSFetchError(f"JWKS fetch failed: {exc}") from exc
                 with self._lock:
-                    self._fetch_times.append(now)
                     self._total_fetches += 1
                 if status == 200:
                     jwk = self._parse_jwk(body)
@@ -242,18 +228,6 @@ class JWKSClient:
         for stale_kid, (_jwk, fetched_at) in list(self._keys.items()):
             if now - fetched_at > self._max_cache_age:
                 del self._keys[stale_kid]
-
-    def _reserve_budget(self, now: float) -> None:
-        """Caller holds the metadata lock; reserves one fetch slot."""
-        self._fetch_times = [
-            t for t in self._fetch_times if now - t < self._window_seconds
-        ]
-        if len(self._fetch_times) >= self._max_fetches:
-            raise VerifyError(
-                "unknown_kid", "JWKS fetch budget exhausted; retry later"
-            )
-        # Slot recorded after the transport returns (or raises); the
-        # reservation itself just refuses when the window is already full.
 
     def _parse_jwk(self, body: bytes) -> Mapping[str, Any]:
         try:
