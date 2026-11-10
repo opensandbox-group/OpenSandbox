@@ -46,11 +46,7 @@ func (c *FilesystemController) DownloadFile() {
 	}
 	resolvedFilePath, err := pathutil.ExpandPath(filePath)
 	if err != nil {
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error resolving file path: %s. %v", filePath, err),
-		)
+		c.respondPathError(err, fmt.Sprintf("error resolving file path: %s. %v", filePath, err))
 		return
 	}
 	if err := rejectStagingPath(resolvedFilePath); err != nil {

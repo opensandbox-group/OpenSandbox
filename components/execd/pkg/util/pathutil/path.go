@@ -15,6 +15,7 @@
 package pathutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +42,10 @@ func envMapFromProcessAndOverrides(envOverrides map[string]string) map[string]st
 	return out
 }
 
+// ErrUndefinedEnvVar indicates that a path references an environment variable
+// that is not set, which is a caller error rather than a server failure.
+var ErrUndefinedEnvVar = errors.New("path references undefined environment variables")
+
 func validateEnvVars(path string, env map[string]string) error {
 	matches := envVarPattern.FindAllStringSubmatch(path, -1)
 	if len(matches) == 0 {
@@ -66,7 +71,7 @@ func validateEnvVars(path string, env map[string]string) error {
 		missing = append(missing, name)
 	}
 	sort.Strings(missing)
-	return fmt.Errorf("path references undefined environment variables: %s", strings.Join(missing, ","))
+	return fmt.Errorf("%w: %s", ErrUndefinedEnvVar, strings.Join(missing, ","))
 }
 
 // ExpandPathWithEnv expands environment variables and a leading "~" to user home.
