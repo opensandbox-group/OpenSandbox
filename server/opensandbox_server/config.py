@@ -851,8 +851,8 @@ class KubernetesRuntimeConfig(BaseModel):
     egress_signing_key_secrets: List[str] = Field(
         default_factory=list,
         description=(
-            "Fast-sandbox egress caller-authentication signing Secrets "
-            "(OSEP-0025), listed current-version-first; keep the previous "
+            "Fast-sandbox egress caller-authentication signing Secrets, "
+            "listed current-version-first; keep the previous "
             "version listed until pool rollout plus credential TTL + leeway "
             "has passed (dual-kid rotation grace). Each Secret must carry "
             "signing.pub (raw base64url Ed25519 public key) and kid "

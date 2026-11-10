@@ -41,7 +41,7 @@ import (
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// Fixed clock (seconds), mirroring the OSEP-0025 credential example.
+// Fixed clock (seconds), matching the credential example's timestamps.
 const (
 	iat      = 1790000000
 	exp      = 1790003600

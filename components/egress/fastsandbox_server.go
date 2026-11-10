@@ -536,11 +536,10 @@ type vaultEntry struct {
 	sealed            bool
 	fileMeta          vaultFileMetadata
 	vaultStateUnknown bool
-	// vaultSignerUnavailable marks a KNOWN vault this egress cannot serve
-	// (caller-auth signer missing/unloadable, https exchange bindings).
-	// Unlike vaultStateUnknown it blocks only the data plane (_active/GET
-	// answer 503); relay mutations stay open so operators can heal or
-	// remove the unsupported configuration, and terminal cleanup runs.
+	// vaultSignerUnavailable marks a known vault this egress cannot serve
+	// (signer missing/unloadable, https exchange bindings): the data plane
+	// fails closed (503) while relay mutations stay open for healing,
+	// removal, and terminal cleanup.
 	vaultSignerUnavailable bool
 	v2Verified             bool
 	// vaultStateProtected records that this live fence previously observed a

@@ -164,12 +164,13 @@ class JWKSService:
             try:
                 keys = self._read_secrets()
             except JWKSBackendError:
+                # Stale-while-error: keep serving cached keys, retry next TTL.
                 logger.warning(
                     "jwks: signing Secret refresh failed; serving cached keys",
                     exc_info=True,
                 )
                 with self._lock:
-                    self._refreshed_at = now  # retry next TTL window
+                    self._refreshed_at = now
                 return
             with self._lock:
                 self._keys = keys

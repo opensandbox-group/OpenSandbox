@@ -81,7 +81,7 @@ def sync_detailed(
 ) -> Response[Any | EgressSigningJwk]:
     """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 credential-vault resolver caller authentication: credential
+     Credential-vault resolver caller authentication: credential
     resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
     against the Ed25519 public key identified by `kid`.
 
@@ -121,7 +121,7 @@ def sync(
 ) -> Any | EgressSigningJwk | None:
     """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 credential-vault resolver caller authentication: credential
+     Credential-vault resolver caller authentication: credential
     resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
     against the Ed25519 public key identified by `kid`.
 
@@ -156,7 +156,7 @@ async def asyncio_detailed(
 ) -> Response[Any | EgressSigningJwk]:
     """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 credential-vault resolver caller authentication: credential
+     Credential-vault resolver caller authentication: credential
     resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
     against the Ed25519 public key identified by `kid`.
 
@@ -194,7 +194,7 @@ async def asyncio(
 ) -> Any | EgressSigningJwk | None:
     """Publish one credential-vault resolver caller-authentication public key
 
-     OSEP-0025 credential-vault resolver caller authentication: credential
+     Credential-vault resolver caller authentication: credential
     resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
     against the Ed25519 public key identified by `kid`.
 

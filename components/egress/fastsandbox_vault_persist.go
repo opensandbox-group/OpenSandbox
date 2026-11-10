@@ -697,12 +697,9 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			} else if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 				entry.degraded = fmt.Sprintf("vault file reload rejected: %v", err)
 				if credentialvault.IsCallerAuthRejection(err) {
-					// Known-but-unserviceable: the vault is sound but this
-					// egress cannot mint credentials for its https://
-					// bindings. Fail closed on the data plane (_active and
-					// relay GET answer 503, never absence) while keeping
-					// relay mutations open so operators can heal or remove
-					// the exchange configuration, and terminal cleanup runs.
+					// Known but unserviceable: fail closed on the data
+					// plane, keep relay mutations open for healing and
+					// cleanup.
 					entry.vaultSignerUnavailable = true
 				} else if vf.Version >= credentialvault.VaultFileVersion2 {
 					entry.vaultStateUnknown = true

@@ -211,10 +211,8 @@ class JWKSClient:
                 raise JWKSFetchError(f"JWKS fetch returned HTTP {status}")
             finally:
                 # Reclaim the flight entry so kid churn does not accumulate
-                # locks forever. Waiters already hold this lock object; they
-                # recheck the caches on wake and either consume the result
-                # or start a fresh flight — never a duplicate concurrent
-                # fetch for the same kid.
+                # locks. Waiters hold this lock object and recheck the
+                # caches on wake — never a duplicate concurrent fetch.
                 with self._lock:
                     if self._inflight.get(kid) is flight:
                         del self._inflight[kid]

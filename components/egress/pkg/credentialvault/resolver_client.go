@@ -288,12 +288,9 @@ func ResolverMaxConcurrencyFromEnv() int {
 }
 
 // defaultCredentialProvider memoizes the process-wide caller-auth provider.
-// Loading is retryable: an initial failure (missing or broken key material)
-// is NOT memoized — only a successful load is — so repairing the key file
-// makes subsequent clients work without a process restart, keeping dialing
-// consistent with per-subject admission, which reloads independently. A
-// short backoff after a failed attempt keeps the happy path free of
-// per-request filesystem churn.
+// Only a successful load is memoized: repairing broken key material makes
+// later clients work without a restart, matching per-subject admission
+// (which reloads independently). A short backoff bounds retry churn.
 var defaultCredentialProvider struct {
 	mu          sync.Mutex
 	provider    CredentialProvider

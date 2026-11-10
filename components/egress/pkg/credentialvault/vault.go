@@ -573,9 +573,8 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 // resolver operator configuration (D13). Inline-only vaults are unaffected.
 // CallerAuthAdmissionError marks an exchange-vault rejection caused by the
 // missing or unloadable caller-authentication signer. Reload paths use it
-// to distinguish "the vault itself is fine but this egress cannot serve its
-// https:// bindings" (fail closed with state-unknown) from ordinary
-// validation rejections (degraded, healable by a relay write).
+// to fail closed (data plane 503, mutations still healable) instead of the
+// ordinary degraded-but-healable treatment.
 type CallerAuthAdmissionError struct {
 	Detail string
 }

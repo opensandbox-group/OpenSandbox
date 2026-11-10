@@ -190,10 +190,9 @@ jobs:
       - name: Run execd-init + hardening E2E
         run: bash scripts/python-k8s-execd-init-e2e.sh
 
-      # OSEP-0025 D5: the Docker-sidecar caller-auth chain (provision ->
-      # JWKS publication -> SDK verification, including
-      # recreation-replaces-keypair revocation) with real server components;
-      # mocks only at the Docker API and the SDK transport, no cluster.
+      # Docker-sidecar caller-auth chain (provision -> JWKS publication
+      # -> SDK verification, incl. keypair-replacement revocation); mocks
+      # only at the Docker API and the SDK transport, no cluster.
       - name: Run credential-vault caller-auth e2e
         working-directory: server
         run: |
