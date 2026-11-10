@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from attrs import define as _attrs_define
 from dateutil.parser import isoparse
 
+from ..models.snapshot_mode import SnapshotMode
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -42,6 +43,9 @@ class Snapshot:
         status (SnapshotStatus): Detailed snapshot status information with lifecycle state and transition details.
         created_at (datetime.datetime): Snapshot creation timestamp
         name (str | Unset): Optional human-readable snapshot name
+        mode (SnapshotMode | Unset): Artifact class of the snapshot: `full` preserves memory and process
+            state, `rootfsOnly` preserves only the writable filesystem.
+            Snapshots created before this field existed report `full`.
     """
 
     id: str
@@ -49,6 +53,7 @@ class Snapshot:
     status: SnapshotStatus
     created_at: datetime.datetime
     name: str | Unset = UNSET
+    mode: SnapshotMode | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         id = self.id
@@ -60,6 +65,10 @@ class Snapshot:
         created_at = self.created_at.isoformat()
 
         name = self.name
+
+        mode: str | Unset = UNSET
+        if not isinstance(self.mode, Unset):
+            mode = self.mode.value
 
         field_dict: dict[str, Any] = {}
 
@@ -73,6 +82,8 @@ class Snapshot:
         )
         if name is not UNSET:
             field_dict["name"] = name
+        if mode is not UNSET:
+            field_dict["mode"] = mode
 
         return field_dict
 
@@ -91,12 +102,20 @@ class Snapshot:
 
         name = d.pop("name", UNSET)
 
+        _mode = d.pop("mode", UNSET)
+        mode: SnapshotMode | Unset
+        if isinstance(_mode, Unset):
+            mode = UNSET
+        else:
+            mode = SnapshotMode(_mode)
+
         snapshot = cls(
             id=id,
             sandbox_id=sandbox_id,
             status=status,
             created_at=created_at,
             name=name,
+            mode=mode,
         )
 
         return snapshot

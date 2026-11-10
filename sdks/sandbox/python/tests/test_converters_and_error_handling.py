@@ -862,6 +862,48 @@ def test_sandbox_model_converter_snapshot_restore_request() -> None:
     assert "image" not in dumped
     assert "entrypoint" not in dumped
 
+
+def test_create_snapshot_request_mode_mapping() -> None:
+    from opensandbox.models.sandboxes import CreateSnapshotRequest
+
+    full = SandboxModelConverter.to_api_create_snapshot_request(
+        CreateSnapshotRequest(name="full-snap")
+    )
+    rootfs_only = SandboxModelConverter.to_api_create_snapshot_request(
+        CreateSnapshotRequest(name="workspace-state", mode="rootfsOnly")
+    )
+
+    assert "mode" not in full.to_dict()
+    assert rootfs_only.to_dict()["mode"] == "rootfsOnly"
+
+
+def test_snapshot_info_mode_reads_unset_as_full() -> None:
+    from datetime import datetime, timezone
+
+    from opensandbox.api.lifecycle.models.snapshot import Snapshot
+    from opensandbox.api.lifecycle.models.snapshot_status import SnapshotStatus
+    from opensandbox.api.lifecycle.types import UNSET
+
+    def _api_snapshot(mode):
+        return Snapshot(
+            id="snap-1",
+            sandbox_id="sbx-1",
+            name="workspace-state",
+            status=SnapshotStatus(state="Ready"),
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            mode=mode,
+        )
+
+    legacy = SandboxModelConverter.to_snapshot_info(_api_snapshot(UNSET))
+    rootfs_only = SandboxModelConverter.to_snapshot_info(
+        _api_snapshot("rootfsOnly")
+    )
+
+    assert legacy.mode == "full"
+    assert rootfs_only.mode == "rootfsOnly"
+    assert isinstance(rootfs_only.mode, str)
+
+
 def test_sandbox_model_converter_to_api_volume_skips_unset_fields() -> None:
     from opensandbox.api.lifecycle.types import UNSET
     from opensandbox.models.sandboxes import Volume

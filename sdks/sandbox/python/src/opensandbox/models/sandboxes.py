@@ -962,6 +962,15 @@ class SnapshotInfo(BaseModel):
         alias="sandbox_id",
     )
     name: str | None = Field(default=None, description="Optional snapshot name")
+    mode: Literal["full", "rootfsOnly"] = Field(
+        default="full",
+        description=(
+            "Artifact class of the snapshot: 'full' preserves memory and "
+            "process state, 'rootfsOnly' preserves only the writable "
+            "filesystem. Snapshots created before this field existed report "
+            "'full'."
+        ),
+    )
     status: SnapshotStatus = Field(description="Current status of the snapshot")
     created_at: datetime = Field(description="Creation timestamp", alias="created_at")
 
@@ -1027,6 +1036,18 @@ class CreateSnapshotRequest(BaseModel):
     """
 
     name: str | None = Field(default=None, description="Optional snapshot name")
+    mode: Literal["full", "rootfsOnly"] | None = Field(
+        default=None,
+        description=(
+            "What the snapshot persists. 'full' (default) captures the "
+            "writable filesystem plus memory and process state; restoring "
+            "resumes in place. 'rootfsOnly' captures only the writable "
+            "filesystem; restoring boots a fresh sandbox from the disk, so "
+            "running processes and in-memory state are discarded and the "
+            "entrypoint re-runs. 'rootfsOnly' requires the fast-sandbox "
+            "backend with OCI-backed sandboxes."
+        ),
+    )
 
 
 class SandboxRenewResponse(BaseModel):
