@@ -11,7 +11,11 @@
 #   /dev/kvm            Firecracker microVMs (required)
 #   /sys/.../kvm        KVM access inside the container
 #   /dev/net/tun        TAP devices for the per-clone netns data plane
-#   /dev/shm            snapshot memory staging (default 64MiB is too small)
+#   /dev/shm            private node shm — kept off the host's shared shm
+#                          (and shadows the OCI_STACK /dev bind below). NOT
+#                          snapshot staging: capture dumps go through
+#                          FAST_SANDBOX_SNAPSHOT_SPILL_DIR when set, or
+#                          straight to the publish staging area otherwise
 #   /var/lib/fast-sandbox  StateRoot; prepared by integration-env.sh up
 #                          (XFS loop image when XFS_STATEROOT=1 so
 #                          per-sandbox rootfs copies are CoW reflinks)
