@@ -35,13 +35,16 @@ class CreateSnapshotRequest:
         name (str | Unset): Optional human-readable snapshot name.
         mode (CreateSnapshotRequestMode | Unset): What the snapshot persists.
 
-            - `full` (default): captures the writable filesystem plus memory and
-              process state; restoring resumes the sandbox in place.
-            - `rootfsOnly`: captures only the writable filesystem; restoring
-              boots a fresh sandbox from the disk. Running processes and
-              in-memory state are discarded, and the entrypoint re-runs on
-              restore. Supported only on the fast-sandbox backend with
-              OCI-backed sandboxes; rejected otherwise.
+            - `full` (default): the most complete capture the runtime
+              supports. On the fast-sandbox backend that includes memory and
+              process state, and restoring resumes the sandbox in place;
+              Docker and Kubernetes snapshots capture the filesystem only and
+              do not restore running processes.
+            - `rootfsOnly`: only the writable filesystem; restoring boots a
+              fresh sandbox from the disk. Running processes and in-memory
+              state are discarded, and the entrypoint re-runs on restore.
+              Supported only on the fast-sandbox backend with OCI-backed
+              sandboxes; rejected otherwise.
              Default: CreateSnapshotRequestMode.FULL.
     """
 

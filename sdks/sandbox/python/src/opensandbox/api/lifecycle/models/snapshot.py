@@ -43,9 +43,11 @@ class Snapshot:
         status (SnapshotStatus): Detailed snapshot status information with lifecycle state and transition details.
         created_at (datetime.datetime): Snapshot creation timestamp
         name (str | Unset): Optional human-readable snapshot name
-        mode (SnapshotMode | Unset): Artifact class of the snapshot: `full` preserves memory and process
-            state, `rootfsOnly` preserves only the writable filesystem.
-            Snapshots created before this field existed report `full`.
+        mode (SnapshotMode | Unset): Artifact class of the snapshot: `full` is the runtime's most
+            complete capture (memory and process state on the fast-sandbox
+            backend; filesystem-only on Docker and Kubernetes),
+            `rootfsOnly` preserves only the writable filesystem. Snapshots
+            created before this field existed report `full`.
     """
 
     id: str
