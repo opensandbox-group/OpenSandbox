@@ -2532,8 +2532,8 @@ components:
       in: header
       name: X-EXECD-ACCESS-TOKEN
       description: |
-        Access token for API authentication. All requests must include this header
-        with a valid token. The token is configured during server initialization.
+        Header-based API authentication. All requests must include this header
+        with a valid value. The value is configured during server initialization.
 
   schemas:
     CreateSessionRequest:

@@ -24,7 +24,7 @@ This Charter sets forth the responsibilities and procedures for technical contri
 - **f.** The TSC may elect a TSC Chair, who will preside over meetings of the TSC and will serve until their resignation or replacement by the TSC. The TSC Chair, or any other TSC member so designated by the TSC, will serve as the primary communication contact between the Project and Agentic AI Foundation (AAIF), a directed fund of The Linux Foundation.
 - **g.** Responsibilities: The TSC will be responsible for all aspects of oversight relating to the Project, which may include:
   - **i.** coordinating the technical direction of the Project;
-  - **ii.** approving project or system proposals (including, but not limited to, incubation, deprecation, and changes to a sub-project’s scope);
+  - **ii.** approving project or system proposals (for example, incubation, deprecation, and changes to a sub-project’s scope);
   - **iii.** organizing sub-projects and removing sub-projects;
   - **iv.** creating sub-committees or working groups to focus on cross-project technical issues and requirements;
   - **v.** appointing representatives to work with other open source or open standards communities;

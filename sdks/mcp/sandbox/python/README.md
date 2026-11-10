@@ -16,7 +16,7 @@ uv run opensandbox-mcp
 ### Package
 
 ```bash
-pip install opensandbox-mcp
+pip install opensandbox-mcp==1.2.0
 opensandbox-mcp
 ```
 
