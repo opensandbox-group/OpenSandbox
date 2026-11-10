@@ -47,7 +47,7 @@
 # server through the published opensandbox CLI ("osb", installed fresh from
 # PyPI; OSB_BIN overrides); raw curl remains only for the calls the CLI
 # cannot express (networkpolicy replace PUT, metadata merge-patch, snapshot
-# re-entry fence) plus the gateway /ping probes.
+# re-entry fence, rootfs-only snapshot mode) plus the gateway /ping probes.
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up             # environment: stack + pool + server/ingress + native template
@@ -3917,7 +3917,136 @@ snapshot_verify() {
 	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
 }
 
-# --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py)
+# --- stage: rootfs-only snapshot verify (FSEP-0001; overlaybd/OCI lane) -------
+
+# The released osb CLI has no snapshot-mode flag, and its -o json path
+# re-serializes through the CLI's own SDK models (dropping unknown fields),
+# so every mode assertion reads the server row with raw curl — the
+# documented escape hatch for calls the CLI cannot express.
+
+# Ready with the mode echoed: the server converges the row from the
+# SandboxSnapshot CR; mode is the fastlet-confirmed artifact class once the
+# fastlet reports it.
+rootfs_only_ready() { # <snapshot-id>
+	local out
+	out="$(server_api GET "/snapshots/$1" 2>/dev/null)" || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.status.state // empty')" == "Ready" ]] || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.mode // empty')" == "rootfsOnly" ]]
+}
+
+rootfs_only_verify() {
+	# One experiment on the overlaybd (OCI) template: create a sandbox ->
+	# rootfs-only snapshot -> verify the snapshot metadata (server row mode,
+	# SandboxSnapshot CR spec/status mode, oci:// manifest pair) -> prove the
+	# source survived the capture (Running + execd /ping) -> cold-boot a new
+	# sandbox from the snapshot -> one pause/resume round on the restored
+	# sandbox (pause is full-only upstream, so a cold-booted descendant must
+	# still produce a durable full checkpoint).
+	# Optional template override (the overlaybd second pass); default native
+	# — rootfs-only capture requires an OCI-backed source, so the stage is
+	# chained from verify-overlaybd only.
+	local template_id="${1:-$TEMPLATE_ID}"
+	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
+	t0="$(now_ms)"
+
+	log "verify (rootfs-only): creating the source sandbox via the opensandbox CLI (templateId=$template_id)"
+	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
+		--metadata origin=fast-sandbox-env-rootfs-only --skip-health-check -o json 2>/dev/null)" \
+		|| fail "osb sandbox create failed against $SERVER_URL"
+	source_id="$(printf '%s' "$created" | jq -r '.id')"
+	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
+	VERIFY_ID="$source_id"
+	wait_for "rootfs-only source sandbox Running" 300 sandbox_running
+	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
+	t1="$(now_ms)"
+	log "verify (rootfs-only): source $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
+
+	log "verify (rootfs-only): POST /sandboxes/$source_id/snapshots {mode: rootfsOnly}"
+	out="$(curl -sS -m 60 -X POST -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+		-H "Content-Type: application/json" \
+		-d '{"name":"env-verify-rootfs-only","mode":"rootfsOnly"}' \
+		"$SERVER_URL/sandboxes/$source_id/snapshots" 2>/dev/null)" \
+		|| fail "rootfs-only snapshot create failed for $source_id"
+	snapshot_id="$(printf '%s' "$out" | jq -r '.id')"
+	[[ -n "$snapshot_id" && "$snapshot_id" != "null" ]] \
+		|| fail "rootfs-only snapshot create carried no id: $(printf '%s' "$out" | head -c 300)"
+	[[ "$(printf '%s' "$out" | jq -r '.status.state // empty')" == "Creating" ]] \
+		|| fail "rootfs-only snapshot create did not return Creating: $(printf '%s' "$out" | head -c 300)"
+	[[ "$(printf '%s' "$out" | jq -r '.mode // empty')" == "rootfsOnly" ]] \
+		|| fail "rootfs-only snapshot create did not echo mode=rootfsOnly: $(printf '%s' "$out" | head -c 300)"
+	pass "rootfs-only snapshot: accepted (Creating + mode=rootfsOnly echo)"
+
+	wait_for "rootfs-only snapshot Ready with mode rootfsOnly" 300 rootfs_only_ready "$snapshot_id"
+	t2="$(now_ms)"
+	log "verify (rootfs-only): $snapshot_id create->Ready $(( (t2 - t1) / 1000000 ))ms"
+
+	# Metadata: the SandboxSnapshot CR carries the requested mode on spec,
+	# the fastlet-confirmed produced mode on status, and publishes the OCI
+	# pair (rootfs-only is OverlayBD-path-only).
+	cr="osb-snap-$(printf '%s' "$snapshot_id" | tr -d '-')"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.spec.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
+		|| fail "SandboxSnapshot $cr spec.mode is not RootfsOnly"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
+		|| fail "SandboxSnapshot $cr status.mode is not RootfsOnly (fastlet-confirmed artifact class)"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == oci://* ]] \
+		|| fail "SandboxSnapshot $cr manifestRef is not an oci:// pair reference"
+	pass "rootfs-only snapshot: CR spec.mode=status.mode=RootfsOnly, oci:// pair published"
+
+	# Source survival: the guest freeze -> pause -> cut -> resume -> thaw
+	# capture cycle must leave the source sandbox serving.
+	wait_for "source sandbox Running after the rootfs-only capture" 120 sandbox_running
+	wait_for "source sandbox execd /ping 200 after the rootfs-only capture" 100 execd_ping_ok
+	pass "rootfs-only snapshot: source sandbox survived the capture (Running + /ping 200)"
+
+	# Cold-boot restore: a fresh sandbox boots the artifact from disk
+	# (seconds-scale readiness, not the millisecond in-place restore).
+	log "verify (rootfs-only): osb sandbox create --snapshot-id $snapshot_id (cold boot)"
+	restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
+		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
+		--skip-health-check -o json 2>/dev/null)" \
+		|| fail "osb sandbox create (snapshotId=$snapshot_id) failed"
+	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
+	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
+	VERIFY_ID="$restore_id"
+	wait_for "cold-booted sandbox Running" 600 sandbox_running
+	t3="$(now_ms)"
+	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t2) / 1000000 ))ms"
+	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 300 execd_ping_ok
+	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
+
+	# One pause/resume round on the cold-booted descendant: PauseSandbox is
+	# full-only upstream, so a sandbox booted from a rootfs-only artifact
+	# must still produce a durable FULL checkpoint and restore from it.
+	log "verify (rootfs-only): pause/resume round on the cold-booted sandbox $restore_id"
+	osb_api sandbox pause "$restore_id" >/dev/null 2>&1 \
+		|| fail "pause failed for $restore_id"
+	wait_for "cold-booted sandbox Paused (full checkpoint durable)" 240 sandbox_paused
+	if execd_ping_ok; then
+		fail "paused sandbox still serves /ping through the gateway"
+	fi
+	[[ "$(kubectl_get "sandbox/$restore_id" '{.status.runtime.checkpoint.manifestRef}' 2>/dev/null)" == "s3://"* ]] \
+		|| fail "pause of the cold-booted sandbox recorded no durable checkpoint"
+	pass "pause on the cold-booted descendant: full checkpoint durable, route released"
+	osb_api sandbox resume "$restore_id" --skip-health-check >/dev/null 2>&1 \
+		|| fail "resume failed for $restore_id"
+	wait_for "cold-booted sandbox Running again (checkpoint restored)" 240 sandbox_running
+	wait_for "resumed sandbox execd /ping 200 through a fresh route" 100 execd_ping_ok
+	pass "resume on the cold-booted descendant: Running + /ping (full checkpoint restored)"
+
+	# Cleanup: restored + source sandboxes, then the snapshot row.
+	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $restore_id failed"
+	wait_for "restored sandbox deleted" 120 verify_sandbox_gone
+	VERIFY_ID="$source_id"
+	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $source_id failed"
+	wait_for "rootfs-only source sandbox deleted" 120 verify_sandbox_gone
+	osb_api snapshot delete "$snapshot_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: snapshot delete $snapshot_id failed"
+	pass "rootfs-only: cleanup (source + cold-booted sandboxes deleted, snapshot row removed)"
+}
+
+# --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py) -----------------
 
 sdk_e2e() {
 	kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
@@ -4083,6 +4212,7 @@ verify_overlaybd() {
 	run_stage "exchange resolver verify (overlaybd template, OSEP-0025)" exchange_resolver_verify "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
+	run_stage "rootfs-only snapshot verify (overlaybd template, FSEP-0001)" rootfs_only_verify "$OCI_TEMPLATE_ID"
 	# Same placement rationale as verify_native: the family recorded by this
 	# matrix's opensandbox_verify pass was killed stages ago.
 	run_stage "vm-console finalize verify (overlaybd, node-agent completeness marker)" vm_console_finalize_verify
