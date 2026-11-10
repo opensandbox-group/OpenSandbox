@@ -29,11 +29,12 @@ import base64
 import json
 import threading
 import time
-from typing import Any, Callable, Mapping, Optional, Protocol
+from collections.abc import Callable, Mapping
+from typing import Any, Protocol
 
 import httpx
 
-from .verifier import KID_GRAMMAR, VerifyError, VerifierConfig, verify_credential
+from .verifier import KID_GRAMMAR, VerifierConfig, VerifyError, verify_credential
 
 #: A cached key is re-validated at most this often (rotation == revocation
 #: within this window).
@@ -71,8 +72,8 @@ class JWKSClient:
         self,
         config: VerifierConfig,
         *,
-        transport: Optional[Transport] = None,
-        now: Optional[Callable[[], float]] = None,
+        transport: Transport | None = None,
+        now: Callable[[], float] | None = None,
         max_cache_age: float = DEFAULT_MAX_CACHE_AGE_SECONDS,
         negative_ttl: float = DEFAULT_NEGATIVE_TTL_SECONDS,
         max_fetches: int = DEFAULT_MAX_FETCHES,
@@ -105,7 +106,7 @@ class JWKSClient:
         credential: str,
         *,
         document_subject: str,
-        now: Optional[int] = None,
+        now: int | None = None,
     ) -> str:
         """Verify one credential, fetching its JWK as needed.
 
@@ -134,7 +135,7 @@ class JWKSClient:
 
     # -- internals ----------------------------------------------------------
 
-    def _key_for_kid(self, kid: str) -> Optional[Mapping[str, Any]]:
+    def _key_for_kid(self, kid: str) -> Mapping[str, Any] | None:
         if not KID_GRAMMAR.match(kid):
             # Local rejection: no fetch, no cache pollution.
             raise VerifyError("kid_grammar", "kid does not match the platform identifier grammar")
@@ -166,7 +167,7 @@ class JWKSClient:
                 self._misses.pop(kid, None)
             return jwk
 
-    def _fetch_locked(self, kid: str, now: float) -> Optional[Mapping[str, Any]]:
+    def _fetch_locked(self, kid: str, now: float) -> Mapping[str, Any] | None:
         # Caller holds the lock; a single flight also dedupes concurrent
         # fetches for the same kid.
         self._fetch_times = [t for t in self._fetch_times if now - t < self._window_seconds]

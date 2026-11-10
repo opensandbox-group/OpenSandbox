@@ -26,8 +26,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -125,7 +126,7 @@ def _jwk_public_key(jwk: Mapping[str, Any]) -> Ed25519PublicKey:
 def verify_credential(
     credential: str,
     *,
-    jwk: Optional[Mapping[str, Any]],
+    jwk: Mapping[str, Any] | None,
     document_subject: str,
     config: VerifierConfig,
     now: int,

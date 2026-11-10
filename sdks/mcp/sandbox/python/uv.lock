@@ -581,6 +581,7 @@ name = "opensandbox"
 source = { editable = "../../../sandbox/python" }
 dependencies = [
     { name = "attrs" },
+    { name = "cryptography" },
     { name = "httpcore" },
     { name = "httpx" },
     { name = "httpx-sse" },
@@ -592,6 +593,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "attrs", specifier = ">=21.3.0" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "httpcore", specifier = ">=1.0.0,<2.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "httpx-sse", specifier = ">=0.4.3,<0.5" },

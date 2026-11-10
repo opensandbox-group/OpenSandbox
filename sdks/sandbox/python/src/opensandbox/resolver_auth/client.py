@@ -21,10 +21,10 @@ JWKS caching, and exposes the single call a resolver needs.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .jwks import JWKSClient, Transport
-from .verifier import DEFAULT_ISSUER, VerifyError, VerifierConfig, verify_credential
+from .verifier import DEFAULT_ISSUER, VerifierConfig
 
 __all__ = ["CredentialVaultCallerAuth"]
 
@@ -42,8 +42,8 @@ class CredentialVaultCallerAuth:
         jwks_base: str,
         expected_audience: str,
         expected_issuer: str = DEFAULT_ISSUER,
-        transport: Optional[Transport] = None,
-        now: Optional[Callable[[], float]] = None,
+        transport: Transport | None = None,
+        now: Callable[[], float] | None = None,
         max_cache_age: float = 3600.0,
         negative_ttl: float = 300.0,
         max_fetches: int = 60,
@@ -80,7 +80,7 @@ class CredentialVaultCallerAuth:
         credential: str,
         *,
         document_subject: str,
-        now: Optional[int] = None,
+        now: int | None = None,
     ) -> str:
         """Verify one resolve call's ``OpenSandbox-Egress-Credential``.
 

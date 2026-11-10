@@ -49,7 +49,7 @@ dependencies = [
     "httpcore>=1.0.0,<2.0",
     "httpx-sse>=0.4.3,<0.5",
     "opentelemetry-api>=1.20,<2.0",
-    "cryptography>=42.0,<46.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

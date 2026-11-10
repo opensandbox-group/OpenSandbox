@@ -27,8 +27,8 @@ from .verifier import (
     KID_GRAMMAR,
     LEEWAY_SECONDS,
     TTL_MAX_SECONDS,
-    VerifyError,
     VerifierConfig,
+    VerifyError,
     verify_credential,
 )
 

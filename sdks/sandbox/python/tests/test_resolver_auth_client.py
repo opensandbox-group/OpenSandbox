@@ -69,7 +69,6 @@ def vectors() -> dict:
 def _happy_parts(vectors):
     case = next(c for c in vectors["cases"] if c["name"] == "valid_sidecar")
     key = next(k for k in vectors["keys"] if k["id"] == "sidecar-1")
-    subject = json.loads(case["payload"])["sub"] if "payload" in case else None
     import base64
 
     claims = json.loads(
