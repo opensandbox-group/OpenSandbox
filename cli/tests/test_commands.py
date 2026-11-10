@@ -2080,6 +2080,15 @@ class TestEgressCommands:
         assert rules[1].target == "bad.example.com"
 
 
+    @pytest.mark.parametrize("rule", ["allow=", "deny=  "])
+    def test_patch_rejects_empty_target_as_usage_error(self, runner: CliRunner, rule: str) -> None:
+        mock_sb = MagicMock()
+        result = _invoke(runner, ["egress", "patch", "sb-1", "--rule", rule], sandbox=mock_sb)
+        assert result.exit_code == 2
+        assert f"Invalid rule '{rule}'" in result.output
+        mock_sb.patch_egress_rules.assert_not_called()
+
+
 # Credential Vault commands
 
 
