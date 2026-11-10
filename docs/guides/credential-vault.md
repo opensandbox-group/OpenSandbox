@@ -342,18 +342,24 @@ Every TCP resolve dial carries one header, `OpenSandbox-Egress-Credential`, hold
 
 Provisioning is operator-only and per-pool (fast-sandbox profile):
 
-1. **Create the signing Secret** (one per pool and version, separate from the MITM CA Secret):
+1. **Create the signing material and two Secrets** (one pair per pool and version, separate from the MITM CA Secret). Kubernetes Secret access is object-scoped: the lifecycle server reads the whole object it references, so the private key lives in its own Secret that the server never references — the server's object carries public entries only.
 
 ```bash
 openssl genpkey -algorithm ed25519 -out signing.key
 openssl pkey -in signing.key -pubout -outform DER | tail -c 32 | basenc --base64url | tr -d '=' > signing.pub.x
+
+# Private-key Secret: referenced ONLY by the pool's egress mount below.
 kubectl create secret generic opensandbox-egress-signing-<pool>-v1 \
-  --from-file=signing.key=signing.key \
+  --from-file=signing.key=signing.key
+
+# Publication Secret: referenced ONLY by the lifecycle server
+# (kubernetes.egress_signing_key_secrets). Public entries only.
+kubectl create secret generic opensandbox-egress-publish-<pool>-v1 \
   --from-file=signing.pub=signing.pub.x \
   --from-literal=kid='<pool>:v1'
 ```
 
-2. **Project it into the pool's egress container** (SandboxPool `fastletTemplate`):
+2. **Project the private-key Secret into the pool's egress container** (SandboxPool `fastletTemplate`):
 
 ```yaml
       - name: egress
@@ -378,7 +384,7 @@ kubectl create secret generic opensandbox-egress-signing-<pool>-v1 \
 
 Only `signing.key` is mounted into the egress. Without a loadable key, vault writes containing `https://` exchange credentials are rejected (fail closed); `unix://` exchange credentials and static vaults keep working.
 
-3. **Publish the public key** — set `kubernetes.egress_signing_key_secrets` in the server config to the Secret name(s), current version first. The server serves the JWK at `/credential-vault/jwks/{kid}` — public keys only, no API key required.
+3. **Publish the public key** — set `kubernetes.egress_signing_key_secrets` in the server config to the **publication** Secret name(s) (`opensandbox-egress-publish-<pool>-v1`), current version first. The server serves the JWK at `/credential-vault/jwks/{kid}` — public keys only, no API key required, and the server's RBAC never needs access to a private-key Secret.
 
 4. **Verify on the resolver** with the Python SDK:
 

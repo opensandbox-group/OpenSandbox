@@ -59,9 +59,22 @@ class SecretReader(Protocol):
 
 
 class SidecarKeyReader(Protocol):
-    """Returns the per-sandbox JWK recorded on a workload, or None."""
+    """Returns the per-sandbox JWK recorded on a workload, or None.
+
+    None means authoritative absence (no such sandbox / no recorded JWK).
+    Transient backend failures should raise; the service surfaces them as
+    retryable errors, never as absence.
+    """
 
     def __call__(self, sandbox_id: str) -> Optional[dict]: ...
+
+
+class JWKSBackendError(Exception):
+    """A transient backend failure (Secret read, workload lookup).
+
+    Surfaced by the route as 503 so resolvers retry instead of caching
+    absence; 404 stays reserved for an authoritative missing key.
+    """
 
 
 def _b64url(value: bytes) -> str:
@@ -108,6 +121,12 @@ class JWKSService:
         # stays capped across unbounded sandbox churn.
         self._sidecar_cache: dict[str, tuple[Optional[dict], float]] = {}
         self._sidecar_cache_cap = 4096
+        # The shared lock guards metadata only. Backend reads (Secret
+        # refresh, workload lookup) run outside it, serialized by these
+        # single-flight locks, so one slow backend read never blocks an
+        # unrelated cache hit.
+        self._refresh_flight = threading.Lock()
+        self._sidecar_flights: dict[str, threading.Lock] = {}
 
     def set_sidecar_reader(self, reader: SidecarKeyReader) -> None:
         """Install the per-sandbox source (wired from the sandbox service)."""
@@ -120,54 +139,99 @@ class JWKSService:
         return len(self._secret_names)
 
     def get(self, kid: str) -> Optional[dict]:
-        """Return the JWK for kid, or None when unknown.
+        """Return the JWK for kid, or None when authoritatively unknown.
 
-        Cache hits cost nothing: one anonymous caller hammering unknown kids
-        cannot starve legitimate resolvers reading already-cached public
-        keys. Only lookups that reach a backend (Secret refresh or sidecar
-        workload read) consume the backend budget; every lookup consumes the
-        caller throttle. Raises :class:`RateLimited` when either bound is
-        exhausted. Off-grammar kids return None without reading anything.
-        Lookup order: fast-sandbox signing Secrets first, then the sidecar
-        (per-sandbox) source.
+        Raises :class:`JWKSBackendError` for transient backend failures —
+        the route maps those to 503 (retryable) so resolvers never cache a
+        false absence; None (→ 404) is reserved for a genuinely missing key.
+        Cache hits cost nothing and never touch the backend budget; every
+        request consumes the anonymous throttle. Raises
+        :class:`RateLimited` when either bound is exhausted. Off-grammar
+        kids return None without reading anything. Lookup order:
+        fast-sandbox signing Secrets first, then the sidecar source.
         """
         if not KID_GRAMMAR.match(kid):
             return None
         now = self._clock()
         with self._lock:
             self._consume_throttle(now)
-            if now - self._refreshed_at > self._cache_ttl:
-                self._consume_budget(now)
-                self._keys = self._refresh_locked()
-                self._refreshed_at = now
+            needs_refresh = now - self._refreshed_at > self._cache_ttl
+        if needs_refresh:
+            self._refresh(now)
+        with self._lock:
             if kid in self._keys:
                 return self._keys[kid]
             cached = self._sidecar_cache.get(kid)
             if cached is not None and now - cached[1] <= self._cache_ttl:
                 return cached[0]
-            self._consume_budget(now)
-            return self._sidecar_locked(kid, now)
+        return self._sidecar_lookup(kid, now)
 
-    def _sidecar_locked(self, kid: str, now: float) -> Optional[dict]:
-        reader = self._sidecar_reader
-        if reader is None:
-            return None
+    def _refresh(self, now: float) -> None:
+        """Refresh the static signing Secrets, coalesced to one flight.
+
+        The backend read runs outside the metadata lock; duplicate callers
+        wait on the flight lock and recheck, so a slow Secret read never
+        blocks unrelated cache hits. A failed refresh keeps the previously
+        cached keys serving (stale-while-error) and retries next TTL —
+        never a false 404.
+        """
+        with self._refresh_flight:
+            with self._lock:
+                if now - self._refreshed_at <= self._cache_ttl:
+                    return  # another caller refreshed while we waited
+                self._consume_budget(now)
+            try:
+                keys = self._read_secrets()
+            except JWKSBackendError:
+                logger.warning(
+                    "jwks: signing Secret refresh failed; serving cached keys",
+                    exc_info=True,
+                )
+                with self._lock:
+                    self._refreshed_at = now  # retry next TTL window
+                return
+            with self._lock:
+                self._keys = keys
+                self._refreshed_at = now
+
+    def _sidecar_lookup(self, kid: str, now: float) -> Optional[dict]:
+        with self._lock:
+            flight = self._sidecar_flights.setdefault(kid, threading.Lock())
         try:
-            jwk = reader(kid)
-        except Exception:
-            logger.warning(
-                "jwks: sidecar key read for %s failed; treated as unknown",
-                kid,
-                exc_info=True,
-            )
-            jwk = None
+            with flight:
+                with self._lock:
+                    cached = self._sidecar_cache.get(kid)
+                    if cached is not None and now - cached[1] <= self._cache_ttl:
+                        return cached[0]
+                    self._consume_budget(now)
+                    reader = self._sidecar_reader
+                if reader is None:
+                    with self._lock:
+                        self._record_sidecar(kid, None, now)
+                    return None
+                try:
+                    jwk = reader(kid)
+                except JWKSBackendError:
+                    raise
+                except Exception as exc:
+                    # Transient workload-read failure: retryable, never
+                    # cached as absence.
+                    raise JWKSBackendError(
+                        f"sidecar key read for {kid} failed: {exc}"
+                    ) from exc
+                with self._lock:
+                    self._record_sidecar(kid, jwk, now)
+                return jwk
+        finally:
+            with self._lock:
+                if self._sidecar_flights.get(kid) is flight:
+                    del self._sidecar_flights[kid]
+
+    def _record_sidecar(self, kid: str, jwk: Optional[dict], now: float) -> None:
         if len(self._sidecar_cache) >= self._sidecar_cache_cap:
-            # Bounded memory under sandbox churn: drop the oldest half
-            # (dict preserves insertion order; good enough for a cache).
             for stale in list(self._sidecar_cache)[: len(self._sidecar_cache) // 2]:
                 del self._sidecar_cache[stale]
         self._sidecar_cache[kid] = (jwk, now)
-        return jwk
 
     def _consume_budget(self, now: float) -> None:
         self._lookup_times = [
@@ -188,19 +252,18 @@ class JWKSService:
             raise RateLimited("jwks request throttle exceeded")
         self._throttle_times.append(now)
 
-    def _refresh_locked(self) -> dict[str, dict]:
+    def _read_secrets(self) -> dict[str, dict]:
         keys: dict[str, dict] = {}
         for name in self._secret_names:
             try:
                 data = self._reader(name)
-            except Exception:
-                logger.warning(
-                    "jwks: reading egress signing Secret %s failed; its kid "
-                    "stays unpublished until the next refresh",
-                    name,
-                    exc_info=True,
-                )
-                continue
+            except Exception as exc:
+                # Transient read failure: surface it (the caller keeps the
+                # previously cached keys) rather than silently dropping the
+                # Secret's kids — a missing key must stay authoritative.
+                raise JWKSBackendError(
+                    f"egress signing Secret {name} read failed: {exc}"
+                ) from exc
             if not data:
                 logger.warning("jwks: egress signing Secret %s not found", name)
                 continue

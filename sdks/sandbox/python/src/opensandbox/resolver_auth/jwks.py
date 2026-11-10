@@ -136,8 +136,6 @@ class JWKSClient:
         unreachable. Transient fetch failures raise VerifyError with code
         ``unknown_kid`` but are never cached as absence.
         """
-        if now is None:
-            now = int(self._now())
         kid = _header_kid(credential)
         try:
             jwk = self._key_for_kid(kid)
@@ -145,6 +143,11 @@ class JWKSClient:
             # Transient backend failure: deny this request (401) but leave
             # no negative-cache entry, so the next request retries.
             raise VerifyError("unknown_kid", str(exc)) from exc
+        if now is None:
+            # Read the clock only after key retrieval: a flight wait or a
+            # cold fetch can take seconds, and verifying against a stale
+            # timestamp would stretch the leeway window.
+            now = int(self._now())
         return verify_credential(
             credential,
             jwk=jwk,
@@ -179,46 +182,56 @@ class JWKSClient:
             # Single-flight recheck after acquiring: another thread may have
             # completed the fetch while we waited.
             now = self._now()
-            with self._lock:
-                cached = self._keys.get(kid)
-                if cached is not None and now - cached[1] <= self._max_cache_age:
-                    return cached[0]
-                missed_at = self._misses.get(kid)
-                if missed_at is not None and now - missed_at <= self._negative_ttl:
-                    return None
-                self._reserve_budget(now)
-            # Network I/O outside every shared lock.
             try:
-                status, body = self._transport(
-                    f"{self._config.jwks_base.rstrip('/')}/jwks/{kid}",
-                    timeout=self._fetch_timeout,
-                )
-            except Exception as exc:
-                # Failed attempts still consume budget — otherwise a down
-                # JWKS service would be retried without bound.
+                with self._lock:
+                    cached = self._keys.get(kid)
+                    if cached is not None and now - cached[1] <= self._max_cache_age:
+                        return cached[0]
+                    missed_at = self._misses.get(kid)
+                    if missed_at is not None and now - missed_at <= self._negative_ttl:
+                        return None
+                    self._reserve_budget(now)
+                # Network I/O outside every shared lock.
+                try:
+                    status, body = self._transport(
+                        f"{self._config.jwks_base.rstrip('/')}/jwks/{kid}",
+                        timeout=self._fetch_timeout,
+                    )
+                except Exception as exc:
+                    # Failed attempts still consume budget — otherwise a down
+                    # JWKS service would be retried without bound.
+                    with self._lock:
+                        self._fetch_times.append(now)
+                        self._total_fetches += 1
+                    raise JWKSFetchError(f"JWKS fetch failed: {exc}") from exc
                 with self._lock:
                     self._fetch_times.append(now)
                     self._total_fetches += 1
-                raise JWKSFetchError(f"JWKS fetch failed: {exc}") from exc
-            with self._lock:
-                self._fetch_times.append(now)
-                self._total_fetches += 1
-            if status == 200:
-                jwk = self._parse_jwk(body)
+                if status == 200:
+                    jwk = self._parse_jwk(body)
+                    with self._lock:
+                        self._record(self._keys, kid, (jwk, now))
+                        self._misses.pop(kid, None)
+                        self._sweep_locked(now)
+                    return jwk
+                if status == 404:
+                    # Authoritative absence: safe to negative-cache.
+                    with self._lock:
+                        self._record(self._misses, kid, now)
+                        self._keys.pop(kid, None)
+                        self._sweep_locked(now)
+                    return None
+                # Rate limit or backend failure: transient, not absence.
+                raise JWKSFetchError(f"JWKS fetch returned HTTP {status}")
+            finally:
+                # Reclaim the flight entry so kid churn does not accumulate
+                # locks forever. Waiters already hold this lock object; they
+                # recheck the caches on wake and either consume the result
+                # or start a fresh flight — never a duplicate concurrent
+                # fetch for the same kid.
                 with self._lock:
-                    self._record(self._keys, kid, (jwk, now))
-                    self._misses.pop(kid, None)
-                    self._sweep_locked(now)
-                return jwk
-            if status == 404:
-                # Authoritative absence: safe to negative-cache.
-                with self._lock:
-                    self._record(self._misses, kid, now)
-                    self._keys.pop(kid, None)
-                    self._sweep_locked(now)
-                return None
-            # Rate limit or backend failure: transient, not absence.
-            raise JWKSFetchError(f"JWKS fetch returned HTTP {status}")
+                    if self._inflight.get(kid) is flight:
+                        del self._inflight[kid]
 
     def _sweep_locked(self, now: float) -> None:
         """Drop expired entries from both maps so inactive kids are

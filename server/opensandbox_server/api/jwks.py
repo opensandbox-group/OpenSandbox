@@ -27,7 +27,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from opensandbox_server.services.jwks import RateLimited
+from opensandbox_server.services.jwks import JWKSBackendError, RateLimited
 
 router = APIRouter(tags=["Credential Vault"])
 
@@ -46,6 +46,7 @@ def _service(request: Request):
         404: {"description": "Unknown kid (off-grammar kids included)"},
         429: {"description": "Lookup budget exhausted; retry later"},
         501: {"description": "No signing Secrets configured"},
+        503: {"description": "Transient backend failure; retry later"},
     },
 )
 def get_jwk(kid: str, request: Request) -> dict:
@@ -54,6 +55,10 @@ def get_jwk(kid: str, request: Request) -> dict:
         jwk: Optional[dict] = _service(request).get(kid)
     except RateLimited:
         raise HTTPException(status_code=429, detail="jwks lookup budget exhausted") from None
+    except JWKSBackendError as exc:
+        # Transient backend failure: 503 so resolvers retry instead of
+        # caching a false absence; 404 stays authoritative.
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     if jwk is None:
         raise HTTPException(status_code=404, detail="unknown kid")
     return jwk

@@ -117,9 +117,8 @@ class K8sDiagnosticsMixin:
             workload = _get_owned_workload_or_404(self.workload_provider, namespace, sandbox_id)
         except HTTPException:
             return None
-        except Exception:
-            logger.exception("Error reading egress signing JWK for %s", sandbox_id)
-            return None
+        # Anything else (API server unreachable, timeout) propagates: the
+        # JWKS service surfaces it as a retryable 503, never a false 404.
         metadata = workload.get("metadata", {}) if isinstance(workload, dict) else {}
         annotations = metadata.get("annotations", {}) if isinstance(metadata, dict) else {}
         recorded = annotations.get(EGRESS_SIGNING_JWK_ANNOTATION)

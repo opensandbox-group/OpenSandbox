@@ -335,7 +335,7 @@ func (s *fastSandboxPolicyServer) readRelayVault(r *http.Request, subj subject.S
 	if s.vaultSealedLocked(subj) {
 		return credentialvault.FullRevision{}, http.StatusConflict, "subject vault is sealed (paused); the bundle copy is already taken", nil
 	}
-	if entry := s.vaults[subj]; entry.vaultStateUnknown {
+	if entry := s.vaults[subj]; entry.vaultStateUnknown || entry.vaultSignerUnavailable {
 		return credentialvault.FullRevision{}, http.StatusServiceUnavailable, "vault state is unknown; refusing to treat it as absent", nil
 	}
 	full, err := store.Full()

@@ -475,7 +475,7 @@ _VECTORS_PATH = (
     _REPO_ROOT / "components" / "egress" / "pkg" / "credentialvault"
     / "testdata" / "resolver_auth_vectors.json"
 )
-_SDK_SRC = _REPO_ROOT / "sdks" / "resolver-auth" / "python" / "src"
+_SDK_SRC = _REPO_ROOT / "sdks" / "sandbox" / "python" / "src"
 if _SDK_SRC.is_dir():
     sys.path.insert(0, str(_SDK_SRC))
 

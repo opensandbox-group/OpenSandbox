@@ -500,6 +500,23 @@ func TestVaultPersistHTTPSExchangeWithoutSignerFailsClosed(t *testing.T) {
 	// relay write) heals the slice.
 	rec = doVault(t, h.srv, http.MethodGet, vaultTestUID, "", "")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	// Relay mutations stay OPEN (this is known-but-unserviceable, not
+	// unknown durable state): an operator can heal the slice by replacing
+	// the vault without the https exchange credential (unconditional PUT —
+	// the rejected reload left the live store empty, so there is no live
+	// revision to precondition against)...
+	rec = doVault(t, h.srv, http.MethodPut, vaultTestUID, vaultFullBody(), "")
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, "healing relay PUT must be accepted while the signer is missing")
+	req2 := httptest.NewRequest(http.MethodGet, "/credential-vault/_active?clientIp="+vaultTestIP, nil)
+	rec2 := httptest.NewRecorder()
+	h.srv.handleCredentialVaultActive(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code, "a healed vault serves again")
+	assert.Contains(t, rec2.Body.String(), "Bearer sekret", "the inline material keeps flowing")
+
+	// ...and removal stays possible for cleanup.
+	rec = doVault(t, h.srv, http.MethodDelete, vaultTestUID, "", "")
+	require.Equal(t, http.StatusNoContent, rec.Code, "terminal relay DELETE must not be blocked by the missing signer")
 }
 
 func TestVaultPersistStaleIncarnationDiscarded(t *testing.T) {

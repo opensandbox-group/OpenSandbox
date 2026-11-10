@@ -287,27 +287,43 @@ func ResolverMaxConcurrencyFromEnv() int {
 	)
 }
 
-// defaultCredentialProvider memoizes the process-wide caller-auth provider:
-// the signer loads once; unconfigured keeps a nil provider.
+// defaultCredentialProvider memoizes the process-wide caller-auth provider.
+// Loading is retryable: an initial failure (missing or broken key material)
+// is NOT memoized — only a successful load is — so repairing the key file
+// makes subsequent clients work without a process restart, keeping dialing
+// consistent with per-subject admission, which reloads independently. A
+// short backoff after a failed attempt keeps the happy path free of
+// per-request filesystem churn.
 var defaultCredentialProvider struct {
-	once     sync.Once
-	provider CredentialProvider
+	mu          sync.Mutex
+	provider    CredentialProvider
+	lastAttempt time.Time
 }
 
+const defaultCredentialProviderRetryBackoff = 5 * time.Second
+
 // DefaultResolverCredentialProvider returns the process-wide provider built
-// from LoadResolverCredentialSigner; nil when no channel is configured.
+// from LoadResolverCredentialSigner; nil when no channel is configured or
+// the material is still broken (retried at most once per backoff window).
 func DefaultResolverCredentialProvider() CredentialProvider {
-	defaultCredentialProvider.once.Do(func() {
-		signer, err := LoadResolverCredentialSigner()
-		if err != nil {
-			log.Warnf("resolver caller-authentication signer unloadable: %v", err)
-			return
-		}
-		if signer == nil {
-			return
-		}
-		defaultCredentialProvider.provider = newResolverCredentialManager(signer)
-	})
+	defaultCredentialProvider.mu.Lock()
+	defer defaultCredentialProvider.mu.Unlock()
+	if defaultCredentialProvider.provider != nil {
+		return defaultCredentialProvider.provider
+	}
+	if time.Since(defaultCredentialProvider.lastAttempt) < defaultCredentialProviderRetryBackoff {
+		return nil
+	}
+	defaultCredentialProvider.lastAttempt = time.Now()
+	signer, err := LoadResolverCredentialSigner()
+	if err != nil {
+		log.Warnf("resolver caller-authentication signer unloadable: %v", err)
+		return nil
+	}
+	if signer == nil {
+		return nil
+	}
+	defaultCredentialProvider.provider = newResolverCredentialManager(signer)
 	return defaultCredentialProvider.provider
 }
 

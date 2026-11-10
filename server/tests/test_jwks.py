@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -226,13 +228,21 @@ class TestSidecarSource:
         service.get(kid)
         assert len(calls) == 2
 
-    def test_sidecar_reader_error_is_unknown_kid(self) -> None:
+    def test_sidecar_reader_error_is_retryable_503(self) -> None:
         def exploding(_sandbox_id: str):
             raise RuntimeError("workload read failed")
 
         service, _, _ = make_service({})
         service._sidecar_reader = exploding
-        assert service.get("sbx-side1") is None
+        with pytest.raises(Exception) as excinfo:
+            service.get("sbx-side1")
+        assert "sidecar key read" in str(excinfo.value)
+        # No absence entry: recovery on the next call.
+        service._sidecar_reader = lambda _sid: {
+            "kty": "OKP", "crv": "Ed25519",
+            "x": "A" * 43, "kid": "sbx-side1", "alg": "EdDSA", "use": "sig",
+        }
+        assert service.get("sbx-side1") is not None
 
     def test_sidecar_route_serves_jwk(self) -> None:
         kid, x = vectors_sidecar()
@@ -317,6 +327,150 @@ class TestK8sSecretWireFormat:
             self._core_api(wire),
         )
         assert service.get("pool-a:v2") is None
+
+
+class TestRound2Hardening:
+    """Lock discipline, transient-failure semantics, backend-to-SDK path."""
+
+    def test_slow_backend_does_not_block_cached_key(self) -> None:
+        kid, x = vectors_sidecar()
+        gate = threading.Event()
+        started = threading.Event()
+
+        def reader(sandbox_id: str):
+            if sandbox_id == "sbx-slowkid1":
+                started.set()
+                assert gate.wait(timeout=10)
+                return None
+            return None
+
+        clock = FakeClock()
+        service, _, _ = make_service(
+            {"s": {"signing.pub": x.encode(), "kid": kid.encode()}}, reader=None
+        )
+        service._sidecar_reader = reader
+        service._clock = clock
+        assert service.get(kid) is not None  # warm the static cache
+
+        lookup = threading.Thread(
+            target=lambda: service.get("sbx-slowkid1"), daemon=True
+        )
+        lookup.start()
+        assert started.wait(timeout=5)
+
+        done = threading.Event()
+
+        def read_cached() -> None:
+            assert service.get(kid) is not None
+            done.set()
+
+        checker = threading.Thread(target=read_cached, daemon=True)
+        checker.start()
+        assert done.wait(timeout=2), (
+            "cached-key read blocked behind an unrelated backend lookup"
+        )
+        gate.set()
+        lookup.join(timeout=5)
+
+    def test_transient_backend_failure_is_503_not_absence(self) -> None:
+        kid, x = vectors_sidecar()
+        material_jwk = {
+            "kty": "OKP", "crv": "Ed25519", "x": x, "kid": "sbx-side1",
+            "alg": "EdDSA", "use": "sig",
+        }
+        state = {"broken": True}
+
+        def flaky(sandbox_id: str):
+            if state["broken"]:
+                raise RuntimeError("workload read failed")
+            return material_jwk
+
+        service, _, _ = make_service({})
+        service._sidecar_reader = flaky
+        client = TestJWKSRoute().make_app(service)
+
+        first = client.get("/credential-vault/jwks/sbx-side1")
+        assert first.status_code == 503, "transient backend failure must be retryable"
+
+        state["broken"] = False
+        second = client.get("/credential-vault/jwks/sbx-side1")
+        assert second.status_code == 200, (
+            "no absence entry was written, so recovery is immediate"
+        )
+
+    def test_sdk_side_of_the_path_recovers(self) -> None:
+        """Backend → route → SDK: a 503 is a transient fetch error for the
+        SDK (no negative cache), and the next call succeeds."""
+        from opensandbox.resolver_auth.jwks import JWKSClient
+
+        kid, x = vectors_sidecar()
+        material_jwk = {
+            "kty": "OKP", "crv": "Ed25519", "x": x, "kid": "sbx-side1",
+            "alg": "EdDSA", "use": "sig",
+        }
+        state = {"broken": True}
+
+        def flaky(sandbox_id: str):
+            if state["broken"]:
+                raise RuntimeError("workload read failed")
+            return material_jwk
+
+        service, _, _ = make_service({})
+        service._sidecar_reader = flaky
+        http = TestJWKSRoute().make_app(service)
+
+        def transport(url: str, *, timeout: float):
+            path = url.split("/credential-vault", 1)[1]
+            response = http.get("/credential-vault" + path)
+            return response.status_code, response.content
+
+        client = JWKSClient(_sdk_config(), transport=transport, now=FakeClock())
+        with pytest.raises(Exception) as blip:
+            client._key_for_kid("sbx-side1")
+        assert "503" in str(blip.value), (
+            "the server's transient 503 must surface as a retryable fetch "
+            "error, never a negative cache entry"
+        )
+
+        state["broken"] = False
+        assert client._key_for_kid("sbx-side1") == material_jwk
+
+    def test_static_refresh_failure_keeps_serving_cached_keys(self) -> None:
+        kid, x = vectors_sidecar()
+        state = {"broken": False}
+
+        def flaky_secret(name: str):
+            if state["broken"]:
+                raise RuntimeError("apiserver unreachable")
+            return {"signing.pub": x.encode(), "kid": kid.encode()}
+
+        clock = FakeClock()
+        service, _, _ = make_service({})
+        service._reader = flaky_secret
+        service._clock = clock
+        service._secret_names = ["s"]
+        assert service.get(kid) is not None  # warm
+
+        clock.now += 46.0  # refresh due
+        state["broken"] = True
+        served = service.get(kid)
+        assert served is not None, (
+            "a failed refresh keeps the previously cached keys, not a 404"
+        )
+
+
+def _sdk_config():
+    from opensandbox.resolver_auth import VerifierConfig
+
+    return VerifierConfig(
+        jwks_base="https://server.invalid/credential-vault",
+        expected_audience="credential-resolver@resolver.internal",
+    )
+
+
+_SDK_SRC = Path(__file__).resolve().parents[1].parent / "sdks" / "sandbox" / "python" / "src"
+if _SDK_SRC.is_dir():
+    sys.path.insert(0, str(_SDK_SRC))
 
 
 class TestCompositeDelegation:

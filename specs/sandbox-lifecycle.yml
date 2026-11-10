@@ -591,6 +591,7 @@ paths:
   /credential-vault/jwks/{kid}:
     get:
       tags: [Credential Vault]
+      security: []
       operationId: getEgressSigningJwk
       summary: Publish one credential-vault resolver caller-authentication public key
       description: |
