@@ -220,6 +220,35 @@ jobs:
         run: |
           kind delete cluster --name "${KIND_CLUSTER}" || true
 
+  # OSEP-0025 D5 nightly lane: the Docker-sidecar caller-authentication
+  # chain (provision -> JWKS publication -> SDK verification, including the
+  # recreation-replaces-keypair revocation story) against the real server
+  # components; mocks only at the Docker API and the SDK's HTTP transport,
+  # so no cluster is needed. The unit slices run in the PR server lane;
+  # this job gives the e2e its own nightly signal.
+  credential-vault-caller-auth-e2e:
+    name: Credential Vault Caller-Auth E2E (Docker sidecar)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Run Docker-sidecar caller-auth e2e
+        working-directory: server
+        run: |
+          uv sync --all-groups
+          uv run pytest -v tests/test_egress_signing_e2e.py
+
   k8s-pool-e2e:
     name: Kubernetes Pool E2E (ingress-header)
     needs: changes
