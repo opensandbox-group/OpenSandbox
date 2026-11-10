@@ -31,6 +31,11 @@ func PathMatch(pattern, name string) (bool, error) {
 	return matchWithSeparator(pattern, name, filepath.Separator, true)
 }
 
+// ValidPattern reports whether pattern is well formed for PathMatch.
+func ValidPattern(pattern string) bool {
+	return globutil.ValidatePathPattern(pattern)
+}
+
 func matchWithSeparator(pattern, name string, separator rune, validate bool) (matched bool, err error) {
 	return doMatchWithSeparator(pattern, name, separator, validate, -1, -1, -1, -1, 0, 0)
 }
