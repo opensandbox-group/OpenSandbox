@@ -43,7 +43,7 @@ Next steps:
      ConfigMap in the pool's namespace, and point SandboxTemplate
      output.publish at an oci:// registry the nodes trust.
 {{- end }}
-{{- if and .Values.routeKeys.create .Values.routeKeys.developmentOnly }}
+{{- if and .Values.routeKeys.create (not .Values.routeKeys.existingSecret) .Values.routeKeys.developmentOnly }}
 
 WARNING: the Ed25519 controller route keys in fast-sandbox-route-keys are
 the published development-only test keys. Provision production keys via
