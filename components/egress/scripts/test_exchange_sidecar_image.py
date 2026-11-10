@@ -19,13 +19,14 @@ against the T6 test resolver and an independent HTTPS origin:
   UID-scoped nft exclusion must cover the mitm uid — transparent
   interception re-originates the egress's :443 dials from mitmdump.
 
-D5 is deferred: resolver dials carry no caller authentication. The
-UID-scoped exclusion therefore unblocks the egress's own dials but is NOT
-a sandbox boundary — sandbox resolver dials are re-originated from the
-same mitm uid, so a sandbox that disables TLS verification can resolve
-for any subject (R4 gap, asserted as a tripwire below; flip when D5
-lands). ``unix://`` socket permissions are the only egress-only boundary
-today.
+D5 mint side: the egress is provisioned with a per-pool signing key, so
+https exchange vaults pass the caller-auth gate and every TCP resolver
+dial carries the OpenSandbox-Egress-Credential JWT. This harness's
+resolver stub cannot enforce that credential (no SDK inside the egress
+image), so the sandbox mint probe below still succeeds here BY HARNESS
+CONSTRAINT; resolver-side enforcement (401 to unauthenticated callers)
+is proven by the credentialvault Go e2e suite. ``unix://`` socket
+permissions remain the boundary for UDS resolvers.
 
 Evidence (per-case results, container logs) is written to an artifacts
 directory without credential values.
@@ -172,6 +173,7 @@ class ExchangeSidecarRuntime:
         self.shared = self.workdir / "shared"
         self.tls = self.workdir / "tls"
         self.rulesdir = self.workdir / "rules"
+        self.signing = self.workdir / "signing"
         self.subnet = ""
         self.created: set[str] = set()
         self.cleanup_report: list[dict] = []
@@ -198,10 +200,13 @@ class ExchangeSidecarRuntime:
             "OPENSANDBOX_EGRESS_RULES": json.dumps(self.policy()),
             "OPENSANDBOX_EGRESS_TOKEN": TOKEN,
             "OPENSANDBOX_EGRESS_SANDBOX_ID": SUBJECT,
-            # Resolver operator env (D13). Caller auth is deferred (D5):
-            # resolver dials carry no Authorization header.
+            # Resolver operator env. The per-pool signing key is provisioned
+            # at runtime setup (self.signing, mounted below): TCP resolver
+            # dials carry the OpenSandbox-Egress-Credential JWT.
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT": "2",
             "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY": "4",
+            "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR": "/run/signing",
+            "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID": "xchg-pool:v1",
             "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA": "/run/live-origin/ca.pem",
         }
 
@@ -213,6 +218,15 @@ class ExchangeSidecarRuntime:
             self.shared.mkdir()
             self.tls.mkdir()
             self.rulesdir.mkdir()
+            # Per-pool signing key for the https resolver leg (D16): the
+            # egress mounts it read-only and mints caller credentials per
+            # TCP dial.
+            self.signing.mkdir()
+            subprocess.run(
+                ["openssl", "genpkey", "-algorithm", "ed25519",
+                 "-out", str(self.signing / "signing.key")],
+                check=True, capture_output=True,
+            )
             # Named volume: macOS bind mounts cannot chmod a unix socket.
             # The test provisions the R4 0710 layout; the stub only chmods
             # directories it creates.
@@ -242,6 +256,7 @@ class ExchangeSidecarRuntime:
                     "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges",
                     "-v", f"{self.shared}:/run/live-origin:ro",
                     "-v", f"{self.spi_volume}:{SPI_DIR}",
+                    "-v", f"{self.signing}:/run/signing:ro",
                     "--add-host", f"{BOUND}:{origin_ip}",
                     "--add-host", f"{STATIC}:{origin_ip}",
                     "--add-host", f"{RESOLVER_HOST}:{resolver_ip}"]
@@ -666,11 +681,12 @@ def test_d16_https_resolver_reachability(runtime: ExchangeSidecarRuntime):
     require(outcome != "https-ok" and not outcome.startswith("http 2"),
             f"sandbox reached the resolver: {outcome!r}")
 
-    # TRIPWIRE (R4 gap, D5 deferred): a sandbox that disables TLS
-    # verification is re-originated by mitmdump from the excluded uid, and
-    # the resolver authenticates nobody — so an attacker-chosen subject
-    # resolves today. Asserts current behavior; flip to denial when D5
-    # lands.
+    # Sandbox mint probe (harness constraint): this stub is permissive —
+    # the egress image carries no resolver-auth SDK, so enforcement cannot
+    # run here. The egress side of D5 is exercised above (the vault passed
+    # the caller-auth gate and the dial minted a credential); the resolver
+    # side (401 to unauthenticated callers) is asserted in the
+    # credentialvault Go e2e suite.
     mint_document = json.dumps({
         "subject": "sbx-attacker",
         "credential": CREDENTIAL,
@@ -695,8 +711,8 @@ def test_d16_https_resolver_reachability(runtime: ExchangeSidecarRuntime):
     sandbox_mint = runtime.exec_sandbox(SANDBOX_UID, "python3", "-c", mint_probe, check=False)
     minted = sandbox_mint.stdout.strip().splitlines()[-1] if sandbox_mint.stdout.strip() else ""
     require(minted == "resolve 200",
-            f"expected the documented D5-deferred gap (unauthenticated sandbox /resolve "
-            f"succeeds; flip this assertion once D5 lands), got: {minted!r} "
+            f"expected the permissive-stub mint probe to succeed (harness "
+            f"constraint; see comment above), got: {minted!r} "
             f"(stderr={sandbox_mint.stderr[-300:]!r})")
 
 
