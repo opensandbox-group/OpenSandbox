@@ -72,6 +72,11 @@ _CREATE_SCHEMA_STATEMENTS = (
         updated_at TIMESTAMPTZ NOT NULL
     )
     """,
+    # CREATE TABLE IF NOT EXISTS does not evolve an existing table: a target
+    # initialized by a pre-mode server still lacks the column the INSERT
+    # below writes. The repository's own ALTER does not help here — the CLI
+    # migration never constructs the repository.
+    "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS mode TEXT",
     "CREATE INDEX IF NOT EXISTS idx_snapshots_source_sandbox_id ON snapshots(source_sandbox_id)",
     "CREATE INDEX IF NOT EXISTS idx_snapshots_state ON snapshots(state)",
     "CREATE INDEX IF NOT EXISTS idx_snapshots_created_at ON snapshots(created_at DESC)",

@@ -411,7 +411,7 @@ def test_snapshot_service_ready_convergence_falls_back_to_requested_mode(tmp_pat
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()
     # Runtime that cannot report a mode (legacy backend): the persisted
-    # request mode stays authoritative.
+    # request mode stays authoritative for full/legacy requests.
     runtime.create_result = SnapshotRuntimeStatus(
         state=SnapshotState.READY,
         image="opensandbox-snapshots:snap-ready",
@@ -430,6 +430,43 @@ def test_snapshot_service_ready_convergence_falls_back_to_requested_mode(tmp_pat
 
     assert fetched.status.state == "Ready"
     assert fetched.mode == "full"
+
+
+@pytest.mark.parametrize("confirmed_mode", [None, "full"])
+def test_snapshot_service_fails_unconfirmed_rootfs_only_artifacts(
+    tmp_path, confirmed_mode
+) -> None:
+    # A backend that predates the mode field silently captures Full
+    # artifacts and reports no mode (or, on a partially new backend, an
+    # explicit full confirmation). A rootfs-only request must never publish
+    # that as Ready: the server is the compatibility boundary across
+    # fast-sandbox versions.
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    runtime.create_result = SnapshotRuntimeStatus(
+        state=SnapshotState.READY,
+        image="oci://reg.example.com/snap/files@sha256:abc",
+        reason="snapshot_runtime_ready",
+        message="fsb snapshot OCI artifacts published successfully.",
+        backend="fsb",
+        mode=confirmed_mode,
+    )
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    created = service.create_snapshot(
+        "sbx-001", CreateSnapshotRequest(mode="rootfsOnly")
+    )
+    fetched = service.get_snapshot(created.id)
+
+    assert fetched.status.state == "Failed"
+    assert fetched.status.reason == "snapshot_mode_unconfirmed"
+    assert "rootfs-only" in (fetched.status.message or "")
+    assert "upgrade" in (fetched.status.message or "")
 
 
 def test_snapshot_service_marks_snapshot_ready_from_worker(tmp_path) -> None:

@@ -48,9 +48,6 @@ class SnapshotRuntimeStatus:
 # Public snapshot mode values (wire names; see CreateSnapshotRequest).
 SNAPSHOT_MODE_FULL = "full"
 SNAPSHOT_MODE_ROOTFS_ONLY = "rootfsOnly"
-# Only "rootfsOnly" is stored; absent (None) means the default "full", so
-# legacy rows and explicit full requests persist identically.
-PERSISTED_SNAPSHOT_MODES = frozenset({SNAPSHOT_MODE_ROOTFS_ONLY})
 
 
 def normalize_snapshot_mode(mode: Optional[str]) -> Optional[str]:

@@ -53,6 +53,7 @@ from opensandbox_server.services.constants import SnapshotErrorCodes
 from opensandbox_server.services.snapshot_runtime import (
     SNAPSHOT_CREATE_CONFLICT_REASON,
     SNAPSHOT_MODE_FULL,
+    SNAPSHOT_MODE_ROOTFS_ONLY,
     NoopSnapshotRuntime,
     SnapshotRuntime,
     SnapshotRuntimePreflightError,
@@ -745,6 +746,47 @@ class PersistedSnapshotService(SnapshotService):
                         state=SnapshotState.FAILED,
                         reason="snapshot_runtime_missing_image",
                         message="Runtime reported Ready without a snapshot image.",
+                        last_transition_at=now,
+                    ),
+                    created_at=record.created_at,
+                    updated_at=now,
+                )
+
+            # Mode-confirmation fence: the server is the compatibility
+            # boundary across fast-sandbox versions, so a requested
+            # rootfs-only snapshot is only Ready when the runtime EXPLICITLY
+            # confirmed a rootfs-only artifact. An absent (or full)
+            # confirmation means the backend predates the mode field (the
+            # old protobuf silently drops it and captures Full) or the
+            # fastlet produced Full artifacts: never publish that as a
+            # rootfs-only snapshot. Mirrors upstream's SnapshotModeDrift
+            # fence at the OpenSandbox layer. Legacy/full requests keep the
+            # permissive fallback (unconfirmed == full).
+            if (
+                normalize_snapshot_mode(record.mode) == SNAPSHOT_MODE_ROOTFS_ONLY
+                and normalize_snapshot_mode(runtime_status.mode)
+                != SNAPSHOT_MODE_ROOTFS_ONLY
+            ):
+                reported = runtime_status.mode or "full"
+                return SnapshotRecord(
+                    id=record.id,
+                    source_sandbox_id=record.source_sandbox_id,
+                    namespace=record.namespace,
+                    name=record.name,
+                    description=record.description,
+                    mode=record.mode,
+                    restore_config=record.restore_config,
+                    status=SnapshotStatusRecord(
+                        state=SnapshotState.FAILED,
+                        reason="snapshot_mode_unconfirmed",
+                        message=(
+                            "The snapshot backend reported "
+                            f"'{reported}' artifacts for a rootfsOnly "
+                            "request instead of confirming a rootfs-only "
+                            "artifact. The fast-sandbox deployment likely "
+                            "predates rootfs-only snapshot support; upgrade "
+                            "it before requesting mode=rootfsOnly."
+                        ),
                         last_transition_at=now,
                     ),
                     created_at=record.created_at,
