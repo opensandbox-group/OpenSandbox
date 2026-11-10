@@ -56,7 +56,7 @@ func run(ctx context.Context, location *time.Location, peak, offpeak int, interv
 	pool, err := opensandbox.NewSandboxPoolBuilder().
 		PoolName("business-hours-example").
 		MaxIdle(initialTarget).
-		ConnectionConfig(opensandbox.ConnectionConfig{UseServerProxy: true}).
+		ConnectionConfig(opensandbox.ConnectionConfig{}).
 		CreationSpec(opensandbox.PoolCreationSpec{
 			Image:      image,
 			Entrypoint: []string{"/bin/sh", "-c", "sleep infinity"},

@@ -53,11 +53,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
@@ -93,6 +96,15 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	writeJSON(w, http.StatusOK, s.actionStatusResponse())
+}
+
+type fastSandboxActionStatusResponse struct {
+	actionhandler.StatusResponse
+	SubjectLifecycleDegraded []string `json:"subjectLifecycleDegraded,omitempty"`
+}
+
+func (s *fastSandboxPolicyServer) actionStatusResponse() fastSandboxActionStatusResponse {
 	recovery := s.vaultRecoveryActive()
 	policyRecovery := s.policyRecoveryActive()
 	degraded := s.degradedVaultUIDs()
@@ -128,6 +140,19 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 			resp.MitmCaError = reason
 		}
 	}
+	return fastSandboxActionStatusResponse{StatusResponse: resp, SubjectLifecycleDegraded: s.subjectLifecycleDegraded()}
+}
+
+func (s *fastSandboxPolicyServer) handleActionsV2Status(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp := s.actionStatusResponse()
+	resp.APIVersion = constants.ActionsAPIVersionV2
+	resp.OwnerStatus = true
+	resp.VaultTransfer, resp.PolicyTransfer, resp.TemplateStateExport = false, false, false
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -157,6 +182,244 @@ func (s *fastSandboxPolicyServer) handleActions(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+func (s *fastSandboxPolicyServer) handleActionsV2(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPolicyBodyBytes))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read action body: %v", err), http.StatusBadRequest)
+		return
+	}
+	env, err := actionhandler.ParseEnvelopeV2(body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid Actions v2 envelope: %v", err), http.StatusBadRequest)
+		return
+	}
+	subj := subject.FromSandboxUID(env.Sandbox.UID)
+	ownerLock := s.ownerLock(subj)
+	ownerLock.Lock()
+	defer ownerLock.Unlock()
+	if err := s.validateActionsV2Owner(subj, env); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	switch env.Operation {
+	case actionhandler.OperationSetBinding, actionhandler.OperationLifecycleHook, actionhandler.OperationRemoveBinding:
+	default:
+		http.Error(w, "snapshot and state-transfer operations are not supported by Actions v2", http.StatusNotImplemented)
+		return
+	}
+	if env.Operation == actionhandler.OperationSetBinding && env.Binding.IsRemoval() {
+		http.Error(w, "live binding removal is unsupported; use Sandbox Delete", http.StatusNotImplemented)
+		return
+	}
+	record, err := s.readOwnerRecord(subj)
+	if err != nil {
+		http.Error(w, "owner persistence unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if env.Operation == actionhandler.OperationRemoveBinding && record != nil && record.Phase == "retired" {
+		writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
+	if env.Operation == actionhandler.OperationSetBinding || env.Operation == actionhandler.OperationRemoveBinding {
+		phase := "active"
+		if env.Operation == actionhandler.OperationRemoveBinding {
+			phase = "retiring"
+		}
+		if err := s.writeOwnerRecord(subj, *env.Owner, phase); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+	}
+	// An absent owner has no registered runtime to dispatch REMOVE to. Persist
+	// a terminal fence anyway, so a delayed initial SET cannot resurrect it.
+	if env.Operation == actionhandler.OperationRemoveBinding && record == nil {
+		if err := s.writeOwnerRecord(subj, *env.Owner, "retired"); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
+	if env.Operation == actionhandler.OperationRemoveBinding && record != nil && record.VaultContract != nil {
+		if err := s.retireWriterVault(subj, record); err != nil {
+			http.Error(w, "Vault retirement requires recovery", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	status, err := s.dispatchAction(r.Context(), env)
+	if err != nil {
+		logEgressUpdateFailedError(fmt.Sprintf("Actions v2 %s for sandbox %s failed: %v", env.Operation, env.Sandbox.UID, err))
+		http.Error(w, err.Error(), status)
+		return
+	}
+	if env.Operation == actionhandler.OperationRemoveBinding {
+		if err := s.writeOwnerRecord(subj, *env.Owner, "retired"); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+	}
+	s.mu.Lock()
+	switch env.Operation {
+	case actionhandler.OperationSetBinding:
+		s.actionOwners[subj] = *env.Owner
+	case actionhandler.OperationRemoveBinding:
+		if current, ok := s.actionOwners[subj]; ok && current.Matches(*env.Owner) {
+			delete(s.actionOwners, subj)
+		}
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+func (s *fastSandboxPolicyServer) validateActionsV2Owner(subj subject.Subject, env *actionhandler.Envelope) error {
+	record, err := s.readOwnerRecord(subj)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		if env.Operation != actionhandler.OperationSetBinding && env.Operation != actionhandler.OperationRemoveBinding {
+			return fmt.Errorf("strict owner is not registered")
+		}
+		return s.cleanOwnerSubject(subj)
+	}
+	if !record.Owner.Matches(*env.Owner) {
+		return fmt.Errorf("strict owner mismatch; rebind is unsupported")
+	}
+	if record.Phase != "active" && env.Operation != actionhandler.OperationRemoveBinding {
+		return fmt.Errorf("strict owner is retiring or retired")
+	}
+	return nil
+}
+
+func (s *fastSandboxPolicyServer) handleActionsV2Owner(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	uid := strings.TrimPrefix(r.URL.Path, constants.ActionsV2OwnerPathPrefix)
+	owner, err := ownerFromRequest(r)
+	if !validVaultSubjectID(uid) || err != nil || owner.SandboxUID != uid {
+		http.Error(w, "valid matching owner required", http.StatusBadRequest)
+		return
+	}
+	subj := subject.FromSandboxUID(uid)
+	lock := s.ownerLock(subj)
+	lock.RLock()
+	defer lock.RUnlock()
+	record, err := s.readOwnerRecord(subj)
+	if err != nil {
+		http.Error(w, "owner persistence unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if record == nil {
+		if err := s.cleanOwnerSubject(subj); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusOK, actionhandler.OwnerObservation{State: "absent", Owner: owner})
+		return
+	}
+	if !record.Owner.Matches(owner) {
+		http.Error(w, "owner mismatch", http.StatusConflict)
+		return
+	}
+	state := "current"
+	if record.Phase == "retired" {
+		state = "retired"
+	}
+	writeJSON(w, http.StatusOK, actionhandler.OwnerObservation{State: state, Owner: owner})
+}
+
+func (s *fastSandboxPolicyServer) subjectHasLiveStateLocked(subj subject.Subject) bool {
+	_, rebind := s.rebinds[subj]
+	_, vault := s.vaults[subj]
+	_, policy := s.policies[subj]
+	_, pending := s.pendingPolicies[subj]
+	_, attachment := s.subjAtt[subj]
+	_, fence := s.subjFence[subj]
+	return rebind || vault || policy || pending || attachment || fence
+}
+
+func (s *fastSandboxPolicyServer) subjectHasPersistentState(subj subject.Subject) (bool, error) {
+	if s.vaultFiles != nil {
+		fs, err := s.vaultFiles.storeFor(subj)
+		if err != nil {
+			return false, err
+		}
+		snapshot, err := fs.Snapshot()
+		if err != nil {
+			return false, err
+		}
+		if snapshot.Exists() || s.vaultFiles.isSealed(subj) {
+			return true, nil
+		}
+	}
+	if s.policyFiles != nil {
+		fs, err := s.policyFiles.storeFor(subj)
+		if err != nil {
+			return false, err
+		}
+		snapshot, err := fs.Snapshot()
+		if err != nil {
+			return false, err
+		}
+		if snapshot.Exists() || s.policyFiles.isSealed(subj) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func ownerFromRequest(r *http.Request) (actionhandler.Owner, error) {
+	encoded := strings.TrimSpace(r.Header.Get(constants.EgressActionsOwnerHeader))
+	if encoded == "" {
+		return actionhandler.Owner{}, fmt.Errorf("owner header is required")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return actionhandler.Owner{}, err
+	}
+	var owner actionhandler.Owner
+	if err := json.Unmarshal(decoded, &owner); err != nil {
+		return owner, err
+	}
+	if !owner.Valid() || strings.TrimSpace(r.Header.Get(constants.EgressActionsSandboxUIDHeader)) != owner.SandboxUID {
+		return owner, fmt.Errorf("owner header is incomplete or disagrees with Sandbox UID header")
+	}
+	return owner, nil
+}
+
+func (s *fastSandboxPolicyServer) validateRelayOwner(w http.ResponseWriter, r *http.Request, uid string) bool {
+	if s.actionsAPIVersion != constants.ActionsAPIVersionV2 {
+		return true
+	}
+	owner, err := ownerFromRequest(r)
+	if err != nil || owner.SandboxUID != uid {
+		http.Error(w, "relay owner must match the path Sandbox UID", http.StatusBadRequest)
+		return false
+	}
+	subj := subject.FromSandboxUID(uid)
+	record, recordErr := s.readOwnerRecord(subj)
+	if recordErr != nil || record == nil || record.Phase != "active" || !record.Owner.Matches(owner) {
+		http.Error(w, "strict owner is not active", http.StatusPreconditionFailed)
+		return false
+	}
+	s.mu.Lock()
+	current, found := s.actionOwners[subj]
+	s.mu.Unlock()
+	if !found || !current.Matches(owner) {
+		http.Error(w, "relay owner is not the current registered owner", http.StatusPreconditionFailed)
+		return false
+	}
+	return true
 }
 
 // dispatchAction validates effect-free input before entering the cancellable
@@ -214,6 +477,14 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	defer s.policyCommitMu.Unlock()
 	old, registered := s.reg.Fence(subj)
 	oldState, _ := s.reg.Get(subj)
+	if stale, ok := s.reg.Resolve(subject.SubjectKey{SourceIP: att.IP}); ok && stale != subj {
+		s.mu.Lock()
+		status, purgeErr := s.vaultPurgeStatusLocked(stale)
+		s.mu.Unlock()
+		if purgeErr != nil {
+			return status, fmt.Errorf("stale subject cleanup blocked: %w", purgeErr)
+		}
+	}
 	s.mu.Lock()
 	// Waiting for an in-progress Vault commit may outlive the request too.
 	if err := s.actionCanceled(ctx); err != nil {
@@ -235,6 +506,14 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			// reason to mutate a live subject or acknowledge an uninstalled update.
 			s.mu.Unlock()
 			return http.StatusInternalServerError, fmt.Errorf("active subject %s has no registered network", subj)
+		}
+	}
+	willPurge := (token != nil && (!token.expectedNew.Matches(fence) || !token.purged)) || (token == nil && registered && !old.Matches(fence))
+	if willPurge {
+		status, purgeErr := s.vaultPurgeStatusLocked(subj)
+		if purgeErr != nil {
+			s.mu.Unlock()
+			return status, fmt.Errorf("subject rebind blocked: %w", purgeErr)
 		}
 	}
 	// A null binding may omit attachment only for its own known identity.
@@ -274,7 +553,13 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 			s.reg.Unregister(subj)
 			s.mu.Lock()
-			s.dropSubjectStateLocked(subj) // preserve this exact token through C publication
+			// The registry has retired this fence even if the local purge fails.
+			s.recordSubjectIntentLocked(subj, token.old, true)
+			if err := s.dropSubjectStateLocked(subj); err != nil { // preserve this exact token through C publication
+				status := s.vaultPurgeFailureStatusLocked(subj)
+				s.mu.Unlock()
+				return status, fmt.Errorf("subject reset purge: %w", err)
+			}
 			token.needsReset = false
 			token.oldRemoved = true
 			token.purged = true
@@ -282,7 +567,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		}
 		s.mu.Lock()
 		if !token.purged {
-			s.dropSubjectStateLocked(subj)
+			if err := s.dropSubjectStateLocked(subj); err != nil {
+				status := s.vaultPurgeFailureStatusLocked(subj)
+				s.mu.Unlock()
+				return status, fmt.Errorf("subject rebind purge: %w", err)
+			}
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.purged = true
 		}
 		removeOld := token.removeOld && !token.oldRemoved
@@ -325,7 +615,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	installStarted := time.Now()
 	// Record even failed first installs: partial kernel effects otherwise have
 	// no network identity for a later same-fence retry or changed-fence rebind.
-	s.recordBindingState(subj, att)
+	s.recordBindingState(subj, att, env.Sandbox.Name)
 	var victims []subject.Subject
 	state, err := s.reg.RegisterAndEnforce(subj, subject.SubjectKey{SourceIP: att.IP}, fence, func() error {
 		return s.OnRegistered(subj, att)
@@ -338,6 +628,14 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	// action gate prevents a victim being re-registered before this purge.
 	for _, victim := range victims {
 		if _, exists := s.reg.Fence(victim); !exists {
+			s.mu.Lock()
+			victimFence, known := s.subjFence[victim]
+			// Actual eviction is known outside the callback, even if a
+			// subsequent best-effort file purge refuses cleanup.
+			if s.subjectDrain != nil && known {
+				s.recordSubjectIntentLocked(victim, victimFence, true)
+			}
+			s.mu.Unlock()
 			s.dropSubjectState(victim)
 		}
 	}
@@ -364,6 +662,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 		}
 		s.finishRebind(subj, token)
+		s.recordBindingSnapshot(subj, fence)
 		log.Infof("subject %s: binding removed (deny-first)", subj)
 		return http.StatusOK, nil
 	}
@@ -374,6 +673,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		log.Errorf("subject %s: binding policy commit failed: %v", subj, err)
 		return http.StatusInternalServerError, fmt.Errorf("binding policy commit: %w", err)
 	}
+	s.recordBindingSnapshot(subj, fence)
 	s.finishRebind(subj, token)
 	policyCommit := time.Since(policyStarted)
 	log.Infof("subject %s: SET_BINDING applied (state=%s) total=%dms denyFirstInstall=%dms policyCommit=%dms",
@@ -419,6 +719,22 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		// ever consume.
 		s.policyCommitMu.Lock()
 		defer s.policyCommitMu.Unlock()
+		// A failed activation rollback must be retried before the ACK gate,
+		// even while no child can acknowledge a snapshot. Do not infer this
+		// from registry Active: a healthy active subject may await a new ACK.
+		s.mu.Lock()
+		retryRevert := s.fenceMatchesLocked(subj, fence) && s.subjectDrain != nil && s.subjectDrain.revertPending[subj]
+		att := s.subjAtt[subj]
+		s.mu.Unlock()
+		if retryRevert {
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
+				return http.StatusInternalServerError, err
+			}
+			s.mu.Lock()
+			delete(s.subjectDrain.revertPending, subj)
+			s.mu.Unlock()
+		}
 		// Fence re-validation AND the pending peek under one s.mu hold
 		// (policyCommitMu → s.mu, the established order): fenceMatchesLocked
 		// reads subjFence, which terminal cleanup deletes under s.mu. An
@@ -428,6 +744,13 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		s.mu.Lock()
 		stale := !s.fenceMatchesLocked(subj, fence)
 		pol := s.pendingPolicies[subj]
+		acknowledged := s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		var checkedEpoch *fastSandboxSubjectEpoch
+		var checkedACK fastSandboxSubjectACK
+		if d := s.subjectDrain; d != nil {
+			checkedEpoch, checkedACK = d.current, d.acked[subj]
+		}
+		att = s.subjAtt[subj]
 		s.mu.Unlock()
 		if stale {
 			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
@@ -438,11 +761,46 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 			// the subject must never activate without its current policy.
 			return http.StatusConflict, fmt.Errorf("data-plane-ready for subject %s with no pending policy", subj)
 		}
+		if !acknowledged {
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
+		}
 		applyStarted := time.Now()
 		if err := s.applyPolicy(subj, pol); err != nil {
 			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
 		}
-		s.clearPendingPolicy(subj)
+		// Child publication/detach and worker failures do not take policyCommitMu.
+		// Fence completion against the exact epoch, registration and digest that
+		// passed the gate; a replacement's ACK cannot complete this activation.
+		s.mu.Lock()
+		if checkedEpoch != nil {
+			d := s.subjectDrain
+			acknowledged = d != nil && d.current == checkedEpoch && d.acked[subj] == checkedACK && s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		}
+		s.mu.Unlock()
+		if !acknowledged {
+			// Keep pending policy for a retried hook. Kernel I/O stays outside mu;
+			// the existing primitive resets nft before unsetting registry policy.
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				s.mu.Lock()
+				if s.subjectDrain.revertPending == nil {
+					s.subjectDrain.revertPending = make(map[subject.Subject]bool)
+				}
+				s.subjectDrain.revertPending[subj] = true
+				s.mu.Unlock()
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
+				return http.StatusInternalServerError, err
+			}
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
+		}
+		s.mu.Lock()
+		if s.subjectDrain != nil {
+			delete(s.subjectDrain.revertPending, subj)
+		}
+		s.mu.Unlock()
+		s.recordBindingSnapshot(subj, fence)
+		// The pending slot stays: it now mirrors what is enforced, so a
+		// data-plane-ready replayed after a lost ack is idempotent (same
+		// rationale as the relay PUT and policy import).
 		log.Infof("subject %s: data-plane-ready, policy active applyPolicy=%dms", subj, time.Since(applyStarted).Milliseconds())
 		return http.StatusOK, nil
 	default:
@@ -477,8 +835,16 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 		log.Infof("subject %s: stale REMOVE_BINDING ignored (fence mismatch)", subj)
 		return http.StatusOK, nil
 	}
+	s.mu.Lock()
+	purgeStatus, purgeErr := s.vaultPurgeStatusLocked(subj)
+	s.mu.Unlock()
+	if purgeErr != nil {
+		return purgeStatus, fmt.Errorf("binding removal blocked: %w", purgeErr)
+	}
 	if token == nil && !ok {
+		s.policyCommitMu.Lock()
 		s.dropSubjectState(subj)
+		s.policyCommitMu.Unlock()
 		return http.StatusOK, nil
 	}
 	// expectedNew REMOVE cancels an unfinished registration intent, including
@@ -491,13 +857,30 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 	// Terminal file cleanup remains best-effort after Unregister. A failed
 	// delete leaves the file fenced to the old identity; this acknowledgement
 	// does not promise automatic cleanup retry.
+	s.policyCommitMu.Lock()
 	s.mu.Lock()
-	s.dropSubjectStateLocked(subj)
+	if s.subjectDrain != nil {
+		// A pending rebind REMOVE may carry expectedNew while the actually
+		// unregistered owner is still old. If already absent, retire only an
+		// existing drain mirror, never the unregistered expectedNew fence.
+		if ok {
+			s.recordSubjectIntentLocked(subj, registeredFence, true)
+		} else if mirroredFence, exists := s.subjectDrain.fences[subj]; exists {
+			s.recordSubjectIntentLocked(subj, mirroredFence, true)
+		}
+	}
+	if err := s.dropSubjectStateLocked(subj); err != nil {
+		status := s.vaultPurgeFailureStatusLocked(subj)
+		s.mu.Unlock()
+		s.policyCommitMu.Unlock()
+		return status, fmt.Errorf("terminal state purge: %w", err)
+	}
 	cleared := token != nil && s.rebinds[subj] == token
 	if cleared {
 		delete(s.rebinds, subj)
 	}
 	s.mu.Unlock()
+	s.policyCommitMu.Unlock()
 	if cleared {
 		log.Infof("subject_rebind_cleared")
 	}

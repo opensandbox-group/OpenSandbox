@@ -197,6 +197,9 @@ func MakeDir(dir string, perm model.Permission) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectStagingPath(abs); err != nil {
+		return err
+	}
 
 	_, statErr := os.Stat(abs)
 	existed := statErr == nil
@@ -249,7 +252,7 @@ func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error)
 		Type:       fileType(fileInfo),
 		Size:       fileInfo.Size(),
 		ModifiedAt: fileInfo.ModTime(),
-		CreatedAt:  getFileCreateTime(fileInfo),
+		CreatedAt:  getFileCreateTime(absPath, fileInfo),
 		Permission: model.Permission{
 			Owner: owner,
 			Group: group,

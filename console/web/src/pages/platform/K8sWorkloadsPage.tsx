@@ -43,17 +43,17 @@ export function K8sWorkloadsPage() {
       });
       if (seq !== requestSeq.current) return;
       if (data.disabled) {
-        setDisabledMsg(data.message ?? 'K8s API 未启用');
+        setDisabledMsg(data.message ?? 'K8s API is not enabled');
         setItems([]);
       } else if (data.errorCode) {
-        setDisabledMsg(data.message ?? 'K8s API 错误');
+        setDisabledMsg(data.message ?? 'K8s API error');
         setItems([]);
       } else {
         setItems(data.items ?? []);
       }
     } catch (e) {
       if (seq !== requestSeq.current) return;
-      message.error(e instanceof Error ? e.message : '加载 K8s 工作负载失败');
+      message.error(e instanceof Error ? e.message : 'Failed to load K8s workloads');
       setItems([]);
     } finally {
       if (seq === requestSeq.current) setLoading(false);
@@ -78,11 +78,11 @@ export function K8sWorkloadsPage() {
   }, [user?.role, tenant]);
 
   if (user?.role !== 'admin') {
-    return <Typography.Text type="secondary">仅 Admin 可查看 K8s 工作负载。</Typography.Text>;
+    return <Typography.Text type="secondary">K8s workloads are only available to admins.</Typography.Text>;
   }
 
   const columns: ColumnsType<K8sWorkloadRow> = [
-    { title: '租户', dataIndex: 'tenant', width: 90, render: (t: string) => <TenantTag tenant={t} /> },
+    { title: 'Tenant', dataIndex: 'tenant', width: 90, render: (t: string) => <TenantTag tenant={t} /> },
     { title: 'Namespace', dataIndex: 'namespace', width: 120 },
     { title: 'Pod', dataIndex: 'name', ellipsis: true },
     {
@@ -97,20 +97,20 @@ export function K8sWorkloadsPage() {
 
   return (
     <div>
-      <Typography.Title level={4}>K8s 工作负载（Pod）</Typography.Title>
+      <Typography.Title level={4}>K8s Workloads (Pods)</Typography.Title>
       {disabledMsg && (
         <Alert type="info" showIcon message={disabledMsg} style={{ marginBottom: 16 }} />
       )}
       <Space wrap style={{ marginBottom: 16 }}>
         <Input
-          placeholder="Sandbox ID 筛选"
+          placeholder="Filter by Sandbox ID"
           value={sandboxId}
           onChange={(e) => setSandboxId(e.target.value)}
           style={{ width: 220 }}
         />
         <Select
           allowClear
-          placeholder="租户"
+          placeholder="Tenant"
           style={{ width: 140 }}
           value={tenant}
           onChange={setTenant}
@@ -119,7 +119,7 @@ export function K8sWorkloadsPage() {
             value: t,
           }))}
         />
-        <Typography.Link onClick={() => void load()}>刷新</Typography.Link>
+        <Typography.Link onClick={() => void load()}>Refresh</Typography.Link>
       </Space>
       <Table rowKey={(r) => `${r.namespace}/${r.name}`} loading={loading} columns={columns} dataSource={items} />
     </div>

@@ -111,10 +111,6 @@ export async function apiRequest<T>(
   return body as T;
 }
 
-export function isNotFound(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 404;
-}
-
 export const authApi = {
   me: () => apiRequest<SessionUser>('/api/auth/me'),
   loginTenant: (apiKey: string) =>

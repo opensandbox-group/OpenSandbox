@@ -53,8 +53,22 @@ func NewConfinedView(root string, uid, gid uint32) *ConfinedView {
 }
 
 // rel converts a namespace-or-host path to a root-relative name; the router
-// forwards host paths after its OverlayView root rewrite.
+// forwards host paths after its OverlayView root rewrite. The staging prefix is
+// reserved, so every operation treats one as absent: a rename would otherwise
+// expose an in-flight upload under a user-visible name.
 func (c *ConfinedView) rel(path string) (string, error) {
+	name, err := c.rawRel(path)
+	if err != nil {
+		return "", err
+	}
+	if err := denyStagingName(name, path); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// rawRel is rel without the staging-name check.
+func (c *ConfinedView) rawRel(path string) (string, error) {
 	cleaned := filepath.Clean(path)
 	switch {
 	case cleaned == c.Root || cleaned == "/tmp":
@@ -117,10 +131,7 @@ func (c *ConfinedView) WriteFile(path string, data []byte, perm os.FileMode) err
 			return err
 		}
 	}
-	if err := root.WriteFile(name, data, perm); err != nil {
-		return err
-	}
-	return c.chownNew(root, name)
+	return writeFileConfinedStaged(root, name, data, perm, newFileOwner(c.Uid, c.Gid))
 }
 
 func (c *ConfinedView) WriteFileReader(path string, r io.Reader, perm os.FileMode) (int64, error) {
@@ -138,16 +149,7 @@ func (c *ConfinedView) WriteFileReader(path string, r io.Reader, perm os.FileMod
 			return 0, err
 		}
 	}
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	n, err := io.Copy(f, r)
-	if err != nil {
-		return n, err
-	}
-	return n, c.chownNew(root, name)
+	return writeReaderConfinedStaged(root, name, r, perm, newFileOwner(c.Uid, c.Gid))
 }
 
 func (c *ConfinedView) Remove(path string) error {
@@ -248,7 +250,11 @@ func (c *ConfinedView) ReadDir(path string) ([]os.DirEntry, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return f.ReadDir(-1)
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	return hideStagingEntries(entries), nil
 }
 
 func (c *ConfinedView) Open(path string) (*os.File, error) {
@@ -285,6 +291,9 @@ func (c *ConfinedView) Search(rootPath, pattern string) ([]string, error) {
 			return nil //nolint:nilerr // skip unreadable or escaping entries
 		}
 		if d.IsDir() {
+			return nil
+		}
+		if isStagingName(d.Name()) {
 			return nil
 		}
 		if matched, _ := filepath.Match(pattern, filepath.Base(p)); matched {

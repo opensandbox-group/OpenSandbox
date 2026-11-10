@@ -24,7 +24,8 @@ every run. This module stays deliberately thin: it exercises only the Python
 SDK client contract against the live stack — template CRUD, create with a
 network policy, the execd surface (commands/files/metrics), diagnostics, the
 egress patch/delete methods, pause/resume state fidelity, snapshot
-create/restore, and connect re-attach.
+create/restore, and connect re-attach. A separate TCP port-scope test uses
+controlled echo listeners to prove packet enforcement and subject isolation.
 
 Requires the fsb integration stack to be up plus
 ``OPENSANDBOX_TEST_FSB_TEMPLATE_ID`` (the golden-image template built by
@@ -41,8 +42,10 @@ unset and is excluded from the default ``make test`` run.
 
 import asyncio
 import inspect
+import ipaddress
 import logging
 import os
+import shlex
 import time
 from datetime import timedelta
 
@@ -62,6 +65,7 @@ from opensandbox.models.templates import (
     TemplateReadiness,
 )
 from opensandbox.sandbox import Sandbox
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +83,10 @@ FSB_PUBLISH_TARGET = os.getenv(
 FSB_DOMAIN = os.getenv("OPENSANDBOX_TEST_DOMAIN", "127.0.0.1:18080")
 FSB_PROTOCOL = os.getenv("OPENSANDBOX_TEST_PROTOCOL", "http")
 FSB_API_KEY = os.getenv("OPENSANDBOX_TEST_API_KEY", "fast-sandbox-env")
+FSB_EGRESS_TARGET_IP = os.getenv("OPENSANDBOX_TEST_FSB_EGRESS_TARGET_IP", "")
+FSB_EGRESS_TARGET_DOMAIN = os.getenv(
+    "OPENSANDBOX_TEST_FSB_EGRESS_TARGET_DOMAIN", "echo.test"
+)
 # Baked into the SDK-built template (test_01b) and verified inside a guest
 # created from it: the golden image must export it at runtime.
 FSB_TEMPLATE_ENV = {"FSB_E2E_MARKER": "env-baked-ok"}
@@ -382,57 +390,254 @@ class TestFsbE2E:
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)
 
-    @pytest.mark.timeout(600)
-    async def test_02b_network_policy_rejects_port_scoped_rules(
+    @pytest.mark.timeout(1200)
+    async def test_02b_network_policy_port_scoped_contract(
         self, manager: SandboxManager, connection_config
     ) -> None:
-        """Fast-sandbox enforcement does not cover port-scoped rules yet, so
-        the server must fail closed with 400 on both the create-carried
-        policy and the PATCH route instead of silently installing rules the
-        fastlet nft path would ignore (a dropped deny rule fails open)."""
-        # Create-carried policy: a rule that pairs ports with an IP target is
-        # rejected the same as a port-only rule.
-        with pytest.raises(SandboxApiException) as create_exc:
-            await Sandbox.create_from_template(
-                FSB_TEMPLATE_ID,
-                timeout=timedelta(hours=1),
-                ready_timeout=COLD_READY_TIMEOUT,
-                connection_config=connection_config,
-                metadata={"origin": "fsb-port-scope-reject"},
-                network_policy=NetworkPolicy(
-                    defaultAction="deny",
-                    egress=[NetworkRule(action="allow", target="1.1.1.1", ports=[443])],
-                ),
-            )
-        assert create_exc.value.status_code == 400, (
-            "fsb create with a port-scoped rule must be rejected with 400"
-        )
+        """TCP scopes round-trip and merge by target and unordered ports."""
+        with pytest.raises(ValidationError, match="domain targets"):
+            NetworkRule(action="allow", target="echo.test", ports=[443])
 
-        # A policy-only sandbox so the PATCH rejection can be asserted
-        # against a live fsb sandbox; killed in the finally block.
+        target = "192.0.2.10"
+        ip_ports = NetworkRule(action="allow", target=target, ports=[18083, 18082])
+        port_only = NetworkRule(action="allow", ports=[8443, 443])
         sandbox = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=1),
             ready_timeout=COLD_READY_TIMEOUT,
             connection_config=connection_config,
-            metadata={"origin": "fsb-port-scope-reject"},
+            metadata={"origin": "fsb-port-scope-contract"},
             network_policy=NetworkPolicy(
-                defaultAction="deny",
-                egress=[NetworkRule(action="allow", target="example.com")],
+                defaultAction="deny", egress=[ip_ports, port_only]
             ),
         )
         try:
-            for rules in (
-                [NetworkRule(action="deny", ports=[25])],
-                [NetworkRule(action="allow", target="1.1.1.1", ports=[443])],
-            ):
-                with pytest.raises(SandboxApiException) as patch_exc:
-                    await sandbox.patch_egress_rules(rules)
-                assert patch_exc.value.status_code == 400, (
-                    "fsb PATCH with a port-scoped rule must be rejected with 400"
-                )
+
+            async def _expect_rules(expected: list[NetworkRule], stage: str) -> None:
+                def _signature(rule: NetworkRule):
+                    return (
+                        rule.target or "",
+                        tuple(sorted(rule.ports or [])),
+                        rule.action,
+                    )
+
+                async def _matches() -> bool:
+                    policy = await sandbox.get_egress_policy()
+                    # Compare lists, not sets/dicts: duplicate scopes must fail.
+                    return policy.default_action == "deny" and sorted(
+                        _signature(rule) for rule in policy.egress or []
+                    ) == sorted(_signature(rule) for rule in expected)
+
+                await _wait_until(_matches, timedelta(minutes=2), stage)
+
+            await _expect_rules([ip_ports, port_only], "create preserves TCP ports")
+
+            distinct_scopes = [
+                NetworkRule(action="allow", target=target, ports=[443]),
+                NetworkRule(action="allow", target=target),
+                NetworkRule(action="deny", ports=[25]),
+                NetworkRule(action="allow", target="192.0.2.11", ports=[18082]),
+            ]
+            await sandbox.patch_egress_rules(distinct_scopes)
+            await _expect_rules(
+                [ip_ports, port_only, *distinct_scopes],
+                "PATCH preserves different scopes on the same target",
+            )
+
+            ip_ports = NetworkRule(action="deny", target=target, ports=[18082, 18083])
+            port_only = NetworkRule(action="deny", ports=[443, 8443])
+            await sandbox.patch_egress_rules([ip_ports, port_only])
+            await _expect_rules(
+                [ip_ports, port_only, *distinct_scopes],
+                "PATCH replaces the same unordered port scopes",
+            )
+
+            await sandbox.delete_egress_rules([""])
+            ip_scopes = [rule for rule in distinct_scopes if rule.target]
+            await _expect_rules(
+                [ip_ports, *ip_scopes],
+                "DELETE empty target removes only port-only scopes",
+            )
+
+            await sandbox.delete_egress_rules([target])
+            await _expect_rules(
+                [rule for rule in ip_scopes if rule.target != target],
+                "DELETE IP removes all its scopes and preserves other IPs",
+            )
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)
+
+    @pytest.mark.skipif(
+        not FSB_EGRESS_TARGET_IP,
+        reason="OPENSANDBOX_TEST_FSB_EGRESS_TARGET_IP is not set (requires the "
+        "controlled MITM echo fixture; port-scope contract still runs)",
+    )
+    @pytest.mark.timeout(2700)
+    async def test_02c_network_policy_port_scoped_enforcement(
+        self, manager: SandboxManager, connection_config
+    ) -> None:
+        """Fresh TCP flows prove per-subject scopes and L3/L4 deny priority."""
+        address = ipaddress.ip_address(FSB_EGRESS_TARGET_IP)
+        assert address.version == 4, "the echo fixture must provide an IPv4 address"
+        target = str(address)
+        domain = FSB_EGRESS_TARGET_DOMAIN
+        assert domain, "the echo fixture TLS domain must not be empty"
+        main = await Sandbox.create_from_template(
+            FSB_TEMPLATE_ID,
+            timeout=timedelta(hours=1),
+            ready_timeout=COLD_READY_TIMEOUT,
+            connection_config=connection_config,
+            metadata={"origin": "fsb-port-scope-main"},
+            network_policy=NetworkPolicy(
+                defaultAction="deny",
+                egress=[NetworkRule(action="allow", target=target, ports=[18082])],
+            ),
+        )
+        control = None
+        try:
+            # Keep the second create inside try: its failure must clean up main.
+            control = await Sandbox.create_from_template(
+                FSB_TEMPLATE_ID,
+                timeout=timedelta(hours=1),
+                ready_timeout=COLD_READY_TIMEOUT,
+                connection_config=connection_config,
+                metadata={"origin": "fsb-port-scope-control"},
+                network_policy=NetworkPolicy(defaultAction="allow", egress=[]),
+            )
+
+            async def _reachable(sandbox: Sandbox, port: int) -> bool:
+                # Fresh curl processes avoid established-connection exemptions after policy updates.
+                args = ["curl", "-fsS", "-m", "8", "--noproxy", "*", "-o", "/dev/null"]
+                if port == 443:
+                    args += [
+                        "--cacert",
+                        "/etc/ssl/certs/ca-certificates.crt",
+                        "--resolve",
+                        f"{domain}:443:{target}",
+                        f"https://{domain}:443/echo",
+                    ]
+                else:
+                    args.append(f"http://{target}:{port}/echo")
+                result = await sandbox.commands.run(
+                    " ".join(shlex.quote(arg) for arg in args)
+                )
+                logger.debug("TCP probe %s:%s: %s", sandbox.id, port, result.error)
+                return result.error is None
+
+            async def _expect_traffic(
+                sandbox: Sandbox, expected: dict[int, bool], stage: str
+            ) -> None:
+                async def _matches() -> bool:
+                    for port, reachable in expected.items():
+                        if await _reachable(sandbox, port) != reachable:
+                            return False
+                    return True
+
+                await _wait_until(_matches, timedelta(minutes=2), stage)
+
+            all_allowed = {18082: True, 18083: True, 443: True}
+
+            async def _expect_isolated(expected: dict[int, bool], stage: str) -> None:
+                await _expect_traffic(main, expected, f"{stage}: main")
+                await _expect_traffic(
+                    control, all_allowed, f"{stage}: control unchanged"
+                )
+
+            # A healthy control distinguishes policy drops from fixture failures.
+            await _expect_traffic(control, all_allowed, "control fixture baseline")
+            await _expect_isolated(
+                {18082: True, 18083: False, 443: False}, "create IP+18082 allow"
+            )
+
+            await main.patch_egress_rules([NetworkRule(action="allow", ports=[18083])])
+            await _expect_isolated(
+                {18082: True, 18083: True, 443: False}, "PATCH port-only allow18083"
+            )
+
+            await main.patch_egress_rules([NetworkRule(action="deny", target=target)])
+            await _expect_isolated(
+                {18082: False, 18083: False}, "plain IP deny beats TCP allows"
+            )
+            await main.delete_egress_rules([target])
+            await main.patch_egress_rules(
+                [NetworkRule(action="allow", target=target, ports=[18082])]
+            )
+            await _expect_isolated(
+                {18082: True, 18083: True},
+                "restore IP+18082 and retain port-only allow",
+            )
+
+            tcp_denies = [NetworkRule(action="deny", ports=[18083])]
+            await main.patch_egress_rules(
+                [NetworkRule(action="deny", target=target, ports=[18082]), *tcp_denies]
+            )
+            await _expect_isolated(
+                {18082: False, 18083: False, 443: False}, "IP+ports and port-only denies"
+            )
+
+            # Test CIDR before a plain IP allow can mask a missing scoped rule.
+            cidr = f"{target}/32"
+            await main.patch_egress_rules(
+                [NetworkRule(action="allow", target=cidr, ports=[443])]
+            )
+            await _expect_isolated(
+                {18082: False, 18083: False, 443: True}, "CIDR+443 allows verified TLS"
+            )
+            tcp_denies.append(NetworkRule(action="deny", ports=[443]))
+            await main.patch_egress_rules([tcp_denies[-1]])
+            await _expect_isolated(
+                {18082: False, 18083: False, 443: False},
+                "deny443 uses original MITM port",
+            )
+
+            await main.patch_egress_rules([NetworkRule(action="allow", target=target)])
+            all_blocked = {18082: False, 18083: False, 443: False}
+            await _expect_isolated(all_blocked, "TCP denies still beat plain IP allow")
+
+            tcp_denies.append(NetworkRule(action="deny", ports=[18082]))
+            await main.patch_egress_rules(
+                [NetworkRule(action="allow", target=target, ports=[18082]), tcp_denies[-1]]
+            )
+            await _expect_isolated(all_blocked, "port-only denies beat all IP allows")
+
+            await main.pause()
+            await _wait_until(
+                lambda: _state_is(manager, main.id, "Paused"),
+                timedelta(minutes=4),
+                "port-scoped sandbox Paused",
+            )
+            main = await Sandbox.resume(
+                main.id,
+                connection_config=connection_config,
+                resume_timeout=WARM_READY_TIMEOUT,
+            )
+            policy = await main.get_egress_policy()
+            assert policy.default_action == "deny"
+            assert sorted(
+                (rule.target or "", tuple(sorted(rule.ports or [])), rule.action)
+                for rule in policy.egress or []
+            ) == sorted(
+                (rule.target or "", tuple(sorted(rule.ports or [])), rule.action)
+                for rule in [
+                    NetworkRule(action="allow", target=target, ports=[18082]),
+                    NetworkRule(action="allow", target=cidr, ports=[443]),
+                    NetworkRule(action="allow", target=target),
+                    *tcp_denies,
+                ]
+            ), "pause/resume must preserve all TCP scopes and actions"
+            await _expect_isolated(all_blocked, "resumed policy still enforced")
+
+            await main.delete_egress_rules([""])
+            await _expect_isolated(
+                all_allowed, "DELETE port-only denies opens all three ports"
+            )
+        finally:
+            # Even a failed control cleanup must not prevent main cleanup.
+            try:
+                if control is not None:
+                    await _kill_and_wait_gone(manager, control.id)
+            finally:
+                await _kill_and_wait_gone(manager, main.id)
 
     @pytest.mark.timeout(1200)
     async def test_03_pause_resume_state_fidelity(
@@ -451,17 +656,6 @@ class TestFsbE2E:
             metadata={"origin": "fast-sandbox-env-pause"},
         )
         try:
-            # Pause a RUNNING sandbox: on a warm pool the guest serves execd
-            # almost immediately, and a pause fired before the Sandbox CR
-            # settles loses its intent (the controller never sees it — the
-            # CI run on 2026-10-21 swallowed a pause fired ~500ms after
-            # create). Wait for Running first.
-            await _wait_until(
-                lambda: _state_is(manager, sandbox.id, "Running"),
-                timedelta(minutes=3),
-                "Running",
-            )
-
             # State markers written before the checkpoint.
             await sandbox.files.write_file("/tmp/fsb-state.txt", "pause-state-check")
             await sandbox.commands.run("echo ram-state-check > /dev/shm/fsb-mem.txt")

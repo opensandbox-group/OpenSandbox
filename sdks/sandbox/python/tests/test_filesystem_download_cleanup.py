@@ -24,7 +24,7 @@ import pytest
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import SandboxApiException
+from opensandbox.exceptions import SandboxApiException, SandboxConnectionException
 from opensandbox.models.sandboxes import SandboxEndpoint
 
 _AdapterFactory = Callable[
@@ -112,9 +112,9 @@ async def test_download_read_failure_releases_response(download_adapter: _Adapte
     try:
         chunks = await adapter.read_bytes_stream("/tmp/file", chunk_size=4)
         assert await anext(chunks) == b"abcd"
-        with pytest.raises(httpx.ReadError) as exc:
+        with pytest.raises(SandboxConnectionException) as exc:
             await anext(chunks)
-        assert exc.value is failure
+        assert exc.value.__cause__ is failure
         assert source.closed
         assert response.is_closed
     finally:

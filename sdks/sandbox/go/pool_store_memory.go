@@ -194,14 +194,16 @@ func (s *InMemoryPoolStateStore) PutIdle(_ context.Context, poolName string, san
 	return nil
 }
 
-// RemoveIdle removes a sandbox from the idle pool map. The queue is cleaned up
-// lazily during take operations. Idempotent.
+// RemoveIdle removes a sandbox from the idle pool and its FIFO queue. Idempotent.
 func (s *InMemoryPoolStateStore) RemoveIdle(_ context.Context, poolName string, sandboxID string) error {
 	ps := s.getOrCreatePool(poolName)
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	delete(ps.idleMap, sandboxID)
+	// Drop the old queue position before the same ID can be reinserted.
+	// Otherwise it would become live again at its previous position.
+	ps.rebuildQueue()
 	return nil
 }
 

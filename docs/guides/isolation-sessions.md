@@ -368,6 +368,8 @@ Reads and writes the session's **merged** mount view — the workspace overlays 
 
 Writes on a `ro` workspace fail; writes on `overlay` land in the upper dir and vanish on `DELETE`, and while the session runs they are not visible to `session.run` (see [Workspace Modes](#workspace-modes)); writes on a `readonly` bind fail.
 
+`files/upload` and `files/replace` stage their bytes in a private temp file next to the destination and rename it into place, so a write that fails partway — `ENOSPC`, an I/O error, execd being killed mid-copy — leaves the file it was replacing untouched. This requires write permission on the containing directory. When only the destination file is writable (for example a `0666` file in a `0555` directory), the write falls back to in-place truncation: it still succeeds, but a partial failure can truncate the old content. Because the rename installs a new inode, an existing hardlink to the old file keeps the old content, and a process that already holds the file open in an `rw` session keeps reading the bytes it opened. The replacement keeps the destination's mode, including setuid/setgid/sticky bits. Ownership is not preserved: every session view assigns the written file to the session's UID/GID, as the isolated write paths have always done, so a file owned by someone else before the write is reassigned. Extended attributes are also not preserved on the staged path: replacing a file drops POSIX ACLs, file capabilities such as `security.capability`, and other xattrs. The in-place fallback updates the existing inode and keeps them. A read-only destination is still rejected; a symlinked destination is written through to the file the namespace sees on a `binds` mount and in the strict profile's `/tmp`, while the workspace views reject a symlinked destination as they always have. The `.osb-staging-` name prefix is reserved: staging files are hidden from `files/search` and `directories/list`, and no file API accepts one as its path — read, stat, rename, or remove. Do not create user files with that prefix. A session that creates its own symlink pointing at a staging name can still read through it, which only exposes that session's own in-flight upload.
+
 ---
 
 ## Capabilities and Probing
@@ -437,6 +439,9 @@ Note: `/capabilities` reports `available: false` when the native workload gate c
 - **No hardware-level guarantee.** Namespaces + seccomp only; pair with a secure runtime for kernel-exploit defense.
 - **Linux only.** Non-Linux builds return `available: false`.
 - **Serialized runs per session** — create multiple sessions for parallelism.
+- **Runs read stdin from `/dev/null`**, foreground and background alike. Pass input through a file or a here-document.
+- **A run's code is read in full before it executes**, so the first output of a very large script waits until the whole script has been transferred.
+- **Runs share one shell.** A function or alias named `eval` is bypassed, but a run that redefines a builtin the session itself relies on, such as `command`, `echo`, or `trap`, changes how every later run in that session executes or reports its exit code. Create a new session to recover.
 - **Bind destinations must pre-exist** in the sandbox image.
 
 ---

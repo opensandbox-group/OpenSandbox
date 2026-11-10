@@ -136,7 +136,7 @@ def _is_valid_ip(host: str) -> bool:
 
 
 def _is_valid_ip_or_ip_port(address: str) -> bool:
-    match = _IPV4_WITH_PORT_RE.match(address)
+    match = _IPV4_WITH_PORT_RE.fullmatch(address)
     if not match:
         return False
     ip_str = match.group("ip")
@@ -166,11 +166,11 @@ def _is_valid_hostname(address: str) -> bool:
         if not (1 <= port <= 65535):
             return False
 
-    return bool(_HOSTNAME_RE.match(host))
+    return bool(_HOSTNAME_RE.fullmatch(host))
 
 
 def _is_wildcard_domain(host: str) -> bool:
-    return bool(_WILDCARD_DOMAIN_RE.match(host))
+    return bool(_WILDCARD_DOMAIN_RE.fullmatch(host))
 
 
 class RenewIntentRedisConfig(BaseModel):
@@ -702,6 +702,13 @@ class ServerConfig(BaseModel):
 
 
 class ProxyConfig(BaseModel):
+    """Server proxy settings.
+
+    DEPRECATED: the server-proxied data path is in maintenance mode and only
+    receives security fixes and bug fixes. Route data-plane traffic through the
+    ingress gateway instead.
+    """
+
     resolve_internal: bool = Field(
         default=True,
         description=(

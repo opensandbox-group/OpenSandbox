@@ -594,11 +594,9 @@ func (s *Sandbox) waitForRunning(ctx context.Context, timeout time.Duration) err
 		timeout = time.Duration(DefaultReadyTimeoutSeconds) * time.Second
 	}
 
-	waitCtx := ctx
-	cancel := func() {}
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		waitCtx, cancel = context.WithTimeout(ctx, timeout)
-	}
+	// Always enforce the running-state budget, including when the caller has
+	// a longer deadline. WithTimeout preserves an earlier parent deadline.
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
@@ -616,6 +614,11 @@ func (s *Sandbox) waitForRunning(ctx context.Context, timeout time.Duration) err
 
 		info, err := s.lifecycle.GetSandbox(waitCtx, s.id)
 		if err != nil {
+			if waitCtx.Err() != nil {
+				// Classify a deadline or cancellation during the request the
+				// same way as one observed between status polls.
+				continue
+			}
 			return fmt.Errorf("opensandbox: get sandbox status: %w", err)
 		}
 		if info.Status.State == StateRunning {

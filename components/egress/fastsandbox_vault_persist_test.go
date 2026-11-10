@@ -142,13 +142,14 @@ func (f *fakeVaultFile) Delete() (policy.FileMutationState, error) {
 // vaultPersistHarness wires a fast-sandbox test server to a fake-backed
 // vaultPersistence over a real (swept) temp directory.
 type vaultPersistHarness struct {
-	srv   *fastSandboxPolicyServer
-	reg   *subject.MemoryRegistry
-	nft   *fakeNft
-	vp    *vaultPersistence
-	dir   string
-	files map[string]*fakeVaultFile
-	mapMu sync.Mutex
+	srv        *fastSandboxPolicyServer
+	reg        *subject.MemoryRegistry
+	nft        *fakeNft
+	vp         *vaultPersistence
+	dir        string
+	files      map[string]*fakeVaultFile
+	mapMu      sync.Mutex
+	newFileErr error
 }
 
 func newVaultPersistHarness(t *testing.T) *vaultPersistHarness {
@@ -169,6 +170,11 @@ func newTestVaultPersistence(t *testing.T, h *vaultPersistHarness) *vaultPersist
 	vp, err := newVaultPersistence(h.dir)
 	require.NoError(t, err)
 	vp.newFile = func(path string) (vaultFileStore, error) {
+		if h.newFileErr != nil {
+			err := h.newFileErr
+			h.newFileErr = nil
+			return nil, err
+		}
 		h.mapMu.Lock()
 		defer h.mapMu.Unlock()
 		f, ok := h.files[path]

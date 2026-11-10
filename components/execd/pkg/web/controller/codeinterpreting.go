@@ -45,7 +45,7 @@ type CodeInterpretingController struct {
 }
 
 type codeExecutionRunner interface {
-	CreateContext(req *runtime.CreateContextRequest) (string, error)
+	CreateContext(ctx context.Context, req *runtime.CreateContextRequest) (string, error)
 	Execute(request *runtime.ExecuteCodeRequest) error
 	GetContext(session string) (runtime.CodeContext, error)
 	GetCommandStatus(session string) (*runtime.CommandStatus, error)
@@ -81,7 +81,7 @@ func (c *CodeInterpretingController) CreateContext() {
 		return
 	}
 
-	session, err := codeRunner.CreateContext(&runtime.CreateContextRequest{
+	session, err := codeRunner.CreateContext(c.ctx.Request.Context(), &runtime.CreateContextRequest{
 		Language: runtime.Language(request.Language),
 		Cwd:      request.Cwd,
 	})

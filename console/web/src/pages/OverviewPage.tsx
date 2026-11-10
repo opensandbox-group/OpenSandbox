@@ -49,14 +49,14 @@ export function OverviewPage() {
           setStats(null);
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : '加载概览失败');
+        setError(e instanceof Error ? e.message : 'Failed to load overview');
       }
     })();
   }, [user?.role]);
 
   return (
     <div>
-      <Typography.Title level={4}>概览</Typography.Title>
+      <Typography.Title level={4}>Overview</Typography.Title>
       {error && <Alert type="error" message={error} style={{ marginBottom: 16 }} />}
 
       {user?.role === 'admin' && stats && (
@@ -69,7 +69,7 @@ export function OverviewPage() {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="平均运行时长"
+                title="Average Uptime"
                 value={formatDuration(stats.avgWallClockSeconds)}
               />
             </Card>
@@ -77,7 +77,7 @@ export function OverviewPage() {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="30 分钟内到期"
+                title="Expires in 30 Minutes"
                 value={stats.expiringWithin30mCount}
               />
             </Card>
@@ -85,7 +85,7 @@ export function OverviewPage() {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="最大运行时长"
+                title="Maximum Uptime"
                 value={formatDuration(stats.maxWallClockSeconds)}
               />
             </Card>
@@ -93,14 +93,14 @@ export function OverviewPage() {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="累计 wall-clock"
+                title="Total Wall-Clock Time"
                 value={formatDuration(stats.totalWallClockSeconds)}
               />
             </Card>
           </Col>
           <Col xs={24} sm={12} md={8}>
             <Card>
-              <Statistic title="统计时间" value={formatDateTime(stats.asOf)} />
+              <Statistic title="Stats Updated At" value={formatDateTime(stats.asOf)} />
             </Card>
           </Col>
         </Row>
@@ -110,7 +110,7 @@ export function OverviewPage() {
         <Row gutter={[16, 16]}>
           <Col xs={24} sm={8}>
             <Card>
-              <Statistic title="沙箱总数" value={tenantSummary.total} />
+              <Statistic title="Total Sandboxes" value={tenantSummary.total} />
             </Card>
           </Col>
           <Col xs={24} sm={8}>

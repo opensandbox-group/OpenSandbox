@@ -1,19 +1,18 @@
 ---
 title: Renew-on-Access
-description: Keep busy sandboxes alive by extending their expiration automatically on observed access — opt-in via lifecycle.renewalPolicy, driven by server-proxy hits or ingress gateway renew-intents.
+description: Keep busy sandboxes alive by extending their expiration automatically on observed access — opt-in via lifecycle.renewalPolicy, driven by ingress gateway renew-intents.
 ---
 
 # Renew-on-Access Guide
 
-This guide shows how to opt sandboxes into **renew-on-access** (OSEP-0009): when the server proxy or the ingress gateway observes traffic for a sandbox, the lifecycle server silently moves the sandbox's expiration forward — a busy sandbox stays alive, an idle one still expires on schedule, and clients never call the renew API themselves.
+This guide shows how to opt sandboxes into **renew-on-access** (OSEP-0009): when the ingress gateway observes traffic for a sandbox, the lifecycle server silently moves the sandbox's expiration forward — a busy sandbox stays alive, an idle one still expires on schedule, and clients never call the renew API themselves.
 
 For the design rationale, see [OSEP-0009](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0009-auto-renew-sandbox-on-ingress-access.md). For expiring *idle* fast sandboxes instead of busy ones, see [Auto-Pause & Wake-on-Access](/guides/auto-pause-wake).
 
 ## How it works in one minute
 
 ```text
-access    a request hits /sandboxes/{id}/proxy/{port} (server proxy mode)
-          and/or is proxied by the ingress gateway (Redis queue mode)
+access    a request is proxied by the ingress gateway (Redis queue mode)
 intent    the hit becomes a renew intent, throttled per sandbox
 renew     the server checks the gates and moves the expiration to
           max(now + extendSeconds, current expiresAt)
@@ -22,7 +21,7 @@ renew     the server checks the gates and moves the expiration to
 Nothing happens unless all three layers agree:
 
 1. **The server operator** enables the renew-intent integration (`[renew_intent]`).
-2. **The trigger path** exists: server-proxy hits (built into the server) and/or the ingress gateway publishing intents to Redis.
+2. **The trigger path** exists: the ingress gateway publishing intents to Redis.
 3. **The sandbox opts in** at creation with `lifecycle.renewalPolicy`.
 
 A sandbox that never declares a `renewalPolicy` is never auto-renewed — omission is exactly today's behavior.
@@ -43,7 +42,7 @@ dsn = "redis://127.0.0.1:6379/0"
 # consumer_concurrency = 8
 ```
 
-`[renew_intent] redis` is only needed for ingress-gateway mode. Server-proxy mode (SDK `useServerProxy`) works with `enabled = true` alone. See [`[renew_intent]` in the server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) for all keys.
+`[renew_intent] redis` enables the ingress-gateway queue mode. See [`[renew_intent]` in the server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) for all keys.
 
 ## Step 2 — Enable the ingress gateway (queue mode)
 

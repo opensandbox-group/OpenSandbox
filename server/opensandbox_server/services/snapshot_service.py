@@ -250,6 +250,8 @@ class PersistedSnapshotService(SnapshotService):
             )
 
         try:
+            if runtime_status.resource_limits:
+                record.restore_config.limits = dict(runtime_status.resource_limits)
             self._snapshot_repository.create(record)
         except Exception as exc:
             logger.warning(
@@ -743,7 +745,10 @@ class PersistedSnapshotService(SnapshotService):
                 description=record.description,
                 restore_config=SnapshotRestoreConfig(
                     image=runtime_status.image,
-                    backend=runtime_status.backend,
+                    backend=runtime_status.backend or record.restore_config.backend,
+                    # Fill-if-missing: a transient source read at creation may
+                    # have dropped the limits; terminal transition retries.
+                    limits=record.restore_config.limits or runtime_status.resource_limits,
                 ),
                 status=SnapshotStatusRecord(
                     state=SnapshotState.READY,

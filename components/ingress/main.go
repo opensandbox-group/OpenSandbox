@@ -25,6 +25,7 @@ import (
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/internal/version"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 
@@ -80,6 +81,12 @@ func main() {
 		log.Panic("FastPath routing requires --secure-access-keys for authenticated route scopes")
 	}
 
+	// Parsing Kubernetes config registers global flags and must only happen once.
+	var kubeConfig *rest.Config
+	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled {
+		kubeConfig = injection.ParseAndGetRESTConfigOrDie()
+	}
+
 	var sandboxProvider sandbox.Provider
 	var fsbProvider *sandbox.FastSandboxProvider
 	if providerType == sandbox.ProviderTypeFastSandbox {
@@ -90,7 +97,7 @@ func main() {
 		)
 		sandboxProvider = fsbProvider
 	} else {
-		cfg := injection.ParseAndGetRESTConfigOrDie()
+		cfg := rest.CopyConfig(kubeConfig)
 		cfg.ContentType = runtime.ContentTypeProtobuf
 		cfg.UserAgent = "opensandbox-ingress/" + version.GitCommit
 		providerFactory := sandbox.NewProviderFactory(cfg, time.Second*30)
@@ -145,7 +152,7 @@ func main() {
 	}
 	activityRecorder, activityOptions := newActivityRecorder(ctx)
 	proxyOptions = append(proxyOptions, activityOptions...)
-	proxyOptions = append(proxyOptions, newWakeOption(ctx, fsbProvider, activityRecorder)...)
+	proxyOptions = append(proxyOptions, newWakeOption(ctx, fsbProvider, activityRecorder, kubeConfig)...)
 	if flag.WakeEnabled && !flag.ActivityEnabled {
 		log.Printf("--wake-enabled without --activity-enabled: completed resumes are not recorded as activity, " +
 			"so the server-side idle sweeper will re-pause freshly resumed sandboxes after the idle threshold; " +
@@ -193,14 +200,14 @@ func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option
 
 // newWakeOption wires the OSEP-0024 wake-on-access orchestrator; every
 // flight is gated on the per-sandbox idle policy read from the Sandbox CR.
-func newWakeOption(ctx context.Context, fsbProvider *sandbox.FastSandboxProvider, activityWriter wake.ActivityWriter) []proxy.Option {
+func newWakeOption(ctx context.Context, fsbProvider *sandbox.FastSandboxProvider, activityWriter wake.ActivityWriter, kubeConfig *rest.Config) []proxy.Option {
 	if !flag.WakeEnabled {
 		return nil
 	}
 	if fsbProvider == nil {
 		log.Panic("Wake-on-access requires a Fast Sandbox provider (set --provider-type=fast-sandbox or --fastpath-endpoint)")
 	}
-	policySource, err := idlepolicy.NewInClusterCRPolicySource(ctx)
+	policySource, err := idlepolicy.NewCRPolicySourceForConfig(ctx, kubeConfig)
 	if err != nil {
 		log.Panicf("Wake-on-access requires Kubernetes API access to read sandbox idle policies: %v", err)
 	}

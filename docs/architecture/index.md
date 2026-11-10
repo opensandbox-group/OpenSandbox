@@ -16,7 +16,7 @@ This document describes the current repository architecture and the main boundar
 The architecture distinguishes three primary interaction paths:
 
 - **Lifecycle management** (orange arrows): Applications, agents, and operators send lifecycle requests (creating, listing, renewing, pausing, resuming, or deleting sandboxes, as well as managing snapshots and templates) to the FastAPI lifecycle server. The server persists metadata and delegates provisioning and orchestration to the configured runtime backend.
-- **Execution and service access** (blue arrows): For command, file, PTY, and Jupyter code execution, or reaching user workload services, clients bypass lifecycle orchestration and connect directly to resolved endpoints—via direct host/pod addresses, the lifecycle server proxy, or an optional Kubernetes ingress gateway.
+- **Execution and service access** (blue arrows): For command, file, PTY, and Jupyter code execution, or reaching user workload services, clients bypass lifecycle orchestration and connect directly to resolved endpoints—via direct host/pod addresses or an optional Kubernetes ingress gateway.
 - **Outbound controls** (green arrows): Outbound requests from the sandbox to external APIs, model providers, or web services can be filtered and secured through egress controls (a per-sandbox sidecar for container workloads or a shared egress process per Fastlet pod for FastSandbox), with support for DNS/nftables policies and optional Credential Vault secret injection.
 
 Runtime and networking capabilities depend on the selected backend; the diagram shows the shared architecture, not a requirement to deploy every component.
@@ -28,7 +28,7 @@ OpenSandbox is organized around six practical surfaces:
 3. **Lifecycle control plane** - the FastAPI server under `server/` that authenticates requests, validates config, persists server-managed records, and delegates lifecycle work to a configured runtime service.
 4. **Runtime backends** - Docker for local and single-host deployments, and Kubernetes with container workload providers (BatchSandbox or `kubernetes-sigs/agent-sandbox`) alongside an optional FastSandbox integration for template-backed microVMs.
 5. **Sandbox data plane** - the user workload and `execd` daemon inside a container or microVM, with optional Jupyter/code-interpreter support. Volume and egress integration depend on the runtime.
-6. **Network and security plane** - endpoint resolution, server proxying, Kubernetes ingress gateway routing, secure endpoint access, egress policy enforcement, credential vault, resource limits, and secure container runtimes.
+6. **Network and security plane** - endpoint resolution, Kubernetes ingress gateway routing, secure endpoint access, egress policy enforcement, credential vault, resource limits, and secure container runtimes.
 
 The split is intentional: SDKs and tools should depend on the public contracts, the server should own lifecycle orchestration, runtime providers should own platform-specific resource creation, and `execd`/egress should own operations that happen from inside the sandbox network and filesystem namespace.
 
@@ -166,19 +166,14 @@ The top-level `runtime.type` configuration option remains strictly `docker` or `
 
 The `[store]` configuration selects SQLite (the default, at `~/.opensandbox/opensandbox.db`) or PostgreSQL. The server persists snapshot metadata and the FastSandbox template catalog through separate repository adapters (`repositories/snapshots/` and `repositories/templates/`). The template catalog stored in the database is the public source of truth; Kubernetes `SandboxTemplate` resources drive golden-image builds and provide asynchronous status updates.
 
-### 3.4 Server Proxy and Endpoint Resolution
+### 3.4 Endpoint Resolution
 
 The lifecycle endpoint API returns the reachable address for a service port inside a sandbox. Depending on runtime and configuration, the endpoint may be:
 
 - A Docker host/bridge mapped endpoint.
 - A Kubernetes ingress gateway endpoint.
-- A server-proxied URL under `/sandboxes/{sandboxId}/proxy/{port}` when `use_server_proxy=true`.
 
-Header-routed ingress endpoints include `OpenSandbox-Ingress-To` in their endpoint metadata. When the endpoint is rewritten to a server-proxied URL, the server removes only this ingress routing header and preserves other required endpoint headers.
-
-The server proxy supports HTTP and WebSocket traffic and is also integrated with optional renew-on-access behavior. For HTTP responses, it strips hop-by-hop headers and the backend `Server` header while preserving an origin `Date`; the server adds a current `Date` only when the response does not already contain one. A root-relative `Location` value that starts with a single `/` is rebased under the same sandbox proxy route, while absolute URLs, network-path references (`//host/path`), and ordinary path-relative values are forwarded unchanged.
-
-HTTP proxy responses preserve the sandbox service's status code, body, and `Content-Type`, including redirects and backend errors. The generated Server OpenAPI describes `200` and `default` responses with `*/*` and no fixed payload schema because the sandbox service controls the payload. Server-side validation and authentication still apply before forwarding; the explicit `422` validation response remains documented. These response declarations cover both root and `/v1` aliases, with and without a backend path, for every supported HTTP method.
+Header-routed ingress endpoints include `OpenSandbox-Ingress-To` in their endpoint metadata.
 
 ## 4. Runtime Backends
 
@@ -193,7 +188,7 @@ Core responsibilities:
 - Stage the `execd` binary from `[runtime].execd_image` into the sandbox and install a bootstrap launcher before starting the user entrypoint.
 - Support network modes `host`, `bridge`, `none`, `pasta`, `slirp4netns`, and custom user-defined networks. The user-mode modes (`pasta`, `slirp4netns`) expose no host-routable container IP and are reached through the published host ports.
 - Allocate host ports for `execd` and user service endpoints in non-host network modes.
-- Restore expiration timers for existing managed containers after server restart.
+- Restore expiration timers for existing managed containers after server restart. Restore runs once, during server startup. Containers removed while the restore is listing are skipped. Any other Docker error during that listing makes server startup fail instead of leaving existing sandboxes without expiration timers. Run the server under a supervisor that restarts it (for example systemd `Restart=on-failure`, or a container restart policy); restore runs again on the next successful start. If the Docker error persists, the server keeps failing to start until the daemon is healthy again.
 - Support host bind mounts, Docker named volumes via the `pvc` volume model, and OSSFS-backed mounts.
 - Attach an egress sidecar when `networkPolicy` is requested and Docker networking is compatible.
 - Create Docker-backed persistent snapshots as local images and restore sandboxes from those snapshot images.
@@ -326,7 +321,7 @@ For FastSandbox routes, ingress asks FastPath to resolve the endpoint and forwar
 
 ### 6.3 Auto-Renew on Access
 
-The optional renew-intent integration extends sandbox TTL when access is observed. It can be triggered by server proxy requests or by ingress gateway events delivered through Redis. Per-sandbox opt-in is controlled by the `lifecycle.renewalPolicy` create field (OSEP-0009); the deprecated `extensions["access.renew.extend.seconds"]` key remains supported throughout 1.x.
+The optional renew-intent integration extends sandbox TTL when access is observed. It is triggered by ingress gateway events delivered through Redis. Per-sandbox opt-in is controlled by the `lifecycle.renewalPolicy` create field (OSEP-0009); the deprecated `extensions["access.renew.extend.seconds"]` key remains supported throughout 1.x.
 
 ## 7. Core Flows
 
@@ -347,7 +342,7 @@ Creation is asynchronous from the API perspective. Clients should poll `GET /v1/
 
 ```text
 Client
-  -> resolve execd endpoint from sandbox metadata or server proxy
+  -> resolve execd endpoint from sandbox metadata
   -> call execd API with X-EXECD-ACCESS-TOKEN when required
   -> execd runs command, file operation, session, PTY, or Jupyter code execution
   -> execd streams SSE/WebSocket output or returns structured responses
@@ -358,7 +353,7 @@ Client
 ```text
 Client
   -> GET /v1/sandboxes/{sandboxId}/endpoints/{port}
-  -> server returns Docker-mapped, ingress-gateway, or server-proxy endpoint
+  -> server returns Docker-mapped or ingress-gateway endpoint
   -> client includes returned headers when secure access or sidecar auth requires them
   -> HTTP/WebSocket traffic reaches the target sandbox port
 ```

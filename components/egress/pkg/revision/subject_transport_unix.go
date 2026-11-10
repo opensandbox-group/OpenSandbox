@@ -110,7 +110,7 @@ func (c *subjectIPCClient) post(ctx context.Context, path string, body []byte) (
 
 // SubjectUnixTransport binds a Transport to one session and exact subject. It
 // does not register the target and cannot be retargeted after construction.
-// This v2 adapter is installation-only; no production launch uses it.
+// This v2 adapter is installation-only; it never enables admission.
 type SubjectUnixTransport struct {
 	ipc       *subjectIPCClient
 	control   string
@@ -123,6 +123,17 @@ var _ Transport = (*SubjectUnixTransport)(nil)
 
 func (*SubjectUnixTransport) String() string   { return "revision.SubjectUnixTransport" }
 func (*SubjectUnixTransport) GoString() string { return "revision.SubjectUnixTransport{}" }
+
+// SubjectTransportRejection carries a confirmed v2 error outcome. Error text
+// remains bounded and credential-free; callers must classify Outcome against a
+// closed vocabulary before logging it. Existing errors.Is checks are unchanged.
+type SubjectTransportRejection struct {
+	Outcome string
+}
+
+func (*SubjectTransportRejection) Error() string    { return ErrTransportRejected.Error() }
+func (*SubjectTransportRejection) GoString() string { return "revision.SubjectTransportRejection{}" }
+func (*SubjectTransportRejection) Unwrap() error    { return ErrTransportRejected }
 
 // NewSubjectUnixTransport constructs a transport without dialing. The server
 // must have the same control generation, token, and snapshot limit.
@@ -211,6 +222,12 @@ func (t *SubjectUnixTransport) do(ctx context.Context, path string, value any) (
 		return nil, err
 	}
 	if status != http.StatusOK {
+		var outcome string
+		if validSubjectJSON(data) && decodeStrictObject(data, map[string]func(*json.Decoder) error{
+			"error": subjectField(&outcome),
+		}) == nil && confirmedSubjectRejection(outcome) {
+			return nil, &SubjectTransportRejection{Outcome: outcome}
+		}
 		return nil, ErrTransportRejected
 	}
 	response, err := decodeSubjectRevisionResponse(data)
@@ -221,6 +238,19 @@ func (t *SubjectUnixTransport) do(ctx context.Context, path string, value any) (
 		return nil, ErrInvalidTransportResponse
 	}
 	return response, nil
+}
+
+// Only outcomes raised before dispatch/state change, or an explicitly fenced
+// receiver failure, confirm rejection. internal_error can follow publication;
+// unknown outcomes retain the generic error so callers reconcile conservatively.
+func confirmedSubjectRejection(outcome string) bool {
+	switch outcome {
+	case "unauthorized", "malformed_request", "request_too_large", "not_found", "method_not_allowed",
+		"control_generation_mismatch", "subject_unknown", "subject_generation_mismatch", "subject_failed", "revision_rejected":
+		return true
+	default:
+		return false
+	}
 }
 
 // encoding/json replaces malformed UTF-8 and unpaired UTF-16 escapes. V2 must

@@ -19,6 +19,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestResourceVersionExpectation(t *testing.T) {
@@ -62,5 +63,36 @@ func TestResourceVersionExpectation(t *testing.T) {
 		if got != testCase.result {
 			t.Fatalf("#%d expected %v, got %v", i, testCase.result, got)
 		}
+	}
+}
+
+func TestResourceVersionExpectationDeleteOthers(t *testing.T) {
+	object := func(name string, uid types.UID) *metav1.ObjectMeta {
+		return &metav1.ObjectMeta{Namespace: "default", Name: name, UID: uid, ResourceVersion: "5"}
+	}
+	kept := func(c ResourceVersionExpectation, obj *metav1.ObjectMeta) bool {
+		stale := obj.DeepCopy()
+		stale.ResourceVersion = "1"
+		satisfied, _ := c.IsSatisfied(stale)
+		return !satisfied
+	}
+	key := types.NamespacedName{Namespace: "default", Name: "a"}
+	old, current, other := object("a", "uid-old"), object("a", "uid-current"), object("b", "uid-other")
+
+	c := NewResourceVersionExpectation()
+	for _, obj := range []*metav1.ObjectMeta{old, current, other} {
+		c.Expect(obj)
+	}
+	c.DeleteOthers(key, current.UID)
+	if kept(c, old) || !kept(c, current) || !kept(c, other) {
+		t.Fatalf("DeleteOthers(keep current) kept old=%v current=%v other=%v", kept(c, old), kept(c, current), kept(c, other))
+	}
+
+	c.DeleteOthers(key, "")
+	if kept(c, current) || !kept(c, other) {
+		t.Fatalf("DeleteOthers(keep none) kept current=%v other=%v", kept(c, current), kept(c, other))
+	}
+	if index := c.(*realResourceVersionExpectation).uidsByName; len(index) != 1 {
+		t.Fatalf("name index not cleaned up: %v", index)
 	}
 }

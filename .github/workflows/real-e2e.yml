@@ -94,6 +94,7 @@ jobs:
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
+          execd_run_as_init = true
           [egress]
           image = "opensandbox/egress:local"
           mode = "dns+nft"
@@ -343,6 +344,7 @@ jobs:
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
+          execd_run_as_init = true
           [egress]
           image = "opensandbox/egress:local"
           mode = "dns+nft"
@@ -452,6 +454,7 @@ jobs:
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
+          execd_run_as_init = true
           [egress]
           image = "opensandbox/egress:local"
           mode = "dns+nft"
@@ -547,6 +550,7 @@ jobs:
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
+          execd_run_as_init = true
           [egress]
           image = "opensandbox/egress:local"
           mode = "dns+nft"
@@ -644,6 +648,7 @@ jobs:
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
+          execd_run_as_init = true
           [egress]
           image = "opensandbox/egress:local"
           mode = "dns+nft"

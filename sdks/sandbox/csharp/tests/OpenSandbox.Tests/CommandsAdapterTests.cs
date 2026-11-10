@@ -218,8 +218,6 @@ public class CommandsAdapterTests
         }
     }
 
-    private static string QuoteForSh(string s) => "'" + s.Replace("'", "'\\''") + "'";
-
     [Theory]
     [InlineData("")]
     [InlineData("1ABC")]

@@ -198,6 +198,10 @@ func (c *FilesystemController) RemoveDirs() {
 			)
 			return
 		}
+		if err := rejectStagingPath(resolvedDir); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := os.RemoveAll(resolvedDir); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
@@ -304,6 +308,9 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 		}
 
 		for _, entry := range dirEntries {
+			if isAnyStagingName(entry.Name()) {
+				continue
+			}
 			entryPath := filepath.Join(dir, entry.Name())
 			info, err := entry.Info()
 			if err != nil {
@@ -374,6 +381,9 @@ func (c *FilesystemController) SearchFiles() {
 		if info.IsDir() {
 			return nil
 		}
+		if isAnyStagingName(info.Name()) {
+			return nil
+		}
 
 		match, err := glob.PathMatch(pattern, info.Name())
 		if err != nil {
@@ -429,6 +439,10 @@ func (c *FilesystemController) ReplaceContent() {
 		origPath := file
 		file, err := pathutil.ExpandAbsPath(file)
 		if err != nil {
+			c.handleFileError(err)
+			return
+		}
+		if err := rejectStagingPath(file); err != nil {
 			c.handleFileError(err)
 			return
 		}

@@ -97,6 +97,8 @@ jobs:
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback \
             TestNftEstablishedDropKernelRuleOrder
+          bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
+            TestResolvedIPRenewalExtendsKernelExpiry
           bash scripts/ci-nft-go-test.sh ./pkg/iptables \
             TestGatewayDNSRedirectKernelPrivateNS
           bash scripts/ci-nft-go-test.sh . \
@@ -139,6 +141,22 @@ jobs:
         with:
           name: live-vault-image-evidence
           path: /tmp/live-vault-image-evidence
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Run exchange sidecar resolver image regression
+        run: |
+          docker build -f components/egress/Dockerfile \
+            -t opensandbox-egress:exchange-sidecar-ci .
+          python components/egress/scripts/test_exchange_sidecar_image.py \
+            --image opensandbox-egress:exchange-sidecar-ci --artifacts /tmp/exchange-sidecar-image-evidence
+
+      - name: Upload exchange sidecar image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exchange-sidecar-image-evidence
+          path: /tmp/exchange-sidecar-image-evidence
           if-no-files-found: ignore
           retention-days: 5
 
@@ -348,6 +366,9 @@ jobs:
 
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: Record nft version
+        run: nft --version
 
       - name: Install mitmproxy (MITM smoke phase, mirrors the egress image)
         run: |

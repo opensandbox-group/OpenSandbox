@@ -66,14 +66,21 @@ func TestFilesWithIdentityPreservesTransportAndDefaultClient(t *testing.T) {
 			t.Errorf("missing request for %s", path)
 		}
 	}
-	body, err := a.DownloadFile(context.Background(), "/file", "")
+	downloads, ok := a.(DownloadFilesystem)
+	if !ok {
+		t.Fatal("identity filesystem does not expose download metadata")
+	}
+	download, err := downloads.DownloadFileResponse(context.Background(), "/file", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = io.ReadAll(body)
-	_ = body.Close()
+	_, err = io.ReadAll(download.Body)
+	_ = download.Body.Close()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if download.StatusCode != http.StatusOK || download.ContentLength != 2 || download.TotalSize != 2 {
+		t.Fatalf("unexpected download metadata: %+v", download)
 	}
 	if path := <-paths; path != prefix+"/v1/filesystem/1001/2000/files/download" {
 		t.Errorf("download path = %s", path)

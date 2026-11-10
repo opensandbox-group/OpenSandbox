@@ -217,3 +217,76 @@ func TestSubjectTransportUnicodeAndMetadataLimits(t *testing.T) {
 	_, err := subjectBodyLimit(math.MaxInt)
 	require.ErrorIs(t, err, ErrInvalidTransport)
 }
+
+func TestSubjectTransportConfirmedRejectionsAndSidecarCompatibility(t *testing.T) {
+	for _, outcome := range []string{"subject_unknown", "subject_generation_mismatch", "subject_failed", "control_generation_mismatch", "revision_rejected"} {
+		t.Run(outcome, func(t *testing.T) {
+			responder := subjectRoundTrip(func(*http.Request) (*http.Response, error) {
+				return subjectHTTPResponse(409, `{"error":"`+outcome+`"}`), nil
+			})
+			subject := subjectTestTransport(t, responder)
+			_, err := subject.Readback(context.Background())
+			require.ErrorIs(t, err, ErrTransportRejected)
+			var rejected *SubjectTransportRejection
+			require.ErrorAs(t, err, &rejected)
+			require.Equal(t, outcome, rejected.Outcome)
+			for _, format := range []string{"%v", "%+v", "%#v"} {
+				require.NotContains(t, fmt.Sprintf(format, err), outcome)
+			}
+			// The sidecar v1 transport still returns the original sentinel and
+			// its Coordinator still aborts a rejected Prepare, without adopting
+			// the Fast Sandbox worker's terminal-outcome policy.
+			sidecar, makeErr := NewUnixTransport("/tmp/not-dialed.sock", testSessionToken, 1024)
+			require.NoError(t, makeErr)
+			var paths []string
+			sidecar.client.Transport = subjectRoundTrip(func(r *http.Request) (*http.Response, error) {
+				paths = append(paths, r.URL.Path)
+				if strings.HasSuffix(r.URL.Path, "/abort") {
+					var command ipcCommand
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&command))
+					raw, marshalErr := json.Marshal(ipcResponse{Revision: &command.Revision})
+					require.NoError(t, marshalErr)
+					return subjectHTTPResponse(200, string(raw)), nil
+				}
+				return responder(r)
+			})
+			_, err = sidecar.Readback(context.Background())
+			require.Same(t, ErrTransportRejected, err)
+			coordinator, makeErr := New("control-a", "subject-a", sidecar, 1024)
+			require.NoError(t, makeErr)
+			_, err = coordinator.Apply(context.Background(), 0, 0, []byte("snapshot"))
+			require.ErrorIs(t, err, ErrPrepareRejected)
+			require.Equal(t, []string{"/v1/revisions/active", "/v1/revisions/prepare", "/v1/revisions/abort"}, paths)
+		})
+	}
+	for _, body := range []string{`{"error":null}`, `{"error":1}`, `{"error":"a","error":"b"}`, `{"error":"a","extra":1}`, `{"error":""}`, `not json`} {
+		transport := subjectTestTransport(t, func(*http.Request) (*http.Response, error) { return subjectHTTPResponse(409, body), nil })
+		_, err := transport.Readback(context.Background())
+		require.Same(t, ErrTransportRejected, err, "malformed outcomes retain the conservative legacy error")
+	}
+}
+
+func TestSubjectTransportConfirmedRejectionVocabulary(t *testing.T) {
+	for _, outcome := range []string{"unauthorized", "malformed_request", "request_too_large", "not_found", "method_not_allowed", "control_generation_mismatch", "subject_unknown", "subject_generation_mismatch", "subject_failed", "revision_rejected"} {
+		t.Run(outcome, func(t *testing.T) {
+			transport := subjectTestTransport(t, func(*http.Request) (*http.Response, error) {
+				return subjectHTTPResponse(409, `{"error":"`+outcome+`"}`), nil
+			})
+			_, err := transport.Readback(context.Background())
+			var rejection *SubjectTransportRejection
+			require.ErrorAs(t, err, &rejection)
+			require.Equal(t, outcome, rejection.Outcome)
+		})
+	}
+	for _, outcome := range []string{"internal_error", "unknown_outcome", "registered", "subject_capacity_exhausted"} {
+		t.Run(outcome, func(t *testing.T) {
+			transport := subjectTestTransport(t, func(*http.Request) (*http.Response, error) {
+				return subjectHTTPResponse(500, `{"error":"`+outcome+`"}`), nil
+			})
+			_, err := transport.Commit(context.Background(), testIdentity())
+			require.Error(t, err)
+			var rejection *SubjectTransportRejection
+			require.False(t, errors.As(err, &rejection), "an ambiguous error must not retire the installer")
+		})
+	}
+}

@@ -162,6 +162,51 @@ func TestNewCgroupBackendV1(t *testing.T) {
 	}
 }
 
+func TestNewCgroupBackendV1MountRootedAtContainerCgroup(t *testing.T) {
+	// Docker on cgroup v1 without a cgroup namespace: /proc/self/cgroup
+	// reports /docker/<id>, but each controller mount is already rooted at
+	// that subtree, so the interface files sit directly under the mount.
+	root := t.TempDir()
+	memDir := filepath.Join(root, "memory")
+	cpuDir := filepath.Join(root, "cpu,cpuacct")
+	writeFile(t, filepath.Join(memDir, "memory.usage_in_bytes"), "104857600\n")
+	writeFile(t, filepath.Join(memDir, "memory.limit_in_bytes"), "1073741824\n")
+	writeFile(t, filepath.Join(cpuDir, "cpuacct.usage"), "50000000\n")
+	writeFile(t, filepath.Join(cpuDir, "cpu.cfs_quota_us"), "100000\n")
+	writeFile(t, filepath.Join(cpuDir, "cpu.cfs_period_us"), "100000\n")
+	overridePaths(t, "11:memory:/docker/abc\n4:cpu,cpuacct:/docker/abc\n",
+		"", memDir, []string{cpuDir}, []string{cpuDir})
+	mountinfo := filepath.Join(t.TempDir(), "mountinfo")
+	writeFile(t, mountinfo,
+		"687 683 0:33 /docker/abc "+cpuDir+" ro,nosuid,nodev,noexec,relatime master:8 - cgroup cgroup rw,cpu,cpuacct\n"+
+			"694 683 0:32 /docker/abc "+memDir+" ro,nosuid,nodev,noexec,relatime master:15 - cgroup cgroup rw,memory\n")
+	origMountinfo := procSelfMountinfo
+	procSelfMountinfo = mountinfo
+	t.Cleanup(func() { procSelfMountinfo = origMountinfo })
+
+	backend, err := newCgroupBackend()
+	if err != nil {
+		t.Fatalf("newCgroupBackend: %v", err)
+	}
+	if got := backend.cpuCount(); got != 1 {
+		t.Fatalf("cpuCount = %v, want 1 (quota 100000/100000)", got)
+	}
+	stats, err := backend.memoryStats()
+	if err != nil {
+		t.Fatalf("memoryStats: %v", err)
+	}
+	if stats.UsedBytes != 104857600 || stats.TotalBytes != 1073741824 {
+		t.Fatalf("memoryStats = %+v, want used=104857600 total=1073741824", stats)
+	}
+	cg, ok := backend.(*cgroupBackend)
+	if !ok {
+		t.Fatalf("backend = %T, want *cgroupBackend", backend)
+	}
+	if want := filepath.Join(cpuDir, "cpuacct.usage"); cg.usagePath != want {
+		t.Fatalf("usagePath = %q, want %q", cg.usagePath, want)
+	}
+}
+
 func TestNewCgroupBackendV1SplitCPUMounts(t *testing.T) {
 	// Some v1 hosts mount cpu and cpuacct as separate hierarchies; the
 	// accounting file and the quota files must be discovered independently.

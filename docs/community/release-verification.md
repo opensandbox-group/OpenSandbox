@@ -1,17 +1,27 @@
 ---
 title: Release Verification
-description: Verify signed OpenSandbox releases for source archives, container images, packages, and Helm charts.
+description: Check release signing coverage and verify supported legacy OpenSandbox artifacts.
 ---
 
 # Release Verification
 
-OpenSandbox signs public release outputs without changing the normal install commands. Verification is optional for day-to-day use, but supported for users who need supply chain integrity checks.
+Signing coverage depends on the release workflow, not just the release date or version. The legacy per-component workflows supported the verification commands below; the current umbrella release process does not provide the same signing coverage.
 
-This process applies to releases produced after the signing workflows were introduced. Older releases may not have attestations or signatures.
+## Current Umbrella Release Status
 
-## Signing Model
+::: warning Signing and provenance gap
+The current [umbrella release workflow](https://github.com/opensandbox-group/OpenSandbox/blob/main/.github/workflows/release-umbrella.yml) and [package release workflow](https://github.com/opensandbox-group/OpenSandbox/blob/main/.github/workflows/release-packages.yml) do not contain Cosign signing or GitHub build-provenance attestation steps. Declaring `attestations: write` permission does not create an attestation. Do not assume that an umbrella release is signed because its version is newer than a signed per-component release.
+:::
 
-OpenSandbox uses these signing paths:
+[Issue #2463](https://github.com/opensandbox-group/OpenSandbox/issues/2463) reports missing signatures and provenance for the examined `release-1.1.0`, `release-1.1.1`, and `release-1.2.0` artifacts, including the server 1.2.0 wheel. It tracks restoring coverage and clarifying registry availability. This guide does not promise that those artifacts will be re-signed.
+
+For umbrella images, use the digest recorded in the versioned [release BOM](https://github.com/opensandbox-group/OpenSandbox/tree/main/docs/releases), for example [1.2.0.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/releases/1.2.0.yaml), when pinning an image. Digest matching checks artifact identity; it is not proof of who built the artifact. The BOM's `metadata.gitCommit` records the build commit, which can differ from the release tag's commit because the release workflow commits the finalized BOM before creating the tag.
+
+If your deployment policy requires a verified signature or provenance, an absent attestation is an unmet requirement, not a successful verification. Do not replace the legacy workflow name in the commands below with `release-umbrella.yml` and treat that as evidence: changing an identity constraint cannot create missing signatures. Check the artifact's actual verification result and the resolution of #2463 before relying on umbrella release provenance.
+
+## Legacy Signing Model {#signing-model}
+
+Before the umbrella migration, the per-target workflows used these signing paths:
 
 - Source code releases: the Generic Release workflow uploads an explicit `opensandbox-<tag>.tar.gz` source archive and `SHA256SUMS` file to the GitHub Release, then creates GitHub/Sigstore provenance attestations for both files.
 - Container images: the component and server image workflows sign Docker Hub, GitHub Container Registry (GHCR), and Alibaba Cloud Container Registry (ACR) image digests with `cosign` keyless signing, and publish provenance attestations to all three registries.
@@ -19,14 +29,14 @@ OpenSandbox uses these signing paths:
 - JavaScript packages: the workflow runs `pnpm pack`, attests the generated npm tarball, and publishes that same tarball.
 - C# packages: NuGet `.nupkg` files are attested before publication.
 - Go SDK modules: the `sdks/sandbox/go/v<version>` source release archive is attested by the Generic Release workflow.
-- Helm charts created by the current release workflow: packaged chart `.tgz` files are attested and published with an attested `SHA256SUMS` file so consumers can verify the exact release bytes.
+- Helm charts created by the legacy Helm release workflow: packaged chart `.tgz` files are attested and published with an attested `SHA256SUMS` file so consumers can verify the exact release bytes.
 - Java/Kotlin packages: Maven Central publications are signed by the Gradle Maven publish signing configuration. Download the `.asc` signature next to the Maven artifact and verify it with OpenPGP tooling.
 
 Release tags may also be signed with `manifests/release/create-release.sh --sign-tag` when the release operator has a local git signing key configured. Do not rely on signed tags alone for generated deliverables; verify the artifact you are installing.
 
-## Trust Roots and Keys
+## Legacy Trust Roots and Keys {#trust-roots-and-keys}
 
-Most OpenSandbox release signatures are keyless Sigstore signatures created by GitHub Actions OpenID Connect (OIDC). There is no long-lived OpenSandbox private key for these signatures, so there is no project public key file to download. The public certificates and signed bundles are retrieved by `gh` or `cosign` from GitHub's attestation service, OCI registries, and Sigstore transparency infrastructure.
+The legacy GitHub Actions signatures described here are keyless Sigstore signatures created by GitHub Actions OpenID Connect (OIDC). There is no long-lived OpenSandbox private key for these signatures, so there is no project public key file to download. The public certificates and signed bundles are retrieved by `gh` or `cosign` from GitHub's attestation service, OCI registries, and Sigstore transparency infrastructure.
 
 Expected identity values:
 
@@ -65,7 +75,7 @@ If you run the release workflows from a downstream fork, replace `opensandbox-gr
 
 Private signing material is not stored in GitHub Releases, Docker Hub, GHCR, ACR, PyPI, npm, Maven Central, NuGet, or Helm chart downloads. Java/Kotlin Maven Central signing keys are held only in GitHub Actions secrets.
 
-## Verify Source Releases
+## Verify Legacy Source Releases {#verify-source-releases}
 
 > Source archives are produced only for releases before 2026-08 (when the `release-generic.yml` workflow was removed). Newer releases have no source archive; skip this section for them.
 
@@ -109,11 +119,11 @@ gh attestation verify SHA256SUMS \
 
 The Generic Release workflow is started with `workflow_dispatch`, so its provenance `source-ref` is the ref selected when the workflow was dispatched (normally `refs/heads/main`), not the release tag created by the job.
 
-## Verify Container Images
+## Verify Legacy Container Images {#verify-container-images}
 
 Install `cosign` and `gh`, then resolve the image digest. Always verify by digest, not by mutable tag alone.
 
-Release images are published with the same component name and digest in all three official registries:
+The legacy image workflows targeted the following registry locations with the same component name and digest. Availability and signing coverage for current umbrella releases must be checked separately; see the warning above and #2463.
 
 | Registry | Image name pattern |
 | --- | --- |
@@ -174,7 +184,7 @@ IMAGE="ghcr.io/opensandbox-group/opensandbox/execd"
 IMAGE="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd"
 ```
 
-## Verify Packages
+## Verify Legacy Packages {#verify-packages}
 
 Download the package file from its normal package registry, then verify the attestation against the OpenSandbox repository and the expected release tag.
 
@@ -259,4 +269,4 @@ gpg --keyserver hkps://keys.openpgp.org --recv-keys "$KEY_ID"
 gpg --verify sandbox-1.0.10.jar.asc sandbox-1.0.10.jar
 ```
 
-If verification cannot find an attestation for a release that predates this process, use a newer release as the signed release evidence.
+If verification cannot find a signature or attestation, do not infer that a newer version is signed. Check the release workflow and signing coverage for the exact artifact; missing verification evidence does not satisfy a signature or provenance requirement.

@@ -60,12 +60,18 @@ jobs:
           - variant: direct
             script: scripts/python-k8s-e2e.sh
             e2e_gateway_route_mode: ""
+            # Shipped-default topology leg: the production server default is
+            # execd_run_as_init = false, so one K8s leg stays on the non-init
+            # path while init mode soaks elsewhere.
+            execd_run_as_init: "false"
           - variant: ingress-header
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: ""
+            execd_run_as_init: "true"
           - variant: ingress-uri
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: uri
+            execd_run_as_init: "true"
     env:
       KIND_CLUSTER: opensandbox-e2e
       KIND_K8S_VERSION: v1.30.4
@@ -105,6 +111,7 @@ jobs:
       - name: Run Kubernetes runtime E2E
         env:
           E2E_GATEWAY_ROUTE_MODE: ${{ matrix.e2e_gateway_route_mode }}
+          E2E_EXECD_RUN_AS_INIT: ${{ matrix.execd_run_as_init }}
         run: bash "./${{ matrix.script }}"
 
       - name: Dump kind diagnostics
@@ -371,6 +378,10 @@ jobs:
     env:
       # Covers up, both e2e steps, and the failure diagnostics.
       IDLE_PAUSE: "1"
+      # LegacySlot E2E regression lives here on purpose: the PR integration
+      # lane (fast-sandbox-test.yml) switched to the ResourceAware profile
+      # (OSEP-0026); keep this nightly on the legacy pool shape.
+      POOL_MODE: "legacy"
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)

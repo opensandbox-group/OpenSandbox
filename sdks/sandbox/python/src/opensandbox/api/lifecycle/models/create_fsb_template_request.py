@@ -44,8 +44,10 @@ class CreateFsbTemplateRequest:
 
         Attributes:
             image (str): Source OCI image reference the golden image is built from.
-            publish (str): S3-compatible publish target for the built artifacts,
-                e.g. `s3://bucket/publish`.
+            publish (str): Publish destination: `s3://bucket/publish` for native artifacts or
+                `oci://registry/repository` for overlaybd artifacts. OCI targets
+                must not contain a tag or digest; the builder generates unique
+                tags per build. Registry credentials are configured on the server.
             resource_limits (ResourceLimits | Unset): Runtime resource constraints as key-value pairs. Similar to Kubernetes
                 resource specifications,
                 allows flexible definition of resource limits. Common resource types include:

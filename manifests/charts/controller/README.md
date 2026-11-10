@@ -67,6 +67,7 @@ The following table lists the configurable parameters of the chart and their def
 |-----|------|---------|-------------|
 | controller.affinity | object | `{}` | Affinity for controller pod assignment |
 | controller.containerSecurityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":false}` | Container security context |
+| controller.extraArgs | list | `[]` | Additional args appended to the controller container command, after the chart-managed flags. Unlocks binary flags the chart does not model, e.g. --enable-file-log --log-file-path=/var/log/sandbox-controller/controller.log (rotating file output alongside stdout) or --concurrency=batchsandbox=32. Entries are passed to the container directly (no shell), so do not shell-quote the values. |
 | controller.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller","tag":""}` | Controller image configuration |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller"` | Controller image repository |
@@ -74,13 +75,17 @@ The following table lists the configurable parameters of the chart and their def
 | controller.kubeClient | object | `{"burst":200,"qps":100}` | Kubernetes client rate limiter configuration |
 | controller.kubeClient.burst | int | `200` | Burst for Kubernetes client rate limiter. |
 | controller.kubeClient.qps | int | `100` | QPS for Kubernetes client rate limiter. |
-| controller.leaderElection | object | `{"enabled":true}` | Enable leader election for controller manager |
+| controller.leaderElection | object | `{"enabled":true,"leaseDuration":"","renewDeadline":"","retryPeriod":""}` | Enable leader election for controller manager |
+| controller.leaderElection.leaseDuration | string | `""` | How long standby replicas wait after the last renewal before taking over the lease (`--leader-elect-lease-duration`). Empty keeps the binary default of 15s. |
+| controller.leaderElection.renewDeadline | string | `""` | How long the leader keeps retrying to renew the lease before giving up leadership (`--leader-elect-renew-deadline`). Must be less than leaseDuration. Raise it with leaseDuration if API server stalls make the leader exit with "leader election lost". Empty keeps the default of 10s. |
+| controller.leaderElection.retryPeriod | string | `""` | How long candidates wait between attempts to acquire or renew the lease (`--leader-elect-retry-period`). renewDeadline must be more than 1.2 times this value. Empty keeps the default of 2s. |
 | controller.livenessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":15,"periodSeconds":20,"successThreshold":1,"timeoutSeconds":1}` | Liveness probe configuration. The livenessProbe.httpGet.port below also drives --health-probe-bind-address and the health container port. |
 | controller.logLevel | string | `"info"` | Log level for zap logger (debug, info, error) |
 | controller.metrics | object | `{"enabled":false,"port":8080,"secure":false}` | controller-runtime metrics endpoint (Prometheus). Disabled by default to preserve the current behavior (the binary defaults to `--metrics-bind-address=0`). |
 | controller.metrics.enabled | bool | `false` | Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`) |
 | controller.metrics.port | int | `8080` | Port for the metrics endpoint |
 | controller.metrics.secure | bool | `false` | Serve metrics over HTTPS with authn/authz (`--metrics-secure`). Set to false to serve plain HTTP for scraping without TLS/RBAC (e.g. PodMonitoring). |
+| controller.namespaces | list | `[]` | Namespaces used to scope the controller informer cache (`--namespaces`). Empty (default) watches the whole cluster. On large shared clusters, list the namespaces holding Pool/BatchSandbox workloads to shrink the cache and avoid startup OOMs. Every watched namespace (CRs and their Pods/Jobs) must be listed; multi-tenant deployments spread across many namespaces should keep this empty. |
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
@@ -93,10 +98,10 @@ The following table lists the configurable parameters of the chart and their def
 | controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration. Shares the health-probe port with livenessProbe. |
 | controller.replicaCount | int | `1` | Number of controller replicas |
 | controller.resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource requests and limits for the controller |
-| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.0-rc.2","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
+| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.1","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
 | controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs |
 | controller.snapshot.containerdSocketPath | string | `""` | Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag. |
-| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.0-rc.2"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.2.0-rc.2 |
+| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.1"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.2.1-rc.1 |
 | controller.snapshot.imageCommitterPodTemplate | object | `{}` | PodTemplateSpec overlay for image-committer commit Job Pods. |
 | controller.snapshot.imageCommitterPullSecret | string | `""` | Secret name for pulling the image-committer image in commit Jobs. Required when imageCommitterImage is stored in a private registry. |
 | controller.snapshot.imageURITemplate | string | `""` | Go named-field template for snapshot image URIs. Empty preserves default naming. |

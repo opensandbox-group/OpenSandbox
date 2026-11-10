@@ -46,7 +46,6 @@ SESSION_GATE_SOURCE_PATH = "/usr/local/libexec/opensandbox-session-gate"
 SESSION_GATE_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-session-gate")
 LAUNCHER_SOURCE_PATH = "/usr/local/libexec/opensandbox-launcher"
 LAUNCHER_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-launcher")
-DEFAULT_EXECD_ENVS_PATH = posixpath.join(OPENSANDBOX_DIR, ".env")
 
 
 class DockerRuntimeMixin:

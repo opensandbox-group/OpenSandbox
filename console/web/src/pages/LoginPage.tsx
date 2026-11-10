@@ -30,10 +30,10 @@ export function LoginPage() {
     try {
       await authApi.loginTenant(values.apiKey.trim());
       await refresh();
-      message.success('租户登录成功');
+      message.success('Tenant login successful');
       navigate('/', { replace: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '登录失败');
+      message.error(e instanceof Error ? e.message : 'Login failed');
     } finally {
       setLoading(false);
     }
@@ -44,10 +44,10 @@ export function LoginPage() {
     try {
       await authApi.loginAdmin(values.adminToken.trim());
       await refresh();
-      message.success('Admin 登录成功');
+      message.success('Admin login successful');
       navigate('/', { replace: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '登录失败');
+      message.error(e instanceof Error ? e.message : 'Login failed');
     } finally {
       setLoading(false);
     }
@@ -71,43 +71,43 @@ export function LoginPage() {
         <Alert
           type="info"
           showIcon
-          message="API Key 仅提交给 BFF，浏览器不长期保存 Lifecycle Key。"
+          message="The API key is sent only to the BFF. The browser does not store the Lifecycle key."
           style={{ marginBottom: 16 }}
         />
         <Tabs
           items={[
             {
               key: 'tenant',
-              label: '租户研发',
+              label: 'Tenant User',
               children: (
                 <Form layout="vertical" onFinish={onTenant}>
                   <Form.Item
                     name="apiKey"
-                    label="租户 API Key"
-                    rules={[{ required: true, message: '请输入 API Key' }]}
+                    label="Tenant API Key"
+                    rules={[{ required: true, message: 'Enter an API key' }]}
                   >
                     <Input.Password prefix={<UserOutlined />} placeholder="OPEN-SANDBOX-API-KEY" />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" block loading={loading}>
-                    登录
+                    Sign In
                   </Button>
                 </Form>
               ),
             },
             {
               key: 'admin',
-              label: '平台 Admin',
+              label: 'Platform Admin',
               children: (
                 <Form layout="vertical" onFinish={onAdmin}>
                   <Form.Item
                     name="adminToken"
                     label="BFF Admin Token"
-                    rules={[{ required: true, message: '请输入 Admin Token' }]}
+                    rules={[{ required: true, message: 'Enter an admin token' }]}
                   >
                     <Input.Password prefix={<LockOutlined />} />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" block loading={loading}>
-                    登录
+                    Sign In
                   </Button>
                 </Form>
               ),

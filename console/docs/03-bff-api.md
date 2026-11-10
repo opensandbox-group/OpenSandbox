@@ -47,6 +47,7 @@ Proxies Lifecycle; responses include BFF **`runtimeSummary`**.
 | GET | `/api/sandboxes/{id}/diagnostics/events` | same |
 | GET | `/api/sandboxes/{id}/logs/archive` | optional OSS archive |
 | GET | `/api/sandboxes/{id}/endpoints/{port}` | same |
+| WS | `/api/sandboxes/{id}/shell/ws` | resolves endpoint `44772`, then bridges execd `POST /pty` and `GET /pty/{sessionId}/ws` |
 
 ### Snapshots (tenant)
 
@@ -75,7 +76,9 @@ Aggregates per-tenant lists; optional `tenant=` filter. Pagination includes `ten
 
 ### Admin sandbox ops
 
-Query **`tenant`** required for `{id}` read/write, diagnostics, etc.
+Query **`tenant`** required for `{id}` read/write, diagnostics, and shell.
+
+`WS /api/admin/sandboxes/{id}/shell/ws?tenant=` opens the same execd PTY bridge with that tenant's API key. The browser session cookie is the only credential on the WebSocket. `BFF_SHELL_ENDPOINT_MODE=server` (default) dials the in-cluster lifecycle proxy and sends `OPEN-SANDBOX-API-KEY`. `gateway` dials the public ingress endpoint and forwards endpoint headers without the tenant API key. Closing the socket deletes the PTY session.
 
 ### Admin snapshots
 

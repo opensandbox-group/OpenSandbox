@@ -46,12 +46,13 @@ The following table lists the configurable parameters of the chart and their def
 | enabled | bool | `true` | Whether the node-agent is enabled (used by the umbrella opensandbox chart). |
 | extraEnv | list | `[]` | Additional environment variables for the node agent container. |
 | fullnameOverride | string | `""` | Override the full name of the chart. |
-| hostPaths | object | `{"cgroup":"/sys/fs/cgroup","fileData":"/var/lib/opensandbox/nodeagent-data","logs":"/var/log/pods","state":"/var/lib/opensandbox/nodeagent","tracing":"/sys/kernel/tracing"}` | Host paths available to the node agent; enabled Sources and Sinks select mounts. |
+| hostPaths | object | `{"cgroup":"/sys/fs/cgroup","fileData":"/var/lib/opensandbox/nodeagent-data","logs":"/var/log/pods","state":"/var/lib/opensandbox/nodeagent","tracing":"/sys/kernel/tracing","vmConsole":"/var/lib/fast-sandbox/firecracker"}` | Host paths available to the node agent; enabled Sources and Sinks select mounts. |
 | hostPaths.cgroup | string | `"/sys/fs/cgroup"` | Host cgroup v2 hierarchy used only by the syscalls Source. |
 | hostPaths.fileData | string | `"/var/lib/opensandbox/nodeagent-data"` | Host path for file sink data (must match sink.file.path). |
 | hostPaths.logs | string | `"/var/log/pods"` | Pod-log host path used only by the container-logs Source. |
 | hostPaths.state | string | `"/var/lib/opensandbox/nodeagent"` | Host path for checkpoint state (must match config.stateDir). |
 | hostPaths.tracing | string | `"/sys/kernel/tracing"` | Host tracefs used only by the syscalls Source. |
+| hostPaths.vmConsole | string | `"/var/lib/fast-sandbox/firecracker"` | Firecracker state root used only by the vm-console Source; GC remains owned by the FC driver. |
 | image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent","tag":""}` | Node agent image configuration. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent"` | Node agent image repository. |

@@ -61,6 +61,12 @@ PLURAL = "sandboxtemplates"
 # exist in the sandboxtemplate-builder image under this name (builder
 # default); execd comes from runtime.execd_image.
 TEMPLATE_KERNEL = "vmlinux.bin"
+# OSEP-0018 on fsb: the guest init sources the baked envs and launches
+# bootstrap.sh, so a baked EXECD_INIT=1 makes bootstrap.sh exec into
+# `execd --init` — execd runs as a subreaper under the guest init (no PID 1
+# signal shield). Injected at CRD projection from runtime.execd_run_as_init;
+# the server value wins over a client-provided env of the same name.
+EXECD_INIT_ENV = "EXECD_INIT"
 DEFAULT_VCPU = "1"
 DEFAULT_MEMORY = "512Mi"
 # Guest rootfs logical size when the client omits resourceLimits.disk. The
@@ -127,6 +133,12 @@ def _publish_validation_error(format: str, publish: str) -> Optional[str]:
                 "publish must be 'oci://registry/repository' without a "
                 "trailing slash."
             )
+        path_component = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+        if (
+            not re.fullmatch(r"(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::[0-9]+)?", host)
+            or not re.fullmatch(rf"{path_component}(?:/{path_component})*", repository)
+        ):
+            return "publish must be a valid oci://registry/repository without a tag or digest."
         return None
     if format == "native":
         if not publish.startswith("s3://"):
@@ -146,6 +158,17 @@ def _publish_validation_error(format: str, publish: str) -> Optional[str]:
     )
 
 
+def effective_machine(spec: dict) -> dict[str, str]:
+    """Effective guest machine ``{"cpu", "memory"}``: pinned ``machine`` if
+    present, else ``resourceLimits`` with defaults; ``disk`` excluded."""
+    machine = spec.get("machine") or {}
+    limits = spec.get("resourceLimits") or {}
+    return {
+        "cpu": str(machine.get("cpu") or limits.get("cpu") or DEFAULT_VCPU),
+        "memory": str(machine.get("memory") or limits.get("memory") or DEFAULT_MEMORY),
+    }
+
+
 class FastSandboxTemplateService:
     """Template catalog + SandboxTemplate CRD orchestration for fsb."""
 
@@ -157,6 +180,7 @@ class FastSandboxTemplateService:
     ):
         self._config = config
         self._execd_image = config.runtime.execd_image
+        self._execd_run_as_init = bool(config.runtime.execd_run_as_init)
         self._repository = repository
         self._k8s_client = k8s_client
         self._k8s_config = config.kubernetes or KubernetesRuntimeConfig()
@@ -267,7 +291,7 @@ class FastSandboxTemplateService:
                 )
         if request.env:
             invalid_env_names = [
-                name for name in request.env if not _VALID_ENV_NAME.match(name)
+                name for name in request.env if not _VALID_ENV_NAME.fullmatch(name)
             ]
             if invalid_env_names:
                 raise HTTPException(
@@ -325,6 +349,8 @@ class FastSandboxTemplateService:
             "publish": publish,
             "format": request.format,
         }
+        # OSEP-0026: pin the machine shape; resourceLimits stays verbatim.
+        spec["machine"] = effective_machine(spec)
         record = FastSandboxTemplateRecord(
             template_id=template_id,
             namespace=namespace,
@@ -431,11 +457,12 @@ class FastSandboxTemplateService:
                 ) from exc
         self._repo().delete(template_id, namespace)
 
-    def resolve_template_artifact(self, template_id: str) -> tuple[str, list[str]]:
-        """Resolve a Succeeded template to its runnable artifact + entrypoint.
+    def resolve_template_artifact(self, template_id: str) -> tuple[str, list[str], dict[str, str]]:
+        """Resolve a Succeeded template to artifact + entrypoint + machine.
 
         native → the template id (the builder's content-addressed index key);
-        overlaybd → the CRD's immutable OCI manifest_ref. Unknown,
+        overlaybd → the CRD's immutable OCI manifest_ref. machine is the
+        effective shape from :func:`effective_machine`. Unknown,
         non-Succeeded, or manifest-less templates all yield 404, so no
         existence information leaks. Reads the DB row only; the watch
         reactor converges build phase.
@@ -450,10 +477,11 @@ class FastSandboxTemplateService:
         if record.phase is not FastSandboxTemplatePhase.SUCCEEDED:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
         entrypoint = list(record.spec.get("entrypoint") or DEFAULT_ENTRYPOINT)
+        machine = effective_machine(record.spec)
         if str(record.spec.get("format") or "overlaybd") != "overlaybd":
-            return record.template_id, entrypoint
+            return record.template_id, entrypoint, machine
         manifest_ref = record.manifest_ref or ""
-        if not manifest_ref.startswith("oci://"):
+        if not re.fullmatch(re.escape(record.publish) + r"@sha256:[0-9a-f]{64}", manifest_ref):
             # Transient (status not landed) or a legacy overlaybd+S3 row
             # (rejected upstream). Both 404; the legacy message is
             # actionable for the owner.
@@ -463,13 +491,13 @@ class FastSandboxTemplateService:
                     "code": SandboxErrorCodes.FSB_TEMPLATE_NOT_FOUND,
                     "message": (
                         "Template artifact is not runnable: overlaybd "
-                        "templates require an OCI manifestRef from a build "
+                        "templates require an immutable OCI manifestRef in the publish repository from a build "
                         "against the current fast-sandbox contract; rebuild "
                         "the template."
                     ),
                 },
             )
-        return manifest_ref, entrypoint
+        return manifest_ref, entrypoint, machine
 
     # -- CRD mapping -----------------------------------------------------------
 
@@ -483,25 +511,25 @@ class FastSandboxTemplateService:
 
     def _build_crd(self, record: FastSandboxTemplateRecord) -> dict:
         limits = record.spec.get("resourceLimits") or {}
-        vcpu = str(limits.get("cpu") or DEFAULT_VCPU)
-        memory = str(limits.get("memory") or DEFAULT_MEMORY)
+        machine = effective_machine(record.spec)
         # resourceLimits.disk (parallel to cpu/memory) is the logical size of
         # the guest rootfs; artifacts are stored and pulled at this size.
         rootfs_size = str(limits.get("disk") or DEFAULT_ROOTFS_SIZE)
         fmt = str(record.spec.get("format") or "overlaybd")
         spec: dict = {
             "image": record.source_image,
-            # Per-template artifact identity: the builder publishes the image
+            # Native artifact identity: the builder publishes the image
             # index under BOTH this key (exact, immutable per template) and
             # the legacy sha256(source-image) key (last-writer-wins, kept for
             # warmImages and older clients). Sandbox creates carry the
             # template key, so two templates of the same source image resolve
-            # to their own artifact sets and caches.
+            # to their own artifact sets and caches. OCI creates instead use
+            # the immutable manifestRef recorded after publication.
             "indexKey": record.template_id,
             "entrypoint": list(record.spec.get("entrypoint") or DEFAULT_ENTRYPOINT),
             "execd": self._execd_image,
             "kernel": TEMPLATE_KERNEL,
-            "machine": {"vcpu": vcpu, "memory": memory},
+            "machine": {"vcpu": machine["cpu"], "memory": machine["memory"]},
             "output": {
                 "rootfsSize": rootfs_size,
                 "format": fmt,
@@ -510,6 +538,10 @@ class FastSandboxTemplateService:
             },
         }
         env = record.spec.get("env") or {}
+        if self._execd_run_as_init:
+            # Copy first: the stored row keeps the client env untouched, and
+            # the server value wins over a client-provided EXECD_INIT.
+            env = {**env, EXECD_INIT_ENV: "1"}
         if env:
             spec["envs"] = [{"name": name, "value": value} for name, value in env.items()]
         # OSEP-0022 CA wiring: bake the pinned MITM CA Secret's certificate
@@ -614,4 +646,9 @@ def total_pages(total_items: int, page_size: int) -> int:
     return math.ceil(total_items / page_size) if page_size > 0 else 0
 
 
-__all__ = ["FastSandboxTemplateService", "template_to_response", "total_pages"]
+__all__ = [
+    "FastSandboxTemplateService",
+    "effective_machine",
+    "template_to_response",
+    "total_pages",
+]

@@ -67,6 +67,10 @@ export interface ConnectionConfigOptions {
   /**
    * Use sandbox server as proxy for process execd requests.
    * Useful when the client SDK cannot access the created sandbox directly.
+   *
+   * @deprecated The server-proxied data path is in maintenance mode (security
+   * and bug fixes only). Route data-plane traffic through the ingress gateway
+   * instead.
    */
   useServerProxy?: boolean;
   /**
@@ -385,6 +389,10 @@ export class ConnectionConfig {
   readonly userAgent: string = DEFAULT_USER_AGENT;
   /**
    * Use sandbox server as proxy for endpoint requests (default false).
+   *
+   * @deprecated The server-proxied data path is in maintenance mode (security
+   * and bug fixes only). Route data-plane traffic through the ingress gateway
+   * instead.
    */
   readonly useServerProxy: boolean;
   readonly endpointCacheTtlMs: number;

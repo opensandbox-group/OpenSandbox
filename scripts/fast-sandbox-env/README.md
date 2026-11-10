@@ -24,6 +24,7 @@ Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgr
 ./scripts/fast-sandbox-env/integration-env.sh up              # environment: stack + pool + server/ingress + native template
 ./scripts/fast-sandbox-env/integration-env.sh verify-native   # verify matrix on the native template (needs up)
 ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + verify matrix (needs up)
+POOL_MODE=resource-aware ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware  # OSEP-0026 matrix (needs a resource-aware up)
 ./scripts/fast-sandbox-env/integration-env.sh status          # component / pool / DART / OpenSandbox health
 ./scripts/fast-sandbox-env/integration-env.sh pool            # re-apply the pool only
 ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e         # Python SDK e2e suite against the live stack
@@ -36,6 +37,8 @@ Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgr
 `IDLE_PAUSE=1 ./scripts/fast-sandbox-env/integration.sh up` additionally deploys an ephemeral Redis (`manifests/idle-pause/redis.yaml`, before the server — the sweeper connects at startup), enables the server `[automation.idle_pause]` sweeper (5s sweep) and the gateway's `--activity-enabled` + `--wake-enabled`, and runs an `idle-pause / wake-on-access` verify stage: an opted-in sandbox (`lifecycle.idlePolicy`, X=30s) is auto-paused with zero traffic, and the next gateway request wakes it (parked while the restore completes). The `idle-e2e` action then runs the SDK suite (`tests/python/tests/test_fsb_idle_pause_e2e.py`) covering the SDK contract only: create with an `IdlePolicy`, auto-pause, and wake-on-access through the SDK's wake retry contract (the multi-round, `wakeOnAccess=false` and Redis-outage behavior lives in the shell verify stage). Sandboxes without `lifecycle.idlePolicy` are never auto-paused or auto-woken regardless of the profile.
 
 ### OverlayBD OCI profile (default on)
+
+The node ublk warm pool is enabled at low/high watermarks of 4/8 with 2 GiB devices, matching this environment's explicit `--resource disk=2Gi` template build setting. `verify-overlaybd` waits for idle devices, logs `/v1/pool` and daemon restart counts before and after the six template creates/deletes, and requires at least six new hits with no new misses, daemon restarts or Pod replacement. The Helm chart also defaults to 2 GiB devices because the OpenSandbox template API uses `resourceLimits.disk=2Gi` when omitted. When changing the template build size, change `runtime.oci.poolSizeGB` to the built rootfs capacity as well: exact capacity matching is required, even when the pool device is larger. `runtime.oci.poolLow=0` disables pooling.
 
 `OCI_STACK` defaults to 1: one cluster serves both template paths. The env generates a local CA + TLS certificate and deploys an in-cluster `registry:2` (fsb-vm and overlaybd require HTTPS), bakes the CA into the `fsb-fastlet`, `fsb-firecracker-runtime` and sandboxtemplate-builder images, installs the `fast-sandbox` chart's `runtime.oci` node stack, wires the registry credentials and the server's `template_oci_publish_secret`, and renders the pool fastlet with `FAST_SANDBOX_OCI_ENABLED=true` plus the shared tools/socket//dev mounts. The `verify-overlaybd` action builds an overlaybd template (published to the in-cluster registry) and runs the whole verify matrix against it — the same assertions as `verify-native`, but on the overlaybd path (template-mode create resolves `status.manifestRef`, boot is ublk on-demand, and snapshots publish/restore via `oci://` manifests). Nodes need kernel ublk support (`CONFIG_BLK_DEV_UBLK`; `modprobe ublk_drv` when built as a module). `OCI_STACK=0` restores the native-only environment (`verify-overlaybd` becomes a no-op).
 
@@ -67,6 +70,7 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fast-sand
 ## Defaults
 
 - **Pool with egress**: `firecracker-egress-pool` (firecracker runtime, `poolMin=2`) carries the OpenSandbox egress container in every fastlet Pod netns — fast-sandbox profile, `dns+nft` mode, MITM addon pinned to the CA seed mount — wired through the Sandbox Actions channel (`infraComponents` host-process entry + `actionHandlers` egress@18080 with the runtime-ready / data-plane-ready hooks).
+- **ResourceAware pool fixture (OSEP-0026)**: `POOL_MODE=resource-aware` swaps the default pool for `firecracker-egress-resource-aware-pool` (`manifests/pool/firecracker-egress-resource-aware-pool.yaml`) — identical except `sandboxResources.mode: ResourceAware` with `overcommitRatio` cpu `4` / memory `2`, so FastPath derives each sandbox's committed request (`ceil(limit / ratio)`, a default-shape sandbox commits 250m CPU / 256Mi) instead of fixed slot accounting. `POOL_NAME` and the server's `fastpath_resource_pool` follow the profile.
 - **P2P by default**: two kind nodes, each running the runtime-agent with a node-local DART daemon (peer discovery through the headless `dart` Service); the pool spreads one fastlet per node via podAntiAffinity. Each node binds its **own** state-root subdirectory (`/var/lib/fast-sandbox/control-plane`, `/var/lib/fast-sandbox/worker`) at the same container path, so one node's committed image cache never satisfies another node's pull — artifact delivery flows `cache -> peer -> origin` with the origin fetched ~once per 4MiB block cluster-wide on every node's first create. `KIND_SINGLE=1` falls back to one node (cache-only).
 - **On-demand loading**: the pool has no `warmImages`; the verify sandbox's create pulls the golden snapshot set through DART. `WARM_IMAGES=1` preheats instead.
 - **fast-sandbox @ pinned commit**: env-owned clone at `$WORK/fast-sandbox`, cloned on first `up` and checked out at the pinned commit afterwards; relocate it with `FSB_DIR`. The source itself has no override — bump the commit in `manifests/third-party/fast-sandbox.commit`.
@@ -82,6 +86,9 @@ manifests/
                                per-node state-root subdirectories
   pool/firecracker-egress-pool.yaml  SandboxPool: egress attached (MITM CA
                                seed mount) + P2P spread
+  pool/firecracker-egress-resource-aware-pool.yaml  OSEP-0026 ResourceAware
+                               fixture: same pool + mode/overcommitRatio
+                               (POOL_MODE=resource-aware)
 ```
 
 Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), rendered with `helm template` from the workdir's values (image tags, artifact-store endpoint, FastPath endpoint, signing key, NodePorts) and applied with plain `kubectl apply` — the cluster keeps no helm state:
@@ -97,9 +104,11 @@ Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), ren
 
 `up`: preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → **MITM CA material (Secret + echo leaf cert)** → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → **TLS echo endpoint (kind-network container)** → SandboxTemplate golden image **built through the server `POST /templates` API, CA baked** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check, **pinned CA fingerprint**).
 
-`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
+`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → **execd-as-init in-guest process verify** (PID 1 = guest init; execd `--init` supervises the workload; orphan reparented and reaped; hardening report `init_mode=subreaper`) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
 
 `verify-overlaybd`: overlaybd SandboxTemplate build (oci:// publication) → the same verify matrix against the overlaybd template.
+
+`verify-resourceaware` (OSEP-0026, needs `POOL_MODE=resource-aware up`): distinctly-shaped template (2 vCPU / 1Gi) create → Sandbox CR `spec.resources.limits` + cgroup leaf `cpu.max`/`cpu.weight`/`pids.max` + aggregate `memory.max` asserted separately → oversized template (8 vCPU) → permanent 400 → template → snapshot → restore round-trip replaying the recorded limits through the composite path → capacity saturation (5 concurrent shaped sandboxes vs 2×2 slots) → retryable 429.
 
 Every stage logs to `$WORK/logs/`; failures dump component logs to `logs/failure-<task>-<ts>.txt`.
 
@@ -121,8 +130,10 @@ The RustFS migration replaces the previous `MINIO_*` and `MC_IMAGE` overrides. B
 | `IMAGE_RUNTIME` | `opensandbox/fsb-firecracker-runtime:dev` | firecracker runtime image (passed to the fast-sandbox chart) |
 | — | agent-config defaults pinned by the chart | Firecracker asset version/kernel live in the runtime agent config (`runtime.config` chart value), hot-reloadable |
 | `POOL_MIN` / `POOL_MAX` | `2` / `2` | pool capacity (auto `1`/`1` when `KIND_SINGLE=1`) |
+| `POOL_MODE` | `legacy` | `resource-aware` = OSEP-0026 ResourceAware pool fixture (`firecracker-egress-resource-aware-pool`: `sandboxResources.mode: ResourceAware` + cpu `4` / memory `2` `overcommitRatio`); `POOL_NAME` follows the profile |
 | `WARM_IMAGES` | `0` | `1` = preheat pool instead of on-demand first-sandbox pull |
 | `SBX_IMAGE` / `EXECD` | `opensandbox/fsb-sandbox-golden:latest` / `opensandbox/execd:latest` | template build inputs |
+| `EXECD_RUN_AS_INIT` | `true` | OSEP-0018 execd-as-init: templates bake `EXECD_INIT=1` (pinned by the init-mode verify stage); `false` = classic topology, that stage fails. |
 | `RUSTFS_IMAGE` / `RC_IMAGE` | `rustfs/rustfs:latest` / `rustfs/rc:latest` | RustFS server and CLI images |
 | `RUSTFS_PORT` | `19000` | host-side S3 API publish; in-cluster clients use the RustFS container IP on port `9000` |
 | `RUSTFS_CONSOLE_PORT` | `19001` | host-side RustFS console publish (human-only; override on port collision) |

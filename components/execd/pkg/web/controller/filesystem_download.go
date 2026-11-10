@@ -20,10 +20,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -53,6 +53,10 @@ func (c *FilesystemController) DownloadFile() {
 		)
 		return
 	}
+	if err := rejectStagingPath(resolvedFilePath); err != nil {
+		c.handleFileError(err)
+		return
+	}
 
 	rawOffset := c.ctx.Query("offset")
 	rawLimit := c.ctx.Query("limit")
@@ -75,12 +79,6 @@ func (c *FilesystemController) DownloadFile() {
 	}
 	defer file.Close()
 
-	if hasLineParams {
-		c.serveLineRange(file, rawOffset, rawLimit)
-		rec.MarkSuccess()
-		return
-	}
-
 	fileInfo, err := file.Stat()
 	if err != nil {
 		c.RespondError(
@@ -88,6 +86,22 @@ func (c *FilesystemController) DownloadFile() {
 			model.ErrorCodeRuntimeError,
 			fmt.Sprintf("error getting file stat info: %s. %v", resolvedFilePath, err),
 		)
+		return
+	}
+	// A directory opens like a file but cannot be read or seeked as one, so
+	// refuse it before either download mode starts.
+	if fileInfo.IsDir() {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("path is a directory: %s", resolvedFilePath),
+		)
+		return
+	}
+
+	if hasLineParams {
+		c.serveLineRange(file, rawOffset, rawLimit)
+		rec.MarkSuccess()
 		return
 	}
 
@@ -99,6 +113,7 @@ func (c *FilesystemController) DownloadFile() {
 			c.RespondError(
 				http.StatusRequestedRangeNotSatisfiable,
 				model.ErrorCodeUnknown,
+				fmt.Sprintf("invalid Range header: %s", rangeHeader),
 			)
 			return
 		}
@@ -199,6 +214,29 @@ func formatContentDisposition(filename string) string {
 		return "attachment; filename=\"" + filename + "\""
 	}
 
-	encodedFilename := url.PathEscape(filename)
+	encodedFilename := encodeExtValue(filename)
 	return "attachment; filename=\"" + encodedFilename + "\"; filename*=UTF-8''" + encodedFilename
+}
+
+// encodeExtValue percent-encodes every byte outside the RFC 8187 attr-char set.
+// url.PathEscape is not enough: it keeps characters such as '=', ':' and '@',
+// which an ext-value may not contain unencoded.
+func encodeExtValue(value string) string {
+	var b strings.Builder
+	for i := range len(value) {
+		if c := value[i]; isAttrChar(c) {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+func isAttrChar(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$&+-.^_`|~", c) >= 0
 }

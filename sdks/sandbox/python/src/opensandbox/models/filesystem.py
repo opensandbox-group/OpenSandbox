@@ -19,10 +19,81 @@ Filesystem-related data models.
 Models for file operations, directory listings, and filesystem metadata.
 """
 
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from datetime import datetime
 from io import IOBase
+from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_BodyT = TypeVar("_BodyT")
+
+
+@dataclass(frozen=True)
+class ByteRange:
+    """Parsed Content-Range response header."""
+
+    start: int
+    end: int
+    total: int
+    raw: str
+
+
+@dataclass(frozen=True)
+class ReadBytesResponse(Generic[_BodyT]):
+    """Downloaded body and its HTTP response metadata."""
+
+    body: _BodyT
+    status_code: int
+    content_type: str | None
+    content_disposition: str | None
+    content_length: int
+    total_size: int
+    content_range: ByteRange | None
+
+    @property
+    def is_partial(self) -> bool:
+        """Whether the server returned 206 Partial Content."""
+        return self.status_code == 206
+
+
+class ReadBytesStream(Protocol):
+    """Closeable synchronous download body."""
+
+    def __iter__(self) -> Iterator[bytes]: ...
+
+    def __next__(self) -> bytes: ...
+
+    def close(self) -> None: ...
+
+    def __enter__(self) -> "ReadBytesStream": ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object | None,
+    ) -> None: ...
+
+
+class AsyncReadBytesStream(Protocol):
+    """Closeable asynchronous download body."""
+
+    def __aiter__(self) -> AsyncIterator[bytes]: ...
+
+    async def __anext__(self) -> bytes: ...
+
+    async def aclose(self) -> None: ...
+
+    async def __aenter__(self) -> "AsyncReadBytesStream": ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object | None,
+    ) -> None: ...
 
 
 class EntryInfo(BaseModel):

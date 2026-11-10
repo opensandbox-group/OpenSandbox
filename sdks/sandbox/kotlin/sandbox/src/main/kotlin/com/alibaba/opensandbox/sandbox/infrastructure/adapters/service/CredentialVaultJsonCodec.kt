@@ -29,11 +29,13 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialListRes
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMatch
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMetadata
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMutationSet
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSource
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSubstitution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultCreateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultPatchRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CustomHeaderEntry
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ExchangeCredentialSource
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.InlineCredentialSource
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
@@ -91,10 +93,18 @@ internal fun Credential.toJsonObject(): JsonObject =
         put("source", source.toJsonObject())
     }
 
-internal fun InlineCredentialSource.toJsonObject(): JsonObject =
-    buildJsonObject {
-        put("type", JsonPrimitive(type))
-        put("value", JsonPrimitive(value))
+internal fun CredentialSource.toJsonObject(): JsonObject =
+    when (this) {
+        is InlineCredentialSource ->
+            buildJsonObject {
+                put("type", JsonPrimitive(type))
+                put("value", JsonPrimitive(value))
+            }
+        is ExchangeCredentialSource ->
+            buildJsonObject {
+                put("type", JsonPrimitive(type))
+                put("endpoint", JsonPrimitive(endpoint))
+            }
     }
 
 internal fun List<CredentialBinding>.toBindingJsonArray(): JsonArray = JsonArray(map { it.toJsonObject() })
@@ -116,8 +126,14 @@ internal fun CredentialMatch.toJsonObject(): JsonObject =
 
 internal fun CredentialAuth.toJsonObject(): JsonObject =
     buildJsonObject {
-        put("type", JsonPrimitive(type.wireName()))
-        when (type) {
+        val authType = type
+        if (authType == null) {
+            // Typeless exchange form: credential reference only, no `type` key.
+            put("credential", JsonPrimitive(credential ?: throw IllegalStateException("Credential auth credential missing")))
+            return@buildJsonObject
+        }
+        put("type", JsonPrimitive(authType.wireName()))
+        when (authType) {
             CredentialAuth.Type.BEARER, CredentialAuth.Type.BASIC -> {
                 put("credential", JsonPrimitive(credential ?: throw IllegalStateException("Credential auth credential missing")))
             }
@@ -228,11 +244,21 @@ internal fun JsonObject.toCredentialMatch(): CredentialMatch {
     return builder.build()
 }
 
-internal fun JsonObject.toCredentialAuthMetadata(): CredentialAuthMetadata =
-    CredentialAuthMetadata(
-        type = requiredString("type"),
-        name = optionalString("name"),
-    )
+internal fun JsonObject.toCredentialAuthMetadata(): CredentialAuthMetadata {
+    val authType = optionalString("type")
+    if (authType != null) {
+        return CredentialAuthMetadata(type = authType, name = optionalString("name"))
+    }
+    // Typeless exchange form (also tolerates the legacy `"type": null` skew):
+    // a credential reference only, never a surfaced null type.
+    val credential =
+        optionalString("credential")
+            ?: throw IllegalStateException("Credential Vault response auth metadata must carry either 'type' or 'credential'")
+    if (optionalString("name") != null || optionalArray("headers") != null || optionalArray("substitutions") != null) {
+        throw IllegalStateException("Credential Vault response typeless auth metadata must carry only 'credential'")
+    }
+    return CredentialAuthMetadata(type = null, name = null, credential = credential)
+}
 
 internal fun String.toCredentialMatchScheme(): CredentialMatch.Scheme =
     when (lowercase()) {
