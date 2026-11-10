@@ -35,6 +35,7 @@ from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
 )
 from opensandbox.adapters.converter.response_handler import (
+    build_api_exception_from_httpx,
     extract_request_id,
     handle_api_error,
 )
@@ -256,10 +257,8 @@ class FilesystemAdapterSync(FilesystemSync):
                     response.read()
                 finally:
                     response.close()
-                raise SandboxApiException(
-                    f"Failed to stream file {path}: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
+                raise build_api_exception_from_httpx(
+                    response, f"Stream file {path}"
                 )
 
             return create_read_bytes_response(
