@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -26,6 +27,7 @@ from opensandbox.models.sandboxes import SandboxEndpoint
 
 from code_interpreter import CodeInterpreter
 from code_interpreter.adapters.code_adapter import CodesAdapter
+from code_interpreter.adapters.factory import AdapterFactory
 from code_interpreter.code_interpreter import RUNTIME_PROCESS_CHECK_COMMAND
 
 
@@ -213,3 +215,33 @@ async def test_create_failure_releases_service_clients(monkeypatch) -> None:
     # Failed creation must still release the service's clients.
     assert created and created[0]._httpx_client.is_closed
     assert created[0]._sse_client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_create_cancelled_during_health_check_releases_clients(monkeypatch) -> None:
+    started = asyncio.Event()
+
+    async def blocking_ping(self) -> bool:
+        started.set()
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", blocking_ping)
+
+    created: list[CodesAdapter] = []
+    original = AdapterFactory.create_code_execution_service
+
+    def capture(self, endpoint):
+        service = original(self, endpoint)
+        created.append(service)
+        return service
+
+    monkeypatch.setattr(AdapterFactory, "create_code_execution_service", capture)
+
+    task = asyncio.create_task(CodeInterpreter.create(sandbox=_FakeSandbox()))  # type: ignore[arg-type]
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert created and created[0]._sse_client.is_closed

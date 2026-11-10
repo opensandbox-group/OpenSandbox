@@ -367,8 +367,9 @@ class CodeInterpreter:
                     await interpreter.check_ready(
                         ready_timeout, health_check_polling_interval
                     )
-            except Exception:
-                # Don't leak the service's clients on a failed creation.
+            except BaseException:
+                # Don't leak the service's clients on a failed or cancelled
+                # creation; asyncio.CancelledError is not an Exception.
                 with contextlib.suppress(Exception):
                     await interpreter.aclose()
                 raise
