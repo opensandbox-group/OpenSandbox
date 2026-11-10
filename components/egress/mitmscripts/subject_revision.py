@@ -264,7 +264,10 @@ class SubjectRevisionOwner:
             entry = self._lookup(target)
             result = self._call(entry, operation, revision, *args)
             if operation == "prepare":
-                entry.prepared = revision
+                # An exact active retry is a receiver no-op: it must neither
+                # replace a pending candidate nor restore suspended authority.
+                if self._call(entry, "readback") != revision:
+                    entry.prepared = revision
             elif operation == "commit" and entry.prepared == revision:
                 entry.snapshot = self._call(entry, "acquire")
                 entry.prepared = None

@@ -108,6 +108,26 @@ class DispatchTest(unittest.TestCase):
         self.assertIsNotNone(self.lookup().snapshot)
         self.assertNotEqual(self.lookup().snapshot.revision, old.revision)
 
+    def check_active_retry_preserves_pending_dispatch(self, suspended):
+        self.register(["192.0.2.1"])
+        active = self.install()
+        if suspended:
+            self.assertEqual(self.command("suspend")["outcome"], "suspended")
+            self.assertIsNone(self.lookup().snapshot)
+        pending = f.snapshot(epoch=2)
+        self.owner.prepare(f.A, pending.revision, pending.payload)
+        self.owner.prepare(f.A, active.revision, active.payload)
+        self.owner.commit(f.A, pending.revision)
+        self.assertEqual(self.owner.readback(f.A), pending.revision)
+        self.assertEqual(self.lookup().snapshot, pending)
+        self.assertEqual(self.owner.acquire(f.A), pending)
+
+    def test_active_prepare_retry_preserves_pending_dispatch(self):
+        self.check_active_retry_preserves_pending_dispatch(suspended=False)
+
+    def test_suspended_active_prepare_retry_preserves_pending_dispatch(self):
+        self.check_active_retry_preserves_pending_dispatch(suspended=True)
+
     def test_suspend_failure_table_digest_and_exact_replay(self):
         self.assertEqual(self.command("suspend")["outcome"], "subject_unknown")
         self.register(["192.0.2.1"])

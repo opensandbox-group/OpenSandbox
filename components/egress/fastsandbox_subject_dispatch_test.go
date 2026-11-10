@@ -469,3 +469,63 @@ func TestFastSandboxSubjectDispatchWorkerFailedUnload(t *testing.T) {
 	require.Equal(t, &next, view.Target)
 	require.NotNil(t, view.Revision)
 }
+
+func TestFastSandboxSubjectDispatchSuspendFencesInflightACK(t *testing.T) {
+	s, h, fault := snapshotFaultHarness(t, "held", "suspend-ack")
+	mutationPersistence(t, s)
+	s.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	owner := actionsV2Owner(testUID, testFenceR, testFenceA, 1)
+	s.mu.Lock()
+	s.subjectDrain.deadline = 30 * time.Second // channels, not deadlines, order this test
+	s.mu.Unlock()
+	released, retryReleased := false, false
+	defer func() {
+		if !released {
+			close(fault.release)
+		}
+		if !retryReleased {
+			close(fault.retryRelease)
+		}
+	}()
+	wait := func(ch <-chan struct{}, message string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(10 * time.Second):
+			t.Fatal(message)
+		}
+	}
+	require.Equal(t, 200, doActionsV2(t, s, actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())).Code)
+	wait(fault.reached, "old Commit response not held")
+	subj := subject.FromSandboxUID(testUID)
+	before := latestSubjectSnapshot(t, s, testUID)
+	// Real fresh initialization transiently revokes authority and restores the
+	// same empty snapshot while the earlier applied Commit response is held.
+	require.Equal(t, 200, writerInit(t, s, owner, true))
+	require.Equal(t, before.digest, latestSubjectSnapshot(t, s, testUID).digest)
+	requireReadinessBlocked(t, s, testUID, testFenceR, testFenceA)
+	close(fault.release)
+	released = true
+	// Reaching the recovery Prepare proves the old ACK path and the queued
+	// Suspend have both completed; the recovery install has not applied yet.
+	wait(fault.retryReached, "post-suspend recovery Prepare not held")
+	s.mu.Lock()
+	_, acked := s.subjectDrain.acked[subj]
+	s.mu.Unlock()
+	// Check the real hook even on the red tree, where the old ACK reappears.
+	rec := readinessHook(t, s, testUID, testFenceR, testFenceA)
+	require.False(t, acked, "pre-suspend install must not resurrect its ACK; readiness=%d %s", rec.Code, rec.Body.String())
+	require.Equal(t, 503, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "subject snapshot not acknowledged")
+	fault.mu.Lock()
+	paths := make([]string, len(fault.events))
+	for i, event := range fault.events {
+		paths[i] = event.Path
+	}
+	fault.mu.Unlock()
+	require.Equal(t, []string{"/v2/subjects/register", "/v2/revisions/prepare", "/v2/revisions/commit", "/v2/subjects/suspend", "/v2/revisions/prepare"}, paths)
+	close(fault.retryRelease)
+	retryReleased = true
+	waitReadiness(t, s, testUID, testFenceR, testFenceA)
+	waitSubjectInstalled(t, h, lifecycleTarget(t, testUID, testFenceR, testFenceA), before)
+}
