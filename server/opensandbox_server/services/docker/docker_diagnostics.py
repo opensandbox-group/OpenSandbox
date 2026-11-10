@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any
+from typing import Any, Optional
 
 from docker.errors import DockerException
 from fastapi import HTTPException, status
@@ -92,6 +92,25 @@ class DockerDiagnosticsMixin:
             backend_type="docker",
             backend_identifiers={"containerId": container.id, "containerName": container.name},
         )
+
+    def get_egress_signing_jwk(self, sandbox_id: str) -> Optional[dict]:
+        """Sidecar caller-auth JWK from the egress container label (D5)."""
+        from docker.errors import NotFound as DockerNotFound
+
+        from opensandbox_server.services.constants import EGRESS_SIGNING_JWK_ANNOTATION
+        from opensandbox_server.services.egress_signing import parse_recorded_jwk
+
+        try:
+            sidecar = self.docker_client.containers.get(f"sandbox-egress-{sandbox_id}")
+        except DockerNotFound:
+            return None
+        recorded = (sidecar.labels or {}).get(EGRESS_SIGNING_JWK_ANNOTATION)
+        if not recorded:
+            return None
+        jwk = parse_recorded_jwk(recorded)
+        if jwk is None or jwk.get("kid") != sandbox_id:
+            return None
+        return jwk
 
     def get_sandbox_log_diagnostics(
         self,

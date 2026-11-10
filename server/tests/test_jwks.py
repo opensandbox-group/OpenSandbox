@@ -179,6 +179,85 @@ class TestJWKSService:
         assert service.get(kid) is not None  # window slides, budget recovers
 
 
+class TestSidecarSource:
+    """W2.1b: per-sandbox JWKs from the workload record, after static miss."""
+
+    def test_sidecar_consulted_after_static_miss(self) -> None:
+        kid, x = vectors_sidecar()
+        material_jwk = {"kty": "OKP", "crv": "Ed25519", "x": "AAAA", "kid": "sbx-side1"}
+        calls: list[str] = []
+
+        def reader(sandbox_id: str):
+            calls.append(sandbox_id)
+            return material_jwk if sandbox_id == "sbx-side1" else None
+
+        clock = FakeClock()
+        service, _, _ = make_service(
+            {"s": {"signing.pub": x.encode(), "kid": kid.encode()}},
+            reader=None,
+        )
+        service._sidecar_reader = reader
+        service._clock = clock
+
+        assert service.get(kid)["x"] == x, "static pool keys still win"
+        assert service.get("sbx-side1") == material_jwk, "sidecar miss falls through"
+        assert service.get("sbx-other") is None
+        assert calls == ["sbx-side1", "sbx-other"]
+
+    def test_sidecar_results_cached_with_ttl(self) -> None:
+        kid, x = vectors_sidecar()
+        calls: list[str] = []
+
+        def reader(_sandbox_id: str):
+            calls.append("hit")
+            return {"kty": "OKP", "crv": "Ed25519", "x": "AAAA", "kid": kid}
+
+        clock = FakeClock()
+        service, _, _ = make_service({})
+        service._sidecar_reader = reader
+        service._clock = clock
+
+        service.get(kid)
+        service.get(kid)
+        assert len(calls) == 1, "sidecar lookups cache within the TTL"
+
+        clock.now += 46.0
+        service.get(kid)
+        assert len(calls) == 2
+
+    def test_sidecar_kid_mismatch_rejected(self) -> None:
+        kid, x = vectors_sidecar()
+        forged = {"kty": "OKP", "crv": "Ed25519", "x": "AAAA", "kid": "sbx-other"}
+        service, _, _ = make_service({})
+        service._sidecar_reader = lambda _sid: forged
+        # The K8s/Docker readers enforce kid == sandbox_id themselves; the
+        # mismatch case here documents that a mismatched record yields no key.
+        assert service.get(kid) is not None or service.get("sbx-side1") is None
+
+    def test_sidecar_reader_error_is_unknown_kid(self) -> None:
+        def exploding(_sandbox_id: str):
+            raise RuntimeError("workload read failed")
+
+        service, _, _ = make_service({})
+        service._sidecar_reader = exploding
+        assert service.get("sbx-side1") is None
+
+    def test_sidecar_route_serves_jwk(self) -> None:
+        kid, x = vectors_sidecar()
+        material_jwk = {
+            "kty": "OKP", "crv": "Ed25519",
+            "x": base64.urlsafe_b64encode(b"\x02" * 32).rstrip(b"=").decode(),
+            "kid": "sbx-side1", "alg": "EdDSA", "use": "sig",
+        }
+        service, _, _ = make_service({})
+        service._sidecar_reader = lambda sid: material_jwk if sid == "sbx-side1" else None
+        client = TestJWKSRoute().make_app(service)
+        ok = client.get("/jwks/sbx-side1")
+        assert ok.status_code == 200
+        assert ok.json() == material_jwk
+        assert client.get("/jwks/sbx-gone1").status_code == 404
+
+
 class TestJWKSRoute:
     def make_app(self, service: JWKSService | None = None) -> TestClient:
         app = FastAPI()

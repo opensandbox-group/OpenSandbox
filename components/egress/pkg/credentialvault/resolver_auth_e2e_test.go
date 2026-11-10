@@ -161,3 +161,34 @@ func TestResolverCallerAuthEndToEnd(t *testing.T) {
 		require.Equal(t, "egress_credential_not_provisioned", resolverErr.Reason)
 	})
 }
+
+// TestResolverCallerAuthSidecarKidEndToEnd is the batch-2 (Stage 2b) variant:
+// the sidecar profile's kid is the sandbox's sandboxId — mixed-case
+// ULID-form. Exercises the widened grammar end to end on both sides of the
+// wire and proves recreation-scale key churn (a fresh keypair per sandbox)
+// verifies through the same JWKS file mechanism.
+func TestResolverCallerAuthSidecarKidEndToEnd(t *testing.T) {
+	if !stubSDKAvailable(t) {
+		t.Skip("python3 + opensandbox-resolver-auth are required for the caller-auth e2e")
+	}
+
+	const kid = "sbx_01HZYEXAMPLE"
+	pub, priv, err := ed25519.GenerateKey(cryptorand.Reader)
+	require.NoError(t, err)
+	origin := startEnforcingStubResolver(t, kid, pub)
+
+	client, err := NewResolverClient(ResolverClientOptions{
+		Endpoint:        origin,
+		Timeout:         5 * time.Second,
+		MaxConcurrency:  1,
+		TLSClientConfig: stubResolverTLSConfig(t),
+		Credentials: newResolverCredentialManager(
+			&ResolverCredentialSigner{key: priv, kid: kid},
+		),
+	})
+	require.NoError(t, err)
+
+	decision, err := client.Resolve(context.Background(), resolverTestInput())
+	require.NoError(t, err, "mixed-case sidecar kids must verify end to end")
+	require.Equal(t, "Bearer test-spi-signer", decision.Headers["authorization"])
+}

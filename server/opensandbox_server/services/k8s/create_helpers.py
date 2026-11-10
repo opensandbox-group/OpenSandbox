@@ -15,14 +15,16 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable, Dict, Optional
 
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig
 from opensandbox_server.services.constants import (
+    EGRESS_SIGNING_JWK_ANNOTATION,
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
+    OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY,
     OPENSANDBOX_LIFECYCLE,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
@@ -30,6 +32,7 @@ from opensandbox_server.services.constants import (
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_SNAPSHOT_ID_LABEL,
 )
+from opensandbox_server.services.egress_signing import generate_sidecar_signing_material
 from opensandbox_server.services.helpers import (
     split_egress_env,
     validate_upstream_proxy_request,
@@ -143,6 +146,24 @@ def _build_create_workload_context(
             otlp_endpoint=egress_config.otlp_endpoint,
             upstream_proxy=egress_config.upstream_proxy,
         )
+        if egress_config.resolver_caller_auth:
+            # OSEP-0025 D5 sidecar caller authentication: one keypair per
+            # sandbox. The private PEM rides the egress env (server-generated
+            # values win over any request-supplied entry), the public JWK is
+            # recorded on the workload for the JWKS endpoint, and nothing
+            # persists server-side. Sandbox recreation replaces the keypair.
+            material = generate_sidecar_signing_material(sandbox_id)
+            egress_settings = replace(
+                egress_settings,
+                env={
+                    **(egress_settings.env or {}),
+                    OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY: material.private_pem,
+                },
+            )
+            annotations = {
+                **(annotations or {}),
+                EGRESS_SIGNING_JWK_ANNOTATION: material.jwk_json,
+            }
 
     return _CreateWorkloadContext(
         labels=labels,

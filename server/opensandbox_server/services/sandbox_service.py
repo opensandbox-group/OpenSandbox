@@ -52,6 +52,15 @@ class SandboxService(ABC):
     def set_tenant_provider(self, provider: object) -> None:
         """Inject tenant provider (no-op for non-K8s implementations)."""
 
+    def get_egress_signing_jwk(self, sandbox_id: str) -> Optional[dict]:
+        """Return the per-sandbox egress caller-auth JWK, or None.
+
+        OSEP-0025 D5 sidecar source: backends read the durable record the
+        server wrote at sandbox creation (workload annotation / container
+        label). None means unknown kid — the JWKS endpoint answers 404.
+        """
+        return None
+
     def close(self) -> None:
         """Release service-owned background readers and connections."""
 

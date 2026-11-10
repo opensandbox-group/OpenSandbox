@@ -67,6 +67,12 @@ class SecretReader(Protocol):
     def __call__(self, name: str) -> Optional[Mapping[str, bytes]]: ...
 
 
+class SidecarKeyReader(Protocol):
+    """Returns the per-sandbox JWK recorded on a workload, or None."""
+
+    def __call__(self, sandbox_id: str) -> Optional[dict]: ...
+
+
 def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
@@ -87,6 +93,7 @@ class JWKSService:
         max_lookups: int = DEFAULT_MAX_LOOKUPS,
         window_seconds: float = DEFAULT_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        sidecar_reader: Optional[SidecarKeyReader] = None,
     ) -> None:
         self._secret_names = list(secret_names)
         self._reader = reader
@@ -94,11 +101,23 @@ class JWKSService:
         self._max_lookups = max_lookups
         self._window_seconds = window_seconds
         self._clock = clock
+        self._sidecar_reader = sidecar_reader
 
         self._lock = threading.Lock()
         self._keys: dict[str, dict] = {}
         self._refreshed_at: float = float("-inf")
         self._lookup_times: list[float] = []
+        # Sidecar (per-sandbox) lookups: one bounded per-kid TTL cache so a
+        # hot resolver does not hammer the workload read path, while memory
+        # stays capped across unbounded sandbox churn.
+        self._sidecar_cache: dict[str, tuple[Optional[dict], float]] = {}
+        self._sidecar_cache_cap = 4096
+
+    def set_sidecar_reader(self, reader: SidecarKeyReader) -> None:
+        """Install the per-sandbox source (wired from the sandbox service)."""
+        with self._lock:
+            self._sidecar_reader = reader
+            self._sidecar_cache.clear()
 
     @property
     def configured_secret_count(self) -> int:
@@ -108,7 +127,9 @@ class JWKSService:
         """Return the JWK for kid, or None when unknown.
 
         Raises :class:`RateLimited` when the lookup budget is exhausted.
-        Off-grammar kids return None without reading anything.
+        Off-grammar kids return None without reading anything. Lookup order:
+        fast-sandbox signing Secrets first, then the sidecar (per-sandbox)
+        source.
         """
         if not KID_GRAMMAR.match(kid):
             return None
@@ -118,7 +139,33 @@ class JWKSService:
             if now - self._refreshed_at > self._cache_ttl:
                 self._keys = self._refresh_locked()
                 self._refreshed_at = now
-            return self._keys.get(kid)
+            if kid in self._keys:
+                return self._keys[kid]
+            return self._sidecar_locked(kid, now)
+
+    def _sidecar_locked(self, kid: str, now: float) -> Optional[dict]:
+        reader = self._sidecar_reader
+        if reader is None:
+            return None
+        cached = self._sidecar_cache.get(kid)
+        if cached is not None and now - cached[1] <= self._cache_ttl:
+            return cached[0]
+        try:
+            jwk = reader(kid)
+        except Exception:
+            logger.warning(
+                "jwks: sidecar key read for %s failed; treated as unknown",
+                kid,
+                exc_info=True,
+            )
+            jwk = None
+        if len(self._sidecar_cache) >= self._sidecar_cache_cap:
+            # Bounded memory under sandbox churn: drop the oldest half
+            # (dict preserves insertion order; good enough for a cache).
+            for stale in list(self._sidecar_cache)[: len(self._sidecar_cache) // 2]:
+                del self._sidecar_cache[stale]
+        self._sidecar_cache[kid] = (jwk, now)
+        return jwk
 
     def _consume_budget(self, now: float) -> None:
         self._lookup_times = [
@@ -225,11 +272,25 @@ def build_k8s_secret_reader(
 
 
 def build_jwks_service_from_config(
-    kubernetes_config, core_v1_api: object
+    kubernetes_config,
+    core_v1_api: object,
+    sidecar_reader: Optional[SidecarKeyReader] = None,
 ) -> "JWKSService":
     """Wire the service from KubernetesRuntimeConfig (fast-sandbox profile)."""
     namespace = kubernetes_config.namespace or "default"
     return JWKSService(
         secret_names=kubernetes_config.egress_signing_key_secrets,
         reader=build_k8s_secret_reader(core_v1_api, namespace),
+        sidecar_reader=sidecar_reader,
+    )
+
+
+def build_sidecar_only_jwks_service(
+    sidecar_reader: SidecarKeyReader,
+) -> "JWKSService":
+    """Sidecar-only service for runtimes without signing Secrets (Docker)."""
+    return JWKSService(
+        secret_names=[],
+        reader=lambda _name: None,
+        sidecar_reader=sidecar_reader,
     )

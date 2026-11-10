@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
             k8s_client = K8sClient(app_config.kubernetes)
             logger.info("Validating secure runtime for Kubernetes backend")
 
-        if runtime_type == "kubernetes" and app_config.kubernetes.egress_signing_key_secrets:
+        if app_config.runtime.type == "kubernetes" and app_config.kubernetes.egress_signing_key_secrets:
             # OSEP-0025 D5: publish the fast-sandbox pool signing keys. Lazy
             # first read — an unreachable API server delays the first JWKS
             # response, not startup.
@@ -195,11 +195,21 @@ async def lifespan(app: FastAPI):
             app.state.jwks_service = build_jwks_service_from_config(
                 app_config.kubernetes,
                 k8s_client.get_core_v1_api(),
+                sidecar_reader=sandbox_service.get_egress_signing_jwk,
             )
             logger.info(
                 "JWKS publication enabled for %d egress signing Secret(s)",
                 len(app_config.kubernetes.egress_signing_key_secrets),
             )
+        elif app_config.egress and app_config.egress.resolver_caller_auth:
+            # Sidecar-only publication (e.g. Docker runtime): no static pool
+            # Secrets, the per-sandbox workload records are the sole source.
+            from opensandbox_server.services.jwks import build_sidecar_only_jwks_service
+
+            app.state.jwks_service = build_sidecar_only_jwks_service(
+                sandbox_service.get_egress_signing_jwk
+            )
+            logger.info("JWKS publication enabled for sidecar signing keys")
 
         await validate_secure_runtime_on_startup(
             app_config,
