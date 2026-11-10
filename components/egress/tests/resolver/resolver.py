@@ -27,7 +27,7 @@ Transports:
 
 Caller authentication, opt-in via ``--require-credential`` (HTTPS transport
 only): every resolve call must carry a valid ``OpenSandbox-Egress-Credential``
-JWT, verified by the ``opensandbox-resolver-auth`` SDK against a JWKS. Keys
+JWT, verified by the ``opensandbox`` SDK against a JWKS. Keys
 come from a live lifecycle server (``--jwks-base URL``) or a static mapping
 file (``--jwks-file PATH``). Without the flag the stub verifies nothing —
 the behavior every existing egress test relies on.
@@ -200,10 +200,10 @@ class _StaticJWKSTransport:
 def build_caller_verifier(options: argparse.Namespace) -> Any:
     """Construct the opt-in caller-credential verifier (requires the SDK)."""
     try:
-        from opensandbox_resolver_auth import CredentialVaultCallerAuth
+        from opensandbox.resolver_auth import CredentialVaultCallerAuth
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise SystemExit(
-            "--require-credential needs the opensandbox-resolver-auth package"
+            "--require-credential needs the opensandbox SDK"
         ) from exc
     return CredentialVaultCallerAuth(
         jwks_base=options.jwks_base or "https://static-jwks.invalid",

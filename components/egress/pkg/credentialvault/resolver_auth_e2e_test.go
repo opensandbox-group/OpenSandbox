@@ -42,10 +42,10 @@ import (
 //   - a TCP client with no provisioned signer fails closed before the wire.
 
 // stubSDKEnv returns the PYTHONPATH that makes resolver.py's lazy
-// opensandbox_resolver_auth import resolve to the in-repo SDK source.
+// opensandbox.resolver_auth import resolve to the in-repo SDK source.
 func stubSDKEnv(t *testing.T) []string {
 	t.Helper()
-	sdkSrc, err := filepath.Abs(filepath.Join("..", "..", "..", "..", "sdks", "resolver-auth", "python", "src"))
+	sdkSrc, err := filepath.Abs(filepath.Join("..", "..", "..", "..", "sdks", "sandbox", "python", "src"))
 	require.NoError(t, err)
 	return []string{"PYTHONPATH=" + sdkSrc}
 }
@@ -58,7 +58,7 @@ func stubSDKAvailable(t *testing.T) bool {
 	if err != nil {
 		return false
 	}
-	probe := exec.Command(python, "-c", "import opensandbox_resolver_auth")
+	probe := exec.Command(python, "-c", "import opensandbox.resolver_auth")
 	probe.Env = append(os.Environ(), stubSDKEnv(t)...)
 	return probe.Run() == nil
 }
@@ -102,7 +102,7 @@ func startEnforcingStubResolver(t *testing.T, kid string, pub ed25519.PublicKey)
 
 func TestResolverCallerAuthEndToEnd(t *testing.T) {
 	if !stubSDKAvailable(t) {
-		t.Skip("python3 + opensandbox-resolver-auth are required for the caller-auth e2e")
+		t.Skip("python3 + the opensandbox SDK are required for the caller-auth e2e")
 	}
 
 	const kid = "pool-e2e:v1"
@@ -165,7 +165,7 @@ func TestResolverCallerAuthEndToEnd(t *testing.T) {
 // sandboxIds (mixed-case ULIDs) — exercises the widened grammar end to end.
 func TestResolverCallerAuthSidecarKidEndToEnd(t *testing.T) {
 	if !stubSDKAvailable(t) {
-		t.Skip("python3 + opensandbox-resolver-auth are required for the caller-auth e2e")
+		t.Skip("python3 + the opensandbox SDK are required for the caller-auth e2e")
 	}
 
 	const kid = "sbx_01HZYEXAMPLE"

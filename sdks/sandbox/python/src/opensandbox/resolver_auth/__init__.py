@@ -1,3 +1,4 @@
+#
 # Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,14 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""OpenSandbox credential-vault resolver caller authentication SDK
-(OSEP-0025): the verification side a header-resolver needs.
+#
+"""Credential-vault resolver caller authentication (verification side).
 
 Primary entry point: :class:`CredentialVaultCallerAuth` — one instance per
-resolver process, one call per resolve request. The lower-level
-:func:`verify_credential` performs the same checks offline when the caller
-supplies the JWK itself.
+resolver process, one :meth:`CredentialVaultCallerAuth.verify_caller` call
+per resolve request.
 """
 
 from .client import CredentialVaultCallerAuth

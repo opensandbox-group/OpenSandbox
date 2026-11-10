@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from opensandbox_resolver_auth import VerifyError, VerifierConfig, verify_credential
+from opensandbox.resolver_auth import VerifyError, VerifierConfig, verify_credential
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 VECTORS = (
@@ -53,7 +53,7 @@ def test_vectors_present(data) -> None:
 
 
 def test_contract_constants_sync(data) -> None:
-    from opensandbox_resolver_auth import (
+    from opensandbox.resolver_auth import (
         CREDENTIAL_HEADER,
         DEFAULT_ISSUER,
         KID_GRAMMAR,

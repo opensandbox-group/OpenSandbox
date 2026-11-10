@@ -58,11 +58,11 @@ from opensandbox_server.services.constants import (
 )
 
 # The resolver SDK is not a server dependency; import it from the repo tree.
-_SDK_SRC = Path(__file__).resolve().parents[1].parent / "sdks" / "resolver-auth" / "python" / "src"
+_SDK_SRC = Path(__file__).resolve().parents[1].parent / "sdks" / "sandbox" / "python" / "src"
 if _SDK_SRC.is_dir():
     sys.path.insert(0, str(_SDK_SRC))
 
-from opensandbox_resolver_auth import CredentialVaultCallerAuth, VerifyError  # noqa: E402
+from opensandbox.resolver_auth import CredentialVaultCallerAuth, VerifyError  # noqa: E402
 
 RESOLVER_ORIGIN = "https://resolver.internal:8443"
 

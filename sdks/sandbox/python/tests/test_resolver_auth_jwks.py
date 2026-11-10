@@ -22,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from opensandbox_resolver_auth import VerifyError, VerifierConfig
-from opensandbox_resolver_auth.jwks import JWKSClient
+from opensandbox.resolver_auth import VerifyError, VerifierConfig
+from opensandbox.resolver_auth.jwks import JWKSClient
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 VECTORS = (

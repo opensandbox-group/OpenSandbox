@@ -383,7 +383,7 @@ Only `signing.key` is mounted into the egress. Without a loadable key, vault wri
 4. **Verify on the resolver** with the Python SDK:
 
 ```python
-from opensandbox_resolver_auth import CredentialVaultCallerAuth
+from opensandbox.resolver_auth import CredentialVaultCallerAuth
 
 caller_auth = CredentialVaultCallerAuth(
     jwks_base="https://<lifecycle-server>/credential-vault",

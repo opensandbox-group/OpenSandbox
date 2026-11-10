@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from opensandbox_resolver_auth import (
+from opensandbox.resolver_auth import (
     CREDENTIAL_HEADER,
     CredentialVaultCallerAuth,
     VerifyError,
