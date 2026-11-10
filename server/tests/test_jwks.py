@@ -171,12 +171,13 @@ class TestJWKSService:
             max_lookups=3,
             window_seconds=60.0,
         )
-        for _ in range(3):
-            service.get(kid)
+        # Distinct unknown kids each cost a backend lookup (sidecar miss).
+        service.get("sbx-burn000")  # refresh + miss = 2 of 3
+        service.get("sbx-burn001")  # miss = 3 of 3
         with pytest.raises(RateLimited):
-            service.get(kid)
+            service.get("sbx-burn002")
         clock.now += 61.0
-        assert service.get(kid) is not None  # window slides, budget recovers
+        assert service.get("sbx-over1") is None  # window slides, budget recovers
 
 
 class TestSidecarSource:
@@ -248,11 +249,102 @@ class TestSidecarSource:
         assert ok.json() == material_jwk
         assert client.get("/credential-vault/jwks/sbx-gone1").status_code == 404
 
+    def test_cache_hits_do_not_consume_backend_budget(self) -> None:
+        """One caller hammering unknown kids must not starve cached-key
+        reads: hits and throttle are free of the backend budget."""
+        kid, x = vectors_sidecar()
+        service, _, _ = make_service(
+            {"s": {"signing.pub": x.encode(), "kid": kid.encode()}},
+            max_lookups=2,
+        )
+        # First read populates the static cache (one refresh, one budgeted
+        # lookup already consumed by the refresh itself).
+        assert service.get(kid) is not None
+        # Unknown kids burn the backend budget (sidecar reader unset, so
+        # each miss costs a lookup slot).
+        for i in range(4):
+            try:
+                service.get(f"sbx-flood{i:03d}")
+            except RateLimited:
+                break
+        # The cached key must still be readable despite the exhausted
+        # backend budget.
+        assert service.get(kid) is not None
+
+
+class TestK8sSecretWireFormat:
+    """build_k8s_secret_reader must decode V1Secret.data's base64 layer."""
+
+    def _core_api(self, data: dict):
+        class FakeSecret:
+            pass
+
+        secret = FakeSecret()
+        secret.data = data
+
+        class FakeApi:
+            def read_namespaced_secret(self, name, namespace):
+                return secret
+
+        return FakeApi()
+
+    def test_wire_format_secret_decodes(self) -> None:
+        import base64 as b64
+
+        from opensandbox_server.services.jwks import build_jwks_service_from_config
+
+        kid = "pool-a:v2"
+        raw_x = b64.urlsafe_b64encode(b"\x07" * 32).rstrip(b"=").decode()
+        wire = {
+            "signing.pub": b64.b64encode(raw_x.encode()).decode(),
+            "kid": b64.b64encode(kid.encode()).decode(),
+        }
+        service = build_jwks_service_from_config(
+            type("C", (), {"namespace": "ns", "egress_signing_key_secrets": ["s"]})(),
+            self._core_api(wire),
+        )
+        jwk = service.get(kid)
+        assert jwk is not None, "the Kubernetes base64 layer must be decoded"
+        assert jwk["x"] == raw_x
+        assert jwk["kid"] == kid
+
+    def test_invalid_base64_entry_is_rejected(self) -> None:
+        from opensandbox_server.services.jwks import build_jwks_service_from_config
+
+        wire = {"signing.pub": "!!!not-base64!!!", "kid": "cG9vbC1hOnYy"}
+        service = build_jwks_service_from_config(
+            type("C", (), {"namespace": "ns", "egress_signing_key_secrets": ["s"]})(),
+            self._core_api(wire),
+        )
+        assert service.get("pool-a:v2") is None
+
+
+class TestCompositeDelegation:
+    """The composite service must delegate the sidecar JWK reader to the
+    backend that owns the workload record (review P1)."""
+
+    def test_delegates_to_kubernetes_for_non_fsb(self) -> None:
+        from unittest.mock import MagicMock
+
+        from opensandbox_server.services.composite_service import CompositeSandboxService
+
+        kubernetes = MagicMock()
+        kubernetes.get_egress_signing_jwk.return_value = {"kty": "OKP"}
+        fsb = MagicMock()
+        fsb.get_egress_signing_jwk.return_value = None
+        composite = CompositeSandboxService(kubernetes, fsb)
+
+        assert composite.get_egress_signing_jwk("sbx-01K8CREATE") == {"kty": "OKP"}
+        kubernetes.get_egress_signing_jwk.assert_called_once_with("sbx-01K8CREATE")
+        assert composite.get_egress_signing_jwk("fsb-pool-a") is None
+        fsb.get_egress_signing_jwk.assert_not_called()
+
 
 class TestJWKSRoute:
     def make_app(self, service: JWKSService | None = None) -> TestClient:
         app = FastAPI()
         app.include_router(jwks_router)
+        app.include_router(jwks_router, prefix="/v1")
         if service is not None:
             app.state.jwks_service = service
         return TestClient(app)
@@ -278,6 +370,8 @@ class TestJWKSRoute:
         assert client.get("/credential-vault/jwks/..%2Fescape").status_code == 404
 
     def test_rate_limited_is_429(self) -> None:
+        """Backend-budget exhaustion (unknown-kid flooding) answers 429;
+        cached-key reads never consume that budget and never 429."""
         kid, x = vectors_sidecar()
         service, _, _ = make_service(
             {"s": {"signing.pub": x.encode(), "kid": kid.encode()}},
@@ -285,10 +379,22 @@ class TestJWKSRoute:
         )
         client = self.make_app(service)
         assert client.get(f"/credential-vault/jwks/{kid}").status_code == 200
+        # Unknown kids burn the backend budget...
+        statuses = [client.get(f"/credential-vault/jwks/sbx-flood{i:03d}").status_code for i in range(3)]
+        assert 429 in statuses
+        # ...while the cached key keeps serving.
         assert client.get(f"/credential-vault/jwks/{kid}").status_code == 200
-        assert client.get(f"/credential-vault/jwks/{kid}").status_code == 429
 
     def test_endpoint_is_public(self) -> None:
-        """No API key required (public-keys-only posture, OSEP-0025)."""
+        """No API key required (public-keys-only posture)."""
         assert "/credential-vault/jwks" in AuthMiddleware.EXEMPT_PATHS
         assert "/v1/credential-vault/jwks" in AuthMiddleware.EXEMPT_PATHS
+
+    def test_served_under_both_root_and_v1(self) -> None:
+        kid, x = vectors_sidecar()
+        service, _, _ = make_service(
+            {"s": {"signing.pub": x.encode(), "kid": kid.encode()}}
+        )
+        client = self.make_app(service)
+        assert client.get(f"/credential-vault/jwks/{kid}").status_code == 200
+        assert client.get(f"/v1/credential-vault/jwks/{kid}").status_code == 200

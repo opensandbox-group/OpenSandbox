@@ -19,6 +19,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -176,4 +177,21 @@ func TestResolverCredentialManagerRejectsEmptyInputs(t *testing.T) {
 	_, err = manager.Credential("sub", "")
 	require.ErrorContains(t, err, "non-empty")
 	require.Equal(t, int64(0), mints.Load())
+}
+
+// TestResolverCredentialManagerBounded: the process-wide cache is capped —
+// past the limit the oldest half is evicted and evicted pairs re-mint on
+// next use.
+func TestResolverCredentialManagerBounded(t *testing.T) {
+	now := time.Unix(1790000000, 0)
+	var mints atomic.Int64
+	manager := countingManager(&now, &mints)
+	manager.cap = 8
+
+	for i := 0; i < 20; i++ {
+		_, err := manager.Credential(fmt.Sprintf("sbx-churn%02d", i), "credential-resolver@resolver.internal")
+		require.NoError(t, err)
+	}
+	require.Len(t, manager.creds, 8, "cache must stay bounded under churn")
+	require.LessOrEqual(t, mints.Load(), int64(20+8), "evictions cause re-mints, not growth")
 }

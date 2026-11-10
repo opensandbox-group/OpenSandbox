@@ -318,6 +318,7 @@ app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")
 app.include_router(policy_router, prefix="/v1")
 app.include_router(credential_vault_router, prefix="/v1")
+app.include_router(jwks_router, prefix="/v1")
 
 DEFAULT_ERROR_CODE = "GENERAL::UNKNOWN_ERROR"
 DEFAULT_ERROR_MESSAGE = "An unexpected error occurred."

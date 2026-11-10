@@ -23,17 +23,24 @@ import (
 // resolverCredentialManager caches one credential per (subject, resolver
 // origin) and re-mints at 80% of the TTL, so no request meets an expired
 // credential. Implements CredentialProvider; minting is lazy on first
-// resolve and a restart starts empty (fresh jti immediately).
+// resolve and a restart starts empty (fresh jti immediately). The cache is
+// bounded: shared-pool egresses see unbounded sandbox churn, so past the
+// cap the oldest half is dropped (evicted entries simply re-mint on next
+// use — µs-scale work).
 type resolverCredentialManager struct {
 	mint func(subject, audience string, now time.Time) (string, error)
 	now  func() time.Time
 
 	mu    sync.Mutex
 	creds map[credentialCacheKey]cachedCredential
+	cap   int
 }
 
 // credentialRefreshFraction is the re-mint point within the TTL window.
 const credentialRefreshFraction = 0.8
+
+// credentialCacheCap bounds the process-wide credential cache.
+const credentialCacheCap = 4096
 
 type credentialCacheKey struct {
 	subject  string
@@ -49,10 +56,15 @@ var _ CredentialProvider = (*resolverCredentialManager)(nil)
 
 // newResolverCredentialManager binds the manager to a loaded signer.
 func newResolverCredentialManager(signer *ResolverCredentialSigner) *resolverCredentialManager {
+	return newResolverCredentialManagerWithCap(signer, credentialCacheCap)
+}
+
+func newResolverCredentialManagerWithCap(signer *ResolverCredentialSigner, cap int) *resolverCredentialManager {
 	return &resolverCredentialManager{
 		mint:  signer.Mint,
 		now:   time.Now,
 		creds: make(map[credentialCacheKey]cachedCredential),
+		cap:   cap,
 	}
 }
 
@@ -76,6 +88,19 @@ func (m *resolverCredentialManager) Credential(subject, audience string) (string
 	jwt, err := m.mint(subject, audience, now)
 	if err != nil {
 		return "", err
+	}
+	if len(m.creds) >= m.cap {
+		// Bounded memory under sandbox churn: drop the oldest half (map
+		// iteration order in Go is randomized, which is good enough for a
+		// cache — evicted pairs re-mint on next use).
+		drop := len(m.creds) / 2
+		for key := range m.creds {
+			if drop == 0 {
+				break
+			}
+			delete(m.creds, key)
+			drop--
+		}
 	}
 	m.creds[key] = cachedCredential{jwt: jwt, mintedAt: now}
 	return jwt, nil

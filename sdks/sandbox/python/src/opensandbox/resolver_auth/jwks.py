@@ -16,11 +16,13 @@
 
 Keys come from ``{jwks_base}/jwks/{kid}`` on the lifecycle server. A cached
 key is re-validated at most hourly, which is what makes rotation a working
-revocation: a retired kid disappears and the next refresh rejects its
-credentials. Unknown-but-well-formed kids get a bounded negative cache, and
-a per-process fetch budget keeps kid spraying from amplifying into server
-lookups. The base URL comes from operator configuration only, and TLS
-verification is never disabled.
+revocation. Unknown-but-well-formed kids get a bounded negative cache;
+transient server failures (rate limit, 5xx, network) are NOT cached as
+absence — they surface as fetch failures and allow an immediate retry on
+the next call. The base URL comes from operator configuration only, TLS
+verification is never disabled, and network I/O never runs under the cache
+lock (per-kid single-flight instead), so one slow fetch cannot block
+verification of unrelated cached keys.
 """
 
 from __future__ import annotations
@@ -47,6 +49,10 @@ DEFAULT_NEGATIVE_TTL_SECONDS = 300.0
 DEFAULT_MAX_FETCHES = 60
 DEFAULT_WINDOW_SECONDS = 60.0
 
+#: Hard cap on cached kids (both maps); the oldest half is dropped when
+#: exceeded, bounding memory under sandbox churn.
+DEFAULT_CACHE_CAP = 4096
+
 
 class Transport(Protocol):
     """Fetches a URL; returns ``(status_code, body_bytes)``. Test seam."""
@@ -65,6 +71,14 @@ class _HTTPXTransport:
         return response.status_code, response.content
 
 
+class JWKSFetchError(Exception):
+    """A transient JWKS fetch failure (rate limit, 5xx, network).
+
+    Distinct from an authoritative unknown kid: callers may retry
+    immediately, and no negative-cache entry is written.
+    """
+
+
 class JWKSClient:
     """Bounded-caching JWKS client plus a one-call verify convenience."""
 
@@ -79,6 +93,7 @@ class JWKSClient:
         max_fetches: int = DEFAULT_MAX_FETCHES,
         window_seconds: float = DEFAULT_WINDOW_SECONDS,
         fetch_timeout: float = 5.0,
+        cache_cap: int = DEFAULT_CACHE_CAP,
     ) -> None:
         if not config.jwks_base.startswith("https://"):
             raise ValueError(
@@ -92,10 +107,15 @@ class JWKSClient:
         self._max_fetches = max_fetches
         self._window_seconds = window_seconds
         self._fetch_timeout = fetch_timeout
+        self._cache_cap = cache_cap
 
+        # The cache lock guards metadata only; network I/O happens outside
+        # it, under per-kid single-flight locks, so a slow fetch for one kid
+        # never blocks cached-key verification for others.
         self._lock = threading.Lock()
         self._keys: dict[str, tuple[Mapping[str, Any], float]] = {}
         self._misses: dict[str, float] = {}
+        self._inflight: dict[str, threading.Lock] = {}
         self._fetch_times: list[float] = []
         self._total_fetches = 0
 
@@ -113,12 +133,18 @@ class JWKSClient:
         Returns the egress-attested subject; raises :class:`VerifyError`
         (map to HTTP 401) on any failure, including first-contact fetch
         failures — known keys keep verifying offline when the server is
-        unreachable.
+        unreachable. Transient fetch failures raise VerifyError with code
+        ``unknown_kid`` but are never cached as absence.
         """
         if now is None:
             now = int(self._now())
         kid = _header_kid(credential)
-        jwk = self._key_for_kid(kid)
+        try:
+            jwk = self._key_for_kid(kid)
+        except JWKSFetchError as exc:
+            # Transient backend failure: deny this request (401) but leave
+            # no negative-cache entry, so the next request retries.
+            raise VerifyError("unknown_kid", str(exc)) from exc
         return verify_credential(
             credential,
             jwk=jwk,
@@ -129,7 +155,7 @@ class JWKSClient:
 
     @property
     def fetch_count(self) -> int:
-        """Total JWKS fetches ever performed (test/observability seam)."""
+        """Total JWKS fetch attempts (test/observability seam)."""
         with self._lock:
             return self._total_fetches
 
@@ -140,59 +166,99 @@ class JWKSClient:
             # Local rejection: no fetch, no cache pollution.
             raise VerifyError("kid_grammar", "kid does not match the platform identifier grammar")
 
-        now = self._now()
+        # Fast path under the metadata lock only.
         with self._lock:
             cached = self._keys.get(kid)
-            if cached is not None:
-                jwk, fetched_at = cached
-                if now - fetched_at <= self._max_cache_age:
-                    return jwk
-                # Bounded staleness: the entry stays usable while a refresh
-                # is attempted, and disappears once the refresh misses.
-                refreshed = self._fetch_locked(kid, now)
-                if refreshed is None:
-                    del self._keys[kid]
-                    self._misses[kid] = now
-                    return None
-                return refreshed
-
+            if cached is not None and self._now() - cached[1] <= self._max_cache_age:
+                return cached[0]
             missed_at = self._misses.get(kid)
-            if missed_at is not None and now - missed_at <= self._negative_ttl:
+            if missed_at is not None and self._now() - missed_at <= self._negative_ttl:
                 return None
+            flight = self._inflight.setdefault(kid, threading.Lock())
+        with flight:
+            # Single-flight recheck after acquiring: another thread may have
+            # completed the fetch while we waited.
+            now = self._now()
+            with self._lock:
+                cached = self._keys.get(kid)
+                if cached is not None and now - cached[1] <= self._max_cache_age:
+                    return cached[0]
+                missed_at = self._misses.get(kid)
+                if missed_at is not None and now - missed_at <= self._negative_ttl:
+                    return None
+                self._reserve_budget(now)
+            # Network I/O outside every shared lock.
+            try:
+                status, body = self._transport(
+                    f"{self._config.jwks_base.rstrip('/')}/jwks/{kid}",
+                    timeout=self._fetch_timeout,
+                )
+            except Exception as exc:
+                # Failed attempts still consume budget — otherwise a down
+                # JWKS service would be retried without bound.
+                with self._lock:
+                    self._fetch_times.append(now)
+                    self._total_fetches += 1
+                raise JWKSFetchError(f"JWKS fetch failed: {exc}") from exc
+            with self._lock:
+                self._fetch_times.append(now)
+                self._total_fetches += 1
+            if status == 200:
+                jwk = self._parse_jwk(body)
+                with self._lock:
+                    self._record(self._keys, kid, (jwk, now))
+                    self._misses.pop(kid, None)
+                    self._sweep_locked(now)
+                return jwk
+            if status == 404:
+                # Authoritative absence: safe to negative-cache.
+                with self._lock:
+                    self._record(self._misses, kid, now)
+                    self._keys.pop(kid, None)
+                    self._sweep_locked(now)
+                return None
+            # Rate limit or backend failure: transient, not absence.
+            raise JWKSFetchError(f"JWKS fetch returned HTTP {status}")
 
-            jwk = self._fetch_locked(kid, now)
-            if jwk is None:
-                self._misses[kid] = now
-            else:
-                self._misses.pop(kid, None)
-            return jwk
+    def _sweep_locked(self, now: float) -> None:
+        """Drop expired entries from both maps so inactive kids are
+        reclaimed, not just capped by eviction."""
+        for stale_kid, missed_at in list(self._misses.items()):
+            if now - missed_at > self._negative_ttl:
+                del self._misses[stale_kid]
+        for stale_kid, (_jwk, fetched_at) in list(self._keys.items()):
+            if now - fetched_at > self._max_cache_age:
+                del self._keys[stale_kid]
 
-    def _fetch_locked(self, kid: str, now: float) -> Mapping[str, Any] | None:
-        # Caller holds the lock; a single flight also dedupes concurrent
-        # fetches for the same kid.
-        self._fetch_times = [t for t in self._fetch_times if now - t < self._window_seconds]
+    def _reserve_budget(self, now: float) -> None:
+        """Caller holds the metadata lock; reserves one fetch slot."""
+        self._fetch_times = [
+            t for t in self._fetch_times if now - t < self._window_seconds
+        ]
         if len(self._fetch_times) >= self._max_fetches:
             raise VerifyError(
                 "unknown_kid", "JWKS fetch budget exhausted; retry later"
             )
-        url = f"{self._config.jwks_base.rstrip('/')}/jwks/{kid}"
-        try:
-            status, body = self._transport(url, timeout=self._fetch_timeout)
-        except Exception as exc:
-            # First-contact fail-closed: known keys still verify offline.
-            raise VerifyError("unknown_kid", f"JWKS fetch failed: {exc}") from exc
-        self._fetch_times.append(now)
-        self._total_fetches += 1
-        if status != 200:
-            return None
+        # Slot recorded after the transport returns (or raises); the
+        # reservation itself just refuses when the window is already full.
+
+    def _parse_jwk(self, body: bytes) -> Mapping[str, Any]:
         try:
             jwk = json.loads(body)
         except Exception as exc:
-            raise VerifyError("unknown_kid", "JWKS response is not JSON") from exc
+            raise JWKSFetchError("JWKS response is not JSON") from exc
         if not isinstance(jwk, dict) or jwk.get("kty") != "OKP" or "x" not in jwk:
-            raise VerifyError("unknown_kid", "JWKS response is not an Ed25519 JWK")
-        self._keys[kid] = (jwk, now)
+            raise JWKSFetchError("JWKS response is not an Ed25519 JWK")
         return jwk
+
+    def _record(self, store: dict, kid: str, value: Any) -> None:
+        """Insert with bounded eviction: past the cap, drop the oldest half
+        (dict preserves insertion order) — bounds memory under sandbox
+        churn."""
+        store[kid] = value
+        if len(store) > self._cache_cap:
+            for stale in list(store)[: len(store) // 2]:
+                del store[stale]
 
 
 def _header_kid(credential: str) -> str:

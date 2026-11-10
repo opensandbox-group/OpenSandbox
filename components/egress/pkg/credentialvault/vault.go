@@ -571,6 +571,24 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 // validateExchangeAdmission fails closed on exchange-sourced credentials:
 // the live revision runtime never supports them; other stores require the
 // resolver operator configuration (D13). Inline-only vaults are unaffected.
+// CallerAuthAdmissionError marks an exchange-vault rejection caused by the
+// missing or unloadable caller-authentication signer. Reload paths use it
+// to distinguish "the vault itself is fine but this egress cannot serve its
+// https:// bindings" (fail closed with state-unknown) from ordinary
+// validation rejections (degraded, healable by a relay write).
+type CallerAuthAdmissionError struct {
+	Detail string
+}
+
+func (e *CallerAuthAdmissionError) Error() string { return e.Detail }
+
+// IsCallerAuthRejection reports whether err is (or wraps) a
+// CallerAuthAdmissionError.
+func IsCallerAuthRejection(err error) bool {
+	var target *CallerAuthAdmissionError
+	return errors.As(err, &target)
+}
+
 func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	hasExchange := false
 	hasTCPExchange := false
@@ -596,9 +614,9 @@ func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	// socket permissions as its boundary and stays writable without one.
 	if hasTCPExchange && !v.resolverAuth.Ready() {
 		if v.resolverAuth.Problem != nil {
-			return fmt.Errorf("https exchange credentials are not supported: resolver caller-authentication signing key is configured but unloadable: %v", v.resolverAuth.Problem)
+			return &CallerAuthAdmissionError{Detail: fmt.Sprintf("https exchange credentials are not supported: resolver caller-authentication signing key is configured but unloadable: %v", v.resolverAuth.Problem)}
 		}
-		return fmt.Errorf("https exchange credentials are not supported without the resolver caller-authentication signing key (%s or %s)", constants.EnvCredentialResolverSigningKeyDir, constants.EnvCredentialResolverSigningKey)
+		return &CallerAuthAdmissionError{Detail: fmt.Sprintf("https exchange credentials are not supported without the resolver caller-authentication signing key (%s or %s)", constants.EnvCredentialResolverSigningKeyDir, constants.EnvCredentialResolverSigningKey)}
 	}
 	return nil
 }

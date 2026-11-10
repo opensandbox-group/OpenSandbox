@@ -397,6 +397,17 @@ func TestVaultPersistApplyFailureRollsBackFile(t *testing.T) {
 const reloadVaultBody = `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 	`"bindings":[{"name":"api","match":{"hosts":["api.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
 
+// A v1 vault with an https:// exchange credential mixed with inline
+// material: reloading it without a provisioned signer must keep the subject
+// fail-closed (_active answers 503 state-unknown) instead of presenting
+// absence, which the pull addon would treat as "no vault" and forward
+// unauthenticated. The inline/unix material is not silently lost either.
+const reloadHTTPSExchangeVaultBody = `{"credentials":[` +
+	`{"name":"tok","source":{"type":"inline","value":"sekret"}},` +
+	`{"name":"spi","source":{"type":"exchange","endpoint":"https://resolver.internal:8443"}}],` +
+	`"bindings":[{"name":"api","match":{"hosts":["api.example.com"]},"auth":{"type":"bearer","credential":"tok"}},` +
+	`{"name":"spi-api","match":{"hosts":["api.example.com"],"methods":["GET"],"paths":["/v1/*"]},"auth":{"credential":"spi"}}]}`
+
 // Construction restricts a dedicated 0777 emptyDir volume root (an
 // untrusted ancestor for the atomic machinery), leaves one holding foreign
 // entries alone, and keeps already-restrictive roots as they are.
@@ -467,6 +478,28 @@ func TestVaultPersistReloadAtSetBinding(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"revision":6`)
 	vf, _ := decodeFile(t, h.fileFor(vaultTestUID))
 	assert.Equal(t, int64(6), vf.Revision)
+}
+
+// TestVaultPersistHTTPSExchangeWithoutSignerFailsClosed: a v1 vault with an
+// https:// exchange credential, reloaded by an egress without a provisioned
+// signer, must surface as vault-state-unknown (503) — never as absence.
+func TestVaultPersistHTTPSExchangeWithoutSignerFailsClosed(t *testing.T) {
+	h := newVaultPersistHarness(t)
+
+	h.seedVaultFile(vaultTestUID, testFenceR, testFenceA, 5, reloadHTTPSExchangeVaultBody)
+	h.readySubject(t, vaultTestUID, vaultTestIP)
+
+	req := httptest.NewRequest(http.MethodGet, "/credential-vault/_active?clientIp="+vaultTestIP, nil)
+	rec := httptest.NewRecorder()
+	h.srv.handleCredentialVaultActive(rec, req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"a signer-rejected v1 vault must fail closed, not read as absent")
+	assert.Contains(t, rec.Body.String(), "unknown")
+
+	// Relay reads stay blocked too — the file is kept until a signer (or a
+	// relay write) heals the slice.
+	rec = doVault(t, h.srv, http.MethodGet, vaultTestUID, "", "")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
 func TestVaultPersistStaleIncarnationDiscarded(t *testing.T) {

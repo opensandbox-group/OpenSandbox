@@ -695,7 +695,14 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 				log.Infof("subject %s: deleted v2 vault state reloaded (stateRevision %d)", subj, vf.StateRevision)
 			} else if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 				entry.degraded = fmt.Sprintf("vault file reload rejected: %v", err)
-				entry.vaultStateUnknown = vf.Version >= credentialvault.VaultFileVersion2
+				// A caller-auth rejection means the vault itself is sound
+				// but this egress cannot serve its https:// bindings: keep
+				// the subject fail-closed (state unknown, _active 503)
+				// instead of presenting absence, which the pull addon would
+				// treat as "no vault" and forward unauthenticated. Other
+				// rejections stay degraded-but-healable by a relay write.
+				entry.vaultStateUnknown = vf.Version >= credentialvault.VaultFileVersion2 ||
+					credentialvault.IsCallerAuthRejection(err)
 				log.Warnf("subject %s: %s (file kept; a policy/vault relay write heals the slice)", subj, entry.degraded)
 			} else {
 				log.Infof("subject %s: vault reloaded from file (version %d, revision %d, incarnation %s)", subj, vf.Version, vf.Revision, vf.Incarnation)

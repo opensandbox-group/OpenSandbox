@@ -97,6 +97,11 @@ class JWKSService:
         self._lock = threading.Lock()
         self._keys: dict[str, dict] = {}
         self._refreshed_at: float = float("-inf")
+        # Two separate bounds: the caller throttle (every request, anonymous
+        # endpoint) and the backend budget (only work that actually reaches a
+        # Secret read or a workload lookup).
+        self._throttle_times: list[float] = []
+        self._max_throttle = max_lookups * 10
         self._lookup_times: list[float] = []
         # Sidecar (per-sandbox) lookups: one bounded per-kid TTL cache so a
         # hot resolver does not hammer the workload read path, while memory
@@ -117,30 +122,36 @@ class JWKSService:
     def get(self, kid: str) -> Optional[dict]:
         """Return the JWK for kid, or None when unknown.
 
-        Raises :class:`RateLimited` when the lookup budget is exhausted.
-        Off-grammar kids return None without reading anything. Lookup order:
-        fast-sandbox signing Secrets first, then the sidecar (per-sandbox)
-        source.
+        Cache hits cost nothing: one anonymous caller hammering unknown kids
+        cannot starve legitimate resolvers reading already-cached public
+        keys. Only lookups that reach a backend (Secret refresh or sidecar
+        workload read) consume the backend budget; every lookup consumes the
+        caller throttle. Raises :class:`RateLimited` when either bound is
+        exhausted. Off-grammar kids return None without reading anything.
+        Lookup order: fast-sandbox signing Secrets first, then the sidecar
+        (per-sandbox) source.
         """
         if not KID_GRAMMAR.match(kid):
             return None
         now = self._clock()
         with self._lock:
-            self._consume_budget(now)
+            self._consume_throttle(now)
             if now - self._refreshed_at > self._cache_ttl:
+                self._consume_budget(now)
                 self._keys = self._refresh_locked()
                 self._refreshed_at = now
             if kid in self._keys:
                 return self._keys[kid]
+            cached = self._sidecar_cache.get(kid)
+            if cached is not None and now - cached[1] <= self._cache_ttl:
+                return cached[0]
+            self._consume_budget(now)
             return self._sidecar_locked(kid, now)
 
     def _sidecar_locked(self, kid: str, now: float) -> Optional[dict]:
         reader = self._sidecar_reader
         if reader is None:
             return None
-        cached = self._sidecar_cache.get(kid)
-        if cached is not None and now - cached[1] <= self._cache_ttl:
-            return cached[0]
         try:
             jwk = reader(kid)
         except Exception:
@@ -165,6 +176,17 @@ class JWKSService:
         if len(self._lookup_times) >= self._max_lookups:
             raise RateLimited("jwks lookup budget exhausted")
         self._lookup_times.append(now)
+
+    def _consume_throttle(self, now: float) -> None:
+        """Caller-side throttle: bounds every request, hit or miss, so one
+        anonymous flood cannot pin the endpoint; an order of magnitude above
+        the backend budget so legitimate caches-first traffic never sees it."""
+        self._throttle_times = [
+            t for t in self._throttle_times if now - t < self._window_seconds
+        ]
+        if len(self._throttle_times) >= self._max_throttle:
+            raise RateLimited("jwks request throttle exceeded")
+        self._throttle_times.append(now)
 
     def _refresh_locked(self) -> dict[str, dict]:
         keys: dict[str, dict] = {}
@@ -249,6 +271,8 @@ def build_k8s_secret_reader(
     """Adapt the CoreV1 API into a SecretReader for the platform namespace."""
 
     def reader(name: str) -> Optional[Mapping[str, bytes]]:
+        import base64
+
         from kubernetes.client import ApiException
 
         try:
@@ -257,7 +281,21 @@ def build_k8s_secret_reader(
             if exc.status == 404:
                 return None
             raise
-        return dict(secret.data or {})
+        # V1Secret.data carries base64-encoded entry values (the Kubernetes
+        # wire format); the parser expects the decoded contents.
+        decoded: dict[str, bytes] = {}
+        for key, value in (secret.data or {}).items():
+            if isinstance(value, str):
+                try:
+                    decoded[key] = base64.b64decode(value)
+                except Exception:
+                    logger.warning(
+                        "jwks: egress signing Secret %s entry %s is not valid base64",
+                        name,
+                        key,
+                    )
+                    return {}
+        return decoded
 
     return reader
 
