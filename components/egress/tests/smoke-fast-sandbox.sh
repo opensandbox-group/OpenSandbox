@@ -327,11 +327,18 @@ start_egress() {
   fi
   # Optional resolver CA honored by the Go TLS stack via SSL_CERT_FILE.
   # CAVEAT: SSL_CERT_FILE replaces the process's whole trust pool — fine in
-  # this harness, NOT production guidance (T8 operator docs). Caller auth
-  # (D5) is deferred: no auth env exists.
+  # this harness, NOT production guidance (T8 operator docs). Optional
+  # per-pool signing key (Test 15b): when set, TCP resolver dials carry the
+  # OpenSandbox-Egress-Credential JWT.
   local resolver_env=()
   if [ -n "${EGRESS_RESOLVER_CA_FILE-}" ]; then
     resolver_env+=(SSL_CERT_FILE="${EGRESS_RESOLVER_CA_FILE}")
+  fi
+  if [ -n "${EGRESS_RESOLVER_SIGNING_DIR-}" ]; then
+    resolver_env+=(
+      OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR="${EGRESS_RESOLVER_SIGNING_DIR}"
+      OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID="${EGRESS_RESOLVER_SIGNING_KID}"
+    )
   fi
   # env(1) is required: words produced by "${mitm_env[@]}" expansion are NOT
   # treated as environment assignments by bash (they'd be executed as commands).
@@ -1318,16 +1325,35 @@ else
   pass "no pollution after resolver recovery (fresh signature)"
 
   ###############################################################################
-  info "Test 15b: exchange over the HTTPS resolver transport (TLS)"
-  # Same chain over https:// with no caller authentication (D5 deferred —
-  # resolver dials carry no Authorization header): TLS verifies against the
-  # fixture CA via SSL_CERT_FILE, and the wire subject stays the sandboxId.
+  info "Test 15b: exchange over the HTTPS resolver transport (TLS + caller credential)"
+  # https:// exchange needs a provisioned signer (vault writes without one
+  # fail closed), and every TCP dial then carries the
+  # OpenSandbox-Egress-Credential JWT. The resolver stub here stays
+  # permissive (it ignores the header); minting and dial-attach are what this
+  # leg exercises — full verification runs in the Go e2e suite.
   python3 "${SCRIPT_DIR}/resolver/resolver.py" --https 127.0.0.1:18443 \
     --tls-cert "${SCRIPT_DIR}/resolver/fixtures/test-localhost-cert.pem" \
     --tls-key "${SCRIPT_DIR}/resolver/fixtures/test-localhost-key.pem" \
     >"${RESOLVER_HTTPS_LOG}" 2>&1 &
   RESOLVER_HTTPS_PID=$!
   wait_for 10 "T6 resolver stub (https)" grep -q "test resolver ready" "${RESOLVER_HTTPS_LOG}"
+
+  EX_VAULT_HTTPS='{"credentials":[{"name":"spi-signer","source":{"type":"exchange","endpoint":"https://127.0.0.1:18443"}}],"bindings":[{"name":"internal-api","match":{"hosts":["api.test"],"methods":["GET"],"paths":["/v1/*"]},"auth":{"credential":"spi-signer"}}]}'
+
+  # Without a signer the https relay PUT must fail closed (the running
+  # egress from Test 15 has none).
+  code="$(vault_relay a PUT "${EX_VAULT_HTTPS}" runtime-a-2)"
+  case "${code}" in
+    4*) pass "https exchange without a signer rejected (fail closed, ${code})" ;;
+    *) fail "https exchange relay PUT without a signer must fail closed, got ${code}: $(cat "${VAULT_BODY}")" ;;
+  esac
+
+  # Provision the per-pool signing key and restart the egress with it.
+  EGRESS_RESOLVER_SIGNING_DIR="$(mktemp -d)"
+  openssl genpkey -algorithm ed25519 -out "${EGRESS_RESOLVER_SIGNING_DIR}/signing.key" 2>/dev/null \
+    || fail "openssl ed25519 keygen failed"
+  EGRESS_RESOLVER_SIGNING_KID="smoke-pool:v1"
+  export EGRESS_RESOLVER_SIGNING_DIR EGRESS_RESOLVER_SIGNING_KID
 
   kill "${EGRESS_PID}" 2>/dev/null
   wait "${EGRESS_PID}" 2>/dev/null || true
@@ -1338,7 +1364,6 @@ else
   set_binding_named a "${FSB_NAME}" 10.10.0.5 17 runtime-a-2 att-a "${VAULT_POLICY_A}"
   lifecycle_hook a runtime-a-2 att-a sandbox.runtime-ready
   lifecycle_hook a runtime-a-2 att-a sandbox.data-plane-ready
-  EX_VAULT_HTTPS='{"credentials":[{"name":"spi-signer","source":{"type":"exchange","endpoint":"https://127.0.0.1:18443"}}],"bindings":[{"name":"internal-api","match":{"hosts":["api.test"],"methods":["GET"],"paths":["/v1/*"]},"auth":{"credential":"spi-signer"}}]}'
   code="$(vault_relay a PUT "${EX_VAULT_HTTPS}" runtime-a-2)"
   [ "${code}" = "200" ] || fail "https exchange relay PUT must replace (200), got ${code}: $(cat "${VAULT_BODY}")"
 
