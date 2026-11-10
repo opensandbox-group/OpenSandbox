@@ -798,8 +798,8 @@ class PVC(BaseModel):
         False,
         alias="deleteOnSandboxTermination",
         description=(
-            "When true, the volume is automatically removed when the sandbox is "
-            "deleted. Only applies to volumes that were auto-created by the server "
+            "When true, the volume is removed when the sandbox is "
+            "deleted. Only applies to volumes that were created by the server "
             "on this request; pre-existing volumes are never removed. For "
             "Kubernetes, the resulting PVC delete then triggers the bound PV's "
             "StorageClass reclaim policy (Retain/Delete)."
@@ -1092,7 +1092,7 @@ class CreateSandboxRequest(BaseModel):
         description=(
             "Opts the sandbox into secured access for endpoint access. "
             "Currently supported only for Kubernetes sandboxes exposed through ingress gateway mode. "
-            "When enabled, the server provisions access credentials and returns required endpoint headers."
+            "When enabled, the server provisions the required request headers and returns them with endpoint responses."
         ),
     )
     volumes: Optional[List[Volume]] = Field(

@@ -1749,10 +1749,10 @@ export interface components {
              * @description Opts the sandbox into secured access for endpoint access.
              *     This is currently supported only for Kubernetes sandboxes exposed
              *     through ingress gateway mode. When enabled, the server provisions
-             *     access credentials and returns the required request headers with
+             *     the required request headers and returns them with
              *     endpoint responses. Clients must include those endpoint headers when
              *     calling the sandbox. When omitted or false, endpoints remain
-             *     accessible without the additional access token for backward
+             *     accessible without the additional header for backward
              *     compatibility.
              * @default false
              */
@@ -2200,8 +2200,8 @@ export interface components {
              */
             createIfNotExists: boolean;
             /**
-             * @description When true, the volume is automatically removed when the sandbox
-             *     is deleted. Only applies to volumes that were auto-created by the
+             * @description When true, the volume is removed when the sandbox
+             *     is deleted. Only applies to volumes that were created by the
              *     server on this request; pre-existing volumes are never removed.
              *     For Kubernetes, the resulting PVC delete triggers the bound PV's
              *     StorageClass reclaim policy (`Retain`/`Delete`).
