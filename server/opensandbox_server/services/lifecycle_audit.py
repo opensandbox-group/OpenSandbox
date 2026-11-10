@@ -283,6 +283,23 @@ def schedule_lifecycle_audit_create(
     )
 
 
+def schedule_lifecycle_audit_metadata(
+    background_tasks: BackgroundTasks,
+    sandbox: Sandbox,
+) -> None:
+    """Replace the open history row's label map with the sandbox's current metadata."""
+    if not lifecycle_audit_enabled():
+        return
+    labels = _audit_metadata(sandbox.metadata)
+    if not labels:
+        return
+    background_tasks.add_task(
+        _record_metadata,
+        sandbox_id=sandbox.id,
+        metadata=labels,
+    )
+
+
 def schedule_lifecycle_audit_delete(
     background_tasks: BackgroundTasks,
     sandbox_id: str,
@@ -325,6 +342,16 @@ def _record_create(**fields: Any) -> None:
         repo.upsert_created(**fields)
     except Exception:
         logger.exception("lifecycle audit create failed for sandbox %s", fields.get("sandbox_id"))
+
+
+def _record_metadata(*, sandbox_id: str, metadata: dict[str, str]) -> None:
+    try:
+        repo = get_lifecycle_audit_repository()
+        if repo is None:
+            return
+        repo.update_metadata(sandbox_id, metadata)
+    except Exception:
+        logger.exception("lifecycle audit metadata update failed for sandbox %s", sandbox_id)
 
 
 def _record_delete(**fields: Any) -> None:

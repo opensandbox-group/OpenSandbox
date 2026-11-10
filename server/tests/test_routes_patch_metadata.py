@@ -73,6 +73,12 @@ class TestPatchMetadataRoute:
                 return sandbox
 
         monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+        recorded: list = []
+
+        def _record(background_tasks, patched):  # type: ignore[no-untyped-def]
+            recorded.append(patched)
+
+        monkeypatch.setattr(lifecycle, "schedule_lifecycle_audit_metadata", _record)
 
         resp = client.patch(
             "/v1/sandboxes/sbx-001/metadata",
@@ -80,6 +86,7 @@ class TestPatchMetadataRoute:
             headers=auth_headers,
         )
         assert resp.status_code == 200
+        assert recorded[0].metadata == sandbox.metadata
 
     def test_delete_key(self, client: TestClient, auth_headers: dict, monkeypatch) -> None:
         sandbox = _make_sandbox({"team": "platform"})

@@ -19,6 +19,7 @@ from opensandbox_server.api.schema import (
     CreateSandboxResponse,
     ImageSpec,
     ResourceLimits,
+    Sandbox,
     SandboxStatus,
 )
 from opensandbox_server.services.lifecycle_audit import (
@@ -27,6 +28,7 @@ from opensandbox_server.services.lifecycle_audit import (
     load_sandbox_for_audit_delete,
     publish_lifecycle_audit_shape,
     schedule_lifecycle_audit_create,
+    schedule_lifecycle_audit_metadata,
     shape_from_pool_manifest,
     shape_from_template_spec,
 )
@@ -135,3 +137,41 @@ def test_schedule_create_records_published_shape(monkeypatch) -> None:
     assert recorded["image_uri"] == "pool.example/sandbox:1"
     assert recorded["cpu_limit"] == "2"
     assert recorded["memory_gi"] == 1
+
+
+def test_schedule_metadata_patch_records_current_labels(monkeypatch) -> None:
+    from opensandbox_server.services import lifecycle_audit as audit_module
+
+    recorded: dict = {}
+
+    class _Repo:
+        def update_metadata(self, sandbox_id: str, metadata: dict[str, str]) -> None:
+            recorded["sandbox_id"] = sandbox_id
+            recorded["metadata"] = metadata
+
+    class _Tasks:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        def add_task(self, func, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.calls.append((func, kwargs))
+
+    monkeypatch.setattr(audit_module, "lifecycle_audit_enabled", lambda: True)
+    monkeypatch.setattr(audit_module, "get_lifecycle_audit_repository", lambda: _Repo())
+    sandbox = Sandbox(
+        id="sbx-prewarm",
+        status=SandboxStatus(state="Running"),
+        metadata={
+            "app": "ai-agent-service",
+            "sandbox.pool": "session",
+            "sandbox.agentId": "1216497457188864",
+        },
+        createdAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    tasks = _Tasks()
+    schedule_lifecycle_audit_metadata(tasks, sandbox)  # type: ignore[arg-type]
+    assert tasks.calls
+    tasks.calls[0][0](**tasks.calls[0][1])
+    assert recorded["sandbox_id"] == "sbx-prewarm"
+    assert recorded["metadata"]["sandbox.agentId"] == "1216497457188864"
+    assert recorded["metadata"]["sandbox.pool"] == "session"

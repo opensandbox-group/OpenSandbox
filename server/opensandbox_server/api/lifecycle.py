@@ -56,6 +56,7 @@ from opensandbox_server.services.lifecycle_audit import (
     load_sandbox_for_audit_delete,
     schedule_lifecycle_audit_create,
     schedule_lifecycle_audit_delete,
+    schedule_lifecycle_audit_metadata,
 )
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 from opensandbox_server.services.snapshot_service import create_snapshot_service
@@ -242,6 +243,7 @@ def get_sandbox(
 )
 def patch_sandbox_metadata(
     sandbox_id: str,
+    background_tasks: BackgroundTasks,
     patch: PatchSandboxMetadataRequest = Body(...),
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
 ) -> Sandbox:
@@ -253,7 +255,9 @@ def patch_sandbox_metadata(
     so a concurrent PATCH may revert a value another PATCH changed or resurrect a key it deleted;
     a PATCH on an fsb sandbox sends only its own keys, fenced by the sandbox UID and generation.
     """
-    return sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
+    sandbox = sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
+    schedule_lifecycle_audit_metadata(background_tasks, sandbox)
+    return sandbox
 
 
 @router.delete(

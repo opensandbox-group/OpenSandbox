@@ -163,7 +163,7 @@ class PostgreSQLLifecycleAuditRepository:
                         WHEN {t}.deleted_at IS NOT NULL
                             OR {t}.state IN ('Terminated', 'Failed')
                         THEN {t}.metadata
-                        ELSE COALESCE(EXCLUDED.metadata, {t}.metadata)
+                        ELSE COALESCE({t}.metadata, EXCLUDED.metadata)
                     END,
                     last_seen_at = EXCLUDED.last_seen_at,
                     source = CASE
@@ -188,6 +188,23 @@ class PostgreSQLLifecycleAuditRepository:
                     now,
                     now,
                 ),
+            )
+
+    def update_metadata(self, sandbox_id: str, metadata: dict[str, str]) -> None:
+        """Replace labels on a still-open row. A missing row is left for create audit."""
+        now = datetime.now(timezone.utc)
+        t = _HISTORY_TABLE
+        with self._pool.connection() as conn:
+            conn.execute(
+                f"""
+                UPDATE {t}
+                SET metadata = %s::jsonb,
+                    last_seen_at = %s
+                WHERE sandbox_id = %s
+                  AND deleted_at IS NULL
+                  AND (state IS NULL OR state NOT IN ('Terminated', 'Failed'))
+                """,
+                (json.dumps(metadata), now, sandbox_id),
             )
 
     def mark_deleted(
