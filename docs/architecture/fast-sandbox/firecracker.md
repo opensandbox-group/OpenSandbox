@@ -40,7 +40,7 @@ These are the checks the integration actually performs (chart + environment tool
 - **Host kernel ≥ 5.10.**
 - `/dev/kvm` present and passed through into the node containers, together with the KVM device node under `/sys`. Nested virtualization works as long as KVM is exposed; a host without it is never labeled and never receives microVM sandboxes.
 - `/dev/net/tun` — TAP devices carry each sandbox network namespace's data plane. The Firecracker driver probes only `/dev/kvm` and `/dev/net/tun`; `vhost-vsock` is deliberately not mounted.
-- `/dev/shm` sized beyond the container default — snapshot memory staging happens there.
+- **Snapshot spill directory (optional)** — `FAST_SANDBOX_SNAPSHOT_SPILL_DIR` names a fast local staging area (tmpfs, a memory-backed emptyDir, or a local NVMe path) mounted into the fastlet. When set and large enough for the VM's memory, checkpoint/snapshot memory dumps stage there before moving to the state root; when unset, dumps write directly to the state root. `/dev/shm` is not part of snapshot capture — only template builds mount it, inside the guest image.
 - **cgroup v2** (unified hierarchy); cgroup v1 hosts are rejected up front.
 - `fs.inotify.max_user_instances` raised on the host for the duration of the cluster.
 - An **XFS filesystem with reflink support** backing the node state root: per-sandbox rootfs copies are copy-on-write reflinks, and the setup probes reflink explicitly — if the probe fails, setup refuses rather than degrading. Disabling XFS falls back to full copies. Reflink works only within one filesystem, which is why each node binds its own subtree of a single shared XFS volume.
