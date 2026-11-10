@@ -1452,6 +1452,18 @@ class CreateSnapshotRequest(BaseModel):
         min_length=1,
         description="Optional human-readable snapshot name",
     )
+    mode: Optional[Literal["full", "rootfsOnly"]] = Field(
+        None,
+        description=(
+            "What the snapshot persists. 'full' (default) captures the "
+            "writable filesystem plus memory and process state; restoring "
+            "resumes in place. 'rootfsOnly' captures only the writable "
+            "filesystem; restoring boots a fresh sandbox from the disk, so "
+            "running processes and in-memory state are discarded and the "
+            "entrypoint re-runs. 'rootfsOnly' requires the fast-sandbox "
+            "backend with OCI-backed sandboxes."
+        ),
+    )
 
     model_config = ConfigDict(
         extra="forbid",
@@ -1470,6 +1482,15 @@ class Snapshot(BaseModel):
     name: Optional[str] = Field(
         None,
         description="Optional human-readable snapshot name",
+    )
+    mode: Literal["full", "rootfsOnly"] = Field(
+        "full",
+        description=(
+            "Artifact class of the snapshot: 'full' preserves memory and "
+            "process state, 'rootfsOnly' preserves only the writable "
+            "filesystem. Snapshots created before this field existed "
+            "report 'full'."
+        ),
     )
     status: SnapshotStatus = Field(
         ...,

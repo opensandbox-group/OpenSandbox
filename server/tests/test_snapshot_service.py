@@ -33,12 +33,14 @@ from opensandbox_server.services.snapshot_runtime import (
     NoopSnapshotRuntime,
     SnapshotRuntimeStatus,
     SnapshotRuntimeUnsupportedError,
+    reject_rootfs_only_mode,
 )
 from opensandbox_server.services.snapshot_service import (
     PersistedSnapshotService,
     PostgreSQLKubernetesSnapshotService,
     create_snapshot_service,
 )
+from opensandbox_server.services.constants import SnapshotErrorCodes
 
 
 class StubSandboxService:
@@ -96,6 +98,8 @@ class StubSnapshotRuntime:
         self.create_result: SnapshotRuntimeStatus | None = None
         self.supported_source_states = {"Running"}
         self.source_state_checks: list[tuple[str, str, str | None]] = []
+        self.preflight_modes: list[str | None] = []
+        self.create_modes: list[str | None] = []
 
     def supports_create_snapshot(self) -> bool:
         return True
@@ -116,11 +120,26 @@ class StubSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 
-    def preflight_create_snapshot(self, sandbox_id: str, *, namespace: str | None = None) -> None:
+    def preflight_create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+        mode: str | None = None,
+    ) -> None:
+        self.preflight_modes.append(mode)
         return None
 
-    def create_snapshot(self, snapshot_id: str, sandbox_id: str, *, namespace: str | None = None):
+    def create_snapshot(
+        self,
+        snapshot_id: str,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+        mode: str | None = None,
+    ):
         self.calls.append((snapshot_id, sandbox_id))
+        self.create_modes.append(mode)
         return self.create_result
 
     def get_snapshot_status(self, snapshot_id: str):
@@ -188,6 +207,74 @@ def test_snapshot_service_persists_create_and_get(tmp_path) -> None:
     assert runtime.calls == [(created.id, "sbx-001")]
 
 
+def test_snapshot_service_threads_rootfs_only_mode(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    created = service.create_snapshot(
+        "sbx-001", CreateSnapshotRequest(name="workspace-state", mode="rootfsOnly")
+    )
+    fetched = service.get_snapshot(created.id)
+
+    assert created.mode == "rootfsOnly"
+    assert fetched.mode == "rootfsOnly"
+    assert runtime.preflight_modes == ["rootfsOnly"]
+    assert runtime.create_modes == ["rootfsOnly"]
+
+
+def test_snapshot_service_defaults_response_mode_to_full(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=StubSnapshotRuntime(),
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    created = service.create_snapshot("sbx-001", CreateSnapshotRequest())
+
+    assert created.mode == "full"
+    # Legacy rows (persisted before the mode column) read back as full too:
+    # the repository stores mode as NULL for full snapshots.
+    fetched = service.get_snapshot(created.id)
+    assert fetched.mode == "full"
+
+
+def test_snapshot_service_rejects_rootfs_only_for_unsupported_runtime(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+
+    class RootfsOnlyRejectingRuntime(StubSnapshotRuntime):
+        def preflight_create_snapshot(
+            self,
+            sandbox_id: str,
+            *,
+            namespace: str | None = None,
+            mode: str | None = None,
+        ) -> None:
+            reject_rootfs_only_mode("the stub backend is full-only", mode)
+
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=RootfsOnlyRejectingRuntime(),
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.create_snapshot("sbx-001", CreateSnapshotRequest(mode="rootfsOnly"))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == SnapshotErrorCodes.UNSUPPORTED_RUNTIME
+    # Nothing was persisted: the rejection happened in preflight.
+    assert service.list_snapshots(ListSnapshotsRequest()).pagination.total_items == 0
+
+
 def test_snapshot_service_rejects_create_when_source_sandbox_not_running(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()
@@ -244,7 +331,12 @@ def test_snapshot_service_rejects_unsupported_runtime_before_persisting(tmp_path
     runtime = StubSnapshotRuntime()
     executor = CapturingExecutor()
 
-    def reject_preflight(sandbox_id: str, *, namespace: str | None = None) -> None:
+    def reject_preflight(
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+        mode: str | None = None,
+    ) -> None:
         raise SnapshotRuntimeUnsupportedError(
             "gVisor RuntimeClass handler 'runsc' does not support rootfs snapshots."
         )
@@ -285,6 +377,59 @@ def test_snapshot_service_rejects_create_when_source_sandbox_state_missing(tmp_p
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["code"] == "SNAPSHOT::INVALID_SOURCE_STATE"
     assert runtime.calls == []
+
+
+def test_snapshot_service_ready_convergence_adopts_runtime_confirmed_mode(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    runtime.create_result = SnapshotRuntimeStatus(
+        state=SnapshotState.READY,
+        image="oci://reg.example.com/snap/files@sha256:abc",
+        reason="snapshot_runtime_ready",
+        message="fsb snapshot OCI artifacts published successfully.",
+        backend="fsb",
+        mode="rootfsOnly",
+    )
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    created = service.create_snapshot(
+        "sbx-001", CreateSnapshotRequest(mode="rootfsOnly")
+    )
+    fetched = service.get_snapshot(created.id)
+
+    assert created.mode == "rootfsOnly"
+    assert fetched.status.state == "Ready"
+    assert fetched.mode == "rootfsOnly"
+
+
+def test_snapshot_service_ready_convergence_falls_back_to_requested_mode(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    # Runtime that cannot report a mode (legacy backend): the persisted
+    # request mode stays authoritative.
+    runtime.create_result = SnapshotRuntimeStatus(
+        state=SnapshotState.READY,
+        image="opensandbox-snapshots:snap-ready",
+        reason="snapshot_runtime_ready",
+        message="Docker snapshot image created successfully.",
+    )
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    created = service.create_snapshot("sbx-001", CreateSnapshotRequest())
+    fetched = service.get_snapshot(created.id)
+
+    assert fetched.status.state == "Ready"
+    assert fetched.mode == "full"
 
 
 def test_snapshot_service_marks_snapshot_ready_from_worker(tmp_path) -> None:
