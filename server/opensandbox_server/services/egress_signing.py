@@ -59,7 +59,7 @@ class SidecarSigningMaterial:
 
 def generate_sidecar_signing_material(sandbox_id: str) -> SidecarSigningMaterial:
     """Generate the per-sandbox keypair; kid is the sandboxId."""
-    if not KID_GRAMMAR.match(sandbox_id):
+    if not KID_GRAMMAR.fullmatch(sandbox_id):
         raise ValueError(
             f"sandbox id {sandbox_id!r} does not match the credential kid "
             "grammar; refusing to provision caller-auth material"

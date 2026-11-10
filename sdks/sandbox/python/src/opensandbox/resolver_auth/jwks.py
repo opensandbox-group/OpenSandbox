@@ -156,7 +156,7 @@ class JWKSClient:
     # -- internals ----------------------------------------------------------
 
     def _key_for_kid(self, kid: str) -> Mapping[str, Any] | None:
-        if not KID_GRAMMAR.match(kid):
+        if not KID_GRAMMAR.fullmatch(kid):
             # Local rejection: no fetch, no cache pollution.
             raise VerifyError("kid_grammar", "kid does not match the platform identifier grammar")
 

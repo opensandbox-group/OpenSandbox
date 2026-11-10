@@ -455,7 +455,11 @@ func (s *fastSandboxPolicyServer) withVaultAccess(
 		return vaultAccessResult{err: &vaultAccessError{http.StatusConflict, "subject vault is sealed"}}
 	}
 	if entry := s.vaults[subj]; entry.vaultStateUnknown || entry.vaultSignerUnavailable {
-		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "vault state is unknown"}}
+		reason := "vault state is unknown"
+		if entry.vaultSignerUnavailable {
+			reason = "vault unserviceable: caller-auth signer unavailable for https exchange bindings"
+		}
+		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, reason}}
 	}
 	return derive(store, s.subjSandbox[subj])
 }

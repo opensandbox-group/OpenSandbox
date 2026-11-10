@@ -494,7 +494,8 @@ func TestVaultPersistHTTPSExchangeWithoutSignerFailsClosed(t *testing.T) {
 	h.srv.handleCredentialVaultActive(rec, req)
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
 		"a signer-rejected v1 vault must fail closed, not read as absent")
-	assert.Contains(t, rec.Body.String(), "unknown")
+	assert.Contains(t, rec.Body.String(), "signer unavailable",
+		"the 503 reason must point operators at signer provisioning, not state recovery")
 
 	// Relay reads stay blocked too — the file is kept until a signer (or a
 	// relay write) heals the slice.

@@ -29,6 +29,10 @@ from fastapi import APIRouter, HTTPException, Request
 
 from opensandbox_server.services.jwks import JWKSBackendError
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["Credential Vault"])
 
 
@@ -44,7 +48,7 @@ def _service(request: Request):
     responses={
         200: {"description": "The JWK for this kid (public key only)"},
         404: {"description": "Unknown kid (off-grammar kids included)"},
-        501: {"description": "No signing Secrets configured"},
+        501: {"description": "JWKS publication is not configured on this server (no egress configuration)"},
         503: {"description": "Transient backend failure; retry later"},
     },
 )
@@ -52,10 +56,11 @@ def get_jwk(kid: str, request: Request) -> dict:
     """Publish one egress caller-authentication public key."""
     try:
         jwk: Optional[dict] = _service(request).get(kid)
-    except JWKSBackendError as exc:
-        # Transient backend failure: 503 so resolvers retry instead of
-        # caching a false absence; 404 stays authoritative.
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except JWKSBackendError:
+        # Generic public detail: the endpoint is unauthenticated, and the
+        # exception text can carry Secret names and API error internals.
+        logger.warning("jwks lookup failed", exc_info=True)
+        raise HTTPException(status_code=503, detail="jwks backend temporarily unavailable") from None
     if jwk is None:
         raise HTTPException(status_code=404, detail="unknown kid")
     return jwk

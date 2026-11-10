@@ -86,11 +86,13 @@ def sync_detailed(
     against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
-    OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
-    is bounded by local `kid` grammar validation and a per-window lookup
-    budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
-    Off-grammar and unknown kids answer 404 without a backend read.
+    OIDC `/.well-known/jwks.json` posture) and requires no API key.
+    Request rate limiting is the trusted ingress/API gateway's job.
+    `kid` is a platform identifier: a fast-sandbox pool kid
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId. Off-grammar
+    kids are rejected locally without a backend read; grammar-valid
+    unknown kids fall through to a workload lookup and answer 404, with
+    short server-side caching of both the served keys and the misses.
 
     Args:
         kid (str):
@@ -126,11 +128,13 @@ def sync(
     against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
-    OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
-    is bounded by local `kid` grammar validation and a per-window lookup
-    budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
-    Off-grammar and unknown kids answer 404 without a backend read.
+    OIDC `/.well-known/jwks.json` posture) and requires no API key.
+    Request rate limiting is the trusted ingress/API gateway's job.
+    `kid` is a platform identifier: a fast-sandbox pool kid
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId. Off-grammar
+    kids are rejected locally without a backend read; grammar-valid
+    unknown kids fall through to a workload lookup and answer 404, with
+    short server-side caching of both the served keys and the misses.
 
     Args:
         kid (str):
@@ -161,11 +165,13 @@ async def asyncio_detailed(
     against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
-    OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
-    is bounded by local `kid` grammar validation and a per-window lookup
-    budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
-    Off-grammar and unknown kids answer 404 without a backend read.
+    OIDC `/.well-known/jwks.json` posture) and requires no API key.
+    Request rate limiting is the trusted ingress/API gateway's job.
+    `kid` is a platform identifier: a fast-sandbox pool kid
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId. Off-grammar
+    kids are rejected locally without a backend read; grammar-valid
+    unknown kids fall through to a workload lookup and answer 404, with
+    short server-side caching of both the served keys and the misses.
 
     Args:
         kid (str):
@@ -199,11 +205,13 @@ async def asyncio(
     against the Ed25519 public key identified by `kid`.
 
     The endpoint is public by design — it serves public keys only (the
-    OIDC `/.well-known/jwks.json` posture) and requires no API key; abuse
-    is bounded by local `kid` grammar validation and a per-window lookup
-    budget. `kid` is a platform identifier: a fast-sandbox pool kid
-    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId.
-    Off-grammar and unknown kids answer 404 without a backend read.
+    OIDC `/.well-known/jwks.json` posture) and requires no API key.
+    Request rate limiting is the trusted ingress/API gateway's job.
+    `kid` is a platform identifier: a fast-sandbox pool kid
+    (`<pool>:v<version>`) or a sidecar sandbox's sandboxId. Off-grammar
+    kids are rejected locally without a backend read; grammar-valid
+    unknown kids fall through to a workload lookup and answer 404, with
+    short server-side caching of both the served keys and the misses.
 
     Args:
         kid (str):

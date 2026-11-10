@@ -104,6 +104,43 @@ def test_inflight_locks_are_reclaimed() -> None:
     )
 
 
+def test_trailing_newline_kid_rejected_locally() -> None:
+    """Python's `$` matches before a trailing newline; fullmatch pins the
+    Go-identical end-of-text semantics so such kids never reach a fetch."""
+    import base64 as b64
+
+    calls: list[str] = []
+
+    class Counting:
+        def __call__(self, url: str, *, timeout: float):
+            calls.append(url)
+            return 404, b"{}"
+
+    clock = FakeClock()
+    client = JWKSClient(_cfg(), transport=Counting(), now=clock)
+    kid = "sbx-newline1\n"
+    header = b64.urlsafe_b64encode(
+        json.dumps({"alg": "EdDSA", "typ": "JWT", "kid": kid}).encode()
+    ).rstrip(b"=").decode()
+    claims = b64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "iss": "opensandbox",
+                "aud": "credential-resolver@resolver.internal",
+                "sub": "sbx-newline1",
+                "iat": 1_790_000_000,
+                "exp": 1_790_003_600,
+                "jti": "newline-kid-boundary1",
+            }
+        ).encode()
+    ).rstrip(b"=").decode()
+    with pytest.raises(VerifyError) as excinfo:
+        client.verify(f"{header}.{claims}.AAAA", document_subject="sbx-newline1")
+    assert excinfo.value.code == "kid_grammar"
+    assert calls == [], "off-contract kids must not trigger a JWKS fetch"
+    assert client._misses == {}, "and must not pollute the negative cache"
+
+
 def test_default_now_boundary_during_fetch() -> None:
     """Deterministic boundary: a token valid exactly at fetch start and
     expired at fetch end (no explicit now) must be rejected."""

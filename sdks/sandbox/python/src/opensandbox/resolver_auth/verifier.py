@@ -160,7 +160,7 @@ def verify_credential(
     kid = header.get("kid")
     if not isinstance(kid, str) or not kid:
         raise VerifyError("kid_missing", "header carries no kid")
-    if not KID_GRAMMAR.match(kid):
+    if not KID_GRAMMAR.fullmatch(kid):
         # Rejected locally: no JWKS fetch, no negative-cache pollution.
         raise VerifyError("kid_grammar", "kid does not match the platform identifier grammar")
 

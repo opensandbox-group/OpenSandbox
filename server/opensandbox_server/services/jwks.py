@@ -133,7 +133,7 @@ class JWKSService:
         service's. Lookup order:
         fast-sandbox signing Secrets first, then the sidecar source.
         """
-        if not KID_GRAMMAR.match(kid):
+        if not KID_GRAMMAR.fullmatch(kid):
             return None
         now = self._clock()
         with self._lock:
@@ -164,13 +164,19 @@ class JWKSService:
             try:
                 keys = self._read_secrets()
             except JWKSBackendError:
-                # Stale-while-error: keep serving cached keys, retry next TTL.
                 logger.warning(
                     "jwks: signing Secret refresh failed; serving cached keys",
                     exc_info=True,
                 )
                 with self._lock:
-                    self._refreshed_at = now
+                    if not self._keys:
+                        # Cold start with nothing stale to serve: re-raise so
+                        # the route answers 503 (retryable) instead of
+                        # falling through to the sidecar source, which would
+                        # authoritatively 404 a real pool kid and plant a
+                        # five-minute negative cache in resolvers.
+                        raise
+                    self._refreshed_at = now  # stale-while-error, retry next TTL
                 return
             with self._lock:
                 self._keys = keys
@@ -262,7 +268,7 @@ def _secret_to_jwk(secret_name: str, data: Mapping[str, bytes]) -> Optional[dict
         )
         return None
     kid = kid_raw.decode("utf-8", errors="replace").strip()
-    if not KID_GRAMMAR.match(kid):
+    if not KID_GRAMMAR.fullmatch(kid):
         logger.error("jwks: egress signing Secret %s carries off-grammar kid %r", secret_name, kid)
         return None
     x = pub_raw.decode("ascii", errors="replace").strip()

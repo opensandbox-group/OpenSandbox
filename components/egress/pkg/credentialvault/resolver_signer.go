@@ -42,6 +42,12 @@ type ResolverCredentialSigner struct {
 // Kid returns the signer's platform identifier (JWKS lookup key).
 func (s *ResolverCredentialSigner) Kid() string { return s.kid }
 
+// fingerprint identifies the loaded material so the process-wide provider
+// can detect rotation and swap its memoized signer.
+func (s *ResolverCredentialSigner) fingerprint() string {
+	return s.kid + ":" + fmt.Sprintf("%x", ed25519.PrivateKey(s.key).Seed())
+}
+
 // Mint signs one credential for (subject, audience) at the full 1h TTL with
 // a fresh jti. Stateless; caching lives in resolverCredentialManager.
 func (s *ResolverCredentialSigner) Mint(subject, audience string, now time.Time) (string, error) {

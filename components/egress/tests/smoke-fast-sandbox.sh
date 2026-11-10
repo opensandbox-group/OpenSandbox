@@ -111,6 +111,7 @@ cleanup() {
   fi
   [ -n "${SSL_DIR:-}" ] && rm -rf "${SSL_DIR}" 2>/dev/null
   [ -n "${CA_SEED_DIR:-}" ] && rm -rf "${CA_SEED_DIR}" 2>/dev/null
+  [ -n "${EGRESS_RESOLVER_SIGNING_DIR:-}" ] && rm -rf "${EGRESS_RESOLVER_SIGNING_DIR}" 2>/dev/null
   [ -n "${VAULT_DIR}" ] && rm -rf "${VAULT_DIR}" 2>/dev/null
   [ -n "${POLICY_DIR}" ] && rm -rf "${POLICY_DIR}" 2>/dev/null
   [ -n "${VAULT_BODY}" ] && rm -f "${VAULT_BODY}" 2>/dev/null
@@ -337,7 +338,7 @@ start_egress() {
   if [ -n "${EGRESS_RESOLVER_SIGNING_DIR-}" ]; then
     resolver_env+=(
       OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR="${EGRESS_RESOLVER_SIGNING_DIR}"
-      OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID="${EGRESS_RESOLVER_SIGNING_KID}"
+      OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID="${EGRESS_RESOLVER_SIGNING_KID-}"
     )
   fi
   # env(1) is required: words produced by "${mitm_env[@]}" expansion are NOT

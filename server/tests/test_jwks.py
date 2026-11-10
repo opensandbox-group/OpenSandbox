@@ -397,6 +397,32 @@ class TestRound2Hardening:
         state["broken"] = False
         assert client._key_for_kid("sbx-side1") == material_jwk
 
+    def test_cold_start_refresh_failure_is_503_not_404(self) -> None:
+        """First-refresh failure with nothing stale to serve must 503 and
+        retry on the next request — falling through to the sidecar source
+        would authoritatively 404 a real pool kid."""
+        kid = "pool-a:v2"
+        state = {"broken": True}
+
+        def flaky_secret(name: str):
+            if state["broken"]:
+                raise RuntimeError("apiserver unreachable on cold start")
+            return {"signing.pub": ("A" * 43).encode(), "kid": kid.encode()}
+
+        clock = FakeClock()
+        service, _, _ = make_service({})
+        service._reader = flaky_secret
+        service._clock = clock
+        service._secret_names = ["s"]
+
+        with pytest.raises(Exception) as cold:
+            service.get(kid)
+        assert "read failed" in str(cold.value)
+
+        state["broken"] = False
+        jwk = service.get(kid)  # next request retries, no TTL stall
+        assert jwk is not None and jwk["kid"] == kid
+
     def test_static_refresh_failure_keeps_serving_cached_keys(self) -> None:
         kid, x = vectors_sidecar()
         state = {"broken": False}
