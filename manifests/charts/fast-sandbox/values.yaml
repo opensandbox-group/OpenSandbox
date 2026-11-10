@@ -304,3 +304,5 @@ runtime:
     # poolSizeGB = rootfsSizeMiB / 1024. This is unrelated to image layer size,
     # disk usage or runtime.oci.cacheSizeGB, and is not inferred by Helm.
     poolSizeGB: 2
+    # -- SHA256 of the deployed overlaybd-ublkd daemon binary. When set, the node daemon writes the ublkd qualification record (ublkd.sock.qualification.json) at startup, which rootfs-only snapshot captures (FSEP-0001) verify before cutting the upper layer. The value must match the fastlet qualification profile's overlaybdSHA256. Derive it from the live stack without touching the image: kubectl exec -n <ns> <runtime-pod> -c overlaybd-ublkd -- grep overlaybd-ublkd /opt/fast-sandbox/oci/current/SHA256SUMS (the bundle digest file; the installed binary is verified against it at install time). Unset keeps Full snapshots fully working and rootfs-only captures rejected.
+    rootfsQualifiedSHA256: ""

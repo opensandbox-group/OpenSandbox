@@ -322,6 +322,14 @@ spec:
           value: {{ .Values.runtime.oci.poolHigh | quote }}
         - name: OVERLAYBD_POOL_SIZE_GB
           value: {{ .Values.runtime.oci.poolSizeGB | quote }}
+        {{- if .Values.runtime.oci.rootfsQualifiedSHA256 }}
+        # Publishes ublkd.sock.qualification.json at startup: the record
+        # rootfs-only captures verify before cutting the upper layer (the
+        # digest must match the daemon binary this container actually execs
+        # and the fastlet qualification profile's overlaybdSHA256).
+        - name: OVERLAYBD_ROOTFS_QUALIFIED_SHA256
+          value: {{ .Values.runtime.oci.rootfsQualifiedSHA256 | quote }}
+        {{- end }}
         securityContext:
           privileged: true
         {{- with .Values.runtime.resources.ublkd }}
