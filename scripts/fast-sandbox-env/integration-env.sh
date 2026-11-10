@@ -94,12 +94,12 @@
 #                    registry (CA baked into the fsb images), the chart's
 #                    runtime.oci node stack, and a full overlaybd verify
 #                    pass beside native. Nodes need ublk support. 0 = native-only.
-#   ROOTFS_ONLY      1 = also run the FSEP-0001 rootfs-only snapshot verify
-#                    (overlaybd lane only). Off by default pending upstream
-#                    fast-sandbox#182 (template-build guest control); the
+#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify
+#                    (overlaybd lane). On by default: the env provisions the
 #                    fastlet-side prerequisites (qualification profile,
-#                    ublkd record, guest kernel) are provisioned
-#                    automatically whenever OCI_STACK=1.
+#                    ublkd record, guest kernel) whenever OCI_STACK=1, and
+#                    template-build guest control is unconditional upstream
+#                    (fast-sandbox#183).
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -4401,13 +4401,15 @@ verify_overlaybd() {
 	# Rootfs-only capture is operator-qualified by design (FSEP-0001): the
 	# fastlet requires a FAST_SANDBOX_ROOTFS_QUALIFICATION profile, a
 	# qualified ublkd backend record, and a node guest-kernel asset for
-	# cold-boot restore. This environment deliberately does not fabricate
-	# those attestations; the stage is opt-in for stacks whose operators
-	# provisioned them.
-	if [[ "${ROOTFS_ONLY:-0}" == 1 ]]; then
+	# cold-boot restore — this environment provisions all three itself (see
+	# rootfs_only_qualification_up). The fourth prerequisite, guest control
+	# in the template build, landed upstream (fast-sandbox#183: unconditional
+	# injection + build-time freeze/thaw probe on OverlayBD builds), so the
+	# stage runs by default on the OCI lane; ROOTFS_ONLY=0 skips it.
+	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
 		run_stage "rootfs-only snapshot verify (overlaybd template, FSEP-0001)" rootfs_only_verify "$OCI_TEMPLATE_ID"
 	else
-		log "ROOTFS_ONLY!=1: skipping the rootfs-only snapshot verify (requires an operator-qualified stack: qualification profile, ublkd qualification record, guest kernel asset)"
+		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
 	fi
 	# Same placement rationale as verify_native: the family recorded by this
 	# matrix's opensandbox_verify pass was killed stages ago.
