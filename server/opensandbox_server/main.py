@@ -201,9 +201,10 @@ async def lifespan(app: FastAPI):
                 "JWKS publication enabled for %d egress signing Secret(s)",
                 len(app_config.kubernetes.egress_signing_key_secrets),
             )
-        elif app_config.egress and app_config.egress.resolver_caller_auth:
-            # Sidecar-only publication (e.g. Docker runtime): no static pool
-            # Secrets, the per-sandbox workload records are the sole source.
+        elif app_config.egress is not None:
+            # Sidecar-only publication (any runtime without static pool
+            # Secrets): the per-sandbox workload records are the sole source,
+            # provisioned unconditionally at sandbox creation.
             from opensandbox_server.services.jwks import build_sidecar_only_jwks_service
 
             app.state.jwks_service = build_sidecar_only_jwks_service(

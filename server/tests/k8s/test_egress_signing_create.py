@@ -15,9 +15,11 @@
 """OSEP-0025 D5 W2.2 (K8s): per-sandbox keypair provisioning at create time.
 
 _build_create_workload_context is the single choke point both K8s providers
-share: when egress.resolver_caller_auth is enabled it generates the keypair,
-injects the private PEM through the egress env (winning over any
-request-supplied entry), and records the public JWK as a workload annotation.
+share. Provisioning is unconditional (no operator knob — turning it off
+would reopen the R4 gap for https:// resolvers): every sandbox created with
+a networkPolicy gets a keypair — private PEM through the egress env (the
+request-supplied name is rejected outright by the env allowlist), public
+JWK as a workload annotation.
 """
 
 from __future__ import annotations
@@ -77,20 +79,8 @@ def _context(k8s_app_config, request):
     )
 
 
-def test_disabled_by_default(k8s_app_config) -> None:
+def test_provisioned_by_default(k8s_app_config) -> None:
     k8s_app_config.egress = EgressConfig(image="egress:latest")
-    context = _context(k8s_app_config, _request())
-    assert context.egress_settings is not None
-    assert OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY not in (
-        context.egress_settings.env or {}
-    )
-    assert EGRESS_SIGNING_JWK_ANNOTATION not in (context.annotations or {})
-
-
-def test_enabled_injects_env_and_annotation(k8s_app_config) -> None:
-    k8s_app_config.egress = EgressConfig(
-        image="egress:latest", resolver_caller_auth=True
-    )
     context = _context(k8s_app_config, _request())
     pem = context.egress_settings.env[OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY]
     assert pem.startswith("-----BEGIN PRIVATE KEY-----")
@@ -101,10 +91,17 @@ def test_enabled_injects_env_and_annotation(k8s_app_config) -> None:
     )
 
 
+def test_each_sandbox_gets_a_fresh_keypair(k8s_app_config) -> None:
+    k8s_app_config.egress = EgressConfig(image="egress:latest")
+    first = _context(k8s_app_config, _request())
+    second = _context(k8s_app_config, _request())
+    first_pem = first.egress_settings.env[OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY]
+    second_pem = second.egress_settings.env[OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY]
+    assert first_pem != second_pem
+
+
 def test_request_supplied_signing_env_rejected(k8s_app_config) -> None:
-    k8s_app_config.egress = EgressConfig(
-        image="egress:latest", resolver_caller_auth=True
-    )
+    k8s_app_config.egress = EgressConfig(image="egress:latest")
     request = _request(env={OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY: "attacker pem"})
     try:
         _context(k8s_app_config, request)
@@ -119,9 +116,7 @@ def test_request_supplied_signing_env_rejected(k8s_app_config) -> None:
 
 
 def test_no_provisioning_without_network_policy(k8s_app_config) -> None:
-    k8s_app_config.egress = EgressConfig(
-        image="egress:latest", resolver_caller_auth=True
-    )
+    k8s_app_config.egress = EgressConfig(image="egress:latest")
     context = _context(k8s_app_config, _request(networkPolicy=None))
     assert context.egress_settings is None
     assert EGRESS_SIGNING_JWK_ANNOTATION not in (context.annotations or {})

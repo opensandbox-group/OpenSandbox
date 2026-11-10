@@ -149,9 +149,7 @@ class TestDockerSidecarProvisioning:
             ingress=IngressConfig(mode="direct"),
         )
         cfg.docker.network_mode = "bridge"
-        cfg.egress = EgressConfig(
-            image="egress:latest", mode="dns+nft", resolver_caller_auth=True
-        )
+        cfg.egress = EgressConfig(image="egress:latest", mode="dns+nft")
         service = DockerSandboxService(config=cfg)
 
         req = make_request(credentialProxy=CredentialProxyConfig(enabled=True))

@@ -214,7 +214,6 @@ Egress sidecar image and enforcement mode. The sidecar is only attached to sandb
 | `readiness_timeout_seconds` | float | `30.0` | Docker only: max wait for sidecar health endpoint (> 0). |
 | `requests` / `limits` | map \| omitted | `null` | Kubernetes only: sidecar resources. Omit independently; invalid quantities fail config load. |
 | `upstream_proxy` | table \| omitted | `null` | Chain mitmproxy egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`. See below. |
-| `resolver_caller_auth` | bool | `false` | OSEP-0025 sidecar caller authentication: generate one Ed25519 keypair per sandbox at creation, inject the private key into the egress sidecar (`OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY`, same channel as the auth token, discarded server-side), and publish the public JWK on the workload for `GET /jwks/{sandboxId}`. `https://` vault exchange credentials then carry a verifiable caller credential. Applies to sandboxes created with `networkPolicy`; fast-sandbox pools use `kubernetes.egress_signing_key_secrets` instead. |
 
 ```toml
 [egress]

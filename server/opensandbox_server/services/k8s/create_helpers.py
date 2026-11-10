@@ -146,24 +146,24 @@ def _build_create_workload_context(
             otlp_endpoint=egress_config.otlp_endpoint,
             upstream_proxy=egress_config.upstream_proxy,
         )
-        if egress_config.resolver_caller_auth:
-            # OSEP-0025 D5 sidecar caller authentication: one keypair per
-            # sandbox. The private PEM rides the egress env (server-generated
-            # values win over any request-supplied entry), the public JWK is
-            # recorded on the workload for the JWKS endpoint, and nothing
-            # persists server-side. Sandbox recreation replaces the keypair.
-            material = generate_sidecar_signing_material(sandbox_id)
-            egress_settings = replace(
-                egress_settings,
-                env={
-                    **(egress_settings.env or {}),
-                    OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY: material.private_pem,
-                },
-            )
-            annotations = {
-                **(annotations or {}),
-                EGRESS_SIGNING_JWK_ANNOTATION: material.jwk_json,
-            }
+        # OSEP-0025 D5 sidecar caller authentication (unconditional): one
+        # keypair per sandbox. The private PEM rides the egress env
+        # (server-generated values win over any request-supplied entry), the
+        # public JWK is recorded on the workload for the JWKS endpoint, and
+        # nothing persists server-side. Sandbox recreation replaces the
+        # keypair.
+        material = generate_sidecar_signing_material(sandbox_id)
+        egress_settings = replace(
+            egress_settings,
+            env={
+                **(egress_settings.env or {}),
+                OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY: material.private_pem,
+            },
+        )
+        annotations = {
+            **(annotations or {}),
+            EGRESS_SIGNING_JWK_ANNOTATION: material.jwk_json,
+        }
 
     return _CreateWorkloadContext(
         labels=labels,

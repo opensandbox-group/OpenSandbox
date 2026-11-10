@@ -1159,21 +1159,10 @@ class EgressConfig(BaseModel):
         description="Container image for the egress sidecar (used when network policy is requested).",
         min_length=1,
     )
-    resolver_caller_auth: bool = Field(
-        default=False,
-        description=(
-            "OSEP-0025 D5 sidecar caller authentication: when enabled, the "
-            "server generates one Ed25519 keypair per sandbox at creation, "
-            "injects the private key into the egress sidecar through "
-            "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY (the same channel as "
-            "OPENSANDBOX_EGRESS_TOKEN, discarded after injection), and "
-            "publishes the public JWK on the workload for GET /jwks/{kid} "
-            "(kid = sandboxId). https:// vault exchange credentials then "
-            "carry a verifiable caller credential in this profile. Default "
-            "false: no key material is generated and the sidecar https:// "
-            "interim posture applies."
-        ),
-    )
+    # NOTE: OSEP-0025 D5 sidecar caller authentication is unconditional —
+    # every sandbox created with a networkPolicy gets a per-sandbox keypair
+    # (see services/egress_signing.py). There is deliberately no operator
+    # knob: turning it off would reopen the R4 gap for https:// resolvers.
     mode: Literal[
         EGRESS_MODE_DNS,
         EGRESS_MODE_DNS_NFT,
