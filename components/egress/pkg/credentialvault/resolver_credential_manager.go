@@ -25,22 +25,22 @@ import (
 // credential. Implements CredentialProvider; minting is lazy on first
 // resolve and a restart starts empty (fresh jti immediately). The cache is
 // bounded: shared-pool egresses see unbounded sandbox churn, so past the
-// cap the oldest half is dropped (evicted entries simply re-mint on next
-// use — µs-scale work).
+// limit an arbitrary half is dropped (map iteration order is randomized;
+// evicted entries simply re-mint on next use — µs-scale work).
 type resolverCredentialManager struct {
 	mint func(subject, audience string, now time.Time) (string, error)
 	now  func() time.Time
 
-	mu    sync.Mutex
-	creds map[credentialCacheKey]cachedCredential
-	cap   int
+	mu         sync.Mutex
+	creds      map[credentialCacheKey]cachedCredential
+	maxEntries int
 }
 
 // credentialRefreshFraction is the re-mint point within the TTL window.
 const credentialRefreshFraction = 0.8
 
-// credentialCacheCap bounds the process-wide credential cache.
-const credentialCacheCap = 4096
+// credentialCacheMaxEntries bounds the process-wide credential cache.
+const credentialCacheMaxEntries = 4096
 
 type credentialCacheKey struct {
 	subject  string
@@ -56,15 +56,15 @@ var _ CredentialProvider = (*resolverCredentialManager)(nil)
 
 // newResolverCredentialManager binds the manager to a loaded signer.
 func newResolverCredentialManager(signer *ResolverCredentialSigner) *resolverCredentialManager {
-	return newResolverCredentialManagerWithCap(signer, credentialCacheCap)
+	return newResolverCredentialManagerWithCap(signer, credentialCacheMaxEntries)
 }
 
-func newResolverCredentialManagerWithCap(signer *ResolverCredentialSigner, cap int) *resolverCredentialManager {
+func newResolverCredentialManagerWithCap(signer *ResolverCredentialSigner, maxEntries int) *resolverCredentialManager {
 	return &resolverCredentialManager{
-		mint:  signer.Mint,
-		now:   time.Now,
-		creds: make(map[credentialCacheKey]cachedCredential),
-		cap:   cap,
+		mint:       signer.Mint,
+		now:        time.Now,
+		creds:      make(map[credentialCacheKey]cachedCredential),
+		maxEntries: maxEntries,
 	}
 }
 
@@ -89,7 +89,7 @@ func (m *resolverCredentialManager) Credential(subject, audience string) (string
 	if err != nil {
 		return "", err
 	}
-	if len(m.creds) >= m.cap {
+	if len(m.creds) >= m.maxEntries {
 		// Bounded memory under sandbox churn: drop the oldest half (map
 		// iteration order in Go is randomized, which is good enough for a
 		// cache — evicted pairs re-mint on next use).

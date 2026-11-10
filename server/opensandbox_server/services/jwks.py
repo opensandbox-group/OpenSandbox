@@ -302,8 +302,6 @@ def build_k8s_secret_reader(
     """Adapt the CoreV1 API into a SecretReader for the platform namespace."""
 
     def reader(name: str) -> Optional[Mapping[str, bytes]]:
-        import base64
-
         from kubernetes.client import ApiException
 
         try:

@@ -186,7 +186,7 @@ func TestResolverCredentialManagerBounded(t *testing.T) {
 	now := time.Unix(1790000000, 0)
 	var mints atomic.Int64
 	manager := countingManager(&now, &mints)
-	manager.cap = 8
+	manager.maxEntries = 8
 
 	for i := 0; i < 20; i++ {
 		_, err := manager.Credential(fmt.Sprintf("sbx-churn%02d", i), "credential-resolver@resolver.internal")

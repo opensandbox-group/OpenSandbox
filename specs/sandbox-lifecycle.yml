@@ -634,7 +634,7 @@ paths:
         '404':
           description: Unknown or off-grammar kid
         '501':
-          description: No egress signing Secrets are configured on this server
+          description: JWKS publication is not configured on this server (no egress configuration)
         '503':
           description: Transient backend failure; retry later
   /sandboxes:
