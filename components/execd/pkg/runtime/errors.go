@@ -57,3 +57,7 @@ var ErrIsolatedRunnerClosed = errors.New("isolated session runner is closed")
 // accepts run or filesystem operations. Cleanup may still be retried through
 // Delete while the controller retains ownership of the session resources.
 var ErrSessionNotActive = errors.New("isolated session is not active")
+
+// ErrUnsupportedLanguage indicates that the language runtime is reachable but
+// offers no kernel for the requested language, so retrying cannot succeed.
+var ErrUnsupportedLanguage = errors.New("unsupported language")
