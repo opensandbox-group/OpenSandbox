@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"math"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -68,13 +69,15 @@ type fastSandboxSubjectEpoch struct {
 }
 
 type fastSandboxSubjectIntent struct {
-	subj         subject.Subject
-	fence        subject.Fencing
-	target       revision.SubjectTarget
-	unload       bool
-	epoch        *fastSandboxSubjectEpoch
-	snapshot     *fastSandboxSubjectSnapshot
-	registration uint64
+	subj            subject.Subject
+	fence           subject.Fencing
+	target          revision.SubjectTarget
+	unload          bool
+	suspend         bool
+	sourceAddresses []netip.Addr // frozen attachment keys; never part of Target identity
+	epoch           *fastSandboxSubjectEpoch
+	snapshot        *fastSandboxSubjectSnapshot
+	registration    uint64
 }
 
 type fastSandboxSubjectSnapshot struct {
@@ -95,6 +98,27 @@ type fastSandboxSubjectACK struct {
 func (s *fastSandboxPolicyServer) subjectVaultAuthoritativeLocked(subj subject.Subject) bool {
 	entry := s.vaults[subj]
 	return !entry.vaultStateUnknown && entry.degraded == ""
+}
+
+// Every Vault entry publication passes here under s.mu. Entry authority, not
+// policy degradation, sealing or the process recovery latch, controls suspend.
+// IPC remains exclusively in the drain worker, outside business locks.
+func (s *fastSandboxPolicyServer) setSubjectVaultEntryLocked(subj subject.Subject, entry vaultEntry) {
+	wasAuthoritative := s.subjectVaultAuthoritativeLocked(subj)
+	s.vaults[subj] = entry
+	d := s.subjectDrain
+	if d == nil || !wasAuthoritative || s.subjectVaultAuthoritativeLocked(subj) {
+		return
+	}
+	fence, registered := d.fences[subj]
+	if !registered || !fence.Matches(entry.fence) {
+		return
+	}
+	target := mustSubjectTarget(subj, fence)
+	d.dropInstallsLocked(target) // never coalesce a recovery install ahead of suspend
+	delete(d.acked, subj)
+	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, suspend: true, epoch: d.current, registration: d.registrations[subj]})
+	d.signal()
 }
 
 // Called under policyCommitMu -> s.mu; no IPC, registry callback or wait.
@@ -157,7 +181,7 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 	sort.Slice(subjects, func(i, j int) bool { return subjects[i] < subjects[j] })
 	for _, subj := range subjects {
 		s.recordSubjectIntentLocked(subj, d.fences[subj], false)
-		if snapshot := d.snapshots[subj]; snapshot != nil {
+		if snapshot := d.snapshots[subj]; snapshot != nil && s.subjectVaultAuthoritativeLocked(subj) {
 			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot, registration: d.registrations[subj]})
 		}
 	}
@@ -218,7 +242,13 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 		registration = d.nextRegistration
 		d.registrations[subj] = registration
 	}
-	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload, epoch: d.current, registration: registration})
+	intent := fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload, epoch: d.current, registration: registration}
+	if !unload {
+		if address := s.subjAtt[subj].IP; address.IsValid() {
+			intent.sourceAddresses = []netip.Addr{address}
+		}
+	}
+	d.queue = append(d.queue, intent)
 	d.signal()
 }
 
@@ -413,6 +443,9 @@ func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandb
 	if err == nil {
 		return
 	}
+	if intent.suspend && receipt.LifecycleSequence != 0 && (receipt.Result.Outcome == "subject_unknown" || receipt.Result.Outcome == "subject_generation_mismatch") {
+		return // confirmed no-op: there is no matching receiver left to suspend
+	}
 	// IPC availability is session state: a pending command whose fence became
 	// stale still blocks the FIFO, so report it. Confirmed outcomes are fenced
 	// per subject.
@@ -510,8 +543,10 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		var err error
 		if intent.unload {
 			receipt, err = epoch.client.Unload(commandCtx, intent.target)
+		} else if intent.suspend {
+			receipt, err = epoch.client.Suspend(commandCtx, intent.target)
 		} else {
-			receipt, err = epoch.client.Register(commandCtx, intent.target)
+			receipt, err = epoch.client.Register(commandCtx, intent.target, intent.sourceAddresses...)
 		}
 		stop()
 		cancel()
@@ -565,7 +600,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 			}
 			s.mu.Unlock()
 		}
-		if !intent.unload && epoch.ctx.Err() == nil && ctx.Err() == nil {
+		if !intent.unload && !intent.suspend && epoch.ctx.Err() == nil && ctx.Err() == nil {
 			if err != nil {
 				s.mu.Lock()
 				if d.current == epoch {

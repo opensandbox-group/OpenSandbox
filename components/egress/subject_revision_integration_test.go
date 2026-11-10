@@ -35,15 +35,16 @@ import (
 // These tests are mandatory: missing Python, imports or socket capability fail
 // rather than skip. They do not exercise TLS, nft, source-IP routing or launch.
 type subjectIPCReport struct {
-	Ready      bool               `json:"ready"`
-	Error      string             `json:"error"`
-	Revision   *revision.Identity `json:"revision"`
-	Digest     string             `json:"digest"`
-	Action     string             `json:"action"`
-	Reason     string             `json:"reason"`
-	Dropped    int                `json:"dropped"`
-	AbortCalls int                `json:"abortCalls"`
-	LastAbort  *revision.Identity `json:"lastAbort"`
+	Target     *revision.SubjectTarget `json:"target"`
+	Ready      bool                    `json:"ready"`
+	Error      string                  `json:"error"`
+	Revision   *revision.Identity      `json:"revision"`
+	Digest     string                  `json:"digest"`
+	Action     string                  `json:"action"`
+	Reason     string                  `json:"reason"`
+	Dropped    int                     `json:"dropped"`
+	AbortCalls int                     `json:"abortCalls"`
+	LastAbort  *revision.Identity      `json:"lastAbort"`
 }
 
 type subjectIPCChild struct {

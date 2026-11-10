@@ -173,7 +173,7 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 	s.vaultForLocked(subj, fence)
 	e := s.vaults[subj]
 	e.sealed = true
-	s.vaults[subj] = e
+	s.setSubjectVaultEntryLocked(subj, e)
 	if snap.Exists() {
 		log.Infof("subject %s: vault exported to snapshot bundle, subject sealed", subj)
 	} else {
@@ -414,7 +414,7 @@ func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subjec
 		return err
 	}
 	entry.sealed = false
-	s.vaults[subj] = entry
+	s.setSubjectVaultEntryLocked(subj, entry)
 	return nil
 }
 
