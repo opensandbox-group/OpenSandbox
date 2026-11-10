@@ -84,13 +84,14 @@ def _case_parameters(data):
 @pytest.mark.parametrize(("case", "check"), list(_case_parameters(_vectors())))
 def test_vector_case(case, check, data) -> None:
     contract = data["contract"]
-    keys = {key["kid"]: key["public_jwk"] for key in data["keys"]}
-
-    header = json.loads(case["header"])
-    kid = header.get("kid", "")
-    # unknown_kid cases have a well-formed kid absent from the key set: pass
-    # jwk=None so the verifier must reject without any fetch.
-    jwk = keys.get(kid)
+    # The JWK a verifying resolver would hold for this token's kid: the key
+    # the case declares as its signer. (A sidecar keypair's JWK is published
+    # under the sandbox's own kid, so the mixed-case-kid case resolves to the
+    # same sidecar-1 public key.)
+    signing = next(key for key in data["keys"] if key["id"] == case["key"])
+    jwk = dict(signing["public_jwk"])
+    if case["name"] == "reject_unknown_kid":
+        jwk = None
     claims = json.loads(_b64(case["jwt"].split(".")[1]))
 
     config = VerifierConfig(

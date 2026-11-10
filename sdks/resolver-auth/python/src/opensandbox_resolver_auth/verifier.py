@@ -60,7 +60,7 @@ _ALLOWED_HEADER_PARAMS = frozenset({"alg", "kid", "typ"})
 #: Platform identifier grammar: a sidecar sandboxId or a fast-sandbox
 #: ``<pool>:v<version>`` kid. Off-grammar kids are rejected locally, before
 #: any JWKS fetch.
-KID_GRAMMAR = re.compile(r"^[a-z][a-z0-9-]{0,62}(:v[0-9]{1,8})?$")
+KID_GRAMMAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}(:v[0-9]{1,8})?$")
 
 
 class VerifyError(Exception):

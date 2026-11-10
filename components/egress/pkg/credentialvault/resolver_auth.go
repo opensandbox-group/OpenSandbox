@@ -51,7 +51,7 @@ const (
 // valid kid substitutes into the JWKS lookup path without escaping ambiguity;
 // off-grammar kids are rejected locally with no fetch (egress side validates
 // its own kid at mint time, resolver side at verification time).
-const credentialKidGrammarSrc = `^[a-z][a-z0-9-]{0,62}(:v[0-9]{1,8})?$`
+const credentialKidGrammarSrc = `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}(:v[0-9]{1,8})?$`
 
 var credentialKidGrammar = regexp.MustCompile(credentialKidGrammarSrc)
 

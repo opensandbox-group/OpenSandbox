@@ -7,8 +7,8 @@
     "typ": "JWT",
     "issuer": "opensandbox",
     "default_expected_audience": "credential-resolver@resolver.internal",
-    "kid_grammar": "^[a-z][a-z0-9-]{0,62}(:v[0-9]{1,8})?$",
-    "kid_notes": "sidecar: sandboxId (incarnation suffix grammar lands with batch 2 / W2.2); fast-sandbox: \u003cpool\u003e:v\u003cversion\u003e; delimiter is path-safe so kid substitutes into the JWKS lookup path",
+    "kid_grammar": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}(:v[0-9]{1,8})?$",
+    "kid_notes": "sidecar: the sandbox's sandboxId (mixed-case ULID-form ids are admitted); fast-sandbox: \u003cpool\u003e:v\u003cversion\u003e; the optional :v suffix is digits-only, so a kid never contains '.', '/', or ' ' — path-safe for the JWKS lookup substitution",
     "ttl_max_seconds": 3600,
     "leeway_seconds": 30,
     "jti_bytes": 16,
@@ -306,6 +306,20 @@
       "note": "typ, when present, must be JWT"
     },
     {
+      "name": "valid_kid_mixed_case",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx_01HZYEXAMPLE\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx_01HZYEXAMPLE\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"mZ8tY3wW9qLn5MqR7xXc2B\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieF8wMUhaWUVYQU1QTEUifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYnhfMDFIWllFWEFNUExFIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6Im1aOHRZM3dXOXFMbjVNcVI3eFhjMkIifQ.wG5zDnDRRalScJcpXIfTV1_DAhroih1k5z9dEnTU_Zlk1PDosGNOpG4o77fXhFzRIK-PjMdRn09MpHjiWvg4CQ",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "accept"
+        }
+      ],
+      "note": "sidecar kids are real sandboxIds (ULID-form, mixed case and underscores) — the grammar admits them"
+    },
+    {
       "name": "reject_kid_grammar_path",
       "key": "sidecar-1",
       "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"../escape\"}",
@@ -321,11 +335,11 @@
       "note": "off-grammar kid rejected locally with no JWKS fetch; path traversal is the motivating case"
     },
     {
-      "name": "reject_kid_grammar_upper",
+      "name": "reject_kid_grammar_space",
       "key": "sidecar-1",
-      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"SBX-UPPER\"}",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx bad\"}",
       "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
-      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IlNCWC1VUFBFUiJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.2fcZG8LVDMe-hGBITOI7eCdxSpCPFiltJ0XmMX1BonW0Znw1gvRmdEluo4KCdm2ZJKd_vUN8lai-JlxsUp3LDg",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieCBiYWQifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.bLpxLUjt_MbKw1aSajzYRLT2RCBSiMtw4GIRR-LCmZFWRrs3po7hAWLl9mXAjCjFoWOP5b2WOjUbfue0AjnZBA",
       "checks": [
         {
           "now": 1790000600,
@@ -333,7 +347,22 @@
           "error": "kid_grammar"
         }
       ],
-      "note": "platform identifiers are lowercase; uppercase is off-grammar"
+      "note": "no spaces in platform identifiers"
+    },
+    {
+      "name": "reject_kid_grammar_slash",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx/1\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC8xIn0.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.0CALgikjSO5FG4XBHRRNhE9txy4MUCqdLtAbR8XaAjl-RMhHx89-DX0cV2GNF12C41KsGdD0zMKbYhjxOtg9DA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "kid_grammar"
+        }
+      ],
+      "note": "no slashes — kid substitutes into a URL path"
     },
     {
       "name": "reject_kid_grammar_colons",
