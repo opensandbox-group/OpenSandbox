@@ -145,10 +145,9 @@ type ResolverClientOptions struct {
 	// TLSClientConfig overrides HTTPS TLS (test/deployment seam); nil keeps
 	// system verification.
 	TLSClientConfig *tls.Config
-	// Credentials mints the caller-authentication JWT attached to every TCP
-	// resolve dial (D5); unix:// dials carry none. Required for https://
-	// endpoints: a TCP dial without a credential provider fails closed
-	// rather than reaching the resolver unauthenticated.
+	// Credentials mints the caller-authentication JWT attached to every
+	// TCP resolve dial. Required for https:// endpoints; unix:// dials
+	// carry none.
 	Credentials CredentialProvider
 }
 
@@ -206,9 +205,8 @@ func NewResolverClient(options ResolverClientOptions) (ResolverClient, error) {
 		}
 		client.requestURL = (&url.URL{Scheme: "https", Host: parsed.authority, Path: parsed.resolvePath}).String()
 		client.hostHeader = parsed.authority
-		// D5 caller authentication: the JWT aud is the resolver origin —
-		// scheme://authority, path prefix excluded — so the verifying
-		// resolver configures the identical string as its expected audience.
+		// The JWT aud is the resolver origin (scheme://authority, path
+		// prefix excluded); the resolver configures the identical string.
 		client.origin = "https://" + parsed.authority
 		client.credentials = options.Credentials
 	}
@@ -290,8 +288,7 @@ func ResolverMaxConcurrencyFromEnv() int {
 }
 
 // defaultCredentialProvider memoizes the process-wide caller-auth provider:
-// the signer loads once from the operator channels; an unconfigured egress
-// keeps a nil provider (unix dials unaffected, TCP dials fail closed).
+// the signer loads once; unconfigured keeps a nil provider.
 var defaultCredentialProvider struct {
 	once     sync.Once
 	provider CredentialProvider
@@ -365,9 +362,8 @@ func (c *resolverClient) Resolve(ctx context.Context, input ResolveInput) (*Reso
 		// D15: Host is the endpoint authority (localhost over unix).
 		request.Host = c.hostHeader
 	}
-	// D5 caller authentication: every TCP dial carries exactly one
-	// credential header; unix dials carry none (socket permissions are the
-	// boundary). A TCP dial without a provisioned signer fails closed
+	// Every TCP dial carries exactly one credential header; unix dials
+	// carry none. A TCP dial without a provisioned signer fails closed
 	// before reaching the wire.
 	if c.origin != "" {
 		if c.credentials == nil {

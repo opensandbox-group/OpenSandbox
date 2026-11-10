@@ -94,7 +94,7 @@ class DockerDiagnosticsMixin:
         )
 
     def get_egress_signing_jwk(self, sandbox_id: str) -> Optional[dict]:
-        """Sidecar caller-auth JWK from the egress container label (D5)."""
+        """Sidecar caller-auth JWK from the egress container label."""
         from docker.errors import NotFound as DockerNotFound
 
         from opensandbox_server.services.constants import EGRESS_SIGNING_JWK_ANNOTATION

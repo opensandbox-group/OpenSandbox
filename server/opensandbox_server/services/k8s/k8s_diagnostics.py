@@ -104,11 +104,10 @@ class K8sDiagnosticsMixin:
         )
 
     def get_egress_signing_jwk(self, sandbox_id: str) -> Optional[dict]:
-        """Sidecar caller-auth JWK from the workload annotation (D5).
+        """Sidecar caller-auth JWK from the workload annotation.
 
         The annotation is the durable source — it lives and dies with the
-        workload, so sandbox recreation replaces the key and server restarts
-        lose nothing.
+        workload, so sandbox recreation replaces the key.
         """
         from opensandbox_server.services.constants import EGRESS_SIGNING_JWK_ANNOTATION
         from opensandbox_server.services.egress_signing import parse_recorded_jwk

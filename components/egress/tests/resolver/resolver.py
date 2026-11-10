@@ -25,14 +25,12 @@ Transports:
   permissions are the trust boundary.
 - ``--https HOST:PORT --tls-cert PEM --tls-key PEM``: TLS transport.
 
-Caller authentication (OSEP-0025 D5), opt-in via ``--require-credential``
-(HTTPS transport only): every resolve call must carry a valid
-``OpenSandbox-Egress-Credential`` JWT, verified offline by the
-``opensandbox-resolver-auth`` SDK against a JWKS. Keys come from a live
-lifecycle server (``--jwks-base URL``) or a static mapping file
-(``--jwks-file PATH``, ``{"<kid>": <JWK>}``) for self-contained runs.
-Without the flag the stub verifies nothing — the pre-D5 behavior every
-existing egress test relies on.
+Caller authentication, opt-in via ``--require-credential`` (HTTPS transport
+only): every resolve call must carry a valid ``OpenSandbox-Egress-Credential``
+JWT, verified by the ``opensandbox-resolver-auth`` SDK against a JWKS. Keys
+come from a live lifecycle server (``--jwks-base URL``) or a static mapping
+file (``--jwks-file PATH``). Without the flag the stub verifies nothing —
+the behavior every existing egress test relies on.
 
 Framing (D15): fixed at ``POST /resolve``; other paths answer 404; UDS mode
 never inspects Host. ``subject`` is the egress-authoritative sandboxId, and
@@ -200,7 +198,7 @@ class _StaticJWKSTransport:
 
 
 def build_caller_verifier(options: argparse.Namespace) -> Any:
-    """Construct the opt-in D5 verifier (requires the resolver-auth SDK)."""
+    """Construct the opt-in caller-credential verifier (requires the SDK)."""
     try:
         from opensandbox_resolver_auth import CredentialVaultCallerAuth
     except ImportError as exc:  # pragma: no cover - environment-dependent
@@ -402,8 +400,8 @@ def build_server(
     server.options = options
     server.exceptions = []
     server.request_timeout = max(30.0, options.delay / 1000.0 * 2 + 5.0)
-    # D5 caller authentication is opt-in; None keeps the stub's pre-D5
-    # behavior byte-for-byte (every existing egress test relies on it).
+    # Opt-in: None keeps the stub verifying nothing, which every existing
+    # egress test relies on.
     server.caller_verifier = build_caller_verifier(options) if options.require_credential else None
     return server
 
@@ -450,7 +448,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--require-credential",
         action="store_true",
-        help="verify the OpenSandbox-Egress-Credential JWT (OSEP-0025 D5); HTTPS only",
+        help="verify the OpenSandbox-Egress-Credential JWT; HTTPS only",
     )
     parser.add_argument(
         "--jwks-base",

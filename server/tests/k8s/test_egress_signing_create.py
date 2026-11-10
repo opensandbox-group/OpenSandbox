@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OSEP-0025 D5 W2.2 (K8s): per-sandbox keypair provisioning at create time.
+"""Per-sandbox keypair provisioning at K8s create time.
 
-_build_create_workload_context is the single choke point both K8s providers
-share. Provisioning is unconditional (no operator knob — turning it off
-would reopen the R4 gap for https:// resolvers): every sandbox created with
-a networkPolicy gets a keypair — private PEM through the egress env (the
-request-supplied name is rejected outright by the env allowlist), public
-JWK as a workload annotation.
+_build_create_workload_context is the choke point both K8s providers share.
+Provisioning is unconditional: every sandbox created with a networkPolicy
+gets a keypair — private PEM through the egress env, public JWK as a
+workload annotation. Request-supplied signing env is rejected by the env
+allowlist.
 """
 
 from __future__ import annotations

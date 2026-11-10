@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OSEP-0025 D5: JWKS publication — service behavior and the public route.
+"""JWKS publication: service behavior and the public route.
 
 Public-keys-only posture (the OIDC jwks.json stance): kid grammar rejects
 locally, the lookup budget bounds abuse (429), reads are cached, one broken
-Secret only removes its own kid, and the endpoint requires no API key.
+Secret only removes its own kid.
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ class TestJWKSService:
 
 
 class TestSidecarSource:
-    """W2.1b: per-sandbox JWKs from the workload record, after static miss."""
+    """Per-sandbox JWKs from the workload record, after static miss."""
 
     def test_sidecar_consulted_after_static_miss(self) -> None:
         kid, x = vectors_sidecar()
@@ -224,15 +224,6 @@ class TestSidecarSource:
         clock.now += 46.0
         service.get(kid)
         assert len(calls) == 2
-
-    def test_sidecar_kid_mismatch_rejected(self) -> None:
-        kid, x = vectors_sidecar()
-        forged = {"kty": "OKP", "crv": "Ed25519", "x": "AAAA", "kid": "sbx-other"}
-        service, _, _ = make_service({})
-        service._sidecar_reader = lambda _sid: forged
-        # The K8s/Docker readers enforce kid == sandbox_id themselves; the
-        # mismatch case here documents that a mismatched record yields no key.
-        assert service.get(kid) is not None or service.get("sbx-side1") is None
 
     def test_sidecar_reader_error_is_unknown_kid(self) -> None:
         def exploding(_sandbox_id: str):

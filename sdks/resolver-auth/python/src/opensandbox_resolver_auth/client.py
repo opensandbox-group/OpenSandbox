@@ -12,13 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The credential-vault resolver entry point (OSEP-0025 D5).
+"""The credential-vault resolver entry point.
 
 One instance serves one resolver: it bundles the three operator values
 (JWKS base, expected issuer, this resolver's own origin) with the bounded
-JWKS caching, and exposes the single call a resolver needs — verify the
-egress caller credential on a resolve request and get back the
-egress-attested sandbox subject.
+JWKS caching, and exposes the single call a resolver needs.
 """
 
 from __future__ import annotations
@@ -34,21 +32,8 @@ __all__ = ["CredentialVaultCallerAuth"]
 class CredentialVaultCallerAuth:
     """Verifies egress caller credentials for a credential-vault resolver.
 
-    Instantiate once per resolver process and reuse: the instance holds the
-    bounded JWKS caches (hourly key re-validation = rotation-as-revocation)
-    and the per-process fetch budget. Not a static utility on purpose — the
-    caches are the point.
-
-    Args:
-        jwks_base: lifecycle server base, e.g.
-            ``https://server.example.com/credential-vault``. Operator
-            configuration only; HTTPS, certificate verification never
-            disabled.
-        expected_audience: this resolver's own origin (the web origin of the
-            endpoint the egress dials). Identical to the ``aud`` the egress
-            mints.
-        expected_issuer: defaults to ``"opensandbox"``.
-        transport / now: injection seams for tests.
+    Instantiate once per resolver process — the instance holds the JWKS
+    caches — and call :meth:`verify_caller` per resolve request.
     """
 
     def __init__(

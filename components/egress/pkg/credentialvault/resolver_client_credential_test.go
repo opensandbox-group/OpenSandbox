@@ -52,7 +52,7 @@ func startUnixEnvelopeServer(t *testing.T) (endpoint string, sawCredential *atom
 }
 
 // TestResolverDialUnixCarriesNoCredential: unix dials never attach the
-// caller credential — socket permissions are their trust boundary (D5).
+// caller credential — socket permissions are their trust boundary.
 func TestResolverDialUnixCarriesNoCredential(t *testing.T) {
 	endpoint, sawCredential := startUnixEnvelopeServer(t)
 	client, err := NewResolverClient(ResolverClientOptions{

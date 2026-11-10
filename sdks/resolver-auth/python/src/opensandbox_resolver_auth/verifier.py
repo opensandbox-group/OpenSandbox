@@ -12,13 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Offline verification of OpenSandbox egress caller credentials (OSEP-0025).
+"""Offline verification of OpenSandbox egress caller credentials.
 
-The egress mints one Ed25519 JWT per (subject, resolver origin) and sends it
-as the ``OpenSandbox-Egress-Credential`` header on every TCP resolve dial.
-This module implements the resolver side: header whitelist, claim bindings,
-and signature verification against a JWK supplied by :mod:`.jwks` (or
-directly by the caller). The wire contract is frozen in
+The egress attaches one ``OpenSandbox-Egress-Credential`` header (an
+Ed25519 JWT) to every TCP resolve dial; this module implements the resolver
+side. The wire contract is frozen in
 ``components/egress/pkg/credentialvault/testdata/resolver_auth_vectors.json``
 and the test suite walks that same file, so Go and Python cannot drift.
 """

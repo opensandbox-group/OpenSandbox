@@ -80,9 +80,9 @@ func jwtCompactPart(t *testing.T, jwt string, index int) string {
 	return jwt[start:end]
 }
 
-// TestResolverCredentialManagerCacheAndRefresh covers the W1.3 acceptance:
-// reuse within the 80% window, re-mint past it with a fresh jti, distinct
-// audiences mint distinct aud claims.
+// TestResolverCredentialManagerCacheAndRefresh: reuse within the 80%
+// window, re-mint past it with a fresh jti, distinct audiences mint
+// distinct aud claims.
 func TestResolverCredentialManagerCacheAndRefresh(t *testing.T) {
 	now := time.Unix(1790000000, 0)
 	var mints atomic.Int64

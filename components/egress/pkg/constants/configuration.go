@@ -41,9 +41,8 @@ const (
 
 // Credential header resolver client (OSEP-0025); owned by
 // pkg/credentialvault/resolver_client.go — consumers use the client interface
-// only. Caller authentication (D5): TCP resolve dials carry an
-// OpenSandbox-Egress-Credential JWT minted from the Ed25519 signing key;
-// unix:// dials carry none (socket permissions are the boundary).
+// only. TCP resolve dials carry an OpenSandbox-Egress-Credential JWT minted
+// from the Ed25519 signing key; unix:// dials carry none.
 const (
 	EnvCredentialResolverTimeout        = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"         // seconds, 1..120
 	EnvCredentialResolverMaxConcurrency = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY" // 1..1024

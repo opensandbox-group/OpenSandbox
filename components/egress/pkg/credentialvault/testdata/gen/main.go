@@ -13,14 +13,9 @@
 // limitations under the License.
 
 // Command gen deterministically rebuilds resolver_auth_vectors.json, the
-// shared cross-language test-vector file for the OSEP-0025 Resolver Caller
-// Authentication contract (egress mint side in Go, resolver verification
-// side in Python).
-//
-// Determinism: key material is derived from fixed seeds (SHA-256 of a fixed
-// label), header/payload JSON is built as ordered literal strings, and all
-// timestamps are fixed epochs — rerunning the generator must reproduce the
-// committed file byte for byte.
+// shared test-vector file consumed by the Go mint tests and the Python
+// resolver SDK tests. Keys derive from fixed seeds and timestamps are fixed
+// epochs, so reruns reproduce the committed file byte for byte.
 //
 // Run from the credentialvault package root:
 //
@@ -221,7 +216,7 @@ func main() {
 			Name: "valid_sidecar", Key: "sidecar-1", HeaderJSON: hSidecar, PayloadJSON: pDefault,
 			JWT:    signJWT(sidecarPriv, hSidecar, pDefault),
 			Checks: []check{accept(nowValid)},
-			Note:   "mint-canonical (OSEP 0025 Credential Format example); W1.1 must reproduce this jwt byte for byte",
+			Note:   "mint-canonical: the egress mint implementation must reproduce this jwt byte for byte",
 		},
 		{
 			Name: "valid_pool", Key: "pool-1", HeaderJSON: hPool, PayloadJSON: pDefault,
@@ -235,7 +230,7 @@ func main() {
 			PayloadJSON: pDefault,
 			JWT:         signJWT(sidecarPriv, `{"alg":"EdDSA","kid":"sbx-7f3a2c"}`, pDefault),
 			Checks:      []check{accept(nowValid)},
-			Note:        "typ is not required (OSEP: 'typ not required; if present it must be JWT')",
+			Note:        "typ is not required; when present it must be JWT",
 		},
 		{
 			Name: "valid_unknown_payload_claim", Key: "sidecar-1", HeaderJSON: hSidecar,

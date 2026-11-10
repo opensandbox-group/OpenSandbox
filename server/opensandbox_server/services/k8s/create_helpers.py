@@ -146,12 +146,9 @@ def _build_create_workload_context(
             otlp_endpoint=egress_config.otlp_endpoint,
             upstream_proxy=egress_config.upstream_proxy,
         )
-        # OSEP-0025 D5 sidecar caller authentication (unconditional): one
-        # keypair per sandbox. The private PEM rides the egress env
-        # (server-generated values win over any request-supplied entry), the
-        # public JWK is recorded on the workload for the JWKS endpoint, and
-        # nothing persists server-side. Sandbox recreation replaces the
-        # keypair.
+        # Sidecar caller authentication (unconditional): one keypair per
+        # sandbox — private PEM through the egress env, public JWK recorded
+        # on the workload. Nothing persists server-side.
         material = generate_sidecar_signing_material(sandbox_id)
         egress_settings = replace(
             egress_settings,

@@ -12,20 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JWKS fetching with bounded caching for the resolver verification SDK.
+"""JWKS fetching with bounded caching.
 
-The lifecycle server publishes one public key per kid at
-``{jwks_base}/jwks/{kid}``. This client keeps a bounded positive cache (a JWK
-is fetched on first use and re-validated at most once per hour — which is
-what makes rotation an effective revocation: a retired kid disappears and
-the next refresh rejects its credentials), a bounded negative cache for
-unknown-but-well-formed kids, and a per-process fetch budget so spraying
-random kids cannot amplify into lifecycle-server lookups (OSEP-0025 JWKS
-Endpoint Security).
-
-The JWKS base URL comes from operator configuration only, never from token
-contents; kid substitutes into the lookup path only after passing the
-platform grammar locally; and TLS verification is never disabled.
+Keys come from ``{jwks_base}/jwks/{kid}`` on the lifecycle server. A cached
+key is re-validated at most hourly, which is what makes rotation a working
+revocation: a retired kid disappears and the next refresh rejects its
+credentials. Unknown-but-well-formed kids get a bounded negative cache, and
+a per-process fetch budget keeps kid spraying from amplifying into server
+lookups. The base URL comes from operator configuration only, and TLS
+verification is never disabled.
 """
 
 from __future__ import annotations

@@ -97,7 +97,7 @@
           "verdict": "accept"
         }
       ],
-      "note": "mint-canonical (OSEP 0025 Credential Format example); W1.1 must reproduce this jwt byte for byte"
+      "note": "mint-canonical: the egress mint implementation must reproduce this jwt byte for byte"
     },
     {
       "name": "valid_pool",
@@ -125,7 +125,7 @@
           "verdict": "accept"
         }
       ],
-      "note": "typ is not required (OSEP: 'typ not required; if present it must be JWT')"
+      "note": "typ is not required; when present it must be JWT"
     },
     {
       "name": "valid_unknown_payload_claim",

@@ -12,15 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sidecar caller-authentication key provisioning (OSEP-0025 D5, batch 2).
+"""Per-sandbox caller-authentication key provisioning.
 
-At sandbox creation the server generates one Ed25519 keypair per sandbox:
-the private key (PKCS8 PEM) is injected into the egress sidecar through the
-OPENSANDBOX_EGRESS_TOKEN env channel and then discarded server-side; the
-public JWK is written onto the workload (K8s annotation / Docker label) so
-the JWKS endpoint can serve it for the life of the workload. Sandbox
-recreation produces a fresh keypair — the JWKS entry is replaced with it,
-which is the whole revocation story for sidecar kids.
+At sandbox creation the server generates one Ed25519 keypair: the private
+key goes into the egress sidecar env and is discarded server-side; the
+public JWK is written onto the workload (annotation / label) where the JWKS
+endpoint reads it. Sandbox recreation produces a fresh keypair, which is
+the whole revocation story.
 """
 
 from __future__ import annotations

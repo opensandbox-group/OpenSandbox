@@ -852,7 +852,7 @@ class KubernetesRuntimeConfig(BaseModel):
         default_factory=list,
         description=(
             "Fast-sandbox egress caller-authentication signing Secrets "
-            "(OSEP-0025 D5), listed current-version-first; keep the previous "
+            "(OSEP-0025), listed current-version-first; keep the previous "
             "version listed until pool rollout plus credential TTL + leeway "
             "has passed (dual-kid rotation grace). Each Secret must carry "
             "signing.pub (raw base64url Ed25519 public key) and kid "
@@ -924,8 +924,7 @@ class KubernetesRuntimeConfig(BaseModel):
         if overlap:
             raise ValueError(
                 "kubernetes.egress_signing_key_secrets must reference "
-                "dedicated Secrets separate from template_mitm_ca_secret "
-                f"(OSEP-0025: independent version lines and reader sets); "
+                "dedicated Secrets separate from template_mitm_ca_secret; "
                 f"shared: {sorted(overlap)}."
             )
         return self
@@ -1159,12 +1158,11 @@ class EgressConfig(BaseModel):
         description="Container image for the egress sidecar (used when network policy is requested).",
         min_length=1,
     )
-    # NOTE: OSEP-0025 D5 sidecar caller authentication is unconditional —
-    # every sandbox created with a networkPolicy gets a per-sandbox keypair
-    # (see services/egress_signing.py), published via
-    # GET /credential-vault/jwks/{sandboxId}. There is deliberately no
-    # operator knob: turning it off would reopen the R4 gap for https://
-    # resolvers.
+    # NOTE: sidecar caller authentication is unconditional — every sandbox
+    # created with a networkPolicy gets a per-sandbox keypair
+    # (services/egress_signing.py), published via
+    # GET /credential-vault/jwks/{sandboxId}. No operator knob: turning it
+    # off would reopen the https:// resolver trust-boundary gap.
     mode: Literal[
         EGRESS_MODE_DNS,
         EGRESS_MODE_DNS_NFT,

@@ -126,8 +126,8 @@ func startPolicyServer(
 		log.Warnf("credential resolver operator configuration not ready: %v", resolverConfigErr)
 	}
 	handler.credentialVault.SetResolverConfig(resolverConfig)
-	// D5 caller-auth gate: https:// exchange credentials fail closed until
-	// the signing key is provisioned (transport-aware; unix:// unaffected).
+	// Caller-auth gate: https:// exchange credentials fail closed until the
+	// signing key is provisioned; unix:// is unaffected.
 	resolverAuth := credentialvault.ResolverAuthConfigFromEnv()
 	if resolverAuth.Problem != nil {
 		log.Warnf("resolver caller-authentication not ready: %v", resolverAuth.Problem)

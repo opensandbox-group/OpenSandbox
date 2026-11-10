@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The public entry point: CredentialVaultCallerAuth.
-
-One instance per resolver process; verify_caller is the single call a
-resolve handler needs. These tests prove the class carries the same frozen
-contract as the lower-level functions and that its caching behavior is the
-JWKS client's.
-"""
+"""The public entry point: CredentialVaultCallerAuth."""
 
 from __future__ import annotations
 
@@ -115,7 +109,7 @@ def test_verify_caller_rejects_mismatched_subject(vectors) -> None:
 
 
 def test_instances_are_stateful_not_static(vectors) -> None:
-    """The class is instance-based on purpose: caches live on the instance."""
+    """Caches are per instance: two instances each fetch once."""
     jwt, subject, jwk = _happy_parts(vectors)
     transport = MapTransport({"sbx-7f3a2c": jwk})
     clock = FakeClock()

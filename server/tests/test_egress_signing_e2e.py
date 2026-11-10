@@ -12,20 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Docker-sidecar caller-authentication end-to-end (OSEP-0025, no cluster).
+"""Docker-sidecar caller-authentication end-to-end, no cluster required.
 
-Chains the real components across the whole server-side story with mocks
-only at the two honest boundaries — the Docker API and the HTTP transport:
-
-    create_sandbox (real service)  ->  per-sandbox keypair (real generation)
-    -> sidecar env + container label (real injection)
-    -> JWKS endpoint (real service + route, sidecar reader through the
-       diagnostics mixin)
-    -> resolver SDK verification (real CredentialVaultCallerAuth) of a
-       credential minted with the injected private key.
-
-Plus the rotation story: recreating the sandbox replaces the keypair, and
-the superseded credential stops verifying.
+Real server components throughout; mocks only at the Docker API and the
+SDK's HTTP transport: create_sandbox provisions the per-sandbox keypair,
+the JWKS route serves the recorded container label, and the resolver SDK
+verifies a credential minted with the injected private key. Covers the
+rotation story too — recreating a sandbox replaces the keypair and the
+predecessor's credential stops verifying.
 """
 
 from __future__ import annotations
@@ -63,8 +57,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY,
 )
 
-# The resolver SDK lives in sdks/ (not a server dependency); import it from
-# the repo tree so this e2e exercises the exact code resolvers install.
+# The resolver SDK is not a server dependency; import it from the repo tree.
 _SDK_SRC = Path(__file__).resolve().parents[1].parent / "sdks" / "resolver-auth" / "python" / "src"
 if _SDK_SRC.is_dir():
     sys.path.insert(0, str(_SDK_SRC))
@@ -89,7 +82,7 @@ def _b64url(raw: bytes) -> str:
 
 
 def _mint(pem: str, *, kid: str, subject: str, audience: str = RESOLVER_ORIGIN) -> str:
-    """Mint exactly the credential the egress would attach for (kid, subject)."""
+    """Mint the credential the egress would attach for (kid, subject)."""
     now = int(time.time())
     header = _b64url(json.dumps({"alg": "EdDSA", "typ": "JWT", "kid": kid}).encode())
     claims = _b64url(
@@ -148,11 +141,9 @@ class _SidecarE2E:
     async def create(self, *, sandbox_id: str | None = None) -> tuple[str, str, dict]:
         """Create one sandbox; return (sandbox_id, private_pem, jwk).
 
-        ``sandbox_id`` models recreation: force the same external id across
-        two creates, exactly like destroying and re-creating one sandbox.
+        ``sandbox_id`` models recreation: forcing the same external id
+        across two creates.
         """
-        # Re-prime the two create_container responses per call so repeated
-        # creation (recreation) works.
         self.mock_client.api.create_container.side_effect = [
             {"Id": "sidecar-id"},
             {"Id": "main-id"},

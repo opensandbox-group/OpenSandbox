@@ -12,15 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Public JWKS endpoint for credential-vault resolver caller authentication
-(OSEP-0025 D5).
+"""Public JWKS endpoint for credential-vault resolver caller authentication.
 
 ``GET /credential-vault/jwks/{kid}`` serves one public Ed25519 JWK that
-resolvers use to verify ``OpenSandbox-Egress-Credential`` headers on resolve
-calls. The endpoint is public by design (public keys only — the OIDC
-jwks.json posture) and is exempt from API key auth; abuse is bounded by
-kid-grammar rejection and the service's lookup budget (429). Route stays
-thin: all logic lives in services.jwks.
+resolvers use to verify ``OpenSandbox-Egress-Credential`` headers. Public by
+design (public keys only, the OIDC jwks.json posture), exempt from API key
+auth; abuse is bounded by kid-grammar rejection and the lookup budget (429).
+All logic lives in services.jwks.
 """
 
 from __future__ import annotations

@@ -21,11 +21,9 @@ import (
 )
 
 // resolverCredentialManager caches one credential per (subject, resolver
-// origin) and re-mints at 80% of the TTL, so no request ever meets an
-// expired credential and the superseded one stays valid at resolvers until
-// its own exp (the 12-minute overlap bounds replay; OSEP-0025 Rotation).
-// Minting is lazy on first resolve; a process restart starts empty and mints
-// fresh jtis immediately. The manager implements CredentialProvider.
+// origin) and re-mints at 80% of the TTL, so no request meets an expired
+// credential. Implements CredentialProvider; minting is lazy on first
+// resolve and a restart starts empty (fresh jti immediately).
 type resolverCredentialManager struct {
 	mint func(subject, audience string, now time.Time) (string, error)
 	now  func() time.Time

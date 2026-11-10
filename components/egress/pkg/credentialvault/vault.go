@@ -290,10 +290,9 @@ func (v *Store) SetResolverConfig(config ResolverConfig) {
 }
 
 // ResolverAuthConfig reports whether the caller-authentication signer is
-// provisioned (D5). The zero value is not ready: vault writes containing
-// https:// exchange credentials fail closed until a signer is injected.
-// unix:// exchange credentials are unaffected — socket permissions remain
-// their boundary (transport-aware gate).
+// provisioned. The zero value is not ready: vault writes containing
+// https:// exchange credentials fail closed until a signer is injected;
+// unix:// exchange credentials are unaffected.
 type ResolverAuthConfig struct {
 	// Signer is the loaded signing identity; nil means not provisioned.
 	Signer *ResolverCredentialSigner
@@ -593,9 +592,8 @@ func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	if !v.resolverConfig.Ready() {
 		return fmt.Errorf("exchange credentials are not supported until the credential resolver operator configuration is ready")
 	}
-	// Transport-aware caller-auth gate (D5): only https:// exchange
-	// credentials need the signer; unix:// keeps socket permissions as its
-	// boundary and stays writable without one.
+	// Only https:// exchange credentials need the signer; unix:// keeps
+	// socket permissions as its boundary and stays writable without one.
 	if hasTCPExchange && !v.resolverAuth.Ready() {
 		if v.resolverAuth.Problem != nil {
 			return fmt.Errorf("https exchange credentials are not supported: resolver caller-authentication signing key is configured but unloadable: %v", v.resolverAuth.Problem)

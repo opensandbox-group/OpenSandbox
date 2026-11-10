@@ -33,13 +33,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Stage 2a end-to-end (OSEP-0025 W5.1a): the egress resolver client with a
-// real signer against the enforcing test resolver (resolver.py
-// --require-credential), both sides driven only by the frozen contract:
+// End-to-end: the egress resolver client with a real signer against the
+// enforcing test resolver (resolver.py --require-credential):
 //
-//   - egress dial → credential verified → resolve served (happy path);
-//   - a dial without the credential header — what a sandbox process
-//     impersonating the egress could do — gets 401 (R4 closure);
+//   - egress dial resolves through the verified credential;
+//   - a dial without the credential header — what a sandbox process could
+//     do — gets 401;
 //   - a TCP client with no provisioned signer fails closed before the wire.
 
 // stubSDKEnv returns the PYTHONPATH that makes resolver.py's lazy
@@ -162,11 +161,8 @@ func TestResolverCallerAuthEndToEnd(t *testing.T) {
 	})
 }
 
-// TestResolverCallerAuthSidecarKidEndToEnd is the batch-2 (Stage 2b) variant:
-// the sidecar profile's kid is the sandbox's sandboxId — mixed-case
-// ULID-form. Exercises the widened grammar end to end on both sides of the
-// wire and proves recreation-scale key churn (a fresh keypair per sandbox)
-// verifies through the same JWKS file mechanism.
+// TestResolverCallerAuthSidecarKidEndToEnd: sidecar kids are real
+// sandboxIds (mixed-case ULIDs) — exercises the widened grammar end to end.
 func TestResolverCallerAuthSidecarKidEndToEnd(t *testing.T) {
 	if !stubSDKAvailable(t) {
 		t.Skip("python3 + opensandbox-resolver-auth are required for the caller-auth e2e")

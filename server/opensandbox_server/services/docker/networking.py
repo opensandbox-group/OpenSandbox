@@ -541,11 +541,9 @@ class DockerNetworkingMixin:
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
 
-        # OSEP-0025 D5 sidecar caller authentication (unconditional): one
-        # keypair per sandbox. The private key rides the OPENSANDBOX_EGRESS_TOKEN
-        # env channel and is discarded server-side immediately; the public
-        # JWK is recorded on the sidecar container as the durable source for
-        # the JWKS endpoint. Sandbox recreation replaces the keypair.
+        # Sidecar caller authentication (unconditional): one keypair per
+        # sandbox — private PEM through the sidecar env, public JWK on the
+        # container label for the JWKS endpoint.
         material = generate_sidecar_signing_material(sandbox_id)
         sidecar_env.append(
             f"{OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY}={material.private_pem}"

@@ -214,10 +214,9 @@ func testHTTPSExchangeVaultRequest() CreateRequest {
 	return request
 }
 
-// TestExchangeHTTPSCredentialsRequireSigner is the W1.2 acceptance matrix:
-// https:// exchange vaults are rejected at write time without a signer,
-// unix:// exchange vaults and inline-only vaults keep serving, and a valid
-// signer reopens the https path (transport-aware gate, fail closed).
+// TestExchangeHTTPSCredentialsRequireSigner: https:// exchange vaults are
+// rejected at write time without a signer; unix:// exchange vaults and
+// inline-only vaults keep serving; a valid signer reopens the https path.
 func TestExchangeHTTPSCredentialsRequireSigner(t *testing.T) {
 	t.Run("https without signer rejected", func(t *testing.T) {
 		store := testResolverReadyStore()

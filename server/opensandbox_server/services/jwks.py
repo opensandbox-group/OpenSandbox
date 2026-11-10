@@ -12,23 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JWKS publication for credential-vault resolver caller authentication
-(OSEP-0025 D5).
+"""JWKS publication for egress caller-authentication keys.
 
-The lifecycle server publishes one public Ed25519 key per fast-sandbox pool
-kid at ``GET /credential-vault/jwks/{kid}``. The endpoint is public by design — it serves
-public keys only, exactly like an OIDC provider's ``/.well-known/jwks.json``
-— and relies on kid-grammar rejection plus rate limiting, never on resolver
-registration (which would reintroduce the static credential this design
-eliminates).
-
-Key material comes from the operator-provisioned signing Secrets referenced
-by ``kubernetes.egress_signing_key_secrets`` (current version first; the
-previous version stays listed through the rotation grace window). Each
-Secret carries ``signing.pub`` (raw base64url Ed25519 public key) and ``kid``
-(``<pool>:v<version>``). Reads are cached for a short TTL to absorb
-first-contact bursts; a misconfigured Secret only removes its own kid and is
-logged, never fatal to the others.
+Serves one public Ed25519 key per kid at ``GET /credential-vault/jwks/{kid}``
+— public keys only, so the endpoint needs no authentication (the OIDC
+jwks.json posture); abuse is bounded by kid-grammar rejection and rate
+limiting. Fast-sandbox pool keys come from the configured signing Secrets;
+sidecar keys come from the per-sandbox workload records.
 """
 
 from __future__ import annotations

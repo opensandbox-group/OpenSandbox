@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OSEP-0025 D5 batch 2: per-sandbox caller-auth provisioning (W2.2).
-
-Material unit tests (generation, pairing, grammar, recreation) and the
-Docker sidecar path (env + container label). The K8s create-path tests live
-in tests/k8s/test_egress_signing_create.py where the k8s fixtures live.
+"""Per-sandbox caller-auth provisioning: material generation and the Docker
+sidecar path (env + label). The K8s create-path tests live in
+tests/k8s/test_egress_signing_create.py.
 """
 
 from __future__ import annotations

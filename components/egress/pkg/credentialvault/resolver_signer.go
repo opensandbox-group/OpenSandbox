@@ -27,21 +27,11 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
 
-// Resolver caller-authentication signer loading (OSEP-0025 D5). Two
-// provisioning channels, both operator-only, neither ever passing through the
-// vault API or into the sandbox:
-//
-//   - fast-sandbox: read-only Secret volume projected at
-//     OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR/signing.key, kid from
-//     OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID (<pool>:v<version>);
-//   - sidecar/docker: PKCS8 PEM injected through the OPENSANDBOX_EGRESS_TOKEN
-//     env channel, kid = the sandbox's OPENSANDBOX_EGRESS_SANDBOX_ID.
-//
-// The dir channel takes precedence when both are present. A missing channel
-// (nil signer, no error) and an unloadable channel (nil signer, diagnostic
-// error) both fail closed at the exchange admission gate for https://
-// endpoints only — unix:// exchange credentials keep socket permissions as
-// their boundary and are unaffected (transport-aware gate, W1.2).
+// Resolver caller-authentication signer loading. Two operator channels —
+// fast-sandbox Secret volume (signing key dir + kid env; dir wins) or
+// sidecar env (PEM, kid = sandbox id). Missing and unloadable alike yield a
+// nil signer; the exchange gate then fails closed for https:// endpoints
+// only.
 
 // ResolverCredentialSigner is the loaded signing identity of this egress.
 type ResolverCredentialSigner struct {
@@ -53,8 +43,7 @@ type ResolverCredentialSigner struct {
 func (s *ResolverCredentialSigner) Kid() string { return s.kid }
 
 // Mint signs one credential for (subject, audience) at the full 1h TTL with
-// a fresh jti. Cache/refresh policy lives in the caller (W1.3); Mint itself
-// is stateless and safe for concurrent use.
+// a fresh jti. Stateless; caching lives in resolverCredentialManager.
 func (s *ResolverCredentialSigner) Mint(subject, audience string, now time.Time) (string, error) {
 	jti, err := newCredentialJTI()
 	if err != nil {

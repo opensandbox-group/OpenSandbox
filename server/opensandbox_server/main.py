@@ -187,9 +187,9 @@ async def lifespan(app: FastAPI):
             logger.info("Validating secure runtime for Kubernetes backend")
 
         if app_config.runtime.type == "kubernetes" and app_config.kubernetes.egress_signing_key_secrets:
-            # OSEP-0025 D5: publish the fast-sandbox pool signing keys. Lazy
-            # first read — an unreachable API server delays the first JWKS
-            # response, not startup.
+            # Publish the fast-sandbox pool signing keys. Lazy first read:
+            # an unreachable API server delays the first JWKS response, not
+            # startup.
             from opensandbox_server.services.jwks import build_jwks_service_from_config
 
             app.state.jwks_service = build_jwks_service_from_config(
