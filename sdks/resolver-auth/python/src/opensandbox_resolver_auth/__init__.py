@@ -12,8 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenSandbox resolver caller-authentication verification SDK (OSEP-0025)."""
+"""OpenSandbox credential-vault resolver caller authentication SDK
+(OSEP-0025): the verification side a header-resolver needs.
 
+Primary entry point: :class:`CredentialVaultCallerAuth` — one instance per
+resolver process, one call per resolve request. The lower-level
+:func:`verify_credential` performs the same checks offline when the caller
+supplies the JWK itself.
+"""
+
+from .client import CredentialVaultCallerAuth
 from .verifier import (
     CREDENTIAL_HEADER,
     DEFAULT_ISSUER,
@@ -27,6 +35,7 @@ from .verifier import (
 
 __all__ = [
     "CREDENTIAL_HEADER",
+    "CredentialVaultCallerAuth",
     "DEFAULT_ISSUER",
     "KID_GRAMMAR",
     "LEEWAY_SECONDS",

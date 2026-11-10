@@ -1,0 +1,110 @@
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The credential-vault resolver entry point (OSEP-0025 D5).
+
+One instance serves one resolver: it bundles the three operator values
+(JWKS base, expected issuer, this resolver's own origin) with the bounded
+JWKS caching, and exposes the single call a resolver needs — verify the
+egress caller credential on a resolve request and get back the
+egress-attested sandbox subject.
+"""
+
+from __future__ import annotations
+
+from typing import Callable, Optional
+
+from .jwks import JWKSClient, Transport
+from .verifier import DEFAULT_ISSUER, VerifyError, VerifierConfig, verify_credential
+
+__all__ = ["CredentialVaultCallerAuth"]
+
+
+class CredentialVaultCallerAuth:
+    """Verifies egress caller credentials for a credential-vault resolver.
+
+    Instantiate once per resolver process and reuse: the instance holds the
+    bounded JWKS caches (hourly key re-validation = rotation-as-revocation)
+    and the per-process fetch budget. Not a static utility on purpose — the
+    caches are the point.
+
+    Args:
+        jwks_base: lifecycle server base, e.g.
+            ``https://server.example.com/credential-vault``. Operator
+            configuration only; HTTPS, certificate verification never
+            disabled.
+        expected_audience: this resolver's own origin (the web origin of the
+            endpoint the egress dials). Identical to the ``aud`` the egress
+            mints.
+        expected_issuer: defaults to ``"opensandbox"``.
+        transport / now: injection seams for tests.
+    """
+
+    def __init__(
+        self,
+        *,
+        jwks_base: str,
+        expected_audience: str,
+        expected_issuer: str = DEFAULT_ISSUER,
+        transport: Optional[Transport] = None,
+        now: Optional[Callable[[], float]] = None,
+        max_cache_age: float = 3600.0,
+        negative_ttl: float = 300.0,
+        max_fetches: int = 60,
+        window_seconds: float = 60.0,
+        fetch_timeout: float = 5.0,
+    ) -> None:
+        self._config = VerifierConfig(
+            jwks_base=jwks_base,
+            expected_issuer=expected_issuer,
+            expected_audience=expected_audience,
+        )
+        self._client = JWKSClient(
+            self._config,
+            transport=transport,
+            now=now,
+            max_cache_age=max_cache_age,
+            negative_ttl=negative_ttl,
+            max_fetches=max_fetches,
+            window_seconds=window_seconds,
+            fetch_timeout=fetch_timeout,
+        )
+
+    @property
+    def config(self) -> VerifierConfig:
+        return self._config
+
+    @property
+    def jwks_fetch_count(self) -> int:
+        """Total JWKS fetches performed (observability/test seam)."""
+        return self._client.fetch_count
+
+    def verify_caller(
+        self,
+        credential: str,
+        *,
+        document_subject: str,
+        now: Optional[int] = None,
+    ) -> str:
+        """Verify one resolve call's ``OpenSandbox-Egress-Credential``.
+
+        Returns the egress-attested subject (the JWT ``sub``) — the sole
+        authoritative identity for per-sandbox authorization. Raises
+        :class:`VerifyError` on any failure; map every failure to HTTP 401.
+        Known keys keep verifying offline when the lifecycle server is
+        unreachable; only first-contact fetches fail (closed).
+        """
+        return self._client.verify(
+            credential, document_subject=document_subject, now=now
+        )

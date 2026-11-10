@@ -383,18 +383,18 @@ Only `signing.key` is mounted into the egress. Without a loadable key, vault wri
 4. **Verify on the resolver** with the Python SDK:
 
 ```python
-from opensandbox_resolver_auth import VerifierConfig
-from opensandbox_resolver_auth.jwks import JWKSClient
+from opensandbox_resolver_auth import CredentialVaultCallerAuth
 
-config = VerifierConfig(
+caller_auth = CredentialVaultCallerAuth(
     jwks_base="https://<lifecycle-server>/credential-vault",
     expected_issuer="opensandbox",
     expected_audience="https://<this-resolver>:<port>",  # your own origin
 )
-client = JWKSClient(config)
 
-subject = client.verify(headers["OpenSandbox-Egress-Credential"],
-                        document_subject=document["subject"])
+subject = caller_auth.verify_caller(
+    headers["OpenSandbox-Egress-Credential"],
+    document_subject=document["subject"],
+)
 ```
 
 Every verification failure maps to HTTP 401. The test resolver enforces all of this behind `--require-credential --jwks-base <url>` (or `--jwks-file <path>` for self-contained runs).

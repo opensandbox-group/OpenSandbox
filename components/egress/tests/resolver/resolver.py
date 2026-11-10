@@ -202,17 +202,15 @@ class _StaticJWKSTransport:
 def build_caller_verifier(options: argparse.Namespace) -> Any:
     """Construct the opt-in D5 verifier (requires the resolver-auth SDK)."""
     try:
-        from opensandbox_resolver_auth import VerifierConfig
-        from opensandbox_resolver_auth.jwks import JWKSClient
+        from opensandbox_resolver_auth import CredentialVaultCallerAuth
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise SystemExit(
             "--require-credential needs the opensandbox-resolver-auth package"
         ) from exc
-    base = options.jwks_base or "https://static-jwks.invalid"
-    transport = _StaticJWKSTransport(options.jwks_file) if options.jwks_file else None
-    return JWKSClient(
-        VerifierConfig(jwks_base=base, expected_audience=options.expected_aud),
-        transport=transport,
+    return CredentialVaultCallerAuth(
+        jwks_base=options.jwks_base or "https://static-jwks.invalid",
+        expected_audience=options.expected_aud,
+        transport=_StaticJWKSTransport(options.jwks_file) if options.jwks_file else None,
     )
 
 
@@ -340,7 +338,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._reply(401, {"error": "credential_missing"})
                 return
             try:
-                verifier.verify(credential, document_subject=parts["subject"])
+                verifier.verify_caller(credential, document_subject=parts["subject"])
             except Exception as exc:
                 # VerifyError.code carries the stable reason (alg_pinned,
                 # subject_mismatch, unknown_kid, ...); anything else is an

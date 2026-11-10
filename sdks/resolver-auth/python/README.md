@@ -19,19 +19,17 @@ Requires Python 3.10+.
 ## Quick start
 
 ```python
-from opensandbox_resolver_auth import VerifyError, VerifierConfig
-from opensandbox_resolver_auth.jwks import JWKSClient
+from opensandbox_resolver_auth import CredentialVaultCallerAuth, VerifyError
 
-config = VerifierConfig(
-    jwks_base="https://lifecycle-server.example.com",
+caller_auth = CredentialVaultCallerAuth(
+    jwks_base="https://lifecycle-server.example.com/credential-vault",
     expected_issuer="opensandbox",
     expected_audience="https://resolver.internal:8443",  # your own origin
 )
-client = JWKSClient(config)
 
 def handle_resolve(document, headers):
     try:
-        subject = client.verify(
+        subject = caller_auth.verify_caller(
             headers["OpenSandbox-Egress-Credential"],
             document_subject=document["subject"],
         )
@@ -42,7 +40,9 @@ def handle_resolve(document, headers):
     ...
 ```
 
-Every `VerifyError` maps to HTTP 401; unknown kids are fetched from
-`{jwks_base}/jwks/{kid}` with bounded positive/negative caching. See the
-package docstrings for the exact claim rules and the
-[credential vault guide](https://open-sandbox.ai) for the full contract.
+One instance per resolver process (it holds the bounded JWKS caches); one
+`verify_caller` call per resolve request. Every `VerifyError` maps to HTTP
+401; unknown kids are fetched from `{jwks_base}/jwks/{kid}` with bounded
+positive/negative caching. See the package docstrings for the exact claim
+rules and the [credential vault guide](https://open-sandbox.ai) for the
+full contract.
