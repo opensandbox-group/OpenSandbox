@@ -17,8 +17,8 @@
 ``GET /credential-vault/jwks/{kid}`` serves one public Ed25519 JWK that
 resolvers use to verify ``OpenSandbox-Egress-Credential`` headers. Public by
 design (public keys only, the OIDC jwks.json posture), exempt from API key
-auth; abuse is bounded by kid-grammar rejection and the lookup budget (429).
-All logic lives in services.jwks.
+auth; request rate limiting is the trusted ingress/API gateway's job. All
+logic lives in services.jwks.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from opensandbox_server.services.jwks import JWKSBackendError, RateLimited
+from opensandbox_server.services.jwks import JWKSBackendError
 
 router = APIRouter(tags=["Credential Vault"])
 
@@ -44,7 +44,6 @@ def _service(request: Request):
     responses={
         200: {"description": "The JWK for this kid (public key only)"},
         404: {"description": "Unknown kid (off-grammar kids included)"},
-        429: {"description": "Lookup budget exhausted; retry later"},
         501: {"description": "No signing Secrets configured"},
         503: {"description": "Transient backend failure; retry later"},
     },
@@ -53,8 +52,6 @@ def get_jwk(kid: str, request: Request) -> dict:
     """Publish one egress caller-authentication public key."""
     try:
         jwk: Optional[dict] = _service(request).get(kid)
-    except RateLimited:
-        raise HTTPException(status_code=429, detail="jwks lookup budget exhausted") from None
     except JWKSBackendError as exc:
         # Transient backend failure: 503 so resolvers retry instead of
         # caching a false absence; 404 stays authoritative.

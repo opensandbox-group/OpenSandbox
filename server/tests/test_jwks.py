@@ -15,8 +15,8 @@
 """JWKS publication: service behavior and the public route.
 
 Public-keys-only posture (the OIDC jwks.json stance): kid grammar rejects
-locally, the lookup budget bounds abuse (429), reads are cached, one broken
-Secret only removes its own kid.
+locally, reads are cached and one broken Secret only removes its own kid;
+request rate limiting belongs to the trusted ingress/API gateway.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from fastapi.testclient import TestClient
 
 from opensandbox_server.api.jwks import router as jwks_router
 from opensandbox_server.middleware.auth import AuthMiddleware
-from opensandbox_server.services.jwks import JWKSService, RateLimited
+from opensandbox_server.services.jwks import JWKSService
 
 REPO_ROOT = Path(__file__).resolve().parents[1].parent
 VECTORS_PATH = (
@@ -166,21 +166,6 @@ class TestJWKSService:
         )
         assert service.get(kid)["x"] == x, "current-version-first wins"
 
-    def test_lookup_budget_exhaustion(self) -> None:
-        kid, x = vectors_sidecar()
-        service, _, clock = make_service(
-            {"s": {"signing.pub": x.encode(), "kid": kid.encode()}},
-            max_lookups=3,
-            window_seconds=60.0,
-        )
-        # Distinct unknown kids each cost a backend lookup (sidecar miss).
-        service.get("sbx-burn000")  # refresh + miss = 2 of 3
-        service.get("sbx-burn001")  # miss = 3 of 3
-        with pytest.raises(RateLimited):
-            service.get("sbx-burn002")
-        clock.now += 61.0
-        assert service.get("sbx-over1") is None  # window slides, budget recovers
-
 
 class TestSidecarSource:
     """Per-sandbox JWKs from the workload record, after static miss."""
@@ -258,29 +243,6 @@ class TestSidecarSource:
         assert ok.status_code == 200
         assert ok.json() == material_jwk
         assert client.get("/credential-vault/jwks/sbx-gone1").status_code == 404
-
-    def test_cache_hits_do_not_consume_backend_budget(self) -> None:
-        """One caller hammering unknown kids must not starve cached-key
-        reads: hits and throttle are free of the backend budget."""
-        kid, x = vectors_sidecar()
-        service, _, _ = make_service(
-            {"s": {"signing.pub": x.encode(), "kid": kid.encode()}},
-            max_lookups=2,
-        )
-        # First read populates the static cache (one refresh, one budgeted
-        # lookup already consumed by the refresh itself).
-        assert service.get(kid) is not None
-        # Unknown kids burn the backend budget (sidecar reader unset, so
-        # each miss costs a lookup slot).
-        for i in range(4):
-            try:
-                service.get(f"sbx-flood{i:03d}")
-            except RateLimited:
-                break
-        # The cached key must still be readable despite the exhausted
-        # backend budget.
-        assert service.get(kid) is not None
-
 
 class TestK8sSecretWireFormat:
     """build_k8s_secret_reader must decode V1Secret.data's base64 layer."""
@@ -522,22 +484,6 @@ class TestJWKSRoute:
         assert "PRIVATE" not in ok.text
         assert client.get("/credential-vault/jwks/pool-z:v9").status_code == 404
         assert client.get("/credential-vault/jwks/..%2Fescape").status_code == 404
-
-    def test_rate_limited_is_429(self) -> None:
-        """Backend-budget exhaustion (unknown-kid flooding) answers 429;
-        cached-key reads never consume that budget and never 429."""
-        kid, x = vectors_sidecar()
-        service, _, _ = make_service(
-            {"s": {"signing.pub": x.encode(), "kid": kid.encode()}},
-            max_lookups=2,
-        )
-        client = self.make_app(service)
-        assert client.get(f"/credential-vault/jwks/{kid}").status_code == 200
-        # Unknown kids burn the backend budget...
-        statuses = [client.get(f"/credential-vault/jwks/sbx-flood{i:03d}").status_code for i in range(3)]
-        assert 429 in statuses
-        # ...while the cached key keeps serving.
-        assert client.get(f"/credential-vault/jwks/{kid}").status_code == 200
 
     def test_endpoint_is_public(self) -> None:
         """No API key required (public-keys-only posture)."""

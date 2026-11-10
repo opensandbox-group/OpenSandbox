@@ -42,14 +42,8 @@ SIGNING_PUBLIC_KEY_ENTRY = "signing.pub"
 KID_ENTRY = "kid"
 
 DEFAULT_CACHE_TTL_SECONDS = 45.0
-DEFAULT_MAX_LOOKUPS = 120
-DEFAULT_WINDOW_SECONDS = 60.0
 
 _ED25519_PUBLIC_KEY_BYTES = 32
-
-
-class RateLimited(Exception):
-    """The lookup budget for the current window is exhausted (HTTP 429)."""
 
 
 class SecretReader(Protocol):
@@ -94,28 +88,18 @@ class JWKSService:
         secret_names: list[str],
         reader: SecretReader,
         cache_ttl: float = DEFAULT_CACHE_TTL_SECONDS,
-        max_lookups: int = DEFAULT_MAX_LOOKUPS,
-        window_seconds: float = DEFAULT_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         sidecar_reader: Optional[SidecarKeyReader] = None,
     ) -> None:
         self._secret_names = list(secret_names)
         self._reader = reader
         self._cache_ttl = cache_ttl
-        self._max_lookups = max_lookups
-        self._window_seconds = window_seconds
         self._clock = clock
         self._sidecar_reader = sidecar_reader
 
         self._lock = threading.Lock()
         self._keys: dict[str, dict] = {}
         self._refreshed_at: float = float("-inf")
-        # Two separate bounds: the caller throttle (every request, anonymous
-        # endpoint) and the backend budget (only work that actually reaches a
-        # Secret read or a workload lookup).
-        self._throttle_times: list[float] = []
-        self._max_throttle = max_lookups * 10
-        self._lookup_times: list[float] = []
         # Sidecar (per-sandbox) lookups: one bounded per-kid TTL cache so a
         # hot resolver does not hammer the workload read path, while memory
         # stays capped across unbounded sandbox churn.
@@ -144,17 +128,15 @@ class JWKSService:
         Raises :class:`JWKSBackendError` for transient backend failures —
         the route maps those to 503 (retryable) so resolvers never cache a
         false absence; None (→ 404) is reserved for a genuinely missing key.
-        Cache hits cost nothing and never touch the backend budget; every
-        request consumes the anonymous throttle. Raises
-        :class:`RateLimited` when either bound is exhausted. Off-grammar
-        kids return None without reading anything. Lookup order:
+        Off-grammar kids return None without reading anything. Request
+        rate limiting is the trusted ingress/API gateway's job, not this
+        service's. Lookup order:
         fast-sandbox signing Secrets first, then the sidecar source.
         """
         if not KID_GRAMMAR.match(kid):
             return None
         now = self._clock()
         with self._lock:
-            self._consume_throttle(now)
             needs_refresh = now - self._refreshed_at > self._cache_ttl
         if needs_refresh:
             self._refresh(now)
@@ -179,7 +161,6 @@ class JWKSService:
             with self._lock:
                 if now - self._refreshed_at <= self._cache_ttl:
                     return  # another caller refreshed while we waited
-                self._consume_budget(now)
             try:
                 keys = self._read_secrets()
             except JWKSBackendError:
@@ -203,7 +184,6 @@ class JWKSService:
                     cached = self._sidecar_cache.get(kid)
                     if cached is not None and now - cached[1] <= self._cache_ttl:
                         return cached[0]
-                    self._consume_budget(now)
                     reader = self._sidecar_reader
                 if reader is None:
                     with self._lock:
@@ -232,25 +212,6 @@ class JWKSService:
             for stale in list(self._sidecar_cache)[: len(self._sidecar_cache) // 2]:
                 del self._sidecar_cache[stale]
         self._sidecar_cache[kid] = (jwk, now)
-
-    def _consume_budget(self, now: float) -> None:
-        self._lookup_times = [
-            t for t in self._lookup_times if now - t < self._window_seconds
-        ]
-        if len(self._lookup_times) >= self._max_lookups:
-            raise RateLimited("jwks lookup budget exhausted")
-        self._lookup_times.append(now)
-
-    def _consume_throttle(self, now: float) -> None:
-        """Caller-side throttle: bounds every request, hit or miss, so one
-        anonymous flood cannot pin the endpoint; an order of magnitude above
-        the backend budget so legitimate caches-first traffic never sees it."""
-        self._throttle_times = [
-            t for t in self._throttle_times if now - t < self._window_seconds
-        ]
-        if len(self._throttle_times) >= self._max_throttle:
-            raise RateLimited("jwks request throttle exceeded")
-        self._throttle_times.append(now)
 
     def _read_secrets(self) -> dict[str, dict]:
         keys: dict[str, dict] = {}

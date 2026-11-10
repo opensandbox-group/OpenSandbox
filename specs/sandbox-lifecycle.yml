@@ -631,10 +631,10 @@ paths:
                 use: sig
         '404':
           description: Unknown or off-grammar kid
-        '429':
-          description: Lookup budget exhausted; retry later
         '501':
           description: No egress signing Secrets are configured on this server
+        '503':
+          description: Transient backend failure; retry later
   /sandboxes:
     get:
       tags: [ Sandboxes ]

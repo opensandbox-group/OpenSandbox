@@ -384,7 +384,7 @@ kubectl create secret generic opensandbox-egress-publish-<pool>-v1 \
 
 Only `signing.key` is mounted into the egress. Without a loadable key, vault writes containing `https://` exchange credentials are rejected (fail closed); `unix://` exchange credentials and static vaults keep working.
 
-3. **Publish the public key** — set `kubernetes.egress_signing_key_secrets` in the server config to the **publication** Secret name(s) (`opensandbox-egress-publish-<pool>-v1`), current version first. The server serves the JWK at `/credential-vault/jwks/{kid}` — public keys only, no API key required, and the server's RBAC never needs access to a private-key Secret.
+3. **Publish the public key** — set `kubernetes.egress_signing_key_secrets` in the server config to the **publication** Secret name(s) (`opensandbox-egress-publish-<pool>-v1`), current version first. The server serves the JWK at `/credential-vault/jwks/{kid}` — public keys only, no API key required, and the server's RBAC never needs access to a private-key Secret. Rate-limit the endpoint at your ingress/API gateway.
 
 4. **Verify on the resolver** with the Python SDK:
 
