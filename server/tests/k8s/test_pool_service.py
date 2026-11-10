@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 from copy import deepcopy
 from unittest.mock import MagicMock
@@ -237,6 +239,23 @@ class TestCreatePool:
         assert exc_info.value.status_code == 409
         assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_POOL_ALREADY_EXISTS
 
+    @pytest.mark.parametrize("k8s_status", [400, 422])
+    def test_create_pool_rejected_spec_raises_http_400(self, k8s_status):
+        svc, mock_api = _make_pool_service()
+        err = ApiException(status=k8s_status, reason="Unprocessable Entity")
+        err.body = json.dumps(
+            {"kind": "Status", "message": 'Pool.sandbox.opensandbox.io "p" is invalid: spec.template: Invalid value'}
+        )
+        mock_api.create_namespaced_custom_object.side_effect = err
+
+        request = CreatePoolRequest(name="p", template={"bad": True}, capacitySpec=_capacity_spec())
+        with pytest.raises(HTTPException) as exc_info:
+            svc.create_pool(request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "spec.template: Invalid value" in exc_info.value.detail["message"]
+
     def test_create_pool_5xx_api_error_raises_http_500(self):
         svc, mock_api = _make_pool_service()
         err = ApiException(status=500)
@@ -392,6 +411,19 @@ class TestUpdatePool:
 
         assert exc_info.value.status_code == 404
         assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_POOL_NOT_FOUND
+
+    def test_update_pool_rejected_spec_without_body_uses_reason(self):
+        svc, mock_api = _make_pool_service()
+        mock_api.patch_namespaced_custom_object.side_effect = ApiException(
+            status=422, reason="Unprocessable Entity"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            svc.update_pool("p", UpdatePoolRequest(capacitySpec=_capacity_spec()))
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert exc_info.value.detail["message"] == "Failed to update pool: Unprocessable Entity"
 
     def test_update_pool_5xx_raises_http_500(self):
         svc, mock_api = _make_pool_service()
