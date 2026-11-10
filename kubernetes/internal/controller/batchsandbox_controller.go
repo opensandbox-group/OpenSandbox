@@ -242,7 +242,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
 
-	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused
+	// Completed is terminal like Paused: the runtime is gone, so task scheduling
+	// must stop and stale scheduler state must be cleared instead of re-polling
+	// (and possibly dispatching new work to an exited executor) until expireTime.
+	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused ||
+		batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted
 	if skipTaskScheduling {
 		r.deleteTaskScheduler(ctx, batchSbx)
 	}

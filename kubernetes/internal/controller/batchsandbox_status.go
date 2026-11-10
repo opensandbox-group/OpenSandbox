@@ -252,18 +252,21 @@ func terminatedContainerFailure(pod *corev1.Pod, status *corev1.ContainerStatus,
 
 // terminatedMainContainerCompletion reports whether the sandbox's main container
 // terminated successfully (exit code 0) under a restart policy that will not
-// restart it (Never), mirroring terminatedMainContainerFailure for the clean
-// exit. This is the exit-0 counterpart of the #1741 failure path: without it a
+// bring it back, mirroring terminatedMainContainerFailure for the clean exit.
+// This is the exit-0 counterpart of the #1741 failure path: without it a
 // finished workload never converges to a terminal phase — the pod's Ready count
 // drops to zero once the main container is gone (sidecars keep the pod Running),
 // and the phase would regress from Succeed back to Pending until expireTime.
-// RestartPolicyAlways and RestartPolicyOnFailure pods are excluded: the kubelet
-// may restart the container, so a termination is not final there. Pods that are
-// already terminating are excluded too — deletion may signal-kill the main
-// container, and that must not be reported as a successful completion.
+// RestartPolicyNever never restarts; RestartPolicyOnFailure restarts only
+// non-zero exits, so a zero exit is final there too. RestartPolicyAlways pods
+// are excluded: the kubelet restarts the container regardless of exit code, so
+// no termination is final. Pods that are already terminating are excluded too —
+// deletion may signal-kill the main container, and that must not be reported as
+// a successful completion.
 func terminatedMainContainerCompletion(pod *corev1.Pod) (string, bool) {
 	if pod.DeletionTimestamp != nil ||
-		pod.Spec.RestartPolicy != corev1.RestartPolicyNever ||
+		(pod.Spec.RestartPolicy != corev1.RestartPolicyNever &&
+			pod.Spec.RestartPolicy != corev1.RestartPolicyOnFailure) ||
 		len(pod.Spec.Containers) == 0 {
 		return "", false
 	}
@@ -286,16 +289,27 @@ func terminatedMainContainerCompletion(pod *corev1.Pod) (string, bool) {
 	return "", false
 }
 
-// summarizePodCompletions finds the first pod whose main container completed
-// successfully. Failure detection always runs first (see applySteadyRuntimePhase),
-// so this only classifies workloads with no observed failures.
+// summarizePodCompletions reports whether every observed pod's main container
+// completed successfully (with at least one pod observed). With multiple
+// replicas a single finished pod must not complete the whole sandbox while its
+// siblings are still running or starting. Failure detection always runs first
+// (see applySteadyRuntimePhase), so this only classifies workloads with no
+// observed failures.
 func summarizePodCompletions(pods []*corev1.Pod) (string, bool) {
-	for _, pod := range pods {
-		if message, completed := terminatedMainContainerCompletion(pod); completed {
-			return message, true
+	if len(pods) == 0 {
+		return "", false
+	}
+	message := ""
+	for i, pod := range pods {
+		podMessage, completed := terminatedMainContainerCompletion(pod)
+		if !completed {
+			return "", false
+		}
+		if i == 0 {
+			message = podMessage
 		}
 	}
-	return "", false
+	return message, true
 }
 
 type podFailureSummary struct {
@@ -417,6 +431,16 @@ func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods 
 	if status.Ready > 0 {
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
+		return
+	}
+	// A restored workload whose main container already exited cleanly (before the
+	// pod ever became Ready again) is finished: converge to the sticky Completed
+	// phase instead of staying in Resuming until expireTime.
+	if message, completed := summarizePodCompletions(pods); completed {
+		status.Phase = sandboxv1alpha1.BatchSandboxPhaseCompleted
+		recordCompletedReadyCondition(status, message)
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionFalse, "", "")
 	}
 }
 
@@ -560,7 +584,10 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 		}
 	}
 
-	if view.status.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
+	if view.status.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed ||
+		view.status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted {
+		// Completed implies the resume succeeded and the workload then finished;
+		// the internal pause snapshot is obsolete either way.
 		if err := r.deleteInternalPauseSnapshot(ctx, batchSbx); err != nil {
 			log.Error(err, "Failed to delete SandboxSnapshot after successful resume")
 			aggErrors = append(aggErrors, err)
