@@ -303,17 +303,19 @@ async def test_create_sandbox_applies_config_sandbox_env_and_binds(mock_docker):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "limits, memory, cpu, gpu",
+    "limits, memory, cpu, gpu, disk",
     [
-        ({"gpu": "2"}, None, None, 2),
-        ({"memory": "512Mi", "cpu": "500m", "gpu": "all"}, 512 * 1024**2, 500_000_000, -1),
-        ({"memory": "1G", "cpu": "1.5"}, 1_000_000_000, 1_500_000_000, None),
-        ({}, None, None, None),
-        ({"disk": "custom-value"}, None, None, None),
+        ({"gpu": "2"}, None, None, 2, None),
+        ({"memory": "512Mi", "cpu": "500m", "gpu": "all"}, 512 * 1024**2, 500_000_000, -1, None),
+        ({"memory": "1G", "cpu": "1.5"}, 1_000_000_000, 1_500_000_000, None, None),
+        ({}, None, None, None, None),
+        ({"disk": "10G"}, None, None, None, 10_000_000_000),
+        ({"ephemeral-storage": "512M"}, None, None, None, 512_000_000),
+        ({"memory": "512Mi", "cpu": "500m", "gpu": "all", "disk": "1Gi"}, 512 * 1024**2, 500_000_000, -1, 1024**3),
     ],
 )
 @patch("opensandbox_server.services.docker.docker_service.docker")
-async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memory, cpu, gpu):
+async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memory, cpu, gpu, disk):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_client.api.create_container.return_value = {"Id": "cid"}
@@ -349,6 +351,12 @@ async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memor
             assert key not in create_host_config_kwargs
         else:
             assert create_host_config_kwargs[key] == expected
+    if disk is None:
+        assert "storage_opt" not in create_host_config_kwargs
+    else:
+        # HostConfig.StorageOpt bounds the writable layer in bytes so the value
+        # is storage-driver independent.
+        assert create_host_config_kwargs["storage_opt"] == {"size": str(disk)}
     device_requests = create_host_config_kwargs.get("device_requests")
     if gpu is None:
         assert "device_requests" not in create_host_config_kwargs
@@ -364,11 +372,12 @@ async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memor
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "key, value",
-    [(key, value) for key in ("memory", "cpu", "gpu") for value in ("", " ", "0", "-1", "invalid")]
+    [(key, value) for key in ("memory", "cpu", "gpu", "disk") for value in ("", " ", "0", "-1", "invalid")]
     + [("memory", "0Mi"), ("memory", "9" * 5000)]
     + [("cpu", value) for value in ("nan", "inf", "-inf", "1e10", "1e308", "1e309", "0.0000000001")]
     + [("gpu", "1.5")]
-    + [(key, "x" * 5000) for key in ("cpu", "gpu")],
+    + [("disk", "10GBx")]
+    + [(key, "x" * 5000) for key in ("cpu", "gpu", "disk")],
     ids=lambda value: value if len(value) < 80 else "oversized-integer",
 )
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -406,6 +415,54 @@ async def test_create_sandbox_rejects_invalid_resource_limits_before_side_effect
     create_container.assert_not_called()
     mock_client.volumes.create.assert_not_called()
     mock_client.api.create_container.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_maps_storage_opt_daemon_rejection_to_400(mock_docker):
+    """A quota-incapable storage driver must fail fast, not silently drop the limit.
+
+    The Docker Engine rejects HostConfig.StorageOpt at container create time when
+    the node's storage driver cannot enforce a writable-layer quota (overlay2
+    without pquota, plain ext4, ...). That error must surface as INVALID_PARAMETER
+    instead of a generic 500 so callers learn their disk limit is not applied.
+    """
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_container.side_effect = APIError(
+        "Error response from daemon: --storage-opt is not supported for overlay2 over ext4"
+    )
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={"disk": "10G"}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+    )
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 40001),
+                "8080": ("0.0.0.0", 40002),
+            },
+        ),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await service.create_sandbox(request)
+
+    assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+    assert "resourceLimits.disk" in exc_info.value.detail["message"]
+    # The failed container create must not leave a partial container behind.
+    mock_client.api.remove_container.assert_not_called()
 
 
 @pytest.mark.asyncio
