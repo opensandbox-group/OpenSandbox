@@ -96,10 +96,14 @@ func (c *Controller) executeSelectSQLQuery(ctx context.Context, request *Execute
 		}
 		row := make([]any, len(columns))
 		for i, v := range values {
-			if v == nil {
+			switch x := v.(type) {
+			case nil:
 				row[i] = nil
-			} else {
-				row[i] = fmt.Sprintf("%v", v)
+			case []byte:
+				// MySQL's text protocol returns non-numeric columns as raw bytes.
+				row[i] = string(x)
+			default:
+				row[i] = fmt.Sprintf("%v", x)
 			}
 		}
 		result = append(result, row)

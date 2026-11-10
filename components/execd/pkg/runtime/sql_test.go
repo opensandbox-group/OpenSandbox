@@ -75,6 +75,44 @@ func TestExecuteSelectSQLQuery_Success(t *testing.T) {
 	require.Equal(t, "bob", qr.Rows[1][1])
 }
 
+func TestExecuteSelectSQLQuery_RendersByteColumnsAsText(t *testing.T) {
+	driver := &stubDriver{
+		columns: []string{"id", "name", "note"},
+		rows: [][]driver.Value{
+			{int64(1), []byte("alice"), nil},
+		},
+	}
+	db := newStubDB(t, driver)
+
+	c := NewController("", "")
+	c.db = db
+
+	var (
+		gotResult map[string]any
+		gotError  *execute.ErrorOutput
+	)
+	req := &ExecuteCodeRequest{
+		Code: "SELECT * FROM users",
+		Hooks: ExecuteResultHook{
+			OnExecuteResult: func(result map[string]any, _ int) {
+				gotResult = result
+			},
+			OnExecuteError: func(err *execute.ErrorOutput) {
+				gotError = err
+			},
+			OnExecuteComplete: func(time.Duration) {},
+		},
+	}
+
+	require.NoError(t, c.executeSelectSQLQuery(context.Background(), req))
+	require.Nil(t, gotError, "unexpected error hook")
+
+	var qr QueryResult
+	require.NoError(t, json.Unmarshal([]byte(gotResult["text/plain"].(string)), &qr))
+	require.Len(t, qr.Rows, 1)
+	require.Equal(t, []any{"1", "alice", nil}, qr.Rows[0])
+}
+
 func TestExecuteUpdateSQLQuery_Success(t *testing.T) {
 	driver := &stubDriver{
 		execRowsAffected: 3,
