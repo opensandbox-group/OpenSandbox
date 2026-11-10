@@ -108,6 +108,14 @@ class CreateSandboxRequest:
                 - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
                 - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
                 - `gpu`: Number of GPU devices (e.g., "1")
+                - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
+                  `ephemeral-storage` are accepted as aliases. On the Docker runtime this
+                  bounds only the container's writable layer via HostConfig.StorageOpt —
+                  bind mounts, named volumes, and read-only image layers are not covered —
+                  and requires a quota-capable storage driver (for example overlay2 on XFS
+                  with pquota); the create request fails with INVALID_PARAMETER if the
+                  daemon cannot enforce it. On the Windows profile this maps to the
+                  sandbox disk size.
 
                 New resource types can be added without API changes.
                  Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
@@ -117,6 +125,14 @@ class CreateSandboxRequest:
                 - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
                 - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
                 - `gpu`: Number of GPU devices (e.g., "1")
+                - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
+                  `ephemeral-storage` are accepted as aliases. On the Docker runtime this
+                  bounds only the container's writable layer via HostConfig.StorageOpt —
+                  bind mounts, named volumes, and read-only image layers are not covered —
+                  and requires a quota-capable storage driver (for example overlay2 on XFS
+                  with pquota); the create request fails with INVALID_PARAMETER if the
+                  daemon cannot enforce it. On the Windows profile this maps to the
+                  sandbox disk size.
 
                 New resource types can be added without API changes.
                  Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.

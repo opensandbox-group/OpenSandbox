@@ -118,7 +118,9 @@ class ResourceLimits(RootModel[Dict[str, str]]):
     Runtime resource constraints as key-value pairs.
 
     Similar to Kubernetes resource specifications, allows flexible definition
-    of resource limits. Common resource types include cpu, memory, and gpu.
+    of resource limits. Common resource types include cpu, memory, gpu, and
+    disk (writable-layer quota; `storage` and `ephemeral-storage` are accepted
+    as aliases on the Docker runtime and Windows profile).
     """
     root: Dict[str, str] = Field(
         default_factory=dict,
