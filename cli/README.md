@@ -496,6 +496,8 @@ osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
 
+`osb config set` accepts only the keys above and validates the value (for example, `connection.protocol` must be `http` or `https`), so a typo fails immediately instead of breaking every later command.
+
 Example config file:
 
 ```toml

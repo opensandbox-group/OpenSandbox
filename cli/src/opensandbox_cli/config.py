@@ -87,18 +87,21 @@ def load_config_file(config_path: Path | None = None) -> dict[str, Any]:
         ) from exc
 
 
-# Config-file keys resolve_config reads as text. `config set` stores their
-# values verbatim: inferring a TOML number would rewrite an API key such as
-# "007123" as 7123.
-STRING_KEYS = frozenset(
-    {
-        "connection.api_key",
-        "connection.domain",
-        "connection.protocol",
-        "defaults.image",
-        "defaults.timeout",
-    }
-)
+# Config keys `config set` accepts and the value shape for each. Unknown keys
+# are rejected so a typo cannot quietly strand the real setting.
+#
+# "verbatim" keys are stored as raw CLI text: inferring a TOML number would
+# rewrite an API key such as "007123" as 7123.
+CONFIG_VALUE_KINDS: dict[str, str] = {
+    "connection.api_key": "verbatim",
+    "connection.domain": "verbatim",
+    "connection.protocol": "protocol",
+    "connection.request_timeout": "int",
+    "connection.use_server_proxy": "bool",
+    "output.color": "bool",
+    "defaults.image": "verbatim",
+    "defaults.timeout": "duration-or-none",
+}
 
 
 def resolve_config(
