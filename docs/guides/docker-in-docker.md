@@ -48,7 +48,7 @@ Under Kata the sandbox runs as a full VM, so a nested `dockerd` runs against the
 
   The target namespace must also run Pod Security Admission at the `privileged` enforce level (`pod-security.kubernetes.io/enforce=privileged`); `baseline` and `restricted` reject privileged containers and added capabilities.
 
-  The template grant reaches **template-mode** sandboxes only. A request carrying `extensions.poolRef` is served from a Pool instead: the provider builds the sandbox from the Pool's pod spec and returns before the template extras are read, so neither the template's `securityContext` nor the server-injected RuntimeClass reaches a pooled sandbox — following the template route alone still leaves `dockerd` unable to start there. For pool mode, put `privileged: true` and the Kata `runtimeClassName` on the Pool's own pod template (`spec.template.spec` of the `Pool` resource, a standard PodSpec — see the [shipped Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml)). Pooled sandboxes also reject `network_policy` and `volumes` requests outright, so the [policy interaction](#dind-and-network-policy-are-mutually-exclusive) below is a template-mode concern.
+  The template grant reaches **template-mode** sandboxes only. A request carrying `extensions.poolRef` is served from a Pool instead: the provider builds the sandbox from the Pool's pod spec and returns before the template extras are read, so neither the template's `securityContext` nor the server-injected RuntimeClass reaches a pooled sandbox — following the template route alone still leaves `dockerd` unable to start there. For pool mode, put `privileged: true` and the Kata `runtimeClassName` on the Pool's own pod template (`spec.template.spec` of the `Pool` resource, a standard PodSpec — see the [shipped Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml)), and set the template container's image there too: the request's image is ignored in pool mode, so the template container must itself be DinD-capable (`docker:27-dind`, or a custom image with `dockerd` and `docker`) or the pod starts without any daemon. Pooled sandboxes also reject `network_policy` and `volumes` requests outright, so the [policy interaction](#dind-and-network-policy-are-mutually-exclusive) below is a template-mode concern.
 
   ::: warning Verification status
   This guide documents the standard DinD-on-Kubernetes pattern — a privileged sandbox pod running the official Docker `dind` image, paired with `privileged_without_host_devices = true` on the Kata runtime handler. It has not yet been verified end to end on an OpenSandbox + Kata deployment; capability, storage, and cgroup behavior vary with the Kata, containerd, and kernel versions in your cluster. Create a sandbox, run `docker info` inside, check the storage driver, and run a nested `docker run` before relying on this setup in production.
@@ -158,7 +158,16 @@ if [ "$ready" -ne 1 ]; then
     tail -n 20 /tmp/dockerd.log >&2
     exit 1
 fi
+
+# --- keep the sandbox alive ---
+# OpenSandbox's bootstrap treats this script's exit as the user command
+# finishing, so without this the sandbox stops right after readiness
+# succeeds. Stop signals reach this script, not the daemon — forward them.
+trap 'kill -TERM "$DOCKERD_PID" 2>/dev/null' TERM INT
+wait "$DOCKERD_PID"
 ```
+
+The trailing `wait` is load-bearing, not cleanup: bootstrap considers the sandbox's user command finished once this script returns, and a template-mode pod stops when it returns — without it the sandbox terminates right after a successful readiness check. Waiting in the foreground keeps the sandbox alive for as long as the daemon runs, and the trap forwards stop signals (which arrive at this script, not the daemon) so teardown shuts `dockerd` down cleanly.
 
 Verify the driver actually in use:
 
