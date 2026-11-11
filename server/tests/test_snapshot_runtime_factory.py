@@ -97,10 +97,22 @@ class _DispatchStubRuntime:
         self.deleted: list[tuple[str, str | None]] = []
         self.watch_started = False
         self.closed = False
+        self.supported_source_states = {"Running"}
+        self.source_state_checks: list[tuple[str, str, str | None]] = []
         self._synchronous = synchronous
 
     def supports_create_snapshot(self) -> bool:
         return True
+
+    def supports_snapshot_source_state(
+        self,
+        sandbox_id: str,
+        state: str,
+        *,
+        namespace: str | None = None,
+    ) -> bool:
+        self.source_state_checks.append((sandbox_id, state, namespace))
+        return state in self.supported_source_states
 
     def supports_synchronous_create(self) -> bool:
         return self._synchronous
@@ -158,8 +170,18 @@ def _composite(
 def test_composite_runtime_dispatches_by_source_sandbox_prefix() -> None:
     default = _DispatchStubRuntime("k8s")
     fsb = _DispatchStubRuntime("fsb")
+    default.supported_source_states.add("Paused")
     composite = _composite(default, fsb)
 
+    assert composite.supports_snapshot_source_state("sbx-001", "Paused") is True
+    assert (
+        composite.supports_snapshot_source_state(
+            "fsb-001",
+            "Paused",
+            namespace="tenant-a",
+        )
+        is False
+    )
     composite.preflight_create_snapshot("fsb-001", namespace="tenant-a")
     composite.preflight_create_snapshot("sbx-001")
     composite.create_snapshot("snap-1", "fsb-001", namespace="tenant-a")
@@ -169,6 +191,8 @@ def test_composite_runtime_dispatches_by_source_sandbox_prefix() -> None:
     composite.delete_snapshot("snap-1", source_sandbox_id="fsb-001")
     composite.delete_snapshot("snap-2", source_sandbox_id="sbx-001")
 
+    assert default.source_state_checks == [("sbx-001", "Paused", None)]
+    assert fsb.source_state_checks == [("fsb-001", "Paused", "tenant-a")]
     assert fsb.preflight == ["fsb-001"]
     assert default.preflight == ["sbx-001"]
     assert [created[1] for created in fsb.created] == ["fsb-001"]
