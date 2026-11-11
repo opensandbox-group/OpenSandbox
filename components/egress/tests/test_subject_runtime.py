@@ -39,6 +39,22 @@ class SubjectRuntimeTest(unittest.TestCase):
         return {addon._PREFIX + name: value for name, value in
                 (self.bundle if bundle is None else bundle).items()}
 
+    def test_admission_bundle_is_optional_but_atomic_and_bounded(self):
+        fields = dict(TLS_ADMISSION="true", TLS_CAPACITY="32", PROCESS_TLS_CAPACITY="131072")
+        bundle = dict(self.bundle, **fields)
+        values = addon._configuration(self.environment(bundle))
+        self.assertEqual(values["TLS_CAPACITY"], 32)
+        self.assertEqual(values["PROCESS_TLS_CAPACITY"], 131072)
+        for name in fields:
+            missing = bundle.copy()
+            del missing[name]
+            with self.assertRaises(SystemExit):
+                addon._configuration(self.environment(missing))
+        for name, value in [("TLS_ADMISSION", "false"), ("TLS_CAPACITY", "0"),
+                            ("TLS_CAPACITY", "01"), ("PROCESS_TLS_CAPACITY", "1048577")]:
+            with self.assertRaises(SystemExit):
+                addon._configuration(self.environment(dict(bundle, **{name: value})))
+
     def test_complete_bundle_constructs_owner_and_stops_socket(self):
         with patch.dict(os.environ, self.environment(), clear=True):
             addon.load(None)

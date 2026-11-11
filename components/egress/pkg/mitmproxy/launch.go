@@ -139,7 +139,7 @@ const SubjectRevisionScriptPath = "/var/egress/mitmscripts/subject_runtime.py"
 const subjectRevisionEnvPrefix = "OPENSANDBOX_EGRESS_SUBJECT_REVISION_"
 
 // SubjectRevisionIPCConfig is an internal handoff, never an operator setting.
-// It deliberately has no single SubjectGeneration or live admission fields.
+// It deliberately has no single SubjectGeneration.
 type SubjectRevisionIPCConfig struct {
 	SocketPath            string
 	SessionToken          string
@@ -147,6 +147,9 @@ type SubjectRevisionIPCConfig struct {
 	MaxSubjects           int
 	MaxSnapshotBytes      int
 	RetainedPayloadBudget int64
+	TLSAdmission          bool
+	TLSCapacity           int
+	ProcessTLSCapacity    int
 }
 
 func validateSubjectRevisionIPCConfig(cfg Config) error {
@@ -160,6 +163,10 @@ func validateSubjectRevisionIPCConfig(cfg Config) error {
 		subject.MaxSubjects <= 0 || subject.MaxSnapshotBytes <= 0 ||
 		int64(subject.MaxSubjects) > math.MaxInt64/2/int64(subject.MaxSnapshotBytes) ||
 		subject.RetainedPayloadBudget < 2*int64(subject.MaxSubjects)*int64(subject.MaxSnapshotBytes) {
+		return errInvalidRevisionIPCConfig
+	}
+	if subject.TLSAdmission && (subject.TLSCapacity < 1 || subject.TLSCapacity > 1<<20 ||
+		subject.ProcessTLSCapacity < 1 || subject.ProcessTLSCapacity > 1<<20) {
 		return errInvalidRevisionIPCConfig
 	}
 	count := 0
@@ -204,7 +211,7 @@ func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
 		}
 	}
 	s := cfg.SubjectRevisionIPC
-	return append(clean,
+	clean = append(clean,
 		subjectRevisionEnvPrefix+"MODE=subject-v2",
 		subjectRevisionEnvPrefix+"SOCKET="+s.SocketPath,
 		subjectRevisionEnvPrefix+"TOKEN="+s.SessionToken,
@@ -213,6 +220,12 @@ func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
 		subjectRevisionEnvPrefix+"MAX_SNAPSHOT_BYTES="+strconv.Itoa(s.MaxSnapshotBytes),
 		subjectRevisionEnvPrefix+"RETAINED_PAYLOAD_BUDGET="+strconv.FormatInt(s.RetainedPayloadBudget, 10),
 	)
+	if s.TLSAdmission {
+		clean = append(clean, subjectRevisionEnvPrefix+"TLS_ADMISSION=true",
+			subjectRevisionEnvPrefix+"TLS_CAPACITY="+strconv.Itoa(s.TLSCapacity),
+			subjectRevisionEnvPrefix+"PROCESS_TLS_CAPACITY="+strconv.Itoa(s.ProcessTLSCapacity))
+	}
+	return clean
 }
 
 // Running: child mitmdump; use GracefulShutdown to SIGTERM+reap before process exit.
@@ -462,6 +475,13 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 		if !ok {
 			continue
 		}
+		if strings.HasPrefix(msg, "credential proxy: tls-budget-v1 ") {
+			scope, occupied, budget, ok := tlsBudgetEvent(msg)
+			if ok {
+				telemetry.RecordTLSBudget(scope, occupied, budget)
+			}
+			continue
+		}
 		if strings.HasPrefix(msg, "credential proxy: tls-admission-") {
 			if decision, reason, ok := tlsAdmissionEvent(msg); ok {
 				telemetry.RecordTLSAdmission(decision, reason)
@@ -482,6 +502,18 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 }
 
 const tlsAdmissionPrefix = "credential proxy: tls-admission-v1"
+
+func tlsBudgetEvent(msg string) (scope string, occupied, budget int64, ok bool) {
+	payload, found := strings.CutPrefix(msg, "credential proxy: tls-budget-v1 ")
+	parts := strings.Split(payload, " ")
+	if !found || len(parts) != 3 || (parts[0] != "process" && parts[0] != "subject") {
+		return "", 0, 0, false
+	}
+	occupied, first := strconv.ParseInt(parts[1], 10, 64)
+	budget, second := strconv.ParseInt(parts[2], 10, 64)
+	return parts[0], occupied, budget, first == nil && second == nil &&
+		occupied >= 0 && budget >= 1 && budget <= 1<<20 && occupied <= budget
+}
 
 // tlsAdmissionEvent validates framing only. The recorder validates the closed
 // decision/reason pairs before creating attributes.
@@ -513,6 +545,11 @@ func credentialProxyMessage(line string) (string, bool) {
 	}
 	if !strings.HasPrefix(line, "credential proxy:") {
 		return "", false
+	}
+	if strings.HasPrefix(line, "credential proxy: tls-budget-") {
+		if _, _, _, ok := tlsBudgetEvent(line); !ok {
+			return "", false
+		}
 	}
 	return line, true
 }

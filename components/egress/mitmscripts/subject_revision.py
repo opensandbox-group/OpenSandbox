@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Bounded, installation-only subject owner for the internal v2 IPC harness.
+"""Bounded subject installation owner with optional dispatch-only TLS registries.
 
 One operation lock owns routing, receiver calls, lifecycle publication and the
-terminal latch. No socket I/O happens here. Admission is permanently disabled by
-InstallationReceiver: successful unload proves installation cleanup with zero
-transport obligations, not that live connections were drained.
+terminal latch. No socket I/O happens here. InstallationReceiver never performs
+admission; the optional registries consume only the dispatch view. In B3b-1 an
+unload receipt still proves installation cleanup only, not transport teardown.
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ from types import MappingProxyType
 
 from revision_publication import InstallationReceiver
 from revision_receiver import Revision, RevisionError, Snapshot
+from tls_registry import ConnectionAccounting
+from subject_admission import SubjectRegistry, admit_source
 
 LIFECYCLE_BODY_LIMIT = 8192
 RESPONSE_LIMIT = 4096
@@ -122,12 +124,14 @@ class _Entry:
     source_addresses: tuple[str, ...] = ()
     snapshot: Snapshot | None = None
     prepared: Revision | None = None
+    registry: SubjectRegistry | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SubjectDispatch:
     target: Target
     snapshot: Snapshot | None
+    registry: SubjectRegistry | None = None
 
 
 def normalize_source(value: str) -> str:
@@ -176,7 +180,9 @@ class SubjectRevisionOwner:
     """
 
     def __init__(self, control_generation: str, *, max_subjects: int,
-                 max_snapshot_bytes: int, retained_payload_budget: int) -> None:
+                 max_snapshot_bytes: int, retained_payload_budget: int,
+                 tls_capacity: int | None = None, process_tls_capacity: int | None = None,
+                 static_passthrough: tuple = ()) -> None:
         if (not valid_identity(control_generation, 128)
                 or not all(_positive_integer(value) for value in
                            (max_subjects, max_snapshot_bytes, retained_payload_budget))
@@ -194,6 +200,18 @@ class SubjectRevisionOwner:
         self._operation_lock = threading.Lock()
         self._terminal = False
         self._closed = False
+        if tls_capacity is not None:
+            self._tls_capacity = tls_capacity
+            self._accounting = ConnectionAccounting(process_tls_capacity)
+            self._static_passthrough = static_passthrough
+
+    @property
+    def control_generation(self) -> str:
+        return self._control
+
+    def admit_tls(self, address, sni, *, ech_hidden=False, destination_port=None):
+        return admit_source(self, address, sni, ech_hidden=ech_hidden,
+                            destination_port=destination_port)[0]
 
     @property
     def max_snapshot_bytes(self) -> int:
@@ -212,6 +230,9 @@ class SubjectRevisionOwner:
                 raise
             except Exception:  # noqa: BLE001 - uncertain owner publication is terminal
                 self._terminal = True
+                for entry in self._entries.values():
+                    if entry.registry is not None:
+                        entry.registry.deactivate()
                 self._source_index = MappingProxyType({})
         # Do not retain a potentially payload-bearing exception as context.
         raise SubjectError(500, "internal_error")
@@ -294,7 +315,7 @@ class SubjectRevisionOwner:
         return self._run(lambda: self._lookup(target).snapshot)
 
     def lookup_source(self, address: str) -> SubjectDispatch | None:
-        """Test inspection only. No TLS hook calls this installation-only API.
+        """Dispatch an address to a fenced identity and its published snapshot.
 
         Read one immutable publication without the potentially slow operation
         lock or receiver locks. Previously returned views remain immutable.
@@ -306,8 +327,11 @@ class SubjectRevisionOwner:
         return self._source_index.get(address)
 
     def _publish_index(self) -> None:
+        for entry in self._entries.values():
+            if entry.registry is not None:
+                entry.registry.publish_dispatch(entry.snapshot)
         self._source_index = MappingProxyType({
-            address: SubjectDispatch(entry.target, entry.snapshot)
+            address: SubjectDispatch(entry.target, entry.snapshot, entry.registry)
             for entry in self._entries.values() for address in entry.source_addresses
         })
 
@@ -323,10 +347,16 @@ class SubjectRevisionOwner:
             return _Result(503, "subject_capacity_exhausted")
         try:
             receiver = InstallationReceiver(self._control, target.subject_generation,
-                                            max_snapshot_bytes=self._max_snapshot_bytes)
+                                            max_snapshot_bytes=self._max_snapshot_bytes,
+                                            static_passthrough=getattr(self, "_static_passthrough", ()))
         except Exception:  # noqa: BLE001 - no entry has been inserted yet
             return _Result(503, "subject_failed")
         self._entries[target.subject_key] = _Entry(target, receiver, source_addresses=addresses)
+        if getattr(self, "_accounting", None) is not None:
+            self._entries[target.subject_key].registry = SubjectRegistry(
+                capacity=self._tls_capacity, accounting=self._accounting,
+                static_passthrough=self._static_passthrough,
+            )
         self._publish_index()
         return _Result(200, "registered")
 
@@ -337,6 +367,8 @@ class SubjectRevisionOwner:
         if entry.target != target:
             return _Result(409, "subject_generation_mismatch")
         entry.failed = True
+        if entry.registry is not None:
+            entry.registry.deactivate()
         del self._entries[target.subject_key]
         self._publish_index()  # revoke routing before close, including a slow/failed close
         try:
@@ -429,6 +461,9 @@ class SubjectRevisionOwner:
         with self._operation_lock:
             self._closed = True
             self._source_index = MappingProxyType({})
+            for entry in self._entries.values():
+                if entry.registry is not None:
+                    entry.registry.deactivate()
             failed = False
             try:
                 for key, entry in tuple(self._entries.items()):

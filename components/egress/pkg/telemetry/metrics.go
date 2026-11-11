@@ -40,6 +40,8 @@ var (
 	nftUpdateFailed         metric.Int64Counter
 	tlsShadowRequests       metric.Int64Counter
 	tlsAdmissionConnections metric.Int64Counter
+	tlsRegistryOccupancy    metric.Int64Histogram
+	tlsRegistryBudget       metric.Int64Histogram
 	credentialResolutions   metric.Int64Counter
 	credentialResolutionDur metric.Float64Histogram
 
@@ -166,6 +168,16 @@ func registerEgressMetrics() error {
 		"egress.mitm.tls.connections_total",
 		metric.WithDescription("Live TLS admission decisions, not successful handshakes, HTTP requests or unique transport lifetimes; best-effort collection."),
 	)
+	if err != nil {
+		return err
+	}
+	tlsRegistryOccupancy, err = meter.Int64Histogram("egress.mitm.tls.registry.occupancy",
+		metric.WithDescription("Fast Sandbox occupied connection slots observed at admission/release; subject observations are not an aggregate gauge."))
+	if err != nil {
+		return err
+	}
+	tlsRegistryBudget, err = meter.Int64Histogram("egress.mitm.tls.registry.configured_budget",
+		metric.WithDescription("Configured connection budget at each Fast Sandbox admission/release observation; per-subject capacity is not reserved."))
 	if err != nil {
 		return err
 	}

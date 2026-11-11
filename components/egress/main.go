@@ -228,13 +228,20 @@ func main() {
 
 // validateRevisionRuntimeStartup runs before profile dispatch or network setup.
 func validateRevisionRuntimeStartup(profile string) error {
+	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalFSBTLSAdmission)) {
+		if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+			return fmt.Errorf("%s requires %s=true", constants.EnvExperimentalFSBTLSAdmission, constants.EnvExperimentalRevisionRuntime)
+		}
+		if profile != constants.ProfileFastSandbox {
+			return fmt.Errorf("%s requires fast-sandbox profile", constants.EnvExperimentalFSBTLSAdmission)
+		}
+	}
 	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
 		return nil
 	}
 	if profile == constants.ProfileFastSandbox {
-		// Fast Sandbox has no live TLS admission yet; keep this flag a no-op.
-		// The _classify port gate is profile-independent and will also cover
-		// per-subject admission when B3 introduces it.
+		// CR-1: keep extra-port startup behavior; live _classify denies SNI
+		// on noncanonical ports after the ECH/no-SNI exceptions.
 		return nil
 	}
 	ports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
