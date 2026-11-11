@@ -20,9 +20,10 @@
 # egress-network-security-rules ConfigMap. This verify owns the baseline
 # lifecycle: it applies the ConfigMap (deny.always = 10.0.0.0/8 +
 # 172.30.0.0/24, allow.always = example.com, reachable.ports.cap = TCP
-# 53/80/443), proves enforcement, then removes it and waits for the reload
-# to unload the rules — so the restrictive baseline never leaks into the
-# other verify stages or the SDK e2e suites.
+# 53/80/443), proves enforcement, then swaps it to empty data — deleting a
+# mounted ConfigMap would not clear the pod volume — and waits for the
+# reload to unload the rules, so the restrictive baseline never leaks into
+# the other verify stages or the SDK e2e suites.
 #
 # Proven while the baseline is active: kernel-side (mount, port-cap
 # complement in the dispatch chain, subject deny set), then live — a
@@ -157,11 +158,18 @@ network_security_rules_verify() {
 	osb_api sandbox kill "$id" >/dev/null 2>&1 || fail "sandbox $id kill failed"
 	wait_for "default-allow sandbox deleted" 120 verify_sandbox_gone
 
-	# Restore the pre-verify environment: remove the baseline and wait for
-	# the hot reload to unload it, so later stages see no platform rules.
-	kubectl -n "$RESOURCE_NS" delete configmap "$RULES_CONFIGMAP" --ignore-not-found >/dev/null \
-		|| fail "baseline configmap delete failed"
-	wait_for "baseline unloaded after verify (port-cap complement gone)" 45 network_security_rules_floor_gone "$pod"
+	# Restore the pre-verify environment: swap the ConfigMap to EMPTY data.
+	# Deleting a mounted ConfigMap does NOT clear the pod volume (kubelet
+	# keeps serving the last known content), while an empty data set removes
+	# the files and the next reload tick unloads the rules.
+	kubectl -n "$RESOURCE_NS" apply -f - >/dev/null <<EOF || fail "baseline unload apply failed"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $RULES_CONFIGMAP
+  namespace: $RESOURCE_NS
+EOF
+	wait_for "baseline unloaded after verify (port-cap complement gone)" 60 network_security_rules_floor_gone "$pod"
 	pass "baseline removed; environment restored"
 	trap - EXIT
 }
