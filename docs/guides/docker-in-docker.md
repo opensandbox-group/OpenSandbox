@@ -48,7 +48,7 @@ Under Kata the sandbox runs as a full VM, so a nested `dockerd` runs against the
 
   The target namespace must also run Pod Security Admission at the `privileged` enforce level (`pod-security.kubernetes.io/enforce=privileged`); `baseline` and `restricted` reject privileged containers and added capabilities.
 
-  The template grant reaches **template-mode** sandboxes only. A request carrying `extensions.poolRef` is served from a Pool instead: the provider builds the sandbox from the Pool's pod spec and returns before the template extras are read, so neither the template's `securityContext` nor the server-injected RuntimeClass reaches a pooled sandbox — following the template route alone still leaves `dockerd` unable to start there. For pool mode, put `privileged: true` and the Kata `runtimeClassName` on the Pool's own pod template (`spec.template.spec` of the `Pool` resource, a standard PodSpec — see the [shipped Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml)), and set the template container's image there too: the request's image is ignored in pool mode, so the template container must itself be DinD-capable (`docker:27-dind`, or a custom image with `dockerd` and `docker`) or the pod starts without any daemon. Pooled sandboxes also reject `network_policy` and `volumes` requests outright, so the [policy interaction](#dind-and-network-policy-are-mutually-exclusive) below is a template-mode concern.
+  The template grant reaches **template-mode** sandboxes only. A request carrying `extensions.poolRef` is served from a Pool instead: the provider builds the sandbox from the Pool's pod spec and returns before the template extras are read, so neither the template's `securityContext` nor the server-injected RuntimeClass reaches a pooled sandbox — following the template route alone still leaves `dockerd` unable to start there. For pool mode, put `privileged: true` and the Kata `runtimeClassName` on the Pool's own pod template (`spec.template.spec` of the `Pool` resource, a standard PodSpec — see the [shipped Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml)), and set the template container's image there too: the request's image is ignored in pool mode, so the template container must itself be DinD-capable (`docker:27-dind`, or a custom image with `dockerd` and `docker`) or the pod starts without any daemon. **The Pool's `recycleStrategy` must be `Delete` or `Restart` for this recipe**: with `Noop`, the recycler returns the existing pod unchanged, so the task entrypoint runs in the previous allocation's mount namespace — `/var/lib/docker` (tmpfs or directory), the daemon, and every nested image and volume survive release and carry into the next allocation, leaking DinD state (and any credentials it holds) across tenants. Pooled sandboxes also reject `network_policy` and `volumes` requests outright, so the [policy interaction](#dind-and-network-policy-are-mutually-exclusive) below is a template-mode concern.
 
   ::: warning Verification status
   This guide documents the standard DinD-on-Kubernetes pattern — a privileged sandbox pod running the official Docker `dind` image, paired with `privileged_without_host_devices = true` on the Kata runtime handler. It has not yet been verified end to end on an OpenSandbox + Kata deployment; capability, storage, and cgroup behavior vary with the Kata, containerd, and kernel versions in your cluster. Create a sandbox, run `docker info` inside, check the storage driver, and run a nested `docker run` before relying on this setup in production.
@@ -144,7 +144,12 @@ DOCKERD_PID=$!
 # must still reach the daemon (bootstrap signals only the entrypoint PID
 # and execd, so an unarmed background dockerd would just be killed when
 # the container exits).
-trap 'kill -TERM "$DOCKERD_PID" 2>/dev/null' TERM INT
+# STOP_DELIVERED records that the stop reached this script (the trap ran),
+# so the exit-status handling below can tell a signal-interrupted wait (an
+# expected stop) from a daemon that died to its own signal (a crash —
+# e.g. an OOM kill's 137 or a segfault's 139 — both in the same >128 range
+# as an interrupted wait, but a failure, not a stop).
+trap 'STOP_DELIVERED=1; kill -TERM "$DOCKERD_PID" 2>/dev/null' TERM INT
 
 # Bail out if the daemon dies or the wait exceeds 30s — otherwise a wrong
 # prerequisite (privileges, mount, storage driver, cgroup) hangs the
@@ -173,14 +178,17 @@ fi
 # foreground while dockerd runs and while it drains.
 wait "$DOCKERD_PID"
 rc=$?
-# A signal-interrupted wait (rc > 128) is an expected stop; a daemon crash
-# (rc 1–127) must propagate so a dead daemon is not recorded as a
-# successful sandbox (bootstrap forwards this exit to BatchSandbox/pool).
-if [ "$rc" -gt 0 ] && [ "$rc" -lt 128 ]; then
+# A non-zero exit with no delivered stop signal is a daemon crash — any
+# signal death counts (an OOM kill's 137, a segfault's 139), so the rc
+# range alone cannot separate crashes from stops; STOP_DELIVERED does.
+# Propagate crashes so a dead daemon is not recorded as a successful
+# sandbox (bootstrap forwards this exit to BatchSandbox/pool); a delivered
+# stop falls through to the drain loop below.
+if [ "$rc" -ne 0 ] && [ -z "${STOP_DELIVERED:-}" ]; then
     exit "$rc"
 fi
-# If a stop signal interrupted the wait, dockerd is still shutting down —
-# stay in the foreground (bounded) until it exits.
+# After a delivered stop, dockerd is shutting down — stay in the
+# foreground (bounded) until it exits.
 for i in $(seq 1 60); do
     kill -0 "$DOCKERD_PID" 2>/dev/null || break
     sleep 0.5
