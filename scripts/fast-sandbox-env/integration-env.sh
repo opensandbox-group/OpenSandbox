@@ -897,11 +897,12 @@ render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 	local src="$MANIFESTS_DIR/cluster/kind-cluster.yaml" out="$GEN_DIR/kind-cluster.yaml"
 	mkdir -p "$GEN_DIR"
 	cp "$src" "$out"
-	# OCI_STACK=1 binds the host /dev into every node (FIRST extraMount, so
-	# the private /dev/shm mount below it shadows the host shm again): the
-	# kernel creates ublk device nodes on the host devtmpfs at add time and
-	# this kernel registers no block major, so a static node list cannot
-	# track them.
+	# OCI_STACK=1 binds the host /dev into every node (rendered FIRST, so
+	# the host-shm bind below it shadows the /dev bind back at /dev/shm,
+	# restoring a real shm mount — that bind is the host's shared shm
+	# passed through, not a private per-node tmpfs): the kernel creates
+	# ublk device nodes on the host devtmpfs at add time and this kernel
+	# registers no block major, so a static node list cannot track them.
 	if [[ "$OCI_STACK" == 1 ]]; then
 		awk '
 			/^  # @UBLK_DEV_MOUNT@$/ {
