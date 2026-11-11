@@ -1193,6 +1193,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             self._delete_sandbox_locked(sandbox_id)
 
     def _delete_sandbox_locked(self, sandbox_id: str) -> None:
+        """Delete a sandbox's container, then run the remaining cleanup.
+
+        `container.kill()` and `container.remove(force=True)` complete before
+        this method returns, so on the Docker backend the container itself is
+        gone when DELETE returns 204. Expiration tracking, egress-sidecar,
+        volume, and metadata cleanup run after container removal in the same
+        call; they do not change the fact that the container is gone.
+        """
         try:
             container = self._get_container_by_sandbox_id(sandbox_id)
         except HTTPException as exc:

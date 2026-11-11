@@ -631,6 +631,14 @@ class BatchSandboxProvider(WorkloadProvider):
         return "Background" if batchsandbox.get("spec", {}).get("taskTemplate") is not None else "Foreground"
 
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
+        """Submit deletion of the BatchSandbox custom object and return.
+
+        The Kubernetes delete request is accepted asynchronously: the
+        finalizer and deletion propagation run after this method returns, so
+        returning does not confirm that the sandbox's runtime execution has
+        terminated. A later 404 for the control object is acceptance-level
+        only and must not be read as confirmed termination.
+        """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
             raise Exception(f"BatchSandbox for sandbox {sandbox_id} not found")
