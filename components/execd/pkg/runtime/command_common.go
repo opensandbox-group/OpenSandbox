@@ -311,6 +311,16 @@ func (t *commandOutputTail) read(path string, onExecute func(string), flushIncom
 		if b == '\n' || b == '\r' {
 			onExecute(t.pending.String())
 			t.pending.Reset()
+		} else if t.pending.Len() > maxScanLineBytes {
+			// Deliver an overlong line in pieces, as session output does, so a
+			// command that never writes a newline cannot grow this buffer
+			// until execd runs out of memory.
+			pending := t.pending.Bytes()
+			cut := lastRuneBoundary(pending[:maxScanLineBytes])
+			onExecute(string(pending[:cut]))
+			rest := bytes.Clone(pending[cut:])
+			t.pending.Reset()
+			t.pending.Write(rest)
 		}
 	}
 	// Reuse storage within a poll, but release completed long lines between polls.
