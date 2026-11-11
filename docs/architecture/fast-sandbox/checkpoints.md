@@ -17,7 +17,7 @@ A pause checkpoint captures the sandbox's runtime state as one artifact set in t
 |---|---|
 | `rootfs` | The sandbox's writable root filesystem |
 | `vmstate` | MicroVM device and vCPU state for Firecracker-backed templates |
-| `memory` | Guest memory, dumped during capture — staged through the spill directory (`FAST_SANDBOX_SNAPSHOT_SPILL_DIR`) when one is configured and large enough for the VM's memory, otherwise written directly to the publish staging area |
+| `memory` | Guest memory, dumped during capture — staged through the spill directory (`FAST_SANDBOX_SNAPSHOT_SPILL_DIR`) when one is configured and large enough for the VM's memory, otherwise written to the state-root filesystem and collected into the publish staging area |
 | `SHA256SUMS` | Digest manifest over the set |
 
 The Sandbox record's `status.runtime.checkpoint` carries the result: a `checkpointID` derived from the sandbox UID, the spec generation that requested the pause, and a `pauseAttempt` retry epoch; the `manifestRef` (`s3://` URI) of the published set; its digest and size. The checkpoint is written digest-first — **a pause is only reported complete after the artifact set is fully in the store** — and a Paused sandbox without a recorded checkpoint cannot be resumed; it must be reset.
