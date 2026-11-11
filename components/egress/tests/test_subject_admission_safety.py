@@ -49,6 +49,19 @@ class SubjectRequestSafetyTest(unittest.TestCase):
         pull.assert_called_once_with(flow)
         self.assertFalse(flow.killed)
 
+    def test_disabled_does_not_require_admission_module(self):
+        # Deployments that ship only system.py (for example the Fast Sandbox
+        # smoke) must keep the existing hooks when admission is disabled.
+        addon = f._load_system_module()
+        flow = f._Flow()
+        client = types.SimpleNamespace(peername=("192.0.2.1", 1234), tls=False, alpn=None)
+        with patch.dict(sys.modules, {"subject_admission": None}), \
+                patch.object(addon, "_requestheaders_pull", return_value=None) as pull:
+            addon.requestheaders(flow)
+            addon.client_disconnected(client)
+        pull.assert_called_once_with(flow)
+        self.assertFalse(flow.killed)
+
 
 if __name__ == "__main__":
     unittest.main()

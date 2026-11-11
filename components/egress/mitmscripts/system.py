@@ -71,6 +71,7 @@ import json
 import os
 import re
 import socket
+import sys
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
@@ -559,9 +560,11 @@ def _record_tls_admission(decision: str, reason: str) -> None:
 
 
 def _subject_admission_runtime() -> Any:
-    import subject_admission
-
-    return subject_admission.runtime()
+    # Only subject_runtime.py imports subject_admission, and only when subject
+    # admission is enabled. Never import it here: the disabled path must not
+    # depend on the module being shipped next to this addon.
+    module = sys.modules.get("subject_admission")
+    return None if module is None else module.runtime()
 
 
 def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = False) -> None:
