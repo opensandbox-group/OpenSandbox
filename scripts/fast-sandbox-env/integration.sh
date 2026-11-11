@@ -45,6 +45,7 @@
 #   env.sh               environment lifecycle: env_up_stages (preflight ->
 #                        SandboxPool), down, status, pool
 #   verify/sandbox.sh    end-to-end sandbox verify + egress policy + lifecycle ops
+#   verify/network-security-rules.sh  egress network-security-rules baseline verify (configmap -> kernel -> live traffic)
 #   verify/init-mode.sh  execd-as-init in-guest process verify (OSEP-0018)
 #   verify/pause-resume.sh  pause/resume round trip
 #   verify/vault.sh      credential-vault relay lifecycle (OSEP-0022)
@@ -93,6 +94,7 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 source "$SCRIPT_DIR/env.sh"
 source "$SCRIPT_DIR/verify/sandbox.sh"
+source "$SCRIPT_DIR/verify/network-security-rules.sh"
 source "$SCRIPT_DIR/verify/init-mode.sh"
 source "$SCRIPT_DIR/verify/pause-resume.sh"
 source "$SCRIPT_DIR/verify/vault.sh"
@@ -215,6 +217,7 @@ case "$ACTION" in
 		trap 'on_error up' ERR
 		env_up_stages
 		run_stage "end-to-end verify (CLI create -> gateway -> execd /ping)" opensandbox_verify
+		run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" network_security_rules_verify
 		run_stage "execd-as-init verify (in-guest process topology)" init_mode_verify
 		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
 		run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify

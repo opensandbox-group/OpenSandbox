@@ -120,6 +120,13 @@ spec:
         - name: mitm-ca-seed
           mountPath: /var/egress/mitm-ca-seed
           readOnly: true
+        # Operator network security rule files; hot-reloaded every minute.
+        # ConfigMap below is optional (absent = no rules). Baseline:
+        # kubectl apply -f egress-network-security-rules-configmap.yaml.
+        # Never via subPath — kubelet does not update subPath mounts.
+        - name: egress-rules
+          mountPath: /var/egress/rules
+          readOnly: true
         # Egress installs nft/iptables rules (DNS redirect + per-subject
         # sets) and marks sockets; NET_ADMIN covers nft/iptables/SO_MARK,
         # NET_RAW covers the raw sockets used for DNS response spoofing.
@@ -147,6 +154,12 @@ spec:
       # medium: Memory would keep the plaintext v1 files off node disk.
       - name: egress-vault
         emptyDir: {}
+      # Operator network security rule files for the egress container above
+      # (/var/egress/rules): optional, absent ConfigMap = no rules.
+      - name: egress-rules
+        configMap:
+          name: egress-network-security-rules
+          optional: true
 # @OCI_FASTLET_VOLUMES@
       # Pool-pinned MITM CA keypair (OSEP-0022, ops-runbook shape): the
       # versioned Secret copy lives in the pool namespace with the keypair

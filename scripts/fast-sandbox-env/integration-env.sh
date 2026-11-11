@@ -2284,6 +2284,9 @@ VOLUMES
 pool_up() {
 	load_mitm_ca_fingerprint
 	[[ -n "$MITM_CA_FINGERPRINT" ]] || die "no pinned MITM CA fingerprint at $MITM_CA_FINGERPRINT_FILE (run up first; mitm_ca_up stores it there)"
+	# Operator network-security baseline: applied before the pool so fastlet
+	# egress containers boot with the rules mounted.
+	kubectl apply -f "$MANIFESTS_DIR/pool/egress-network-security-rules-configmap.yaml" >/dev/null
 	render_pool
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
@@ -3986,6 +3989,8 @@ verify_native() {
 	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
 	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
+	# Lives in verify/network-security-rules.sh, shared with integration.sh.
+	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
 	run_stage "execd-as-init verify (in-guest process topology)" init_mode_verify
 	run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
 	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
