@@ -2276,7 +2276,7 @@ components:
             SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
 
         resourceRequests:
-          $ref: '#/components/schemas/ResourceLimits'
+          $ref: '#/components/schemas/ResourceRequests'
           description: |
             Resource reservations (guaranteed minimums) for the sandbox instance.
             When provided, these values are used as Kubernetes resource `requests`,
@@ -2457,6 +2457,23 @@ components:
         cpu: "500m"
         memory: "512Mi"
         gpu: "1"
+    ResourceRequests:
+      type: object
+      description: |
+        Resource reservations for the sandbox, as key-value pairs in Kubernetes
+        resource specification syntax (same key space as `resourceLimits`):
+        - `cpu`: CPU reservation (e.g., "250m" for 0.25 CPU cores)
+        - `memory`: Memory reservation (e.g., "512Mi", "1Gi")
+
+        On Kubernetes-based runtimes these become the sandbox container's
+        `requests` — scheduling guarantees, not hard caps. This field is
+        ignored by the Docker runtime, which reads only `resourceLimits`, so
+        a `disk` reservation here does not create a writable-layer quota.
+      additionalProperties:
+        type: string
+      example:
+        cpu: "500m"
+        memory: "512Mi"
     FsbTemplateResourceLimits:
       type: object
       description: |

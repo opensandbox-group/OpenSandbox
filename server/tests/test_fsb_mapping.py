@@ -31,6 +31,7 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
     RenewalPolicy,
     ResourceLimits,
+    ResourceRequests,
     SandboxLifecycle,
     Volume,
 )
@@ -145,7 +146,7 @@ def test_map_create_request_strips_pool_ref():
         ("platform", {"platform": PlatformSpec(os="linux", arch="amd64")}),
         (
             "resourceRequests",
-            {"resource_requests": ResourceLimits(root={"cpu": "1"})},
+            {"resource_requests": ResourceRequests(root={"cpu": "1"})},
         ),
         ("secureAccess", {"secure_access": True}),
         ("volumes", {"volumes": [_host_volume()]}),

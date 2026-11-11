@@ -94,6 +94,7 @@ from .renew_sandbox_expiration_request import RenewSandboxExpirationRequest
 from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
 from .renewal_policy import RenewalPolicy
 from .resource_limits import ResourceLimits
+from .resource_requests import ResourceRequests
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
 from .sandbox_lifecycle import SandboxLifecycle
@@ -182,6 +183,7 @@ __all__ = (
     "RenewSandboxExpirationRequest",
     "RenewSandboxExpirationResponse",
     "ResourceLimits",
+    "ResourceRequests",
     "Sandbox",
     "SandboxExtensions",
     "SandboxLifecycle",

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from ..models.network_policy import NetworkPolicy
     from ..models.platform_spec import PlatformSpec
     from ..models.resource_limits import ResourceLimits
+    from ..models.resource_requests import ResourceRequests
     from ..models.sandbox_lifecycle import SandboxLifecycle
     from ..models.volume import Volume
 
@@ -119,23 +120,17 @@ class CreateSandboxRequest:
 
                 New resource types can be added without API changes.
                  Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
-            resource_requests (ResourceLimits | Unset): Runtime resource constraints as key-value pairs. Similar to
-                Kubernetes resource specifications,
-                allows flexible definition of resource limits. Common resource types include:
-                - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
-                - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
-                - `gpu`: Number of GPU devices (e.g., "1")
-                - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
-                  `ephemeral-storage` are accepted as aliases. On the Docker runtime this
-                  bounds only the container's writable layer via HostConfig.StorageOpt —
-                  bind mounts, named volumes, and read-only image layers are not covered —
-                  and requires a quota-capable storage driver (for example overlay2 on XFS
-                  with pquota); the create request fails with INVALID_PARAMETER if the
-                  daemon cannot enforce it. On the Windows profile this maps to the
-                  sandbox disk size.
+            resource_requests (ResourceRequests | Unset): Resource reservations for the sandbox, as key-value pairs in
+                Kubernetes
+                resource specification syntax (same key space as `resourceLimits`):
+                - `cpu`: CPU reservation (e.g., "250m" for 0.25 CPU cores)
+                - `memory`: Memory reservation (e.g., "512Mi", "1Gi")
 
-                New resource types can be added without API changes.
-                 Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
+                On Kubernetes-based runtimes these become the sandbox container's
+                `requests` — scheduling guarantees, not hard caps. This field is
+                ignored by the Docker runtime, which reads only `resourceLimits`, so
+                a `disk` reservation here does not create a writable-layer quota.
+                 Example: {'cpu': '500m', 'memory': '512Mi'}.
             env (CreateSandboxRequestEnv | Unset): Environment variables to inject into the sandbox runtime. Example:
                 {'API_KEY': 'secret-key', 'DEBUG': 'true', 'LOG_LEVEL': 'info'}.
             metadata (CreateSandboxRequestMetadata | Unset): Custom key-value metadata for management, filtering, and
@@ -224,7 +219,7 @@ class CreateSandboxRequest:
     platform: PlatformSpec | Unset = UNSET
     timeout: int | None | Unset = UNSET
     resource_limits: ResourceLimits | Unset = UNSET
-    resource_requests: ResourceLimits | Unset = UNSET
+    resource_requests: ResourceRequests | Unset = UNSET
     env: CreateSandboxRequestEnv | Unset = UNSET
     metadata: CreateSandboxRequestMetadata | Unset = UNSET
     lifecycle: SandboxLifecycle | Unset = UNSET
@@ -348,6 +343,7 @@ class CreateSandboxRequest:
         from ..models.network_policy import NetworkPolicy
         from ..models.platform_spec import PlatformSpec
         from ..models.resource_limits import ResourceLimits
+        from ..models.resource_requests import ResourceRequests
         from ..models.sandbox_lifecycle import SandboxLifecycle
         from ..models.volume import Volume
 
@@ -387,11 +383,11 @@ class CreateSandboxRequest:
             resource_limits = ResourceLimits.from_dict(_resource_limits)
 
         _resource_requests = d.pop("resourceRequests", UNSET)
-        resource_requests: ResourceLimits | Unset
+        resource_requests: ResourceRequests | Unset
         if isinstance(_resource_requests, Unset):
             resource_requests = UNSET
         else:
-            resource_requests = ResourceLimits.from_dict(_resource_requests)
+            resource_requests = ResourceRequests.from_dict(_resource_requests)
 
         _env = d.pop("env", UNSET)
         env: CreateSandboxRequestEnv | Unset

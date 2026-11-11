@@ -1648,7 +1648,7 @@ export interface components {
              *     resulting in Guaranteed QoS class.
              *     Only meaningful for Kubernetes-based runtimes; ignored by Docker runtime.
              */
-            resourceRequests?: components["schemas"]["ResourceLimits"];
+            resourceRequests?: components["schemas"]["ResourceRequests"];
             /**
              * @description Environment variables to inject into the sandbox runtime.
              * @example {
@@ -1812,6 +1812,24 @@ export interface components {
          *     }
          */
         ResourceLimits: {
+            [key: string]: string;
+        };
+        /**
+         * @description Resource reservations for the sandbox, as key-value pairs in Kubernetes
+         *     resource specification syntax (same key space as `resourceLimits`):
+         *     - `cpu`: CPU reservation (e.g., "250m" for 0.25 CPU cores)
+         *     - `memory`: Memory reservation (e.g., "512Mi", "1Gi")
+         *
+         *     On Kubernetes-based runtimes these become the sandbox container's
+         *     `requests` — scheduling guarantees, not hard caps. This field is
+         *     ignored by the Docker runtime, which reads only `resourceLimits`, so
+         *     a `disk` reservation here does not create a writable-layer quota.
+         * @example {
+         *       "cpu": "500m",
+         *       "memory": "512Mi"
+         *     }
+         */
+        ResourceRequests: {
             [key: string]: string;
         };
         /**

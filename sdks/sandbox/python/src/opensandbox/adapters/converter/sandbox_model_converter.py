@@ -211,6 +211,7 @@ class SandboxModelConverter:
             PlatformSpec as ApiPlatformSpec,
         )
         from opensandbox.api.lifecycle.models.resource_limits import ResourceLimits
+        from opensandbox.api.lifecycle.models.resource_requests import ResourceRequests
         from opensandbox.api.lifecycle.models.sandbox_lifecycle import (
             SandboxLifecycle as ApiSandboxLifecycle,
         )
@@ -293,7 +294,7 @@ class SandboxModelConverter:
         )
         api_resource_requests = UNSET
         if resource_requests:
-            api_resource_requests = ResourceLimits.from_dict(resource_requests)
+            api_resource_requests = ResourceRequests.from_dict(resource_requests)
 
         request = CreateSandboxRequest(
             image=image,
