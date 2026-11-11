@@ -26,6 +26,9 @@ func (p *NetworkPolicy) AllowsProxyDestination(host string, port int) bool {
 	}
 	ip, err := netip.ParseAddr(host)
 	literal := err == nil
+	if literal && ip.Zone() != "" {
+		return false
+	}
 	ip = ip.Unmap()
 	allowed := p.DefaultAction == ActionAllow
 	for _, r := range p.Egress {
@@ -55,7 +58,12 @@ func (p *NetworkPolicy) AllowsProxyDestination(host string, port int) bool {
 			if r.targetKind == targetIP {
 				matches = r.ip.Unmap() == ip
 			} else {
-				matches = r.prefix.Contains(ip) || ip.Is4() && r.prefix.Contains(netip.AddrFrom16(ip.As16()))
+				matches = r.prefix.Contains(ip)
+				// Only mapped IPv4 prefixes may also match an IPv4 address;
+				// broader IPv6 prefixes must stay in their own address family.
+				if !matches && ip.Is4() && r.prefix.Addr().Is4In6() && r.prefix.Bits() >= 96 {
+					matches = r.prefix.Contains(netip.AddrFrom16(ip.As16()))
+				}
 			}
 		}
 		if matches {

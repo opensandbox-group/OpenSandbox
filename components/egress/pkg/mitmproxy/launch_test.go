@@ -34,6 +34,22 @@ func TestBuildMitmdumpArgsModeSpecs(t *testing.T) {
 	require.NotContains(t, args, "transparent@::1:18081")
 }
 
+func TestBuildMitmdumpArgsExplicitProxyPortCollision(t *testing.T) {
+	t.Setenv(constants.EnvUpstreamProxy, "http://proxy.example.com:3128")
+	for _, v6 := range []bool{false, true} {
+		args := buildMitmdumpArgs(Config{ListenPort: 18082, ListenV6: &v6})
+		require.Contains(t, args, "transparent@127.0.0.1:18082")
+		require.NotContains(t, args, "regular@127.0.0.1:18082")
+		require.Contains(t, args, "regular@127.0.0.1:18083")
+		if v6 {
+			require.Contains(t, args, "transparent@::1:18082")
+		}
+	}
+	args := buildMitmdumpArgs(Config{ListenPort: 18083})
+	require.Contains(t, args, "transparent@127.0.0.1:18083")
+	require.Contains(t, args, "regular@127.0.0.1:18082")
+}
+
 func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
 	args := buildMitmdumpArgs(Config{ListenPort: 18081})
 	require.Contains(t, args, "--mode")

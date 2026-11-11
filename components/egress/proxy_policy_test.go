@@ -49,3 +49,27 @@ func TestProxyAuthorizeCurrentPolicy(t *testing.T) {
 	s.liveRevision = true
 	check("/egress/authorize?host=code.invalid&port=80", http.StatusServiceUnavailable)
 }
+
+func TestProxyAuthorizeIPBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		raw, host string
+		want      int
+	}{
+		{`{"defaultAction":"allow","egress":[{"action":"deny","target":"2001:db8::/32"}]}`, "2001:db8::1%25eth0", http.StatusForbidden},
+		{`{"defaultAction":"allow"}`, "fe80::1%251", http.StatusForbidden},
+		{`{"defaultAction":"allow"}`, "2001:db8::1%2525eth0", http.StatusForbidden},
+		{`{"defaultAction":"allow"}`, "2001:db8::1", http.StatusNoContent},
+		{`{"egress":[{"action":"allow","target":"::/0"}]}`, "192.0.2.1", http.StatusForbidden},
+		{`{"egress":[{"action":"allow","target":"::/0"}]}`, "::ffff:192.0.2.1", http.StatusForbidden},
+		{`{"egress":[{"action":"allow","target":"::/0"}]}`, "2001:db8::1", http.StatusNoContent},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			p, err := policy.ParsePolicy(tc.raw)
+			require.NoError(t, err)
+			s := &policyServer{proxy: &stubProxy{updated: p}}
+			w := httptest.NewRecorder()
+			s.handleProxyAuthorize(w, httptest.NewRequest(http.MethodGet, "/egress/authorize?host="+tc.host+"&port=80", nil))
+			require.Equal(t, tc.want, w.Code, w.Body.String())
+		})
+	}
+}

@@ -80,7 +80,7 @@ const listenHostLoopback = "127.0.0.1"
 // the bare address, no brackets).
 const listenHostLoopbackV6 = "::1"
 
-// ExplicitProxyPort is the sidecar's loopback HTTP proxy for applications that
+// ExplicitProxyPort is the sidecar's default loopback HTTP proxy port for applications that
 // delegate destination DNS to the configured upstream proxy.
 const ExplicitProxyPort = 18082
 
@@ -344,7 +344,11 @@ func buildMitmdumpArgs(cfg Config) []string {
 		args = append(args, "--mode", fmt.Sprintf("transparent@%s:%d", listenHostLoopbackV6, cfg.ListenPort))
 	}
 	if strings.TrimSpace(cfg.ListenHost) == "" && strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
-		args = append(args, "--mode", fmt.Sprintf("regular@127.0.0.1:%d", ExplicitProxyPort))
+		port := ExplicitProxyPort
+		if cfg.ListenPort == port {
+			port++ // Preserve the operator's existing transparent listener port.
+		}
+		args = append(args, "--mode", fmt.Sprintf("regular@127.0.0.1:%d", port))
 	}
 	args = append(args,
 		"--listen-port", strconv.Itoa(cfg.ListenPort),

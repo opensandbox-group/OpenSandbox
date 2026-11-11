@@ -62,6 +62,8 @@ ca_secret_name = "upstream-proxy-ca"
 
 When an upstream proxy is configured, the sidecar also exposes an explicit HTTP proxy at `http://127.0.0.1:18082` inside the sandbox network namespace. Configure proxy-aware applications to use this listener:
 
+If the transparent listener is explicitly configured on port `18082` using `OPENSANDBOX_EGRESS_MITMPROXY_PORT`, the explicit listener uses port `18083` instead; use that port in the application proxy URLs below. The existing transparent listener keeps its configured port.
+
 ```bash
 export HTTP_PROXY=http://127.0.0.1:18082
 export HTTPS_PROXY=http://127.0.0.1:18082
@@ -73,7 +75,7 @@ export no_proxy="$NO_PROXY"
 
 Applications send the destination hostname to this listener without resolving it locally. The sidecar checks the current network policy, applies Credential Vault bindings, and chains the request through the configured upstream proxy, which resolves the destination. Only the upstream proxy's hostname needs infrastructure DNS; a literal proxy IP needs no lookup. Applications must trust the sidecar's interception CA as with transparent interception. Do not configure applications with the upstream proxy address or its credentials directly.
 
-Domain rules, platform overlays, and TCP port restrictions are checked before CONNECT and again on each HTTP request, including requests on existing connections. Denied requests receive HTTP 403; unavailable policy checks fail closed with HTTP 503. IP/CIDR rules apply to literal destination IPs. Since remotely resolved addresses are unavailable locally, any IP/CIDR deny applicable to the destination port conservatively rejects hostname requests; put resolved-address restrictions on the upstream proxy if required. With `OPENSANDBOX_EGRESS_BLOCK_DOH_443` enabled, explicit requests to port 443 are conservatively rejected because local DNS cannot classify remotely resolved addresses.
+Domain rules, platform overlays, and TCP port restrictions are checked before CONNECT and again on each HTTP request, including requests on existing connections. Denied requests receive HTTP 403; unavailable policy checks fail closed with HTTP 503. IP/CIDR rules apply to literal destination IPs; zoned IPv6 destinations are rejected. Since remotely resolved addresses are unavailable locally, any IP/CIDR deny applicable to the destination port conservatively rejects hostname requests; put resolved-address restrictions on the upstream proxy if required. With `OPENSANDBOX_EGRESS_BLOCK_DOH_443` enabled, explicit requests to port 443 are conservatively rejected because local DNS cannot classify remotely resolved addresses.
 
 This listener is available for the sidecar profile only, not the shared Fast Sandbox profile. Existing transparent interception remains available and still requires destination DNS. Applications that ignore explicit proxy settings may fail when external DNS is unavailable; no synthetic DNS answers are provided. Set proxy variables through the sandbox environment or application configuration; they are not injected automatically.
 
