@@ -2457,6 +2457,26 @@ components:
         cpu: "500m"
         memory: "512Mi"
         gpu: "1"
+    FsbTemplateResourceLimits:
+      type: object
+      description: |
+        Guest machine sizing for a Fast Sandbox template, as key-value pairs:
+        - `cpu`: guest vCPUs (e.g., "1")
+        - `memory`: guest memory (e.g., "512Mi")
+        - `disk`: logical size of the guest rootfs (e.g., "2Gi"); the artifact
+          set is stored and P2P-pulled at this size, so keep it just above the
+          expanded source image.
+
+        Defaults when omitted: cpu `1`, memory `512Mi`, disk `2Gi`.
+        Only these three keys are accepted: `storage` and `ephemeral-storage`
+        are sandbox writable-layer quota aliases and are not template keys —
+        the request fails with HTTP 400 if they are set here.
+      additionalProperties:
+        type: string
+      example:
+        cpu: "1"
+        memory: "512Mi"
+        disk: "2Gi"
     RenewSandboxExpirationRequest:
       type: object
       required: [expiresAt]
@@ -3137,7 +3157,7 @@ components:
           minLength: 1
           description: Source OCI image reference the golden image is built from.
         resourceLimits:
-          $ref: '#/components/schemas/ResourceLimits'
+          $ref: '#/components/schemas/FsbTemplateResourceLimits'
           description: |
             Guest machine sizing: `cpu` -> guest vCPUs, `memory` -> guest memory,
             `disk` -> logical size of the guest rootfs (parallel resource keys).
@@ -3220,7 +3240,7 @@ components:
           type: string
           description: Source OCI image reference.
         resourceLimits:
-          $ref: '#/components/schemas/ResourceLimits'
+          $ref: '#/components/schemas/FsbTemplateResourceLimits'
         entrypoint:
           type: array
           items:

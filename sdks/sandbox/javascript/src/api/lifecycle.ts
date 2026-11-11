@@ -1814,6 +1814,27 @@ export interface components {
         ResourceLimits: {
             [key: string]: string;
         };
+        /**
+         * @description Guest machine sizing for a Fast Sandbox template, as key-value pairs:
+         *     - `cpu`: guest vCPUs (e.g., "1")
+         *     - `memory`: guest memory (e.g., "512Mi")
+         *     - `disk`: logical size of the guest rootfs (e.g., "2Gi"); the artifact
+         *       set is stored and P2P-pulled at this size, so keep it just above the
+         *       expanded source image.
+         *
+         *     Defaults when omitted: cpu `1`, memory `512Mi`, disk `2Gi`.
+         *     Only these three keys are accepted: `storage` and `ephemeral-storage`
+         *     are sandbox writable-layer quota aliases and are not template keys —
+         *     the request fails with HTTP 400 if they are set here.
+         * @example {
+         *       "cpu": "1",
+         *       "memory": "512Mi",
+         *       "disk": "2Gi"
+         *     }
+         */
+        FsbTemplateResourceLimits: {
+            [key: string]: string;
+        };
         RenewSandboxExpirationRequest: {
             /**
              * Format: date-time
@@ -2293,7 +2314,7 @@ export interface components {
              *     it just above the expanded source image. Defaults when omitted:
              *     cpu `1`, memory `512Mi`, disk `2Gi`.
              */
-            resourceLimits?: components["schemas"]["ResourceLimits"];
+            resourceLimits?: components["schemas"]["FsbTemplateResourceLimits"];
             /**
              * @description Guest business command (argv); empty defaults to
              *     `["tail", "-f", "/dev/null"]`.
@@ -2356,7 +2377,7 @@ export interface components {
             templateId: string;
             /** @description Source OCI image reference. */
             image: string;
-            resourceLimits?: components["schemas"]["ResourceLimits"];
+            resourceLimits?: components["schemas"]["FsbTemplateResourceLimits"];
             /** @description Guest business command (argv). */
             entrypoint?: string[];
             /** @description Environment variables baked into the golden image. */

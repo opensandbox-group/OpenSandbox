@@ -30,8 +30,8 @@ if TYPE_CHECKING:
     from ..models.fsb_template_env import FsbTemplateEnv
     from ..models.fsb_template_metadata import FsbTemplateMetadata
     from ..models.fsb_template_readiness import FsbTemplateReadiness
+    from ..models.fsb_template_resource_limits import FsbTemplateResourceLimits
     from ..models.fsb_template_status import FsbTemplateStatus
-    from ..models.resource_limits import ResourceLimits
 
 
 T = TypeVar("T", bound="FsbTemplate")
@@ -50,23 +50,19 @@ class FsbTemplate:
             status (FsbTemplateStatus): Status of a fsb template build.
             created_at (datetime.datetime): Creation timestamp (RFC 3339 UTC).
             updated_at (datetime.datetime): Last update timestamp (RFC 3339 UTC).
-            resource_limits (ResourceLimits | Unset): Runtime resource constraints as key-value pairs. Similar to Kubernetes
-                resource specifications,
-                allows flexible definition of resource limits. Common resource types include:
-                - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
-                - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
-                - `gpu`: Number of GPU devices (e.g., "1")
-                - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
-                  `ephemeral-storage` are accepted as aliases. On the Docker runtime this
-                  bounds only the container's writable layer via HostConfig.StorageOpt —
-                  bind mounts, named volumes, and read-only image layers are not covered —
-                  and requires a quota-capable storage driver (for example overlay2 on XFS
-                  with pquota); the create request fails with INVALID_PARAMETER if the
-                  daemon cannot enforce it. On the Windows profile this maps to the
-                  sandbox disk size.
+            resource_limits (FsbTemplateResourceLimits | Unset): Guest machine sizing for a Fast Sandbox template, as key-
+                value pairs:
+                - `cpu`: guest vCPUs (e.g., "1")
+                - `memory`: guest memory (e.g., "512Mi")
+                - `disk`: logical size of the guest rootfs (e.g., "2Gi"); the artifact
+                  set is stored and P2P-pulled at this size, so keep it just above the
+                  expanded source image.
 
-                New resource types can be added without API changes.
-                 Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
+                Defaults when omitted: cpu `1`, memory `512Mi`, disk `2Gi`.
+                Only these three keys are accepted: `storage` and `ephemeral-storage`
+                are sandbox writable-layer quota aliases and are not template keys —
+                the request fails with HTTP 400 if they are set here.
+                 Example: {'cpu': '1', 'memory': '512Mi', 'disk': '2Gi'}.
             entrypoint (list[str] | Unset): Guest business command (argv).
             env (FsbTemplateEnv | Unset): Environment variables baked into the golden image.
             metadata (FsbTemplateMetadata | Unset): Custom metadata from the creation request.
@@ -80,7 +76,7 @@ class FsbTemplate:
     status: FsbTemplateStatus
     created_at: datetime.datetime
     updated_at: datetime.datetime
-    resource_limits: ResourceLimits | Unset = UNSET
+    resource_limits: FsbTemplateResourceLimits | Unset = UNSET
     entrypoint: list[str] | Unset = UNSET
     env: FsbTemplateEnv | Unset = UNSET
     metadata: FsbTemplateMetadata | Unset = UNSET
@@ -152,8 +148,8 @@ class FsbTemplate:
         from ..models.fsb_template_env import FsbTemplateEnv
         from ..models.fsb_template_metadata import FsbTemplateMetadata
         from ..models.fsb_template_readiness import FsbTemplateReadiness
+        from ..models.fsb_template_resource_limits import FsbTemplateResourceLimits
         from ..models.fsb_template_status import FsbTemplateStatus
-        from ..models.resource_limits import ResourceLimits
 
         d = dict(src_dict)
         template_id = d.pop("templateId")
@@ -171,11 +167,11 @@ class FsbTemplate:
         updated_at = isoparse(d.pop("updatedAt"))
 
         _resource_limits = d.pop("resourceLimits", UNSET)
-        resource_limits: ResourceLimits | Unset
+        resource_limits: FsbTemplateResourceLimits | Unset
         if isinstance(_resource_limits, Unset):
             resource_limits = UNSET
         else:
-            resource_limits = ResourceLimits.from_dict(_resource_limits)
+            resource_limits = FsbTemplateResourceLimits.from_dict(_resource_limits)
 
         entrypoint = cast(list[str], d.pop("entrypoint", UNSET))
 
