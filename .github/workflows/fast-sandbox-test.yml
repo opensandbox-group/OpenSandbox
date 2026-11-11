@@ -41,6 +41,9 @@ jobs:
     runs-on: kvm
     timeout-minutes: 240
     env:
+      # The integration script defaults to direct VCS downloads; use the
+      # module proxy for host builds and fastlet's Docker build instead.
+      FSB_GOPROXY: https://proxy.golang.org,direct
       # Full-stack profile (single round while scenarios stabilize).
       IDLE_PAUSE: "1"
       IDLE_PAUSE_ROUNDS: "1"
