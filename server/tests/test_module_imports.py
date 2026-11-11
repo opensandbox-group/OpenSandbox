@@ -15,28 +15,32 @@
 """Modules import on their own, not only after ``opensandbox_server.main``.
 
 The test session imports ``main`` first (see conftest.py), which hides an
-import cycle, so the imports run in a fresh interpreter.
+import cycle, so each import runs in a fresh interpreter.
 """
 
 import subprocess
 import sys
 
+import pytest
+
 # Like conftest.py, keep the Docker service that lifecycle builds at import off
 # a real daemon, which CI hosts such as the Windows runners do not have.
 _NO_DOCKER = "import docker; from unittest.mock import MagicMock; docker.from_env = MagicMock; "
 
-_MODULES = [
-    "opensandbox_server.services",
-    "opensandbox_server.services.fast_sandbox.service",
-    "opensandbox_server.services.snapshot_service",
-    "opensandbox_server.api.lifecycle",
-    "opensandbox_server.integrations.idle_pause",
-]
 
-
-def test_modules_import_in_a_fresh_interpreter() -> None:
+@pytest.mark.parametrize(
+    "module",
+    [
+        "opensandbox_server.services",
+        "opensandbox_server.services.fast_sandbox.service",
+        "opensandbox_server.services.snapshot_service",
+        "opensandbox_server.api.lifecycle",
+        "opensandbox_server.integrations.idle_pause",
+    ],
+)
+def test_module_imports_in_a_fresh_interpreter(module: str) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", _NO_DOCKER + "\n".join(f"import {m}" for m in _MODULES)],
+        [sys.executable, "-c", f"{_NO_DOCKER}import {module}"],
         capture_output=True,
         text=True,
         timeout=60,
