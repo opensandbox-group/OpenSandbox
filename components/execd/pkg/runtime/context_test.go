@@ -371,6 +371,56 @@ func TestCreateContext_SkipsNewerUnauthenticatedDecoyRuntimeFile(t *testing.T) {
 	require.Equal(t, "sess-after-decoy", sessionID)
 }
 
+func TestCreateContext_FastFailsForLanguageWithoutKernel(t *testing.T) {
+	const (
+		validToken = "valid-jupyter-runtime-token"
+		staleToken = "older-stale-runtime-token"
+	)
+
+	var specRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Token "+validToken {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/kernelspecs") {
+			specRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"default":"python","kernelspecs":{"python":{"name":"python","spec":{"language":"python","display_name":"Python"}}}}`))
+			return
+		}
+		require.Failf(t, "unexpected request", "%s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	runtimeRoot := t.TempDir()
+	port := jupyterPortFromBaseURL(server.URL)
+	validFile := writeJupyterServerFile(t, runtimeRoot, "opensandbox-jupyter.valid", "jpserver-1.json", jupyterRuntimeServerInfo{
+		Port:  port,
+		Token: validToken,
+	})
+	newTime := time.Now().Add(-1 * time.Second)
+	require.NoError(t, os.Chtimes(validFile, newTime, newTime))
+	staleFile := writeJupyterServerFile(t, runtimeRoot, "opensandbox-jupyter.stale", "jpserver-2.json", jupyterRuntimeServerInfo{
+		Port:  port,
+		Token: staleToken,
+	})
+	oldTime := time.Now().Add(-10 * time.Second)
+	require.NoError(t, os.Chtimes(staleFile, oldTime, oldTime))
+
+	c := NewController(server.URL, "")
+	c.jupyterRuntimeRoot = runtimeRoot
+
+	start := time.Now()
+	_, err := c.CreateContext(context.Background(), &CreateContextRequest{
+		Language: JavaScript,
+		Cwd:      t.TempDir(),
+	})
+	require.ErrorIs(t, err, ErrUnsupportedLanguage)
+	require.Less(t, time.Since(start), 500*time.Millisecond)
+	require.Equal(t, int32(1), specRequests.Load(), "an unsupported language must not be retried")
+}
+
 func TestKernelWaitingBackoffKeepsWaitingForJupyterStartup(t *testing.T) {
 	backoff := kernelWaitingBackoff
 	backoff.Jitter = 0
