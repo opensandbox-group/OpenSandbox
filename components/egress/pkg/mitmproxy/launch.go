@@ -223,7 +223,13 @@ func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
 	if s.TLSAdmission {
 		clean = append(clean, subjectRevisionEnvPrefix+"TLS_ADMISSION=true",
 			subjectRevisionEnvPrefix+"TLS_CAPACITY="+strconv.Itoa(s.TLSCapacity),
-			subjectRevisionEnvPrefix+"PROCESS_TLS_CAPACITY="+strconv.Itoa(s.ProcessTLSCapacity))
+			subjectRevisionEnvPrefix+"PROCESS_TLS_CAPACITY="+strconv.Itoa(s.ProcessTLSCapacity),
+			// The child reads its static passthrough policy only from this
+			// handoff: inheritance is stripped above and main.go rejects an
+			// operator-set value for fast-sandbox, so the policy is empty.
+			// parse_handoff treats a missing value as an error, including for
+			// an empty policy, so admission must ship it explicitly.
+			constants.EnvMitmproxyPassthroughHosts+"=[]")
 	}
 	return clean
 }

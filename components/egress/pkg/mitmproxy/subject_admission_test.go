@@ -5,9 +5,34 @@ package mitmproxy
 
 import (
 	"encoding/json"
-	"github.com/stretchr/testify/require"
+	"strings"
 	"testing"
+
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/stretchr/testify/require"
 )
+
+// The subject child reads the static passthrough policy only from its handoff:
+// main.go rejects an operator-set value for fast-sandbox, and the child env
+// builder strips inheritance. parse_handoff treats a missing value as an error,
+// so admission must ship the policy explicitly or the child fatals at load().
+func TestSubjectAdmissionStaticPassthroughHandoff(t *testing.T) {
+	cfg := subjectLaunchHandoff()
+	require.NoError(t, json.Unmarshal([]byte(`{"TLSAdmission":true,"TLSCapacity":32,"ProcessTLSCapacity":131072}`), &cfg))
+	child, err := WithSubjectRevision(Config{}, cfg)
+	require.NoError(t, err)
+	env := buildMitmdumpChildEnv([]string{constants.EnvMitmproxyPassthroughHosts + `=["stale.example"]`}, "/home", child)
+	require.Contains(t, env, constants.EnvMitmproxyPassthroughHosts+"=[]")
+	require.NotContains(t, env, constants.EnvMitmproxyPassthroughHosts+`=["stale.example"]`)
+
+	disabled, err := WithSubjectRevision(Config{}, subjectLaunchHandoff())
+	require.NoError(t, err)
+	off := buildMitmdumpChildEnv(nil, "/home", disabled)
+	for _, value := range off {
+		require.False(t, strings.HasPrefix(value, constants.EnvMitmproxyPassthroughHosts+"="),
+			"the disabled path must not introduce a static passthrough reader")
+	}
+}
 
 func TestSubjectAdmissionHandoff(t *testing.T) {
 	cfg := subjectLaunchHandoff()

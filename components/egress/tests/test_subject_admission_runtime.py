@@ -21,8 +21,12 @@ class SubjectHarness(h.LiveRuntimeHarness):
     sequence = 0
 
     def env(self, drain_seconds=1):
+        # The subject child must not inherit the sidecar's static passthrough
+        # value: production strips it and ships its own handoff, so inheriting
+        # "[]" here would hide a missing admission handoff field.
         env = {k: v for k, v in super().env().items()
-               if not k.startswith("OPENSANDBOX_EGRESS_REVISION_")}
+               if not k.startswith("OPENSANDBOX_EGRESS_REVISION_")
+               and k != "OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS"}
         values = dict(MODE="subject-v2", SOCKET=self.socket_path, TOKEN=h.TOKEN,
                       CONTROL_GENERATION=h.CONTROL, MAX_SUBJECTS="2",
                       MAX_SNAPSHOT_BYTES="1048576", RETAINED_PAYLOAD_BUDGET="4194304",
