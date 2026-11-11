@@ -802,11 +802,17 @@ func (m *MergedView) Search(root, pattern string) ([]string, error) { //nolint:g
 }
 
 // ReplaceContent reads a file, replaces text, and writes to upper.
+// A lower-only file is created in upper, so the write has to carry the
+// existing mode. Hardcoding 0644 made a 0600 secret world-readable.
 func (m *MergedView) ReplaceContent(path, old, newStr string) error {
 	data, err := m.ReadFile(path)
 	if err != nil {
 		return err
 	}
+	mode := os.FileMode(0o644)
+	if info, statErr := m.Stat(path); statErr == nil {
+		mode = info.Mode().Perm()
+	}
 	content := strings.ReplaceAll(string(data), old, newStr)
-	return m.WriteFile(path, []byte(content), 0o644) //nolint:gosec
+	return m.WriteFile(path, []byte(content), mode) //nolint:gosec
 }

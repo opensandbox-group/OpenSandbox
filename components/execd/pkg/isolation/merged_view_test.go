@@ -725,3 +725,17 @@ func TestMergedView_UnreadableUpperFileKeepsItsError(t *testing.T) {
 		assert.ErrorIs(t, err, fs.ErrPermission, "Open, same dir %v", sameDir)
 	}
 }
+
+func TestMergedView_ReplaceContentKeepsLowerFileMode(t *testing.T) {
+	mv := newTestMergedView(t, WorkspaceRW)
+	require.NoError(t, os.WriteFile(filepath.Join(mv.LowerDir, "secret.txt"), []byte("hello world"), 0o600))
+
+	require.NoError(t, mv.ReplaceContent("secret.txt", "world", "gopher"))
+
+	info, err := os.Stat(filepath.Join(mv.UpperDir, "secret.txt"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	data, err := os.ReadFile(filepath.Join(mv.UpperDir, "secret.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "hello gopher", string(data))
+}
