@@ -56,12 +56,10 @@ func (c *Controller) runSQL(ctx context.Context, request *ExecuteCodeRequest) er
 		return err
 	}
 
-	switch c.getQueryType(request.Code) {
-	case "SELECT":
+	if c.queryReturnsRows(request.Code) {
 		return c.executeSelectSQLQuery(ctx, request)
-	default:
-		return c.executeUpdateSQLQuery(ctx, request)
 	}
+	return c.executeUpdateSQLQuery(ctx, request)
 }
 
 func (c *Controller) executeSelectSQLQuery(ctx context.Context, request *ExecuteCodeRequest) error {
@@ -171,13 +169,52 @@ func (c *Controller) executeUpdateSQLQuery(ctx context.Context, request *Execute
 	return nil
 }
 
-// getQueryType extracts the first token to decide which executor to use.
-func (c *Controller) getQueryType(query string) string {
-	fields := strings.Fields(query)
-	if len(fields) == 0 {
-		return ""
+// queryReturnsRows reports whether the statement should use the row executor.
+// Leading whitespace and --, #, and /* */ comments are skipped. SHOW, DESCRIBE,
+// DESC, and EXPLAIN return rows the same way SELECT does. WITH is left on the
+// update path because WITH ... DELETE is not a query.
+func (c *Controller) queryReturnsRows(query string) bool {
+	switch firstSQLToken(query) {
+	case "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN":
+		return true
+	default:
+		return false
 	}
-	return strings.ToUpper(fields[0])
+}
+
+// firstSQLToken returns the first SQL word, skipping whitespace and comments.
+func firstSQLToken(query string) string {
+	i := 0
+	for i < len(query) {
+		switch {
+		case query[i] == ' ' || query[i] == '\t' || query[i] == '\n' || query[i] == '\r':
+			i++
+		case strings.HasPrefix(query[i:], "--") || query[i] == '#':
+			nl := strings.IndexByte(query[i:], '\n')
+			if nl < 0 {
+				return ""
+			}
+			i += nl + 1
+		case strings.HasPrefix(query[i:], "/*"):
+			end := strings.Index(query[i+2:], "*/")
+			if end < 0 {
+				return ""
+			}
+			i += end + 4
+		default:
+			j := i
+			for j < len(query) {
+				switch query[j] {
+				case ' ', '\t', '\n', '\r', '(':
+					return strings.ToUpper(query[i:j])
+				default:
+					j++
+				}
+			}
+			return strings.ToUpper(query[i:])
+		}
+	}
+	return ""
 }
 
 // initDB lazily opens the local sandbox database.

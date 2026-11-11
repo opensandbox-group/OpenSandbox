@@ -198,3 +198,32 @@ func TestExecuteUpdateSQLQuery_Success(t *testing.T) {
 	require.Len(t, qr.Rows[0], 1, "unexpected row entry length")
 	require.Equal(t, float64(3), qr.Rows[0][0])
 }
+
+func TestQueryReturnsRowsSkipsCommentsAndRecognizesRowCommands(t *testing.T) {
+	c := NewController("", "")
+
+	rowQueries := []string{
+		"SELECT 1",
+		"  select 1",
+		"-- note\nSELECT 1",
+		"/* c */ SELECT 1",
+		"# c\nSELECT 1",
+		"SHOW TABLES",
+		"DESCRIBE t",
+		"DESC t",
+		"EXPLAIN SELECT 1",
+	}
+	for _, query := range rowQueries {
+		require.Truef(t, c.queryReturnsRows(query), "expected rows: %q", query)
+	}
+
+	updates := []string{
+		"UPDATE t SET a = 1",
+		"/* c */ DELETE FROM t",
+		"INSERT INTO t VALUES (1)",
+		"-- only a comment",
+	}
+	for _, query := range updates {
+		require.Falsef(t, c.queryReturnsRows(query), "expected update: %q", query)
+	}
+}
