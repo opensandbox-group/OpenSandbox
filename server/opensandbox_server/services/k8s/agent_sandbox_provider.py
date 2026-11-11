@@ -303,7 +303,6 @@ class AgentSandboxProvider(WorkloadProvider):
         extensions: Optional[Dict[str, str]] = None,
         sandbox_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Build pod spec dict for the Sandbox CRD."""
         has_egress = egress_settings is not None
         disable_ipv6_for_egress = (
             egress_settings.disable_ipv6 if egress_settings is not None else False
