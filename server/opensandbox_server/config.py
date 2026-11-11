@@ -1455,7 +1455,8 @@ class DockerConfig(BaseModel):
                 f"docker.port_range_min ({self.port_range_min}) must be less than "
                 f"docker.port_range_max ({self.port_range_max})."
             )
-        if self.port_range_max - self.port_range_min < 100:
+        # allocate_host_port uses random.randint, which includes both ends.
+        if self.port_range_max - self.port_range_min + 1 < 100:
             raise ValueError(
                 f"Port range ({self.port_range_min}-{self.port_range_max}) is too narrow. "
                 f"Need at least 100 ports for reliable allocation."

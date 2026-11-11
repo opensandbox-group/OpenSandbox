@@ -59,6 +59,15 @@ def test_publish_host_rejects_a_name() -> None:
         DockerConfig(publish_host="host.docker.internal")
 
 
+def test_port_range_counts_inclusive_ports() -> None:
+    # randint(min, max) is inclusive, so 40000-40099 is 100 allocatable ports.
+    config = DockerConfig(port_range_min=40000, port_range_max=40099)
+    assert config.port_range_max - config.port_range_min + 1 == 100
+
+    with pytest.raises(ValueError, match="at least 100"):
+        DockerConfig(port_range_min=40000, port_range_max=40098)
+
+
 def test_publish_host_rejects_ipv6() -> None:
     # The allocator probes with an AF_INET socket: an IPv6 literal would pass ip_address() and then
     # fail every probe with gaierror (not EADDRNOTAVAIL, so no wildcard fallback) — every sandbox
