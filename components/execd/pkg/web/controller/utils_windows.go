@@ -23,7 +23,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -64,12 +63,11 @@ func ChmodFile(file string, perms model.Permission) error {
 	}
 
 	if perms.Mode != 0 {
-		mode, err := strconv.ParseUint(strconv.Itoa(perms.Mode), 8, 32)
+		mode, err := fileModeFromAPI(perms.Mode)
 		if err != nil {
 			return err
 		}
-		err = os.Chmod(abs, os.FileMode(mode))
-		if err != nil {
+		if err := os.Chmod(abs, mode); err != nil {
 			return err
 		}
 	}
@@ -177,11 +175,11 @@ func MakeDir(dir string, perm model.Permission) error {
 	}
 
 	if !existed && perm.Mode != 0 {
-		mode, err := strconv.ParseUint(strconv.Itoa(perm.Mode), 8, 32)
+		mode, err := fileModeFromAPI(perm.Mode)
 		if err != nil {
 			return err
 		}
-		return os.Chmod(abs, os.FileMode(mode))
+		return os.Chmod(abs, mode)
 	}
 	return nil
 }
@@ -206,8 +204,6 @@ func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error)
 		createdAt = time.Unix(0, data.CreationTime.Nanoseconds())
 	}
 
-	mode := strconv.FormatInt(int64(fileInfo.Mode().Perm()), 8)
-
 	return model.FileInfo{
 		Path:       absPath,
 		Type:       fileType(fileInfo),
@@ -217,10 +213,7 @@ func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error)
 		Permission: model.Permission{
 			Owner: "",
 			Group: "",
-			Mode: func() int {
-				i, _ := strconv.Atoi(mode)
-				return i
-			}(),
+			Mode:  apiModeFromFileMode(fileInfo.Mode()),
 		},
 	}, nil
 }
