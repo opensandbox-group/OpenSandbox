@@ -97,6 +97,9 @@ type stubNft struct {
 	onApply     func(*policy.NetworkPolicy)
 	deadline    time.Time
 	hasDeadline bool
+	domains     map[string][]netip.Addr
+	lastDrops   nftables.EstablishedDrops
+	dropMatched int
 }
 
 func (s *stubNft) Quiesce() { s.quiesces++ }
@@ -109,6 +112,29 @@ func (s *stubNft) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 		s.onApply(p)
 	}
 	return s.err
+}
+
+func (s *stubNft) ApplyStaticDropEstablished(ctx context.Context, p *policy.NetworkPolicy, drops nftables.EstablishedDrops) (int, error) {
+	s.lastDrops = drops
+	err := s.ApplyStatic(ctx, p)
+	return s.dropMatched, err
+}
+
+func (s *stubNft) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldPol, newPol *policy.NetworkPolicy) (int, error) {
+	prior := s.SnapshotResolvedDomains()
+	drops := nftables.ComputeEstablishedDrops(oldPol, newPol, prior)
+	return s.ApplyStaticDropEstablished(ctx, newPol, drops)
+}
+
+func (s *stubNft) SnapshotResolvedDomains() map[string][]netip.Addr {
+	if s.domains == nil {
+		return map[string][]netip.Addr{}
+	}
+	out := make(map[string][]netip.Addr, len(s.domains))
+	for domain, addrs := range s.domains {
+		out[domain] = append([]netip.Addr(nil), addrs...)
+	}
+	return out
 }
 
 func TestReloadAlwaysRules_NftFailurePreservesRulesAndRetriesBeforeProxyPublish(t *testing.T) {
