@@ -852,20 +852,33 @@ Under Kata the sandbox runs as a full VM, so a nested `dockerd` runs against the
 
 - The sandbox image must contain the daemon and CLI (for example `docker:27-dind`, or a custom image with `dockerd` and `docker` installed).
 - The server must be configured with a Kata runtime (`secure_runtime.type = "kata"` with `k8s_runtime_class = "kata-qemu"` or `"kata-fc"`), as described in the Kubernetes Mode section above.
-- **Capabilities (Kubernetes mode)**: rootful `dockerd` needs `NET_ADMIN` for its bridge and NAT/iptables setup, and the mount and cgroup writes below need `SYS_ADMIN` — Kubernetes grants neither by default, and the server-injected main sandbox container carries no `securityContext` of its own. On the BatchSandbox path, grant the capabilities on the sandbox's `SandboxTemplate` (the template's container `securityContext` is merged into the runtime container, and template values win wherever the runtime does not set one):
+- **Capabilities**: rootful `dockerd` needs `NET_ADMIN` for its bridge and NAT/iptables setup, and the mount and cgroup writes below need `SYS_ADMIN` — the main sandbox container gets neither by default, and how (and whether) they can be granted depends on the workload provider path:
 
-  ```yaml
-  # SandboxTemplate CRD — main sandbox container
-  securityContext:
-    capabilities:
-      add: ["NET_ADMIN", "SYS_ADMIN"]
-  ```
+  - **Kubernetes mode (BatchSandbox provider)**: the server-injected main sandbox container carries no `securityContext` of its own, so grant the capabilities in the **BatchSandbox CR template file** configured at `[kubernetes].batchsandbox_template_file` — not a `SandboxTemplate` CRD (that CRD has no main-container pod spec). This is a partial BatchSandbox manifest, like the [shipped AKS example](https://github.com/opensandbox-group/OpenSandbox/blob/main/examples/aks-kata/batchsandbox-template-configmap.yaml); the provider merges the template's `sandbox` container `securityContext` (or the first container's) into the runtime container, and template values win wherever the runtime does not set one:
 
-  The target namespace must also run Pod Security Admission at the `privileged` enforce level (`pod-security.kubernetes.io/enforce=privileged`); `baseline` and `restricted` reject added capabilities. Without both, a `docker:27-dind` sandbox starts, but the daemon cannot initialize its bridge/iptables/cgroup setup and dies during the readiness wait — the [troubleshooting table](#quick-troubleshooting-reference) row "daemon dies during startup" is what this looks like.
+    ```yaml
+    # BatchSandbox CR template file ([kubernetes].batchsandbox_template_file)
+    spec:
+      template:
+        spec:
+          containers:
+            - name: sandbox   # the provider merges this container's securityContext into the runtime main container
+              securityContext:
+                capabilities:
+                  add: ["NET_ADMIN", "SYS_ADMIN"]
+    ```
+
+    The target namespace must also run Pod Security Admission at the `privileged` enforce level (`pod-security.kubernetes.io/enforce=privileged`); `baseline` and `restricted` reject added capabilities. Without the grant, a `docker:27-dind` sandbox starts, but the daemon cannot initialize its bridge/iptables/cgroup setup and dies during the readiness wait — the [troubleshooting table](#quick-troubleshooting-reference) row "daemon dies during startup" is what this looks like.
+
+    ::: warning The template grant is provider-wide — it re-arms `NET_ADMIN` inside `network_policy` sandboxes
+    Every sandbox pod created by a server using this template gets `NET_ADMIN`, not just DinD sandboxes. When a request carries a `network_policy`, the policy wiring adds `drop: [NET_ADMIN]` to the same container — but the provider's security-context merge keeps the template's `add` alongside the policy's `drop` (`_merge_security_context` in `services/k8s/batchsandbox_provider.py`), and Kubernetes applies additions after drops, so `NET_ADMIN` is restored and the workload can rewrite the shared pod-netns rules, bypassing the egress sidecar. The server does not currently detect or reject this combination: never put `NET_ADMIN` in a template that also serves `network_policy` requests — serve DinD sandboxes from a separate template (or a separate server deployment) than policy-governed sandboxes, and verify after creation that a policy sandbox's emitted pod does not carry `NET_ADMIN` in both `capabilities.add` and `capabilities.drop`. See [Limitations](#limitations).
+    :::
+
+  - **Docker mode (Docker provider)**: rootful DinD is not supported on this path. The server drops `NET_ADMIN` and `SYS_ADMIN` from sandbox containers by default (`[docker].drop_capabilities`) and exposes no capability-add option for them — removing the entries only restores the container engine's default capability set, which does not include `NET_ADMIN` either. Run nested-daemon workloads on the Kubernetes (BatchSandbox) path above.
 
 ### Limitations
 
-- **`network_policy` and DinD are incompatible with the default daemon networking.** When a sandbox request carries a `network_policy`, the server deliberately strips `NET_ADMIN` from the main sandbox container (`build_security_context_for_sandbox_container` in `services/k8s/egress_helper.py`) so the egress sidecar stays the only writer of the pod's network rules. Rootful `dockerd` needs `NET_ADMIN` for its bridge and NAT setup, so under the default configuration the nested daemon cannot bring up its network — this combination is unsupported. Granting `NET_ADMIN` back to the workload is not an option: the capability would let the sandbox mutate the same shared pod-netns rules the policy depends on, defeating the isolation. Allow-listing the registry endpoints (below) is necessary but not sufficient — it fixes name resolution and reachability, not the daemon's own bridge setup. A `dockerd --bridge=none --iptables=false` daemon starts without `NET_ADMIN`, but nested containers then share the sandbox's network namespace and get no isolated networks or port publishing — treat that as an untested escape hatch, not a supported configuration.
+- **`network_policy` and DinD are incompatible with the default daemon networking.** When a sandbox request carries a `network_policy`, the server deliberately strips `NET_ADMIN` from the main sandbox container (`build_security_context_for_sandbox_container` in `services/k8s/egress_helper.py`) so the egress sidecar stays the only writer of the pod's network rules. Rootful `dockerd` needs `NET_ADMIN` for its bridge and NAT setup, so under the default configuration the nested daemon cannot bring up its network — this combination is unsupported. Granting `NET_ADMIN` back to the workload is not an option: the capability would let the sandbox mutate the same shared pod-netns rules the policy depends on, defeating the isolation. This also holds for **template-level grants**: a `NET_ADMIN` entry in the BatchSandbox template file's `capabilities.add` applies to every pod from that template, and on a policy sandbox the provider's security-context merge keeps it alongside the policy's `drop` while Kubernetes applies additions after drops — so `NET_ADMIN` comes back and the policy is silently defeated. Keep `NET_ADMIN` out of any template that serves `network_policy` requests (see the Prerequisites warning above). Allow-listing the registry endpoints (below) is necessary but not sufficient — it fixes name resolution and reachability, not the daemon's own bridge setup. A `dockerd --bridge=none --iptables=false` daemon starts without `NET_ADMIN`, but nested containers then share the sandbox's network namespace and get no isolated networks or port publishing — treat that as an untested escape hatch, not a supported configuration.
 
 ### Storage driver: put `/var/lib/docker` on a real filesystem
 
@@ -967,7 +980,7 @@ The nested daemon's pulls are ordinary sandbox egress traffic:
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `docker info` shows `Driver: vfs` | `/var/lib/docker` not on a filesystem supporting `overlay2` | Mount the data directory before starting `dockerd`; recreate the sandbox if it already fell back |
-| Daemon dies during startup (readiness wait reports "dockerd exited") | Missing capability (`NET_ADMIN`/`SYS_ADMIN`) on the Kubernetes path, or a mount/cgroup prerequisite is wrong | Check `/tmp/dockerd.log`; on Kubernetes verify the `SandboxTemplate` carries the capabilities and the namespace PSA level is `privileged` (see Prerequisites) |
+| Daemon dies during startup (readiness wait reports "dockerd exited") | Missing capability (`NET_ADMIN`/`SYS_ADMIN`) on the Kubernetes path, or a mount/cgroup prerequisite is wrong | Check `/tmp/dockerd.log`; on Kubernetes verify the BatchSandbox template file (`[kubernetes].batchsandbox_template_file`) carries the capabilities and the namespace PSA level is `privileged` (see Prerequisites) |
 | `--memory`/`mem_limit` fails or is ignored | cgroup controllers not enabled in the delegated subtree | `echo "+memory +pids" > /sys/fs/cgroup/cgroup.subtree_control` before starting `dockerd` |
 | `failed to Lchown ... for UID <large N>` on COPY | Large-UID owners in the build context under a userns-capped runtime | Normalize ownership (`tar --owner=0 --group=0`) or use a Kata sandbox |
 | `x509: certificate signed by unknown authority` on pulls | Interception CA not in the nested daemon's trust store | Start the daemon after CA delivery, or install the exported CA into its trust pool |
