@@ -15,7 +15,7 @@ metadata:
   line: "1.2"
   channel: rc
   releaseDate: "2026-11-11"
-  gitCommit: 83edd969ff896b172ac66ec148f5ba57371c3a69
+  gitCommit: f7c6cf92e738388d4ce4753d2a20f2683c5ecd34
 
 compatibility:
   kubernetes:
