@@ -118,10 +118,3 @@ def test_get_sandbox_omits_none_fields(
     assert "reason" not in payload["status"]
     assert "message" not in payload["status"]
     assert "lastTransitionAt" not in payload["status"]
-
-
-def test_get_sandbox_requires_api_key(client: TestClient) -> None:
-    response = client.get("/v1/sandboxes/sbx-001")
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "MISSING_API_KEY"

@@ -103,7 +103,7 @@ Important request features:
 
 - `image` or `snapshotId` for container startup, or `templateId` for the FastSandbox path in Kubernetes mode.
 - `entrypoint`, environment variables, metadata, and opaque `extensions`.
-- `resourceLimits` for CPU, memory, GPU, and future resource keys.
+- `resourceLimits` for CPU, memory, GPU, writable-layer disk (`disk`), and future resource keys.
 - `platform` constraints.
 - `volumes` for host paths, platform-managed named volumes/PVCs, and OSSFS.
 - `networkPolicy` for outbound network policy configuration.

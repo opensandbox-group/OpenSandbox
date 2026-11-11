@@ -79,6 +79,17 @@ func TestParsePolicy_InvalidAction(t *testing.T) {
 	require.Error(t, err, "expected error for invalid action")
 }
 
+func TestParsePolicy_InvalidDefaultAction(t *testing.T) {
+	for _, action := range []string{"alow", "permit", "drop"} {
+		_, err := ParsePolicy(`{"defaultAction":"` + action + `","egress":[{"action":"deny","target":"example.com"}]}`)
+		require.ErrorContains(t, err, "unsupported defaultAction", "defaultAction %q", action)
+	}
+
+	p, err := ParsePolicy(`{"defaultAction":" ALLOW ","egress":[{"action":"deny","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.Equal(t, ActionAllow, p.DefaultAction)
+}
+
 func TestParsePolicy_EmptyTargetError(t *testing.T) {
 	_, err := ParsePolicy(`{"egress":[{"action":"allow","target":""}]}`)
 	require.Error(t, err, "expected error for empty target")

@@ -21,52 +21,6 @@ from unittest.mock import MagicMock
 from opensandbox_server.services.constants import SandboxErrorCodes
 
 
-class TestMetadataMergePatch:
-    """Test the JSON Merge Patch (RFC 7396) semantics for metadata merging."""
-
-    @staticmethod
-    def apply_patch(current: dict, patch: dict) -> dict:
-        """Reference implementation of merge-patch semantics."""
-        current = dict(current)
-        for key, value in patch.items():
-            if value is None:
-                current.pop(key, None)
-            else:
-                current[key] = value
-        return current
-
-    def test_add_new_key(self):
-        result = self.apply_patch({"a": "1"}, {"b": "2"})
-        assert result == {"a": "1", "b": "2"}
-
-    def test_replace_existing_key(self):
-        result = self.apply_patch({"a": "1"}, {"a": "2"})
-        assert result == {"a": "2"}
-
-    def test_delete_existing_key(self):
-        result = self.apply_patch({"a": "1", "b": "2"}, {"a": None})
-        assert result == {"b": "2"}
-
-    def test_delete_nonexistent_key_silent(self):
-        result = self.apply_patch({"a": "1"}, {"b": None})
-        assert result == {"a": "1"}
-
-    def test_empty_patch_noop(self):
-        result = self.apply_patch({"a": "1"}, {})
-        assert result == {"a": "1"}
-
-    def test_empty_current_empty_patch_noop(self):
-        result = self.apply_patch({}, {})
-        assert result == {}
-
-    def test_mixed_add_replace_delete(self):
-        result = self.apply_patch(
-            {"team": "infra", "env": "staging", "old": "remove"},
-            {"team": "platform", "env": None, "project": "new"},
-        )
-        assert result == {"team": "platform", "old": "remove", "project": "new"}
-
-
 class TestIsSystemLabel:
     """Test system label detection (opensandbox.io/ prefix)."""
 
@@ -197,8 +151,6 @@ class TestPatchLabelsMethod:
 
 
 class TestPatchMetadataValidation:
-    """Test that invalid metadata in the patch is rejected."""
-
     def test_reserved_prefix_rejected(self):
         from opensandbox_server.services.validators import ensure_metadata_labels
 

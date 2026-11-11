@@ -307,6 +307,23 @@ def test_create_rejects_native_oci_before_side_effects(service, crs):
     assert not crs.created
 
 
+@pytest.mark.parametrize("alias", ["storage", "ephemeral-storage"])
+def test_create_rejects_sandbox_disk_quota_aliases(service, crs, alias):
+    """The sandbox writable-layer quota aliases are not template keys.
+
+    Template resourceLimits describe guest machine sizing (disk = guest
+    rootfs size), and the shared sandbox-create component must not promise
+    the aliases here.
+    """
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(resourceLimits={"cpu": "1", alias: "10G"}))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+    assert alias in excinfo.value.detail["message"]
+    assert "cpu, memory, disk" in excinfo.value.detail["message"]
+    assert not crs.created
+
+
 @pytest.mark.parametrize("manifest_ref", [
     None,
     "oci://registry.example.com/team/templates:latest",
@@ -503,7 +520,6 @@ def execd_init_service(repo, crs, monkeypatch):
 
 
 def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
-    # A client-provided EXECD_INIT must not win over the server switch.
     record = execd_init_service.create_template(
         _create_request(env={"EXECD_INIT": "0", "LOG_LEVEL": "info"})
     )
@@ -670,7 +686,6 @@ def test_resolve_artifact_requires_succeeded(service, crs):
 
 
 def test_resolve_gate_trusts_db_row_not_crd(service, crs):
-    """The create gate reads the DB projection only."""
     record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
 
     # CR already says Succeeded but the event has not been delivered: 404.

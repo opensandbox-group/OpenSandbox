@@ -81,6 +81,7 @@ def _container_lifecycle_state(container: Any) -> tuple[str, str, str]:
 class DockerDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Docker backend."""
 
+
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
         container = self._get_container_by_sandbox_id(sandbox_id)
         # Container lookup already provides inspect data. Do not construct a full

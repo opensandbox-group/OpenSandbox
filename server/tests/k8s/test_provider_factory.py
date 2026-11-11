@@ -86,8 +86,7 @@ spec:
     
     def test_create_provider_with_none_type_uses_default(self, mock_k8s_client, k8s_app_config):
         provider = create_workload_provider(None, mock_k8s_client, k8s_app_config)
-        
-        # Should use the first registered provider (batchsandbox)
+
         assert isinstance(provider, BatchSandboxProvider)
     
     def test_create_provider_with_invalid_type_raises_error(self, mock_k8s_client):

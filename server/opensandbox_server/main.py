@@ -201,7 +201,6 @@ async def lifespan(app: FastAPI):
         sandbox_service,
         ext,
     )
-    app.state.renew_intent_runner = app.state.renew_intent_consumer
 
     app.state.proxy_renew_coordinator = ProxyRenewCoordinator(
         app_config,
@@ -341,23 +340,13 @@ async def request_validation_exception_handler(
 
 @app.get("/health")
 async def health_check():
-    """
-    Health check endpoint.
-
-    Returns:
-        dict: Health status
-    """
+    """Health check endpoint."""
     return {"status": "healthy"}
 
 
 @app.get("/version")
 async def version_info():
-    """
-    Return the deployed server package version (resolved from installed metadata).
-
-    Returns:
-        dict: Package version
-    """
+    """Return the deployed server package version (resolved from installed metadata)."""
     return {"version": __version__}
 
 

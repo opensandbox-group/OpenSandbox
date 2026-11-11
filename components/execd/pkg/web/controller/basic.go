@@ -29,6 +29,8 @@ type basicController struct {
 	ctx          *gin.Context
 	sseSetupOnce sync.Once
 	chunkWriter  sync.Mutex
+	// Assigned once before all command callbacks/goroutines; immutable thereafter.
+	commandID string
 }
 
 func newBasicController(ctx *gin.Context) *basicController {

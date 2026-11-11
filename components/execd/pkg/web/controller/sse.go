@@ -83,6 +83,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	var pingWg sync.WaitGroup
 
 	hooks := runtime.ExecuteResultHook{
+		OnCommandAllocated: func(commandID string) { c.commandID = commandID },
 		OnExecuteInit: func(session string) {
 			event := model.ServerStreamEvent{
 				Type:      model.StreamEventTypeInit,
@@ -250,7 +251,7 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 
 	select {
 	case <-c.ctx.Request.Context().Done():
-		log.Error("sse: %s client disconnected", handler)
+		log.ErrorWithCommandID(c.commandID, "sse: %s client disconnected", handler)
 		return
 	default:
 	}
@@ -274,10 +275,10 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 	}
 
 	if err != nil {
-		log.Error("sse: %s write %s: %v", handler, summary, err)
+		log.ErrorWithCommandID(c.commandID, "sse: %s write %s: %v", handler, summary, err)
 	} else {
 		if verbose {
-			log.Info("sse: %s write %s", handler, summary)
+			log.InfoWithCommandID(c.commandID, "sse: %s write %s", handler, summary)
 		}
 	}
 }

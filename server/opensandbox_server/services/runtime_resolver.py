@@ -13,12 +13,8 @@
 # limitations under the License.
 
 """
-Secure runtime resolver for translating secure runtime configuration
-to backend-specific parameters (Docker --runtime, Kubernetes RuntimeClass).
-
-This module provides:
-- SecureRuntimeResolver: Translates AppConfig to runtime parameters
-- validate_secure_runtime_on_startup: Validates runtime availability at server startup
+Secure runtime resolver: translates secure runtime configuration to
+backend-specific parameters (Docker --runtime, Kubernetes RuntimeClass).
 """
 
 from __future__ import annotations
@@ -60,12 +56,6 @@ class SecureRuntimeResolver:
     }
 
     def __init__(self, config: AppConfig):
-        """
-        Initialize the resolver with application configuration.
-
-        Args:
-            config: Application configuration containing secure_runtime settings
-        """
         self.secure_runtime: Optional[SecureRuntimeConfig] = getattr(
             config, "secure_runtime", None
         )
@@ -78,50 +68,30 @@ class SecureRuntimeResolver:
         )
 
     def get_docker_runtime(self) -> Optional[str]:
-        """
-        Get the Docker OCI runtime name for secure containers.
-
-        Returns the configured docker_runtime if set, otherwise uses
-        the default mapping for the secure runtime type.
-
-        Returns:
-            OCI runtime name (e.g., "runsc", "kata-runtime") or None
-        """
+        """Return the Docker OCI runtime name (configured or type default); None when disabled."""
         if not self.is_enabled():
             return None
 
         if self.secure_runtime is None:
             return None
 
-        # Use explicit docker_runtime if configured
         if self.secure_runtime.docker_runtime:
             return self.secure_runtime.docker_runtime
 
-        # Fall back to default mapping
         runtime_type = self.secure_runtime.type
         return self.DEFAULT_DOCKER_RUNTIMES.get(runtime_type)
 
     def get_k8s_runtime_class(self) -> Optional[str]:
-        """
-        Get the Kubernetes RuntimeClass name for secure containers.
-
-        Returns the configured k8s_runtime_class if set, otherwise uses
-        the default mapping for the secure runtime type.
-
-        Returns:
-            RuntimeClass name (e.g., "gvisor", "kata-qemu") or None
-        """
+        """Return the Kubernetes RuntimeClass name (configured or type default); None when disabled."""
         if not self.is_enabled():
             return None
 
         if self.secure_runtime is None:
             return None
 
-        # Use explicit k8s_runtime_class if configured
         if self.secure_runtime.k8s_runtime_class:
             return self.secure_runtime.k8s_runtime_class
 
-        # Fall back to default mapping
         runtime_type = self.secure_runtime.type
         return self.DEFAULT_K8S_RUNTIME_CLASSES.get(runtime_type)
 
@@ -132,21 +102,8 @@ async def validate_secure_runtime_on_startup(
     k8s_client: Optional["K8sClient"] = None,
 ) -> None:
     """
-    Validate that configured secure runtimes are available at startup.
-
-    This function performs fail-fast validation to ensure the server
-    starts with a valid secure runtime configuration. It checks:
-    - Docker runtimes: Verifies the runtime exists in Docker daemon
-    - Kubernetes RuntimeClasses: Verifies the RuntimeClass exists in cluster
-
-    Args:
-        config: Application configuration
-        docker_client: Optional Docker client for runtime validation
-        k8s_client: Optional K8s client wrapper for RuntimeClass validation
-
-    Raises:
-        ValueError: If a configured secure runtime is not available
-        Exception: For other validation errors
+    Fail-fast startup validation: verify the configured Docker OCI runtime or
+    Kubernetes RuntimeClass exists, raising if unavailable.
     """
     resolver = SecureRuntimeResolver(config)
 
@@ -187,8 +144,6 @@ async def _validate_docker_runtime(
         return
 
     try:
-        # Get list of available runtimes from Docker daemon
-        # Docker stores runtimes in daemon configuration
         info = docker_client.info()
         runtimes = info.get("Runtimes", {})
 

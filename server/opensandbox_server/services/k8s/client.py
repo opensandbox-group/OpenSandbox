@@ -45,8 +45,8 @@ class K8sClient:
     """
     Unified Kubernetes API client.
 
-    Encapsulates all cluster resource operations (CustomObject, Secret, Pod,
-    RuntimeClass). Callers never hold raw API handles directly.
+    Encapsulates all cluster resource operations (CustomObject, Secret, PVC,
+    Pod, RuntimeClass). Callers never hold raw API handles directly.
     """
 
     def __init__(self, k8s_config: KubernetesRuntimeConfig):

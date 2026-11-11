@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -64,7 +65,6 @@ def test_auth_middleware_skips_validation_for_proxy_to_sandbox():
         return {"proxied": True, "sandbox_id": sandbox_id, "port": port, "path": full_path}
 
     client = TestClient(app)
-    # No OPEN-SANDBOX-API-KEY header; should still succeed for proxy path
     response = client.get("/sandboxes/abc-123/proxy/8080/foo/bar")
     assert response.status_code == 200
     assert response.json()["proxied"] is True
@@ -74,7 +74,6 @@ def test_auth_middleware_skips_validation_for_proxy_to_sandbox():
 
 
 def test_auth_middleware_v1_proxy_path_exempt():
-    """V1 prefix proxy path is also exempt."""
     app = _build_test_app()
 
     @app.get("/v1/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}")
@@ -88,7 +87,6 @@ def test_auth_middleware_v1_proxy_path_exempt():
 
 
 def test_auth_middleware_requires_key_for_non_proxy_paths_containing_proxy_and_sandboxes():
-    """Paths that contain both 'proxy' and 'sandboxes' but not in proxy-route shape still require auth."""
     app = _build_test_app()
 
     @app.get("/proxy/sandboxes/anything")
@@ -160,3 +158,24 @@ def test_auth_middleware_is_proxy_path_accepts_valid_shapes():
     # Non-numeric port must not skip auth (malformed path → 401, not 422)
     assert AuthMiddleware._is_proxy_path("/sandboxes/s1/proxy/not-a-port/x") is False
     assert AuthMiddleware._is_proxy_path("/sandboxes/s1/proxy/8080x/") is False
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("post", "/v1/sandboxes/sbx-001/pause", None),
+        ("get", "/v1/sandboxes", None),
+        ("get", "/v1/sandboxes/sbx-001", None),
+        ("delete", "/v1/sandboxes/sbx-001", None),
+        ("post", "/v1/sandboxes/sbx-001/renew-expiration", {"expiresAt": "2030-01-01T00:00:00Z"}),
+    ],
+)
+def test_real_app_lifecycle_routes_require_api_key(method, path, json_body):
+    """Lifecycle routes on the real app reject a missing key (middleware wiring)."""
+    from opensandbox_server.main import app as main_app
+
+    client = TestClient(main_app)
+    kwargs = {"json": json_body} if json_body is not None else {}
+    response = client.request(method, path, **kwargs)
+    assert response.status_code == 401
+    assert response.json()["code"] == "MISSING_API_KEY"

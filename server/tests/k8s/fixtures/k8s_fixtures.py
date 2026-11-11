@@ -36,7 +36,6 @@ def mock_k8s_client():
     client.get_core_v1_api.return_value = mock_core_api
     client.custom_api = mock_custom_api
     client.core_api = mock_core_api
-    # Unified resource operation methods
     client.create_custom_object = MagicMock(return_value={"metadata": {"name": "test", "uid": "uid"}})
     client.get_custom_object = MagicMock(return_value=None)
     client.list_custom_objects = MagicMock(return_value=[])
@@ -219,8 +218,7 @@ def k8s_service(k8s_app_config):
 
         from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
         service = KubernetesSandboxService(k8s_app_config)
-        
-        # Save mock objects for access in tests
+
         service.k8s_client = mock_k8s_client
         service.workload_provider = mock_provider
 

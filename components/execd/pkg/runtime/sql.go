@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -96,10 +97,20 @@ func (c *Controller) executeSelectSQLQuery(ctx context.Context, request *Execute
 		}
 		row := make([]any, len(columns))
 		for i, v := range values {
-			if v == nil {
+			switch x := v.(type) {
+			case nil:
 				row[i] = nil
-			} else {
-				row[i] = fmt.Sprintf("%v", v)
+			case []byte:
+				// MySQL's text protocol returns non-numeric columns as raw bytes.
+				// Keep non-UTF-8 payloads lossless: json.Marshal would otherwise
+				// silently replace invalid bytes with U+FFFD.
+				if utf8.Valid(x) {
+					row[i] = string(x)
+				} else {
+					row[i] = fmt.Sprintf("%v", x)
+				}
+			default:
+				row[i] = fmt.Sprintf("%v", x)
 			}
 		}
 		result = append(result, row)

@@ -203,7 +203,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._ossfs_mount_ref_counts: Dict[str, int] = {}
         self._restore_existing_sandboxes()
 
-        # Initialize secure runtime resolver
         self.resolver = SecureRuntimeResolver(self.app_config)
         self.docker_runtime = self.resolver.get_docker_runtime()
 
@@ -271,8 +270,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
         except DockerNotFound as exc:
             # Container disappeared between list-summary and inspect; treat as
-            # not found rather than surfacing a 500. See list_sandboxes for
-            # the full-table variant of this fix.
+            # not found rather than surfacing a 500.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
@@ -451,7 +449,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             managed_volumes = []
 
         self._remove_expiration_tracking(sandbox_id)
-        # Ensure sidecar is also cleaned up on expiration
         self._cleanup_egress_sidecar(sandbox_id)
         self._cleanup_windows_oem_volume(sandbox_id, labels)
         self._release_ossfs_mounts(mount_keys)
@@ -726,13 +723,16 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
     def _prepare_resource_limits(
         self, request: CreateSandboxRequest
-    ) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    ) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
         """Validate platform resource limits and return outer Docker limits."""
         if is_windows_platform(request.platform):
             validate_windows_resource_limits(
                 (request.resource_limits.root if request.resource_limits else None) or {}
             )
-            return None, None, None
+            # The Windows profile handles resourceLimits.disk as a sandbox
+            # environment size hint (windows_common); there is no Docker
+            # StorageOpt equivalent to apply on the outer container.
+            return None, None, None, None
         return self._resolve_resource_limits(request)
 
     def _provision_sandbox(
@@ -741,7 +741,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         request: CreateSandboxRequest,
         created_at: datetime,
         expires_at: Optional[datetime],
-        resource_limits: tuple[Optional[int], Optional[int], Optional[int]],
+        resource_limits: tuple[Optional[int], Optional[int], Optional[int], Optional[int]],
         pvc_inspect_cache: Optional[dict[str, dict]] = None,
         auto_created_volumes: Optional[list[str]] = None,
         sandbox_env: Optional[Dict[str, Optional[str]]] = None,
@@ -757,7 +757,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 auto_created_volumes, separators=(",", ":"),
             )
         image_uri, auth_config = self._resolve_image_auth(request, sandbox_id)
-        mem_limit, nano_cpus, gpu_count = resource_limits
+        mem_limit, nano_cpus, gpu_count, disk_quota = resource_limits
         egress_token: Optional[str] = None
         requested_windows_profile = is_windows_platform(request.platform)
 
@@ -809,6 +809,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             effective_mem_limit = None if requested_windows_profile else mem_limit
             effective_nano_cpus = None if requested_windows_profile else nano_cpus
             effective_gpu_count = None if requested_windows_profile else gpu_count
+            effective_disk_quota = None if requested_windows_profile else disk_quota
 
             # pvc_inspect_cache carries Docker volume inspect data from the
             # validation phase, avoiding a redundant API call.
@@ -881,6 +882,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 host_config_kwargs = self._base_host_config_kwargs(
                     effective_mem_limit, effective_nano_cpus, f"container:{sidecar_container.id}",
                     gpu_count=effective_gpu_count,
+                    disk_quota=effective_disk_quota,
                 )
                 # Container network namespace is shared with sidecar. Docker rejects
                 # exposing ports on the main container in "container:<id>" mode.
@@ -894,6 +896,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 host_config_kwargs = self._base_host_config_kwargs(
                     effective_mem_limit, effective_nano_cpus, self.network_mode,
                     gpu_count=effective_gpu_count,
+                    disk_quota=effective_disk_quota,
                 )
                 if self.network_mode != HOST_NETWORK_MODE:
                     port_bindings = allocate_port_bindings(

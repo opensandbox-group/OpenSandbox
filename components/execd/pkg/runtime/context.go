@@ -169,7 +169,7 @@ func (c *Controller) waitForJupyterContext(ctx context.Context, req CreateContex
 		session *jupytersession.Session
 	)
 	err := retry.OnError(kernelWaitingBackoff, func(err error) bool {
-		if ctx.Err() != nil || errors.Is(err, errJupyterNotConfigured) {
+		if ctx.Err() != nil || errors.Is(err, errJupyterNotConfigured) || errors.Is(err, ErrUnsupportedLanguage) {
 			return false
 		}
 		log.Error("jupyter: create context failed, retrying: %v", err)
@@ -197,6 +197,7 @@ func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyte
 		kernel string
 		err    error
 	)
+	var unsupported error
 	for _, token := range tokens {
 		candidateClient := c.jupyterClientWithToken(token)
 		kernel, err = c.searchKernel(candidateClient, request.Language)
@@ -204,8 +205,16 @@ func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyte
 			client = candidateClient
 			break
 		}
+		if errors.Is(err, ErrUnsupportedLanguage) {
+			unsupported = err
+		}
 	}
 	if err != nil {
+		// A token that reached Jupyter and found no matching kernel is more
+		// telling than a later stale token's auth failure.
+		if unsupported != nil {
+			return nil, nil, unsupported
+		}
 		return nil, nil, err
 	}
 
