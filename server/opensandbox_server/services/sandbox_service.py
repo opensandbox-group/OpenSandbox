@@ -13,10 +13,7 @@
 # limitations under the License.
 
 """
-Sandbox service layer for business logic.
-
-This module contains the business logic for sandbox lifecycle management.
-This module defines the abstract interface for sandbox services.
+Abstract interface for sandbox service implementations.
 """
 
 from abc import ABC, abstractmethod
@@ -57,12 +54,7 @@ class SandboxService(ABC):
 
     @staticmethod
     def generate_sandbox_id() -> str:
-        """
-        Generate a unique sandbox identifier.
-
-        Returns:
-            str: A RFC4122-compliant UUID4 string (with hyphens)
-        """
+        """Generate a unique RFC4122 UUID4 sandbox identifier (with hyphens)."""
         return str(uuid4())
 
     @staticmethod
@@ -100,15 +92,7 @@ class SandboxService(ABC):
 
     @staticmethod
     def validate_port(port: int) -> None:
-        """
-        Validate that the supplied port falls within the allowed range.
-
-        Args:
-            port: Port to validate
-
-        Raises:
-            ValueError: If port is outside 1-65535
-        """
+        """Validate that the port is within 1-65535; raises HTTPException(400) otherwise."""
         ensure_valid_port(port)
 
     @abstractmethod
@@ -280,15 +264,7 @@ class SandboxService(ABC):
         sandbox_id: str,
         scope: str,
     ) -> DiagnosticResult:
-        """Collect stable log diagnostics using runtime-specific policy.
-
-        Args:
-            sandbox_id: Unique sandbox identifier.
-            scope: Diagnostic scope requested by the caller.
-
-        Returns:
-            Runtime-provided stable diagnostic result.
-        """
+        """Collect stable log diagnostics using runtime-specific policy."""
         pass
 
     @abstractmethod
@@ -297,15 +273,7 @@ class SandboxService(ABC):
         sandbox_id: str,
         scope: str,
     ) -> DiagnosticResult:
-        """Collect stable event diagnostics using runtime-specific policy.
-
-        Args:
-            sandbox_id: Unique sandbox identifier.
-            scope: Diagnostic scope requested by the caller.
-
-        Returns:
-            Runtime-provided stable diagnostic result.
-        """
+        """Collect stable event diagnostics using runtime-specific policy."""
         pass
 
     @abstractmethod

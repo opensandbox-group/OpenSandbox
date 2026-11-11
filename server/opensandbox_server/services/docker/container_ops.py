@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 class DockerContainerOpsMixin:
     """Mixin providing image management, platform resolution, and container creation."""
 
+
     def _normalize_platform_key(self, platform: Optional[PlatformSpec]) -> str:
         if platform is None:
             return "default"

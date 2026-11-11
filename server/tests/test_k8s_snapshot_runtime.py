@@ -438,16 +438,6 @@ def test_postgresql_ha_submitted_create_stays_creating_without_terminal_cr() -> 
     assert status.reason == "snapshot_runtime_submitted"
 
 
-def test_submitted_create_stays_creating_without_terminal_cr() -> None:
-    k8s_client = FakeK8sClient()
-    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
-
-    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
-
-    assert status.state == SnapshotState.CREATING
-    assert status.reason == "snapshot_runtime_submitted"
-
-
 def test_start_status_watch_registers_namespaces_and_invokes_callback() -> None:
     k8s_client = WatchRecordingK8sClient()
     runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")

@@ -872,7 +872,6 @@ def test_create_without_network_policy_still_registers_egress_binding(persisted_
     assert [b["handler"] for b in bindings] == ["egress"]
     assert json.loads(bindings[0]["input"]) == {"defaultAction": "allow", "egress": []}
 
-    # The sandbox can adopt a policy later through the relay.
     policy = {"defaultAction": "allow", "egress": [{"action": "allow", "target": "a.com"}]}
     response = client.put(url, json=policy)
     assert response.status_code == 200

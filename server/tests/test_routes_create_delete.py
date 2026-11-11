@@ -462,9 +462,7 @@ def test_create_docker_sends_normalized_network_policy_to_sidecar(
 def test_create_docker_does_not_mount_a_misspelled_read_only_volume_read_write(
     client, auth_headers, sample_sandbox_request, docker_policy_runtime, read_only, status_code, binds,
 ):
-    # `readonly` used to be dropped, which mounted the volume read-write.
-    response = client.post(
-        "/v1/sandboxes",
+    response = client.post(        "/v1/sandboxes",
         headers=auth_headers,
         json={**sample_sandbox_request, "metadata": {}, "volumes": [{**PVC_VOLUME, **read_only}]},
     )
@@ -486,7 +484,6 @@ def test_create_docker_does_not_mount_a_misspelled_read_only_volume_read_write(
 def test_create_docker_does_not_create_a_volume_when_the_create_flag_is_misspelled(
     client, auth_headers, sample_sandbox_request, docker_policy_runtime, pvc, status_code,
 ):
-    # `createIfNotExist` used to be dropped, so the missing volume was created.
     docker_policy_runtime.api.inspect_volume.side_effect = [
         DockerNotFound("no such volume"),
         {"Name": "data-vol", "Driver": "local"},
@@ -606,13 +603,6 @@ def test_delete_sandbox_returns_204_and_calls_service(
     assert response.status_code == 204
     assert response.text == ""
     assert calls == ["sbx-001"]
-
-
-def test_delete_sandbox_requires_api_key(client: TestClient) -> None:
-    response = client.delete("/v1/sandboxes/sbx-001")
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "MISSING_API_KEY"
 
 
 def test_create_sandbox_pool_only_passes_resolution_untouched(

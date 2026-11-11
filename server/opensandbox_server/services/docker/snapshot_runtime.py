@@ -15,9 +15,10 @@
 """
 Docker-backed snapshot runtime.
 
-This runtime performs ``docker commit`` inline and returns the final status to
-the caller so the server can persist terminal snapshot state in the request
-path.
+``create_snapshot`` blocks on ``docker commit`` and returns the final status in
+one call, so the snapshot service worker can persist terminal state from that
+single result. ``supports_synchronous_create`` is False: the snapshot row is
+persisted first and the commit runs in the service's background worker.
 """
 
 from __future__ import annotations

@@ -71,7 +71,6 @@ class PoolService:
         template: Dict[str, Any],
         capacity_spec: PoolCapacitySpec,
     ) -> Dict[str, Any]:
-        """Build a Pool CRD manifest dict."""
         return {
             "apiVersion": f"{OPENSANDBOX_API_GROUP}/{OPENSANDBOX_API_VERSION}",
             "kind": POOL_KIND,
@@ -91,7 +90,6 @@ class PoolService:
         }
 
     def _pool_from_raw(self, raw: Dict[str, Any]) -> PoolResponse:
-        """Convert a raw Pool CRD dict to a PoolResponse model."""
         metadata = raw.get("metadata", {})
         spec = raw.get("spec", {})
         raw_status = raw.get("status")

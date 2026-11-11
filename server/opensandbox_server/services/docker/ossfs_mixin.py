@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class OSSFSMixin:
+
     @staticmethod
     def _validate_bucket_name(bucket: str) -> None:
         """Validate OSS bucket name to prevent command injection."""
@@ -94,8 +95,7 @@ class OSSFSMixin:
                     "message": f"Mount path must be absolute: '{path}'",
                 },
             )
-        
-        # Check for dangerous characters that could be used for command injection
+
         dangerous_chars = [';', '&', '|', '`', '$', '(', ')', '<', '>', '\n', '\r']
         for char in dangerous_chars:
             if char in path:

@@ -37,7 +37,8 @@ def _parse_rfc3339_time(value: str) -> Optional[datetime]:
     s = value.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
-    # Ingress uses Go RFC3339Nano (up to 9 fractional digits); CPython fromisoformat allows at most 6.
+    # Ingress uses Go RFC3339Nano (up to 9 fractional digits); CPython
+    # fromisoformat allows at most 6.
     dot = s.find(".")
     if dot != -1:
         end = dot + 1

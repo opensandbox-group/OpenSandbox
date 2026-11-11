@@ -107,7 +107,6 @@ def test_candidate_maps_pause_and_deletion_states():
 
 
 def test_candidate_unparsable_expiry_drops_candidate():
-    # The expiry gate cannot be verified, so the candidate is skipped.
     assert _candidate_from_cr(_cr(expire_time="not-a-time"), "ns1") is None
 
 

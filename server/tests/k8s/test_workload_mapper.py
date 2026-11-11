@@ -216,13 +216,12 @@ class TestExtractPlatformFromWorkload:
     """
 
     def test_pool_mode_workload_with_null_template_returns_none(self):
-        """Pool-mode BatchSandbox CR has spec.template == None; must not crash."""
         workload = {
             "metadata": {"name": "sb-1", "namespace": "opensandbox-system"},
             "spec": {
                 "replicas": 1,
                 "poolRef": "pool-runc",
-                "template": None,  # <-- this used to crash
+                "template": None,
                 "taskTemplate": {},
             },
             "status": {"replicas": 1, "ready": 1, "allocated": 1},
@@ -230,7 +229,6 @@ class TestExtractPlatformFromWorkload:
         assert _extract_platform_from_workload(workload) is None
 
     def test_pool_mode_workload_without_template_key_returns_none(self):
-        """Pool-mode BatchSandbox CR may also omit spec.template entirely."""
         workload = {
             "metadata": {"name": "sb-1"},
             "spec": {
@@ -241,7 +239,6 @@ class TestExtractPlatformFromWorkload:
         assert _extract_platform_from_workload(workload) is None
 
     def test_template_mode_with_full_platform_returns_platform(self):
-        """Template-mode workload with nodeSelector returns the declared platform."""
         workload = {
             "metadata": {"name": "sb-1"},
             "spec": {
@@ -281,7 +278,6 @@ class TestExtractPlatformFromWorkload:
         assert platform.arch == "arm64"
 
     def test_null_spec_returns_none(self):
-        """spec itself being None must not crash."""
         workload = {"metadata": {"name": "sb-1"}, "spec": None}
         assert _extract_platform_from_workload(workload) is None
 
