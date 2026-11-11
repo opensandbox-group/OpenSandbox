@@ -123,9 +123,11 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
 	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
-	// The always-rule files loaded above are re-staged every minute by the
-	// reload job, so configmap-mounted rule changes need no restart.
-	fastSandboxSrv.SetAlwaysRuleLoader(policy.NewAlwaysRuleLoader(time.Minute))
+	// Operator always-rule files are re-staged by the reload job below; the
+	// loader gate sits UNDER the one-minute ticker (30s < 60s) so every tick
+	// re-stats the files and an edit converges on the next tick instead of
+	// occasionally skipping to the one after.
+	fastSandboxSrv.SetAlwaysRuleLoader(policy.NewAlwaysRuleLoader(30 * time.Second))
 
 	// Register the configured state-directory basenames BEFORE either
 	// constructor runs: the volume-root restriction must recognize the

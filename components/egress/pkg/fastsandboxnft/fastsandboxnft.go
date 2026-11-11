@@ -453,10 +453,12 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 
 // ApplyAlwaysRulesReload rebuilds the whole table (as Remove does) after an
 // always-rule reload: the port floor is swapped into the master chains and
-// every installed subject re-emitted with the NEW merged policy from pols —
-// subjects absent from pols (or mapped to nil) stay deny-first. In-memory
-// state mutates only after the transaction commits, so a failed reload
-// leaves the applier as the kernel still sees it and stays retryable.
+// every installed subject re-emitted with the NEW merged policy from pols.
+// Subjects the applier holds deny-first (inst.pol == nil) stay deny-first
+// even when pols carries a policy for them — a deny-first transition that
+// raced the caller's snapshot must never be resurrected by the rebuild.
+// In-memory state mutates only after the transaction commits, so a failed
+// reload leaves the applier as the kernel still sees it and stays retryable.
 func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -471,8 +473,14 @@ func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy
 	}
 	now := a.now()
 	for subj, inst := range a.subjects {
+		// Kernel truth wins over the caller's snapshot: deny-first stays
+		// deny-first (see the doc comment).
+		pol := pols[subj]
+		if inst.pol == nil {
+			pol = nil
+		}
 		var err error
-		if pol := pols[subj]; pol == nil {
+		if pol == nil {
 			err = writeSubjectDenyFirstFragment(&b, subj, inst.att, a.opts.MitmRedirectPort)
 		} else {
 			err = writeSubjectInitialPolicyFragment(&b, subj, inst.att, pol, a.opts.MitmRedirectPort)
@@ -489,7 +497,11 @@ func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy
 		return err
 	}
 	for subj, inst := range a.subjects {
-		inst.pol = pols[subj]
+		pol := pols[subj]
+		if inst.pol == nil {
+			pol = nil
+		}
+		inst.pol = pol
 		a.subjects[subj] = inst
 	}
 	a.tableReady = true

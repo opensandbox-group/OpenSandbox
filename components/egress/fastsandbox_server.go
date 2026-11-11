@@ -590,11 +590,17 @@ func (s *fastSandboxPolicyServer) reloadAlwaysRules() (bool, error) {
 	return changed, err
 }
 
-// applyAlwaysOverlay is the loader's apply callback. Runs under policyMu so
-// no policy push interleaves: a subject registering mid-reload cannot reach
-// active state and re-emits deny-first; one unloaded concurrently is already
-// gone from the applier's map and is just not emitted.
+// applyAlwaysOverlay is the loader's apply callback. policyCommitMu comes
+// first (the applyPolicy caller order): the SET_BINDING / hook / rollback
+// deny-first transitions hold it but not policyMu, so without it a reload
+// could snapshot an active policy whose deny-first transition commits first
+// and get that stale allow policy re-emitted by the rebuild. A registering
+// subject cannot reach active state (policy application needs policyMu); a
+// subject the applier holds deny-first stays deny-first via the reload's
+// inst.pol guard even if it raced the snapshot.
 func (s *fastSandboxPolicyServer) applyAlwaysOverlay(deny, allow []policy.EgressRule) error {
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
 	s.policyMu.Lock()
 	defer s.policyMu.Unlock()
 

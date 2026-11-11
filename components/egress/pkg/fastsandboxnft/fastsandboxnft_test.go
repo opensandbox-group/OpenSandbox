@@ -406,6 +406,42 @@ func TestApplyAlwaysRulesReloadFailureStaysRetryable(t *testing.T) {
 	a.mu.Unlock()
 }
 
+// TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst: a deny-first transition
+// that raced the reload's snapshot (inst.pol == nil in the applier) must
+// never be resurrected by the rebuild even when the caller's map still
+// carries a policy for the subject — the kernel stays deny-first.
+func TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	reverted := subject.FromSandboxUID("u-1")
+	require.NoError(t, a.ApplyDenyFirst(ctx, reverted, testSlot("u-1", "10.0.0.5")))
+	stillActive := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, stillActive, testSlot("u-2", "10.0.0.6")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, stillActive, pol))
+	// the race: u-1 reverts to deny-first (ApplyDenyFirst) AFTER the caller
+	// snapshotted its (allow) policy into the reload map
+	require.NoError(t, a.ApplyDenyFirst(ctx, reverted, testSlot("u-1", "10.0.0.5")))
+	staleAllow, err := policy.ParsePolicy(`{"defaultAction":"allow"}`)
+	require.NoError(t, err)
+
+	floor := []policy.PortRange{{Lo: 1, Hi: 79}}
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, floor, map[subject.Subject]*policy.NetworkPolicy{
+		reverted:    staleAllow,
+		stillActive: pol,
+	}))
+	script := runner.last()
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop",
+		"the reverted subject must re-emit deny-first despite the stale map entry")
+	assert.NotContains(t, script, "tcp dport { 1-65535 } drop", "no default-allow mark rules for the reverted subject")
+	a.mu.Lock()
+	require.Nil(t, a.subjects[reverted].pol, "the applier must not adopt a policy for a deny-first subject")
+	require.Same(t, pol, a.subjects[stillActive].pol)
+	a.mu.Unlock()
+}
+
 func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
