@@ -11,11 +11,16 @@
 #   /dev/kvm            Firecracker microVMs (required)
 #   /sys/.../kvm        KVM access inside the container
 #   /dev/net/tun        TAP devices for the per-clone netns data plane
-#   /dev/shm            private node shm — kept off the host's shared shm
-#                          (and shadows the OCI_STACK /dev bind below). NOT
-#                          snapshot staging: capture dumps go through
-#                          FAST_SANDBOX_SNAPSHOT_SPILL_DIR when set, or
-#                          straight to the publish staging area otherwise
+#   /dev/shm            the host's shared shm passed through into each
+#                          node (kind extra mounts are host binds, so both
+#                          nodes see the same host mount — NOT a private
+#                          per-node tmpfs). NOT snapshot staging either:
+#                          capture dumps go through
+#                          FAST_SANDBOX_SNAPSHOT_SPILL_DIR when set and
+#                          large enough, or straight to the publish
+#                          staging area otherwise. The bind also shadows
+#                          the OCI_STACK /dev bind below, restoring a real
+#                          shm mount at /dev/shm
 #   /var/lib/fast-sandbox  StateRoot; prepared by integration-env.sh up
 #                          (XFS loop image when XFS_STATEROOT=1 so
 #                          per-sandbox rootfs copies are CoW reflinks)
@@ -23,7 +28,7 @@
 #                          the host /dev, so ublk device nodes (created by
 #                          the kernel at add time, block majors dynamic)
 #                          are visible inside the node. FIRST so the
-#                          private /dev/shm bind below shadows it back.
+#                          host-shm bind below shadows it back.
 #
 # Node state roots are PRIVATE per node: each node container binds its
 # own host subdirectory (control-plane/ or worker/) at the same
