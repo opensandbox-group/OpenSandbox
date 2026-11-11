@@ -43,6 +43,7 @@ classifiers = [
 ]
 dependencies = [
     "docker",
+    "cryptography>=42.0,<46.0",
     "fastapi>=0.137.0",
     "starlette>=1.3.1",
     "python-multipart>=0.0.31",
@@ -105,6 +106,10 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.14.8",
     "pyright>=1.1.0",
+    # For tests/test_egress_signing_e2e.py, which imports the in-repo
+    # sandbox SDK's resolver_auth from the source tree.
+    "attrs>=21.3.0",
+    "httpx-sse>=0.4.3,<0.5",
 ]
 
 [tool.ruff]

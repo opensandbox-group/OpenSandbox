@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 import logging
 
 from fastapi import HTTPException
@@ -54,6 +56,16 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     def set_tenant_provider(self, provider: object) -> None:
         self._kubernetes.set_tenant_provider(provider)
         self._fsb.set_tenant_provider(provider)
+
+    def get_egress_signing_jwk(self, sandbox_id: str) -> Optional[dict]:
+        """Delegate to the backend that owns the sandbox's workload record.
+
+        Only the Kubernetes backend records per-sandbox JWKs; fsb pools
+        publish through the static signing Secrets instead.
+        """
+        if sandbox_id.startswith("fsb-"):
+            return None
+        return self._kubernetes.get_egress_signing_jwk(sandbox_id)
 
     def close(self) -> None:
         self._fsb.close()

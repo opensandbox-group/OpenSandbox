@@ -90,6 +90,7 @@ type Store struct {
 	liveAdmission     bool
 	staticPassthrough mitmpassthrough.Config
 	resolverConfig    ResolverConfig
+	resolverAuth      ResolverAuthConfig
 }
 
 type record struct {
@@ -286,6 +287,29 @@ func (v *Store) SetResolverConfig(config ResolverConfig) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.resolverConfig = config
+}
+
+// ResolverAuthConfig reports whether the caller-authentication signer is
+// provisioned. The zero value is not ready: vault writes containing
+// https:// exchange credentials fail closed until a signer is injected;
+// unix:// exchange credentials are unaffected.
+type ResolverAuthConfig struct {
+	// Signer is the loaded signing identity; nil means not provisioned.
+	Signer *ResolverCredentialSigner
+	// Problem carries the diagnostic when a provisioning channel is
+	// configured but the key is unloadable. The gate fails closed either
+	// way; Problem only improves the error.
+	Problem error
+}
+
+func (c ResolverAuthConfig) Ready() bool { return c.Signer != nil }
+
+// SetResolverAuthConfig installs the caller-authentication gate. Call before
+// serving vault mutations.
+func (v *Store) SetResolverAuthConfig(config ResolverAuthConfig) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.resolverAuth = config
 }
 
 func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
@@ -547,12 +571,33 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 // validateExchangeAdmission fails closed on exchange-sourced credentials:
 // the live revision runtime never supports them; other stores require the
 // resolver operator configuration (D13). Inline-only vaults are unaffected.
+// CallerAuthAdmissionError marks an exchange-vault rejection caused by the
+// missing or unloadable caller-authentication signer. Reload paths use it
+// to fail closed (data plane 503, mutations still healable) instead of the
+// ordinary degraded-but-healable treatment.
+type CallerAuthAdmissionError struct {
+	Detail string
+}
+
+func (e *CallerAuthAdmissionError) Error() string { return e.Detail }
+
+// IsCallerAuthRejection reports whether err is (or wraps) a
+// CallerAuthAdmissionError.
+func IsCallerAuthRejection(err error) bool {
+	var target *CallerAuthAdmissionError
+	return errors.As(err, &target)
+}
+
 func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	hasExchange := false
+	hasTCPExchange := false
 	for _, credential := range credentials {
-		if credential.SourceType == "exchange" {
-			hasExchange = true
-			break
+		if credential.SourceType != "exchange" {
+			continue
+		}
+		hasExchange = true
+		if src, ok := credential.Source.(*exchangeSource); ok && src.usesTCPTransport() {
+			hasTCPExchange = true
 		}
 	}
 	if !hasExchange {
@@ -563,6 +608,14 @@ func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	}
 	if !v.resolverConfig.Ready() {
 		return fmt.Errorf("exchange credentials are not supported until the credential resolver operator configuration is ready")
+	}
+	// Only https:// exchange credentials need the signer; unix:// keeps
+	// socket permissions as its boundary and stays writable without one.
+	if hasTCPExchange && !v.resolverAuth.Ready() {
+		if v.resolverAuth.Problem != nil {
+			return &CallerAuthAdmissionError{Detail: fmt.Sprintf("https exchange credentials are not supported: resolver caller-authentication signing key is configured but unloadable: %v", v.resolverAuth.Problem)}
+		}
+		return &CallerAuthAdmissionError{Detail: fmt.Sprintf("https exchange credentials are not supported without the resolver caller-authentication signing key (%s or %s)", constants.EnvCredentialResolverSigningKeyDir, constants.EnvCredentialResolverSigningKey)}
 	}
 	return nil
 }

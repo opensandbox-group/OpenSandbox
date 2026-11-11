@@ -53,6 +53,14 @@ EGRESS_RULES_ENV = "OPENSANDBOX_EGRESS_RULES"
 EGRESS_MODE_ENV = "OPENSANDBOX_EGRESS_MODE"
 # Must match components/egress/pkg/constants/configuration.go EnvEgressToken
 OPENSANDBOX_EGRESS_TOKEN = "OPENSANDBOX_EGRESS_TOKEN"
+# OSEP-0025 D5 sidecar caller authentication: the server generates one
+# Ed25519 keypair per sandbox, injects the private key through this env
+# (same channel as OPENSANDBOX_EGRESS_TOKEN), and publishes the public JWK
+# on the workload (annotation/label below) for the JWKS endpoint.
+OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY = "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY"
+# Workload-side record of the public JWK (JSON, public material only); the
+# JWKS endpoint reads it back as the durable per-sandbox key source.
+EGRESS_SIGNING_JWK_ANNOTATION = "opensandbox.io/egress-signing-jwk"
 OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT = "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT"
 # Server-injected; not user-settable.
 OPENSANDBOX_EGRESS_SANDBOX_ID = "OPENSANDBOX_EGRESS_SANDBOX_ID"

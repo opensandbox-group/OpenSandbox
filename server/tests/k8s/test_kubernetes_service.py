@@ -397,10 +397,21 @@ class TestKubernetesSandboxServiceCreate:
         assert (
             egress_settings.otlp_endpoint == "http://otel-collector.observability:4318"
         )
-        assert egress_settings.env == {"OPENSANDBOX_EGRESS_LOG_LEVEL": "debug"}
+        # D5 (unconditional): the request env survives plus the
+        # server-generated signing key; the JWK lands as a workload
+        # annotation.
+        assert set(egress_settings.env) == {
+            "OPENSANDBOX_EGRESS_LOG_LEVEL",
+            "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY",
+        }
+        assert egress_settings.env["OPENSANDBOX_EGRESS_LOG_LEVEL"] == "debug"
+        assert egress_settings.env["OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY"].startswith(
+            "-----BEGIN PRIVATE KEY-----"
+        )
         assert kwargs["env"] == {"SANDBOX_ENV": "value"}
         assert "network_policy" not in kwargs
         assert kwargs["annotations"][SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] == "egress-token"
+        assert "opensandbox.io/egress-signing-jwk" in kwargs["annotations"]
 
     def _configure_upstream_proxy(self, k8s_service) -> EgressUpstreamProxyConfig:
         upstream_proxy = EgressUpstreamProxyConfig(

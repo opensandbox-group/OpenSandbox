@@ -454,8 +454,12 @@ func (s *fastSandboxPolicyServer) withVaultAccess(
 	if s.vaultSealedLocked(subj) {
 		return vaultAccessResult{err: &vaultAccessError{http.StatusConflict, "subject vault is sealed"}}
 	}
-	if entry := s.vaults[subj]; entry.vaultStateUnknown {
-		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "vault state is unknown"}}
+	if entry := s.vaults[subj]; entry.vaultStateUnknown || entry.vaultSignerUnavailable {
+		reason := "vault state is unknown"
+		if entry.vaultSignerUnavailable {
+			reason = "vault unserviceable: caller-auth signer unavailable for https exchange bindings"
+		}
+		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, reason}}
 	}
 	return derive(store, s.subjSandbox[subj])
 }
@@ -536,7 +540,12 @@ type vaultEntry struct {
 	sealed            bool
 	fileMeta          vaultFileMetadata
 	vaultStateUnknown bool
-	v2Verified        bool
+	// vaultSignerUnavailable marks a known vault this egress cannot serve
+	// (signer missing/unloadable, https exchange bindings): the data plane
+	// fails closed (503) while relay mutations stay open for healing,
+	// removal, and terminal cleanup.
+	vaultSignerUnavailable bool
+	v2Verified             bool
 	// vaultStateProtected records that this live fence previously observed a
 	// non-v1 or unreadable source. A later missing/legacy file cannot erase that
 	// provenance and reopen the v1 writer path.

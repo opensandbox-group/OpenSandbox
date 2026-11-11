@@ -190,6 +190,15 @@ jobs:
       - name: Run execd-init + hardening E2E
         run: bash scripts/python-k8s-execd-init-e2e.sh
 
+      # Docker-sidecar caller-auth chain (provision -> JWKS publication
+      # -> SDK verification, incl. keypair-replacement revocation); mocks
+      # only at the Docker API and the SDK transport, no cluster.
+      - name: Run credential-vault caller-auth e2e
+        working-directory: server
+        run: |
+          uv sync --all-groups
+          uv run pytest -v tests/test_egress_signing_e2e.py
+
       - name: Dump kind diagnostics
         if: always()
         run: |

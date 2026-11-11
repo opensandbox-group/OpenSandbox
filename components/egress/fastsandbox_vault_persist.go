@@ -506,6 +506,7 @@ func (s *fastSandboxPolicyServer) vaultRecoveryActive() bool {
 func (s *fastSandboxPolicyServer) clearVaultDegradedLocked(subj subject.Subject) {
 	if e, ok := s.vaults[subj]; ok {
 		e.degraded = ""
+		e.vaultSignerUnavailable = false
 		s.vaults[subj] = e
 	}
 }
@@ -695,7 +696,14 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 				log.Infof("subject %s: deleted v2 vault state reloaded (stateRevision %d)", subj, vf.StateRevision)
 			} else if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 				entry.degraded = fmt.Sprintf("vault file reload rejected: %v", err)
-				entry.vaultStateUnknown = vf.Version >= credentialvault.VaultFileVersion2
+				if credentialvault.IsCallerAuthRejection(err) {
+					// Known but unserviceable: fail closed on the data
+					// plane, keep relay mutations open for healing and
+					// cleanup.
+					entry.vaultSignerUnavailable = true
+				} else if vf.Version >= credentialvault.VaultFileVersion2 {
+					entry.vaultStateUnknown = true
+				}
 				log.Warnf("subject %s: %s (file kept; a policy/vault relay write heals the slice)", subj, entry.degraded)
 			} else {
 				log.Infof("subject %s: vault reloaded from file (version %d, revision %d, incarnation %s)", subj, vf.Version, vf.Revision, vf.Incarnation)

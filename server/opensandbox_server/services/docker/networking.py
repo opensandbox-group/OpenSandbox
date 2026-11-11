@@ -38,8 +38,10 @@ from opensandbox_server.api.schema import Endpoint, NetworkPolicy
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
     EGRESS_RULES_ENV,
+    EGRESS_SIGNING_JWK_ANNOTATION,
     OTEL_EXPORTER_OTLP_ENDPOINT,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY,
     OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
     EGRESS_UPSTREAM_EXTRA_CA_PATH,
@@ -58,6 +60,7 @@ from opensandbox_server.services.endpoint_auth import (
     merge_endpoint_headers,
 )
 from opensandbox_server.services.helpers import upstream_proxy_egress_env
+from opensandbox_server.services.egress_signing import generate_sidecar_signing_material
 from opensandbox_server.services.validators import (
     ensure_credential_proxy_configured,
     ensure_egress_configured,
@@ -537,6 +540,15 @@ class DockerNetworkingMixin:
             sidecar_env.append(f"{key}={value}")
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
+
+        # Sidecar caller authentication (unconditional): one keypair per
+        # sandbox — private PEM through the sidecar env, public JWK on the
+        # container label for the JWKS endpoint.
+        material = generate_sidecar_signing_material(sandbox_id)
+        sidecar_env.append(
+            f"{OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY}={material.private_pem}"
+        )
+        sidecar_labels[EGRESS_SIGNING_JWK_ANNOTATION] = material.jwk_json
 
         if extra_env:
             skip_keys = (

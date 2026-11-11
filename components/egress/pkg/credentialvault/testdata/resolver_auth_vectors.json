@@ -1,0 +1,503 @@
+{
+  "schema": "opensandbox.resolver-auth.vectors/v1",
+  "generated_by": "go run ./testdata/gen/main.go (components/egress/pkg/credentialvault)",
+  "contract": {
+    "header_name": "OpenSandbox-Egress-Credential",
+    "alg": "EdDSA",
+    "typ": "JWT",
+    "issuer": "opensandbox",
+    "default_expected_audience": "credential-resolver@resolver.internal",
+    "kid_grammar": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}(:v[0-9]{1,8})?$",
+    "kid_notes": "sidecar: the sandbox's sandboxId (mixed-case ULID-form ids are admitted); fast-sandbox: \u003cpool\u003e:v\u003cversion\u003e; the optional :v suffix is digits-only, so a kid never contains '.', '/', or ' ' — path-safe for the JWKS lookup substitution",
+    "ttl_max_seconds": 3600,
+    "leeway_seconds": 30,
+    "jti_bytes": 16,
+    "env_sidecar_private_key": "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY",
+    "env_fastsandbox_key_dir": "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR",
+    "env_fastsandbox_signing_kid": "OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID",
+    "audience_derivation": "web origin of the resolver endpoint, scheme://host[:port], path prefix excluded; the egress mints it as aud and the verifying resolver configures the identical string as expected_aud",
+    "signing_key_file": "signing.key",
+    "key_format": "PKCS8 PEM (Ed25519); the env value and the signing.key file carry the same PEM form",
+    "jwks_path_template": "/jwks/{kid}",
+    "rejected_header_params": [
+      "jku",
+      "x5u",
+      "jwk"
+    ],
+    "errors": {
+      "alg_pinned": "alg is not EdDSA",
+      "audience": "aud does not equal the verifying resolver's origin",
+      "expired": "now \u003e exp + leeway",
+      "header_parameter": "header parameter outside the alg/kid/typ whitelist (jku/x5u/jwk rejected on sight)",
+      "iat_future": "iat is more than leeway seconds in the future",
+      "issuer": "iss does not equal the configured issuer",
+      "kid_grammar": "kid does not match the platform identifier grammar (rejected locally, no fetch)",
+      "kid_missing": "header carries no kid",
+      "signature": "Ed25519 signature verification failed",
+      "subject_mismatch": "JWT sub does not equal the resolve document's subject",
+      "typ_invalid": "typ present but not JWT",
+      "unknown_kid": "kid well-formed but absent from JWKS",
+      "window": "exp - iat \u003e 3600"
+    },
+    "allowed_header_params": [
+      "alg",
+      "kid",
+      "typ"
+    ]
+  },
+  "clock": {
+    "exp": 1790003600,
+    "exp_leeway_boundary": 1790003630,
+    "exp_rejected": 1790003631,
+    "iat": 1790000000,
+    "iat_leeway_boundary_at": 1790000000,
+    "iat_leeway_boundary_iat": 1790000030,
+    "now_valid": 1790000600
+  },
+  "keys": [
+    {
+      "id": "sidecar-1",
+      "profile": "sidecar",
+      "kid": "sbx-7f3a2c",
+      "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINR85118IY4exo1GvuYCtq/QkAXHcZRUvNWDnhX5TliY\n-----END PRIVATE KEY-----\n",
+      "public_jwk": {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": "NEeP1Nzur5gR91Uxlfb5I0uNX6rsaOgU0vzYmov988U",
+        "kid": "sbx-7f3a2c",
+        "alg": "EdDSA",
+        "use": "sig"
+      }
+    },
+    {
+      "id": "pool-1",
+      "profile": "fast-sandbox",
+      "kid": "pool-a:v2",
+      "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIOYhoxLQhVUZSLvyzaEBiH1yHr7Fv7wctn3z1ipXFHFr\n-----END PRIVATE KEY-----\n",
+      "public_jwk": {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": "yvkt0-0naqcVoZusKcI-DsBy7Ul6_HQZssfjvZMkmoY",
+        "kid": "pool-a:v2",
+        "alg": "EdDSA",
+        "use": "sig"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "valid_sidecar",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.F2IQxdc6dhUkuHOdu1jlf-Aiy2k74Ug3tjY-ChjqvniBLqdcktvhWy-bzi23FXxJMlnSye6GLXehmOnB6ASlAA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "accept"
+        }
+      ],
+      "note": "mint-canonical: the egress mint implementation must reproduce this jwt byte for byte"
+    },
+    {
+      "name": "valid_pool",
+      "key": "pool-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"pool-a:v2\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InBvb2wtYTp2MiJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.L5dtIYZhPWxg6gqTeRMH-m53yBNa0ElL6t4ZePMkyQus43Y6PoSx1lcFZVym_xqW1LlJ33U6OQYFEW7P6stdCA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "accept"
+        }
+      ],
+      "note": "mint-canonical for the fast-sandbox profile; kid grammar with the pool:version form"
+    },
+    {
+      "name": "valid_typ_absent",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.cQm2b-tKNy9pYyfkXTI96ruAUwMZSj2EvHQJhZT2Gr9eonLxZbAs0gwCXe0PQPNqoxZ-mzhQ7uJe8nJejsQLDg",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "accept"
+        }
+      ],
+      "note": "typ is not required; when present it must be JWT"
+    },
+    {
+      "name": "valid_unknown_payload_claim",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\",\"foo\":\"bar\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EiLCJmb28iOiJiYXIifQ.KE60QhE0pMoCYGlli2A9e4qz64J2S4fTw39mvg5cCQVzkjxWIY-YWXsKhcrnj7KWCkXADCwEYTvlxKLZYi8ACA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "accept"
+        }
+      ],
+      "note": "unknown payload claims are ignored"
+    },
+    {
+      "name": "valid_exp_leeway_boundary",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.F2IQxdc6dhUkuHOdu1jlf-Aiy2k74Ug3tjY-ChjqvniBLqdcktvhWy-bzi23FXxJMlnSye6GLXehmOnB6ASlAA",
+      "checks": [
+        {
+          "now": 1790003630,
+          "verdict": "accept"
+        }
+      ],
+      "note": "now == exp + 30s is the last accepted instant (now \u003c= exp + 30s)"
+    },
+    {
+      "name": "valid_iat_leeway_boundary",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000030,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDMwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.XbjN2lkCeqOTpHTNJC17u5PPLj_2LsnmS0Z4QE0gpno4NAWiQj-56FIShJjC0ScEBx-AoJUywR4O6oc_u3p7Aw",
+      "checks": [
+        {
+          "now": 1790000000,
+          "verdict": "accept"
+        }
+      ],
+      "note": "iat at exactly now + 30s is still accepted ('iat more than the leeway in the future is rejected')"
+    },
+    {
+      "name": "reject_expired_beyond_leeway",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.F2IQxdc6dhUkuHOdu1jlf-Aiy2k74Ug3tjY-ChjqvniBLqdcktvhWy-bzi23FXxJMlnSye6GLXehmOnB6ASlAA",
+      "checks": [
+        {
+          "now": 1790003631,
+          "verdict": "reject",
+          "error": "expired"
+        }
+      ],
+      "note": "now \u003e exp + 30s"
+    },
+    {
+      "name": "reject_iat_future",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000180,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMTgwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.oKlcOerB1RJ7J71z0oru1bSPykqPDumoXNbLaxPtfpg1MgynYMMtJnTpD2y7f1cESv4AxmHbmf7zbIh9X0lnBw",
+      "checks": [
+        {
+          "now": 1790000000,
+          "verdict": "reject",
+          "error": "iat_future"
+        }
+      ],
+      "note": "iat 180s in the future at verification time exceeds the 30s leeway"
+    },
+    {
+      "name": "reject_window_over_3600",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003601,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDEsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.L-cJ27wNDzU56ts7uR-DW_XdnUe8Bi7LP8xj51FOf0Wg9E2MJOGP03Q3PNpReGwn3Np5BbmLTgjg3RZp_PjaCw",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "window"
+        }
+      ],
+      "note": "exp - iat must be \u003c= 3600"
+    },
+    {
+      "name": "reject_aud_mismatch",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"other-resolver@elsewhere.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6Im90aGVyLXJlc29sdmVyQGVsc2V3aGVyZS5pbnRlcm5hbCIsInN1YiI6InNieC03ZjNhMmMiLCJpYXQiOjE3OTAwMDAwMDAsImV4cCI6MTc5MDAwMzYwMCwianRpIjoia1g5c1Qydlo4cUxtNE5wUjZ3WWIzQSJ9.qnAgLglVpS5mvXfTOaQCirW5-rDZ6oobSj0TCAliAOlt57WnuGZY6_0bgrj2BkA9isoQ1KNHrk0dgMoLYb3uAA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "audience"
+        }
+      ],
+      "note": "aud must equal the verifying resolver's own origin; cross-resolver replay dies here"
+    },
+    {
+      "name": "reject_iss_mismatch",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"not-opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJub3Qtb3BlbnNhbmRib3giLCJhdWQiOiJjcmVkZW50aWFsLXJlc29sdmVyQHJlc29sdmVyLmludGVybmFsIiwic3ViIjoic2J4LTdmM2EyYyIsImlhdCI6MTc5MDAwMDAwMCwiZXhwIjoxNzkwMDAzNjAwLCJqdGkiOiJrWDlzVDJ2WjhxTG00TnBSNndZYjNBIn0.fJJ8Das6byOz1DZo6vXrEW_cfuxtRFn7poLaQihd-ncQNpZzhzTd4-qFxzWONgqPfSRTC6qHt3JRlVxJXb5_AQ",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "issuer"
+        }
+      ],
+      "note": "iss must equal the SDK's configured issuer"
+    },
+    {
+      "name": "reject_sub_mismatch",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-othe1\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtb3RoZTEiLCJpYXQiOjE3OTAwMDAwMDAsImV4cCI6MTc5MDAwMzYwMCwianRpIjoia1g5c1Qydlo4cUxtNE5wUjZ3WWIzQSJ9.c8utGwN_gP9N6b0NOxh6bXlkGdiWjXSn3g9OJ0IDvrQ9C-7wI2sUJDMS6T9aqHTlydJUx2JgFppz7s2LN3fwCg",
+      "document_subject": "sbx-7f3a2c",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "subject_mismatch"
+        }
+      ],
+      "note": "JWT sub must equal the resolve document's subject; the attested sub is the sole authoritative identity"
+    },
+    {
+      "name": "reject_alg_none",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"none\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIiwia2lkIjoic2J4LTdmM2EyYyJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.imAGBvQD63qOcamEO8J9kaFHzcuy7BUoz3QeojrmpSseQ9Q1cHI1MyUqtzhLXHxqsbxZ67Yclh0rEAO42QgzCw",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "alg_pinned"
+        }
+      ],
+      "note": "alg is pinned to EdDSA; anything else is rejected with no algorithm negotiation"
+    },
+    {
+      "name": "reject_alg_hs256",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.tnTXfDtUecr9P1446agz_y9QeyCwTZ94XuzLtilU1uPkIgy69Jml5BKAoCYjOnRHvlmuRzs9mGse8wSvvBr3Dg",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "alg_pinned"
+        }
+      ],
+      "note": "HMAC confusion: signature bytes are a valid Ed25519 signature but the alg is wrong"
+    },
+    {
+      "name": "reject_typ_wrong",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"jose\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6Impvc2UiLCJraWQiOiJzYngtN2YzYTJjIn0.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.WtUzohhS2VKkHT-qIl8EYUMa2m6M440rif25OWyvU02DL1D7CexWZtpL6KA9ZWosNe5ovSNE8pXZTXgOc3nXAg",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "typ_invalid"
+        }
+      ],
+      "note": "typ, when present, must be JWT"
+    },
+    {
+      "name": "valid_kid_mixed_case",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx_01HZYEXAMPLE\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx_01HZYEXAMPLE\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"mZ8tY3wW9qLn5MqR7xXc2B\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieF8wMUhaWUVYQU1QTEUifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYnhfMDFIWllFWEFNUExFIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6Im1aOHRZM3dXOXFMbjVNcVI3eFhjMkIifQ.wG5zDnDRRalScJcpXIfTV1_DAhroih1k5z9dEnTU_Zlk1PDosGNOpG4o77fXhFzRIK-PjMdRn09MpHjiWvg4CQ",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "accept"
+        }
+      ],
+      "note": "sidecar kids are real sandboxIds (ULID-form, mixed case and underscores) — the grammar admits them"
+    },
+    {
+      "name": "reject_kid_grammar_path",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"../escape\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ii4uL2VzY2FwZSJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.ck4NH8_Hifr2eg7VkHWIMNEOtqOozqL1xU0ER6oTfZQskzQTcqE0QwJMW1z-Rzz4157BkMKlRjalesAmPiuZBQ",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "kid_grammar"
+        }
+      ],
+      "note": "off-grammar kid rejected locally with no JWKS fetch; path traversal is the motivating case"
+    },
+    {
+      "name": "reject_kid_grammar_space",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx bad\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieCBiYWQifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.bLpxLUjt_MbKw1aSajzYRLT2RCBSiMtw4GIRR-LCmZFWRrs3po7hAWLl9mXAjCjFoWOP5b2WOjUbfue0AjnZBA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "kid_grammar"
+        }
+      ],
+      "note": "no spaces in platform identifiers"
+    },
+    {
+      "name": "reject_kid_grammar_slash",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx/1\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC8xIn0.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.0CALgikjSO5FG4XBHRRNhE9txy4MUCqdLtAbR8XaAjl-RMhHx89-DX0cV2GNF12C41KsGdD0zMKbYhjxOtg9DA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "kid_grammar"
+        }
+      ],
+      "note": "no slashes — kid substitutes into a URL path"
+    },
+    {
+      "name": "reject_kid_grammar_colons",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"a:b:c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImE6YjpjIn0.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.6W94IdX8ujhQBN4YZY0cXHYM2wDySc0DZEzOTLJSQtBuFrObM7cIdyTLaJEx-qtt1GFsKHkKYFPebghGRi7hAw",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "kid_grammar"
+        }
+      ],
+      "note": "at most one :version suffix"
+    },
+    {
+      "name": "reject_kid_grammar_version",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"pool-a:x9\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InBvb2wtYTp4OSJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.OhMF0JSV7sfW202cK2smFWkB4iMDCYqXeFsgy8DBa05Z4hcG21J0CAUMY2SEyCTLxSLJ2gDTA4B_xkpeG5hNAA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "kid_grammar"
+        }
+      ],
+      "note": "the version suffix must be v followed by digits"
+    },
+    {
+      "name": "reject_kid_missing",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.kR9gwYlsHnVOqHInn52Vp2oGi4jL4IiKBtip5AjaYMKxulYjHZJdi4CZLgGSQe9d3wKeDRKz2qL_nGOdc_U5Dw",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "kid_missing"
+        }
+      ],
+      "note": "the header must carry alg and kid"
+    },
+    {
+      "name": "reject_header_jku",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\",\"jku\":\"https://attacker.example/keys\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMiLCJqa3UiOiJodHRwczovL2F0dGFja2VyLmV4YW1wbGUva2V5cyJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.f2rkk7zmNCHLSPltJ3MNCP7VdjJAlhUXKZETi0FKZijKy0ectsuWD8YOo4gTw1k2xrhyNHQW3ISdLXmAN324Ag",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "header_parameter"
+        }
+      ],
+      "note": "jku is rejected on sight; keys come from the configured endpoint and nowhere else"
+    },
+    {
+      "name": "reject_header_x5u",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\",\"x5u\":\"https://attacker.example/cert\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMiLCJ4NXUiOiJodHRwczovL2F0dGFja2VyLmV4YW1wbGUvY2VydCJ9.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.fjar9N-zvjKzlWM8Buru67fjoPEeRVG5ciawVvxLvnum8csBRRFFWb9Kzq332creFtc6mjoipXvq6GWkxsX4BA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "header_parameter"
+        }
+      ],
+      "note": "x5u is rejected on sight"
+    },
+    {
+      "name": "reject_header_jwk",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\",\"jwk\":{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"AAAA\"}}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMiLCJqd2siOnsia3R5IjoiT0tQIiwiY3J2IjoiRWQyNTUxOSIsIngiOiJBQUFBIn19.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.AeoZXKQviEgJKTXUP6uABggnRklfKuEWJFWdeLMd8cnhZCgg8sNxqJo-gTiWS1qYU74klfomg4PurfTZePhqAQ",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "header_parameter"
+        }
+      ],
+      "note": "embedded jwk is rejected on sight (key-injection vector)"
+    },
+    {
+      "name": "reject_header_unknown_param",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\",\"foo\":\"bar\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMiLCJmb28iOiJiYXIifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.p_Yb0QkVCVYhgO_6HvVhMP34AAcArF9gKyAnaDLfvVnVWSBKmbIll-klwJfHW8YO8GFqQpI03yt1mEKsYeVeCQ",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "header_parameter"
+        }
+      ],
+      "note": "unknown header parameters are rejected; only alg/kid/typ are legal"
+    },
+    {
+      "name": "reject_unknown_kid",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-ffffaa\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC1mZmZmYWEifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.NznHQ-44KJPacJVC-9EJ6OTMRgRk6zbJITYQmRG0dmDxPNO2uWXNDdHSNpXv9B5O6jy5BAHfO0qoh719k6O5CA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "unknown_kid"
+        }
+      ],
+      "note": "kid is well-formed but absent: JWKS fetch misses (verify with a mock fetch); hits the negative cache"
+    },
+    {
+      "name": "reject_signature_tampered",
+      "key": "sidecar-1",
+      "header": "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"sbx-7f3a2c\"}",
+      "payload": "{\"iss\":\"opensandbox\",\"aud\":\"credential-resolver@resolver.internal\",\"sub\":\"sbx-7f3a2c\",\"iat\":1790000000,\"exp\":1790003600,\"jti\":\"kX9sT2vZ8qLm4NpR6wYb3A\"}",
+      "jwt": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InNieC03ZjNhMmMifQ.eyJpc3MiOiJvcGVuc2FuZGJveCIsImF1ZCI6ImNyZWRlbnRpYWwtcmVzb2x2ZXJAcmVzb2x2ZXIuaW50ZXJuYWwiLCJzdWIiOiJzYngtN2YzYTJjIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDM2MDAsImp0aSI6ImtYOXNUMnZaOHFMbTROcFI2d1liM0EifQ.FmIQxdc6dhUkuHOdu1jlf-Aiy2k74Ug3tjY-ChjqvniBLqdcktvhWy-bzi23FXxJMlnSye6GLXehmOnB6ASlAA",
+      "checks": [
+        {
+          "now": 1790000600,
+          "verdict": "reject",
+          "error": "signature"
+        }
+      ],
+      "note": "one signature byte flipped; everything else is the valid_sidecar token"
+    }
+  ]
+}

@@ -566,8 +566,17 @@ func ResolverConfigFromEnv() (ResolverConfig, error) {
 	return config, diag
 }
 
-// NewSubjectStore creates a per-subject store (fast-sandbox) with the D13
-// gate derived from env, so reloaded exchange vaults face the same gate.
+// ResolverAuthConfigFromEnv derives the caller-auth gate from the operator
+// provisioning channels. An unloadable channel yields a nil signer plus a
+// diagnostic Problem; the gate fails closed either way.
+func ResolverAuthConfigFromEnv() ResolverAuthConfig {
+	signer, err := LoadResolverCredentialSigner()
+	return ResolverAuthConfig{Signer: signer, Problem: err}
+}
+
+// NewSubjectStore creates a per-subject store (fast-sandbox) with the
+// resolver gates derived from env, so reloaded exchange vaults face the
+// same gates as fresh writes.
 func NewSubjectStore() *Store {
 	store := NewStore(nil, func() bool { return true })
 	config, err := ResolverConfigFromEnv()
@@ -575,5 +584,10 @@ func NewSubjectStore() *Store {
 		log.Warnf("credential resolver operator configuration not ready: %v", err)
 	}
 	store.SetResolverConfig(config)
+	auth := ResolverAuthConfigFromEnv()
+	if auth.Problem != nil {
+		log.Warnf("resolver caller-authentication not ready: %v", auth.Problem)
+	}
+	store.SetResolverAuthConfig(auth)
 	return store
 }

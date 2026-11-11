@@ -588,6 +588,55 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /credential-vault/jwks/{kid}:
+    get:
+      tags: [Credential Vault]
+      security: []
+      operationId: getEgressSigningJwk
+      summary: Publish one credential-vault resolver caller-authentication public key
+      description: |
+        Credential-vault resolver caller authentication: credential
+        resolvers verify the `OpenSandbox-Egress-Credential` JWT offline
+        against the Ed25519 public key identified by `kid`.
+
+        The endpoint is public by design — it serves public keys only (the
+        OIDC `/.well-known/jwks.json` posture) and requires no API key.
+        Request rate limiting is the trusted ingress/API gateway's job.
+        `kid` is a platform identifier: a fast-sandbox pool kid
+        (`<pool>:v<version>`) or a sidecar sandbox's sandboxId. Off-grammar
+        kids are rejected locally without a backend read; grammar-valid
+        unknown kids fall through to a workload lookup and answer 404, with
+        short server-side caching of both the served keys and the misses.
+      parameters:
+        - name: kid
+          in: path
+          required: true
+          description: Platform key identifier, for example `pool-a:v2`.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The Ed25519 public JWK for this kid
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EgressSigningJwk'
+              example:
+                kty: OKP
+                crv: Ed25519
+                x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo
+                kid: pool-a:v2
+                alg: EdDSA
+                use: sig
+        '404':
+          description: Unknown or off-grammar kid
+        '501':
+          description: JWKS publication is not configured on this server (no egress configuration)
+        '503':
+          description: Transient backend failure; retry later
   /sandboxes:
     get:
       tags: [ Sandboxes ]
@@ -1593,6 +1642,32 @@ components:
           type: boolean
           description: Whether create + readiness completed successfully
       required: [eventType, createDurationMs, success]
+    EgressSigningJwk:
+      type: object
+      description: |
+        One egress caller-authentication public key (OSEP-0025). Public
+        material only — the matching private keys never leave the egress
+        provisioning channels.
+      properties:
+        kty:
+          type: string
+          enum: [OKP]
+        crv:
+          type: string
+          enum: [Ed25519]
+        x:
+          type: string
+          description: Raw Ed25519 public key, base64url without padding
+        kid:
+          type: string
+          description: Platform key identifier; the JWKS lookup key
+        alg:
+          type: string
+          enum: [EdDSA]
+        use:
+          type: string
+          enum: [sig]
+      required: [kty, crv, x, kid, alg, use]
     ListSandboxesResponse:
       type: object
       properties:

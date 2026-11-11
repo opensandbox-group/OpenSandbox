@@ -23,9 +23,14 @@ Transports:
 
 - ``--uds PATH``: HTTP over a Unix domain socket (bound 0660); the socket
   permissions are the trust boundary.
-- ``--https HOST:PORT --tls-cert PEM --tls-key PEM``: TLS without caller
-  authentication (OSEP-0025 D5 caller auth is deferred); TLS is the
-  transport only.
+- ``--https HOST:PORT --tls-cert PEM --tls-key PEM``: TLS transport.
+
+Caller authentication, opt-in via ``--require-credential`` (HTTPS transport
+only): every resolve call must carry a valid ``OpenSandbox-Egress-Credential``
+JWT, verified by the ``opensandbox`` SDK against a JWKS. Keys
+come from a live lifecycle server (``--jwks-base URL``) or a static mapping
+file (``--jwks-file PATH``). Without the flag the stub verifies nothing —
+the behavior every existing egress test relies on.
 
 Framing (D15): fixed at ``POST /resolve``; other paths answer 404; UDS mode
 never inspects Host. ``subject`` is the egress-authoritative sandboxId, and
@@ -176,6 +181,37 @@ def resolve_response(
     return {"headers": headers, "redactions": redactions}
 
 
+class _StaticJWKSTransport:
+    """Serves per-kid JWKs from a JSON file (``{"<kid>": <JWK>}``)."""
+
+    def __init__(self, path: str) -> None:
+        with open(path, encoding="utf-8") as handle:
+            self._keys = json.load(handle)
+        if type(self._keys) is not dict:
+            raise SystemExit(f"--jwks-file must hold a JSON object: {path}")
+
+    def __call__(self, url: str, *, timeout: float) -> tuple[int, bytes]:
+        kid = url.rsplit("/", 1)[-1]
+        if kid in self._keys:
+            return 200, json.dumps(self._keys[kid]).encode()
+        return 404, b"{}"
+
+
+def build_caller_verifier(options: argparse.Namespace) -> Any:
+    """Construct the opt-in caller-credential verifier (requires the SDK)."""
+    try:
+        from opensandbox.resolver_auth import CredentialVaultCallerAuth
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise SystemExit(
+            "--require-credential needs the opensandbox SDK"
+        ) from exc
+    return CredentialVaultCallerAuth(
+        jwks_base=options.jwks_base or "https://static-jwks.invalid",
+        expected_audience=options.expected_aud,
+        transport=_StaticJWKSTransport(options.jwks_file) if options.jwks_file else None,
+    )
+
+
 class _UnixHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -293,6 +329,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except _BadRequest:
             self._reply(400, {"error": "malformed_request"})
             return
+        verifier = getattr(self.server, "caller_verifier", None)
+        if verifier is not None:
+            credential = self.headers.get("OpenSandbox-Egress-Credential")
+            if not credential:
+                self._reply(401, {"error": "credential_missing"})
+                return
+            try:
+                verifier.verify_caller(credential, document_subject=parts["subject"])
+            except Exception as exc:
+                # VerifyError.code carries the stable reason (alg_pinned,
+                # subject_mismatch, unknown_kid, ...); anything else is an
+                # internal verifier fault and still denies — never pass
+                # through on error.
+                code = getattr(exc, "code", "credential_invalid")
+                self._reply(401, {"error": code})
+                return
         self._reply(
             200, resolve_response(parts, options.incomplete_redactions)
         )
@@ -348,6 +400,9 @@ def build_server(
     server.options = options
     server.exceptions = []
     server.request_timeout = max(30.0, options.delay / 1000.0 * 2 + 5.0)
+    # Opt-in: None keeps the stub verifying nothing, which every existing
+    # egress test relies on.
+    server.caller_verifier = build_caller_verifier(options) if options.require_credential else None
     return server
 
 
@@ -390,9 +445,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="return redactions for only one header (R9 auto-derivation tests)",
     )
+    parser.add_argument(
+        "--require-credential",
+        action="store_true",
+        help="verify the OpenSandbox-Egress-Credential JWT; HTTPS only",
+    )
+    parser.add_argument(
+        "--jwks-base",
+        metavar="URL",
+        help="lifecycle server JWKS base URL (with --require-credential)",
+    )
+    parser.add_argument(
+        "--jwks-file",
+        metavar="PATH",
+        help='static JWKS JSON file {"<kid>": <JWK>} (with --require-credential)',
+    )
+    parser.add_argument(
+        "--expected-aud",
+        metavar="ORIGIN",
+        help="this resolver's origin; defaults to https://<--https value>",
+    )
     args = parser.parse_args(argv)
     if args.https and (not args.tls_cert or not args.tls_key):
         parser.error("--https requires --tls-cert and --tls-key")
+    if args.require_credential:
+        if not args.https:
+            parser.error("--require-credential requires --https (unix dials carry no credential)")
+        if bool(args.jwks_base) == bool(args.jwks_file):
+            parser.error("--require-credential needs exactly one of --jwks-base / --jwks-file")
+        if not args.expected_aud:
+            args.expected_aud = f"https://{args.https}"
     if args.fail:
         if args.fail == "once":
             args.fail_once = True

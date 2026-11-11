@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import HTTPException, status
 from kubernetes.client.exceptions import ApiException
@@ -102,6 +102,32 @@ class K8sDiagnosticsMixin:
             backend_type="kubernetes",
             backend_identifiers=identifiers,
         )
+
+    def get_egress_signing_jwk(self, sandbox_id: str) -> Optional[dict]:
+        """Sidecar caller-auth JWK from the workload annotation.
+
+        The annotation is the durable source — it lives and dies with the
+        workload, so sandbox recreation replaces the key.
+        """
+        from opensandbox_server.services.constants import EGRESS_SIGNING_JWK_ANNOTATION
+        from opensandbox_server.services.egress_signing import parse_recorded_jwk
+
+        try:
+            namespace = self._resolve_namespace_for_lookup(sandbox_id)
+            workload = _get_owned_workload_or_404(self.workload_provider, namespace, sandbox_id)
+        except HTTPException:
+            return None
+        # Anything else (API server unreachable, timeout) propagates: the
+        # JWKS service surfaces it as a retryable 503, never a false 404.
+        metadata = workload.get("metadata", {}) if isinstance(workload, dict) else {}
+        annotations = metadata.get("annotations", {}) if isinstance(metadata, dict) else {}
+        recorded = annotations.get(EGRESS_SIGNING_JWK_ANNOTATION)
+        if not recorded:
+            return None
+        jwk = parse_recorded_jwk(recorded)
+        if jwk is None or jwk.get("kid") != sandbox_id:
+            return None
+        return jwk
 
     def get_sandbox_log_diagnostics(
         self,

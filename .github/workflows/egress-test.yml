@@ -43,6 +43,11 @@ jobs:
       - name: Install mitmproxy
         run: pip install -r components/egress/requirements-mitmproxy.txt
 
+      - name: Install sandbox SDK for caller-auth enforcement tests
+        # The enforcing resolver tests and the Go caller-auth e2e import
+        # opensandbox.resolver_auth; required here, not skippable.
+        run: pip install -e sdks/sandbox/python
+
       - name: Check gofmt
         working-directory: components/egress
         run: |

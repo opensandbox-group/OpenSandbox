@@ -309,7 +309,7 @@ A resolver is any service that answers one route: `POST /resolve` with a JSON do
 
 Hard requirements on a resolver endpoint:
 
-- **Reachable only by the egress process.** A sandbox that could call the resolver directly could mint credentials and bypass the policy plane. Unix sockets are structurally isolated by directory/socket permissions (for example `0710`/`0660`) — guests have no filesystem path to them. For `https://` endpoints there is **no structural isolation today**: the guarantee comes from the egress policy layer — deny-by-default plus the resolver host never appearing in any sandbox's egress allow list. In the sidecar profile, the UID-scoped exclusion that lets the egress dial the resolver is scoped to the MITM uid (transparently intercepted dials are re-originated by it, the same mechanism as upstream proxies), so that exclusion alone is **not** the trust boundary — a disallowed sandbox dial is denied by policy before any upstream connection, which is exactly why the resolver host must stay out of every allow list. HTTPS caller authentication (egress-presented bearer tokens) is declared follow-up work and is not implemented yet; until it lands, treat an `https://` resolver as reachable by anything that can route to it and protect it accordingly (network segmentation, dedicated resolver ports, no shared allow-list entries).
+- **Reachable only by the egress process.** A sandbox that could call the resolver directly could mint credentials and bypass the policy plane. Unix sockets are structurally isolated by directory/socket permissions (for example `0710`/`0660`) — guests have no filesystem path to them. For `https://` endpoints, egress caller authentication (an Ed25519 JWT verified by the resolver against server-published JWKS) closes this boundary at the application layer in both profiles — see [Resolver Caller Authentication](#resolver-caller-authentication-fast-sandbox); a sandbox process dialing the resolver directly receives 401.
 - **Bounded responses.** The egress enforces an envelope — 64KiB total, at most 16 headers, 8KiB per value, 64 redaction entries — and denies the request when exceeded.
 - **Per-request semantics.** Input includes request context; caching and rotation are resolver-internal and invisible to the contract.
 
@@ -335,6 +335,79 @@ curl -fsS --unix-socket /run/spi/spi.sock http://localhost/resolve \
 ```
 
 A working resolver answers `200` with deterministic headers — `authorization: Bearer test-spi-signer`, `x-test-subject` echoing the subject, and `x-test-signature = sha256(subject|credential|binding|authority|path)` — and supports `--delay <ms>`, `--fail once|rate`, and `--incomplete-redactions` for outage drills. In containerized deployments the same file runs next to the egress with a shared socket volume (the fast-sandbox integration verify drives it exactly that way). It is a test harness, not an identity service: for production, put your real signing service behind the same `POST /resolve` contract.
+
+### Resolver Caller Authentication (fast-sandbox)
+
+Every TCP resolve dial carries one header, `OpenSandbox-Egress-Credential`, holding a compact Ed25519 JWT minted by the egress. The credential proves "this resolve call originated from the egress process" and binds the attested `sub` (the sandboxId); resolvers verify it offline against a JWKS published by the lifecycle server at `GET /credential-vault/jwks/{kid}`. Unix sockets keep using socket permissions as their boundary and carry no credential.
+
+Provisioning is operator-only and per-pool (fast-sandbox profile):
+
+1. **Create the signing material and two Secrets** (one pair per pool and version, separate from the MITM CA Secret). Kubernetes Secret access is object-scoped: the lifecycle server reads the whole object it references, so the private key lives in its own Secret that the server never references — the server's object carries public entries only.
+
+```bash
+openssl genpkey -algorithm ed25519 -out signing.key
+openssl pkey -in signing.key -pubout -outform DER | tail -c 32 | basenc --base64url | tr -d '=' > signing.pub.x
+
+# Private-key Secret: referenced ONLY by the pool's egress mount below.
+kubectl create secret generic opensandbox-egress-signing-<pool>-v1 \
+  --from-file=signing.key=signing.key
+
+# Publication Secret: referenced ONLY by the lifecycle server
+# (kubernetes.egress_signing_key_secrets). Public entries only.
+kubectl create secret generic opensandbox-egress-publish-<pool>-v1 \
+  --from-file=signing.pub=signing.pub.x \
+  --from-literal=kid='<pool>:v1'
+```
+
+2. **Project the private-key Secret into the pool's egress container** (SandboxPool `fastletTemplate`):
+
+```yaml
+      - name: egress
+        # ... existing egress container fields ...
+        env:
+        - name: OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KEY_DIR
+          value: /var/lib/opensandbox-egress/signing
+        - name: OPENSANDBOX_EGRESS_RESOLVER_SIGNING_KID
+          value: "<pool>:v1"
+        volumeMounts:
+        - name: egress-signing
+          mountPath: /var/lib/opensandbox-egress/signing
+          readOnly: true
+      volumes:
+      - name: egress-signing
+        secret:
+          secretName: opensandbox-egress-signing-<pool>-v1
+          items:
+          - key: signing.key
+            path: signing.key
+```
+
+Only `signing.key` is mounted into the egress. Without a loadable key, vault writes containing `https://` exchange credentials are rejected (fail closed); `unix://` exchange credentials and static vaults keep working.
+
+3. **Publish the public key** — set `kubernetes.egress_signing_key_secrets` in the server config to the **publication** Secret name(s) (`opensandbox-egress-publish-<pool>-v1`), current version first. The server serves the JWK at `/credential-vault/jwks/{kid}` — public keys only, no API key required, and the server's RBAC never needs access to a private-key Secret. Rate-limit the endpoint at your ingress/API gateway.
+
+4. **Verify on the resolver** with the Python SDK:
+
+```python
+from opensandbox.resolver_auth import CredentialVaultCallerAuth
+
+caller_auth = CredentialVaultCallerAuth(
+    jwks_base="https://<lifecycle-server>/credential-vault",
+    expected_issuer="opensandbox",
+    expected_audience="https://<this-resolver>:<port>",  # your own origin
+)
+
+subject = caller_auth.verify_caller(
+    headers["OpenSandbox-Egress-Credential"],
+    document_subject=document["subject"],
+)
+```
+
+Every verification failure maps to HTTP 401. The test resolver enforces all of this behind `--require-credential --jwks-base <url>` (or `--jwks-file <path>` for self-contained runs).
+
+**Sidecar profile (per-sandbox keys, always on).** Every sandbox created with `networkPolicy` gets a fresh keypair — the private PEM is injected into its egress sidecar through the auth-token env channel and discarded server-side, and the public JWK is recorded on the workload (Kubernetes annotation `opensandbox.io/egress-signing-jwk` / Docker container label) where `GET /credential-vault/jwks/{sandboxId}` reads it. There is no configuration for this: turning it off would reopen the resolver trust-boundary gap this feature closes. No operator key management either — sandbox recreation replaces the keypair, and the JWKS entry follows the workload. The resolver integration is unchanged — the same three SDK config values, with `expected_audience` still the resolver's own origin.
+
+**Rotation** is the versioned-Secret runbook: create `-(v+1)` with its own kid, add it to `egress_signing_key_secrets` ahead of the old entry, update the SandboxPool reference, roll the pool, and remove the old Secret only after the rollout completes and credential TTL + leeway (about 1 hour) has passed — credentials minted by not-yet-rolled instances stay verifiable throughout. Resolvers re-validate cached keys at most hourly, so a retired kid stops verifying within that window; monitor resolver-side 401 rates and page the key owner on spikes.
 
 ### Python SDK Example
 

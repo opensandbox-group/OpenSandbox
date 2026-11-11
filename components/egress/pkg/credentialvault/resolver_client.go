@@ -29,11 +29,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
 // Egress → credential header resolver client (OSEP-0025 frozen contract).
@@ -143,6 +145,10 @@ type ResolverClientOptions struct {
 	// TLSClientConfig overrides HTTPS TLS (test/deployment seam); nil keeps
 	// system verification.
 	TLSClientConfig *tls.Config
+	// Credentials mints the caller-authentication JWT attached to every
+	// TCP resolve dial. Required for https:// endpoints; unix:// dials
+	// carry none.
+	Credentials CredentialProvider
 }
 
 // NewResolverClient validates the endpoint; no connection is dialed.
@@ -199,6 +205,10 @@ func NewResolverClient(options ResolverClientOptions) (ResolverClient, error) {
 		}
 		client.requestURL = (&url.URL{Scheme: "https", Host: parsed.authority, Path: parsed.resolvePath}).String()
 		client.hostHeader = parsed.authority
+		// The JWT aud is the resolver origin (scheme://authority, path
+		// prefix excluded); the resolver configures the identical string.
+		client.origin = "https://" + parsed.authority
+		client.credentials = options.Credentials
 	}
 	httpClient.Transport = transport
 	client.http = httpClient
@@ -277,17 +287,84 @@ func ResolverMaxConcurrencyFromEnv() int {
 	)
 }
 
+// defaultCredentialProvider memoizes the process-wide caller-auth provider.
+// Only a successful load is memoized, and the load is re-attempted on the
+// backoff cadence: repairing broken key material takes effect without a
+// restart, and a rotated key (kid or key bytes changed) swaps the memoized
+// signer — keeping dialing consistent with per-subject admission, which
+// reloads independently.
+var defaultCredentialProvider struct {
+	mu          sync.Mutex
+	provider    CredentialProvider
+	fingerprint string
+	lastAttempt time.Time
+}
+
+const defaultCredentialProviderRetryBackoff = 5 * time.Second
+
+// DefaultResolverCredentialProvider returns the process-wide provider built
+// from LoadResolverCredentialSigner; nil when no channel is configured or
+// the material is still broken.
+func DefaultResolverCredentialProvider() CredentialProvider {
+	defaultCredentialProvider.mu.Lock()
+	defer defaultCredentialProvider.mu.Unlock()
+	if time.Since(defaultCredentialProvider.lastAttempt) < defaultCredentialProviderRetryBackoff {
+		return defaultCredentialProvider.provider
+	}
+	defaultCredentialProvider.lastAttempt = time.Now()
+	signer, err := LoadResolverCredentialSigner()
+	if err != nil {
+		log.Warnf("resolver caller-authentication signer unloadable: %v", err)
+		return defaultCredentialProvider.provider
+	}
+	if signer == nil {
+		return defaultCredentialProvider.provider
+	}
+	if signer.fingerprint() == defaultCredentialProvider.fingerprint {
+		return defaultCredentialProvider.provider
+	}
+	defaultCredentialProvider.provider = newResolverCredentialManager(signer)
+	defaultCredentialProvider.fingerprint = signer.fingerprint()
+	return defaultCredentialProvider.provider
+}
+
+// errCredentialNotProvisioned is returned by the lazy default provider
+// while no signer is loadable; Resolve maps it to the
+// egress_credential_not_provisioned denial.
+var errCredentialNotProvisioned = errors.New("resolver caller-auth signer not provisioned")
+
+// lazyDefaultProvider resolves the process provider at dial time, not at
+// client-construction time: endpoint clients are cached per handler for the
+// process lifetime, so capturing a nil provider at construction would pin
+// every later dial on that endpoint to failure even after the key material
+// is repaired.
+type lazyDefaultProvider struct{}
+
+var _ CredentialProvider = lazyDefaultProvider{}
+
+func (lazyDefaultProvider) Credential(subject, audience string) (string, error) {
+	provider := DefaultResolverCredentialProvider()
+	if provider == nil {
+		return "", errCredentialNotProvisioned
+	}
+	return provider.Credential(subject, audience)
+}
+
 // NewResolverClientFromEnv builds a client from the resolver envs; wiring
-// supplies the endpoint.
+// supplies the endpoint. TCP endpoints carry the process caller credential.
 func NewResolverClientFromEnv(endpoint string) (ResolverClient, error) {
-	return NewResolverClient(ResolverClientOptions{Endpoint: endpoint})
+	return NewResolverClient(ResolverClientOptions{Endpoint: endpoint, Credentials: lazyDefaultProvider{}})
 }
 
 // resolverClient is the UDS/HTTPS transport; construct via NewResolverClient.
 type resolverClient struct {
-	http        *http.Client
-	requestURL  string
-	hostHeader  string // https: endpoint authority; empty for unix (localhost)
+	http       *http.Client
+	requestURL string
+	hostHeader string // https: endpoint authority; empty for unix (localhost)
+	// origin is the https resolver origin (scheme://authority) used as the
+	// credential aud; empty for unix dials, which carry no credential.
+	origin      string
+	credentials CredentialProvider
 	timeout     time.Duration
 	concurrency chan struct{}
 }
@@ -323,6 +400,22 @@ func (c *resolverClient) Resolve(ctx context.Context, input ResolveInput) (*Reso
 	if c.hostHeader != "" {
 		// D15: Host is the endpoint authority (localhost over unix).
 		request.Host = c.hostHeader
+	}
+	// Every TCP dial carries exactly one credential header; unix dials
+	// carry none. A TCP dial without a provisioned signer fails closed
+	// before reaching the wire.
+	if c.origin != "" {
+		if c.credentials == nil {
+			return nil, resolverErrorf(ResolverUnavailable, "egress_credential_not_provisioned")
+		}
+		jwt, err := c.credentials.Credential(input.Subject, c.origin)
+		if errors.Is(err, errCredentialNotProvisioned) {
+			return nil, resolverErrorf(ResolverUnavailable, "egress_credential_not_provisioned")
+		}
+		if err != nil {
+			return nil, resolverErrorf(ResolverUnavailable, "egress_credential_mint_failed")
+		}
+		request.Header.Set(EgressCredentialHeader, jwt)
 	}
 	request.Close = true
 

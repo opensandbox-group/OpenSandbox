@@ -226,6 +226,7 @@ func TestStubIntegrationHTTPS(t *testing.T) {
 		Timeout:         5 * time.Second,
 		MaxConcurrency:  4,
 		TLSClientConfig: stubResolverTLSConfig(t),
+		Credentials:     credProvider(t),
 	})
 	require.NoError(t, err)
 	decision, err := client.Resolve(context.Background(), resolverTestInput())

@@ -65,13 +65,23 @@ class DockerfileH2DependencyTests(unittest.TestCase):
     def test_all_workflow_installs_and_caches_use_shared_requirements(self):
         workflow = WORKFLOW.read_text().replace("\\\n", "")
         installs = [line for line in workflow.splitlines() if "pip install" in line]
-        self.assertEqual(len(installs), 4)
-        for install in installs:
+        # Two sanctioned install shapes: the shared mitmproxy requirements
+        # (the historical four) and the editable in-repo sandbox SDK that
+        # the caller-auth enforcement tests import. Both are reproducible
+        # and pin-free at the workflow level.
+        sdk_installs = [i for i in installs if "-e sdks/sandbox/python" in i]
+        self.assertEqual(len(sdk_installs), 1)
+        requirement_installs = [i for i in installs if i not in sdk_installs]
+        self.assertEqual(len(requirement_installs), 4)
+        for install in requirement_installs:
             with self.subTest(install=install.strip()):
                 words = shlex.split(install)
                 self.assertEqual(words[words.index("-r") + 1],
                                  "components/egress/requirements-mitmproxy.txt")
                 self.assertFalse(any("==" in word for word in words))
+        for install in sdk_installs:
+            with self.subTest(install=install.strip()):
+                self.assertNotIn("==", install)
         setups = re.findall(r"uses: actions/setup-python@[^\n]+\n(.*?)(?=\n      - name:)",
                             workflow, re.DOTALL)
         self.assertEqual(len(setups), 3)
