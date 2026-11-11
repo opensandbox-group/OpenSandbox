@@ -13,7 +13,7 @@ If the task is driven by spec changes, also read `../specs/AGENTS.md`.
 
 ## Key Areas
 
-- `sandbox/python`, `sandbox/javascript`, `sandbox/kotlin`, `sandbox/csharp`, `sandbox/go`
+- `sandbox/python`, `sandbox/javascript`, `sandbox/kotlin`, `sandbox/csharp`, `sandbox/go`, `sandbox/rust`
 - `code-interpreter/python`, `code-interpreter/javascript`, `code-interpreter/csharp`
 - `sandbox/kotlin/code-interpreter`
 - `mcp/sandbox/python`
@@ -108,6 +108,15 @@ Go sandbox SDK:
 ```bash
 cd sdks/sandbox/go
 go test ./...
+```
+
+Rust sandbox SDK:
+
+```bash
+cd sdks/sandbox/rust
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
 ```
 
 ## Guardrails

@@ -5,7 +5,7 @@ description: Choose an OpenSandbox SDK and compare lifecycle, Client Pool, traci
 
 # SDKs
 
-OpenSandbox provides five sandbox SDKs for lifecycle management, command execution, file operations, and resource metrics. This site follows the repository's default branch; a feature merged here may require a newer package than the one you have installed. Check the [release index](https://github.com/opensandbox-group/OpenSandbox/releases) when upgrading.
+OpenSandbox provides six sandbox SDKs for lifecycle management, command execution, file operations, and resource metrics. This site follows the repository's default branch; a feature merged here may require a newer package than the one you have installed. Check the [release index](https://github.com/opensandbox-group/OpenSandbox/releases) when upgrading.
 
 ## Installation
 
@@ -14,6 +14,7 @@ OpenSandbox provides five sandbox SDKs for lifecycle management, command executi
 | [Python](/sdks/python) | `opensandbox` | `pip install opensandbox` |
 | [JavaScript/TypeScript](/sdks/javascript) | `@alibaba-group/opensandbox` | `npm install @alibaba-group/opensandbox` |
 | [Kotlin/Java](/sdks/kotlin) | `com.alibaba.opensandbox:sandbox` | Gradle/Maven |
+| [Rust](/sdks/rust) | `opensandbox` | Path or git dependency; not yet published to crates.io |
 | [Go](/sdks/go) | `github.com/alibaba/OpenSandbox/sdks/sandbox/go` | `go get github.com/alibaba/OpenSandbox/sdks/sandbox/go` |
 | [C#/.NET](/sdks/csharp) | `Alibaba.OpenSandbox` | `dotnet add package Alibaba.OpenSandbox` |
 
@@ -21,26 +22,28 @@ OpenSandbox provides five sandbox SDKs for lifecycle management, command executi
 
 “Yes” means a public SDK entry point exists. Availability also depends on the server runtime and the execd version installed in the sandbox.
 
-| Capability | Python async/sync | JavaScript/TypeScript | Kotlin/Java | Go | C#/.NET |
-| --- | --- | --- | --- | --- | --- |
-| Create, connect, renew, pause/resume, kill | Yes | Yes | Yes | Yes | Yes |
-| Snapshots and template management | Yes | Yes | Yes | Yes | Yes |
-| Resource requests, volumes, lifecycle hooks | Yes | Yes | Yes | Yes | Yes |
-| Commands, files, resource metrics | Yes | Yes | Yes | Yes | Yes |
-| Egress policy and Credential Vault | Yes | Yes | Yes | Yes | Yes |
-| Isolated sessions | Yes | Yes | Yes | Yes | Yes |
-| [Client Pool](/guides/client-pool), including Redis | Yes | Yes | Yes | Yes | No |
-| [Pool warmup tracing](/sdks/observability#pool-warmup-tracing) | Yes | Yes, fewer attributes | Yes | No | No |
-| [Diagnostic context, logs/events](/api/#diagnostics) | Yes | Yes | Yes | Yes | Yes |
-| [Create-latency telemetry](/sdks/observability#creation-metrics) | Yes | Yes | Yes | Yes | Yes |
+| Capability | Python async/sync | JavaScript/TypeScript | Kotlin/Java | Rust | Go | C#/.NET |
+| --- | --- | --- | --- | --- | --- | --- |
+| Create, connect, renew, pause/resume, kill | Yes | Yes | Yes | Yes | Yes | Yes |
+| Snapshots and template management | Yes | Yes | Yes | Snapshots only | Yes | Yes |
+| Resource requests, volumes, lifecycle hooks | Yes | Yes | Yes | Yes | Yes | Yes |
+| Commands, files, resource metrics | Yes | Yes | Yes | Yes | Yes | Yes |
+| Egress policy and Credential Vault | Yes | Yes | Yes | Yes | Yes | Yes |
+| Isolated sessions | Yes | Yes | Yes | No | Yes | Yes |
+| [Client Pool](/guides/client-pool), including Redis | Yes | Yes | Yes | No | Yes | No |
+| [Pool warmup tracing](/sdks/observability#pool-warmup-tracing) | Yes | Yes, fewer attributes | Yes | No | No | No |
+| [Diagnostic context, logs/events](/api/#diagnostics) | Yes | Yes | Yes | No | Yes | Yes |
+| [Create-latency telemetry](/sdks/observability#creation-metrics) | Yes | Yes | Yes | No | Yes | Yes |
 
 ### Differences that affect application code
 
 - **Pools:** Go exposes different warmup controls; the fields accepted by the default pool creator also differ across languages. See the [pool configuration matrix](/guides/client-pool#configuration).
 - **Go command control:** interrupt, command status, and accumulated command logs are exposed by `ExecdClient`, rather than the high-level `Sandbox` wrapper. Neither `Sandbox.CreateSession` nor `ExecdClient.CreateSession` accepts an initial working directory. Set `Cwd` when running a command in the session instead.
+- **Rust scope:** no Client Pool, isolated sessions, diagnostics, or template CRUD; see the [Rust SDK scope](/sdks/rust#scope-and-limitations).
+- **Rust readiness:** `Sandbox::connect` waits for execd `/ping` by default; pass `ReadyOptions` to change the budget or skip the probe.
 - **Go connect/resume readiness:** pass `ReadyOptions` to request readiness checks. Without it, connecting resolves the endpoint without checking sandbox health.
-- **Metrics streaming:** Go exposes `ExecdClient.WatchMetrics`; the other SDKs' stable metrics services provide point-in-time reads. The [CLI](/cli/) also has a metrics stream via `osb sandbox metrics --watch`.
-- **Timeout units:** use Python `timedelta` and JVM `Duration`; JavaScript and C# command timeouts use seconds. Go `RunCommandRequest.Timeout` uses **milliseconds**.
+- **Metrics streaming:** Go exposes `ExecdClient.WatchMetrics` and Rust exposes `ExecdClient::watch_metrics`; the other SDKs' stable metrics services provide point-in-time reads. The [CLI](/cli/) also has a metrics stream via `osb sandbox metrics --watch`.
+- **Timeout units:** use Python `timedelta` and JVM `Duration`; JavaScript and C# command timeouts use seconds. Go `RunCommandRequest.Timeout` and Rust `RunCommandRequest::with_timeout_millis` use **milliseconds**.
 
 Template-backed sandboxes require an explicit TTL and inherit their workload configuration from the published template. Their egress policy is managed through the lifecycle API; they do not have a sandbox-side Credential Vault.
 
@@ -51,7 +54,7 @@ Template-backed sandboxes require an explicit TTL and inherit their workload con
 
 ## Diagnostics
 
-All sandbox SDKs expose diagnostic context, logs, and events on both `Sandbox`
+All sandbox SDKs except Rust expose diagnostic context, logs, and events on both `Sandbox`
 and `SandboxManager`. Use a manager when execd is not ready: these requests go
 to the lifecycle server without connecting to the sandbox.
 
@@ -61,19 +64,20 @@ to the lifecycle server without connecting to the sandbox.
 | Kotlin/Java, JavaScript | `getDiagnosticContext` | `getDiagnosticLogs` / `getDiagnosticEvents` |
 | Go | `GetDiagnosticContext` | `GetDiagnosticLogs` / `GetDiagnosticEvents` |
 | C# | `GetDiagnosticContextAsync` | `GetDiagnosticLogsAsync` / `GetDiagnosticEventsAsync` |
+| Rust | Not implemented | Not implemented |
 
 Manager methods take a sandbox ID; sandbox methods use the current instance.
 Context returns the backend type, backend-defined identifiers, and lifecycle state
 when available. Log/event methods also require a scope such as `container` or
 `runtime`. Availability depends on the server backend. URL-delivered content is
 not downloaded automatically; inspect `truncated` and `warnings`.
-C# `SdkDiagnosticsOptions` separately controls local SDK logging.
+C# `SdkDiagnosticsOptions` separately controls local SDK logging. The Rust SDK does not implement diagnostics yet; see the [Rust SDK scope](/sdks/rust#scope-and-limitations).
 
 ## Lifecycle and cleanup
 
-High-level image/snapshot creation defaults to a 10-minute TTL. Configure the TTL explicitly for your workload. To disable expiration, use Python `timeout=None`, JavaScript `timeoutSeconds: null`, Kotlin `timeout(null)`, or the Go/C# `ManualCleanup` option. Template creation requires a TTL.
+High-level image/snapshot creation defaults to a 10-minute TTL. Configure the TTL explicitly for your workload. To disable expiration, use Python `timeout=None`, JavaScript `timeoutSeconds: null`, Kotlin `timeout(null)`, or the Go/C# `ManualCleanup` and Rust `with_manual_cleanup()` options. Template creation requires a TTL.
 
-`close()`, `DisposeAsync()`, and context-manager exit release local client resources; they do not kill the remote sandbox. Kill it in a `finally`/`defer` block, or use Python's `destroy()` helper. Pool acquisitions are consumed once and are not returned to the idle buffer.
+`close()`, `DisposeAsync()`, and context-manager exit release local client resources; they do not kill the remote sandbox. Kill it in a `finally`/`defer` block, or use Python's `destroy()` helper. Rust handles hold only a shared connection pool, so dropping them is enough. Pool acquisitions are consumed once and are not returned to the idle buffer.
 
 ## CLI
 
