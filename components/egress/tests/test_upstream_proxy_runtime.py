@@ -41,6 +41,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 MITMDUMP = shutil.which("mitmdump")
 
@@ -55,8 +56,8 @@ VAULT_PAYLOAD = json.dumps(
             {
                 "name": "compat-api",
                 "match": {
-                    "schemes": ["http"],
-                    "hosts": ["code.example.com"],
+                    "schemes": ["http", "https"],
+                    "hosts": ["code.example.com", "code.invalid"],
                     "methods": ["GET"],
                     "paths": ["/v1/secure"],
                 },
@@ -325,6 +326,7 @@ class _VaultUnixServer:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._mode = "normal"
+        self.denied_hosts: set[str] = set()
 
     def start(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -353,6 +355,13 @@ class _VaultUnixServer:
                 data += chunk
             with self._lock:
                 mode = self._mode
+                denied_hosts = set(self.denied_hosts)
+            path = data.split(b" ", 2)[1].decode("ascii")
+            if path.startswith("/egress/authorize?"):
+                host = parse_qs(urlsplit(path).query).get("host", [""])[0]
+                status = 503 if mode == "policy-error" else 403 if host in denied_hosts else 204
+                conn.sendall(f"HTTP/1.1 {status} Policy\r\ncontent-length: 0\r\n\r\n".encode())
+                return
             if mode == "server-error":
                 body = b"vault-private-diagnostic"
                 conn.sendall(
@@ -490,7 +499,10 @@ class UpstreamProxyRuntimeTest(unittest.TestCase):
         # The CONNECT dial is routed: lets tests keep a business FQDN in the
         # CONNECT authority while dialing the local target.
         cls._proxy = _ConnectProxy(
-            routes={("code.example.com", 80): ("127.0.0.1", cls._target.port)}
+            routes={
+                ("code.example.com", 80): ("127.0.0.1", cls._target.port),
+                ("code.invalid", 80): ("127.0.0.1", cls._target.port),
+            }
         )
         cls._proxy.start()
         cls._tmp = tempfile.TemporaryDirectory(prefix="egress-upstream-test-")
@@ -795,6 +807,139 @@ class UpstreamProxyRuntimeTest(unittest.TestCase):
         finally:
             self._vault.set_mode("normal")
             _stop(proc)
+
+    def test_explicit_proxy_policy_without_destination_dns(self) -> None:
+        port = _free_port()
+        proc, log = _start_mitmdump(
+            port,
+            {
+                "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET": self._vault_path,
+                "OPENSANDBOX_EGRESS_UPSTREAM_PROXY": f"http://127.0.0.1:{self._proxy.port}",
+                "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH": PROXY_AUTH,
+            },
+            load_system_addon=True,
+        )
+        try:
+            # .invalid has no DNS answer; only the fake upstream knows its route.
+            status, _ = _proxy_get_host(port, "http://code.invalid/v1/secure", "code.invalid")
+            self.assertEqual(200, status, log)
+            self.assertEqual("code.invalid:80", self._proxy.requests[-1]["authority"])
+            self.assertEqual(VAULT_AUTH, self._target.requests[-1]["headers"]["authorization"])
+            self.assertEqual(PROXY_AUTH, self._proxy.requests[-1]["proxy-authorization"])
+
+            before = len(self._proxy.requests)
+            with self._vault._lock:
+                self._vault.denied_hosts.add("code.invalid")
+            status, _ = _proxy_get_host(port, "http://code.invalid/v1/secure", "code.invalid")
+            self.assertEqual(403, status, log)
+            self.assertEqual(before, len(self._proxy.requests), log)
+
+            # CONNECT is checked before any TLS or upstream tunnel is opened.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            try:
+                conn.request("CONNECT", "code.invalid:443")
+                self.assertEqual(403, conn.getresponse().status, log)
+            finally:
+                conn.close()
+            self.assertEqual(before, len(self._proxy.requests), log)
+
+            # Host must not select a credential for a different dial target.
+            status, _ = _proxy_get_host(port, "http://other.invalid/v1/secure", "code.invalid")
+            self.assertEqual(403, status, log)
+            self.assertEqual(before, len(self._proxy.requests), log)
+
+            self._vault.set_mode("policy-error")
+            status, _ = _proxy_get_host(port, "http://code.invalid/v1/secure", "code.invalid")
+            self.assertEqual(503, status, log)
+            self.assertEqual(before, len(self._proxy.requests), log)
+        finally:
+            with self._vault._lock:
+                self._vault.denied_hosts.clear()
+            self._vault.set_mode("normal")
+            _stop(proc)
+
+    def test_explicit_https_credentials_and_policy_update_on_existing_tunnel(self) -> None:
+        import ssl
+
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            self.skipTest("openssl is not installed")
+        received: list[dict[str, str]] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:
+                received.append(dict(self.headers))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *_args) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert, key = Path(tmp) / "cert.pem", Path(tmp) / "key.pem"
+            subprocess.run(
+                [
+                    openssl, "req", "-x509", "-newkey", "rsa:2048",
+                    "-keyout", str(key), "-out", str(cert), "-days", "1",
+                    "-nodes", "-subj", "/CN=code.invalid",
+                    "-addext", "subjectAltName=DNS:code.invalid",
+                ],
+                check=True, capture_output=True,
+            )
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert, key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            upstream = _ConnectProxy({("code.invalid", 443): server.server_address})
+            upstream.start()
+            port = _free_port()
+            proc, log = _start_mitmdump(
+                port,
+                {
+                    "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET": self._vault_path,
+                    "OPENSANDBOX_EGRESS_UPSTREAM_PROXY": f"http://127.0.0.1:{upstream.port}",
+                    "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH": PROXY_AUTH,
+                },
+                "--set", f"confdir={tmp}",
+                "--set", f"ssl_verify_upstream_trusted_ca={cert}",
+                load_system_addon=True,
+            )
+            client_context = ssl.create_default_context(cafile=str(Path(tmp) / "mitmproxy-ca-cert.pem"))
+            conn = http.client.HTTPSConnection("127.0.0.1", port, context=client_context, timeout=10)
+            conn.set_tunnel("code.invalid", 443)
+            try:
+                conn.request("GET", "/v1/secure")
+                response = conn.getresponse()
+                self.assertEqual(200, response.status, log)
+                self.assertEqual(b"ok", response.read())
+                self.assertEqual(VAULT_AUTH, received[0]["Authorization"])
+                self.assertNotIn("Proxy-Authorization", received[0])
+                self.assertEqual(["code.invalid:443"], [r["authority"] for r in upstream.requests])
+                self.assertEqual(PROXY_AUTH, upstream.requests[0]["proxy-authorization"])
+
+                with self._vault._lock:
+                    self._vault.denied_hosts.add("code.invalid")
+                conn.request("GET", "/v1/secure")
+                response = conn.getresponse()
+                self.assertEqual(403, response.status, log)
+                response.read()
+                self.assertEqual(1, len(received))
+                self.assertEqual(1, len(upstream.requests))
+                self.assertNotIn(VAULT_AUTH, "\n".join(log))
+                self.assertNotIn(PROXY_AUTH, "\n".join(log))
+            finally:
+                conn.close()
+                with self._vault._lock:
+                    self._vault.denied_hosts.clear()
+                _stop(proc)
+                upstream.stop()
+                server.shutdown()
+                server.server_close()
 
 
 if __name__ == "__main__":

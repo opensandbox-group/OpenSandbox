@@ -80,6 +80,10 @@ const listenHostLoopback = "127.0.0.1"
 // the bare address, no brackets).
 const listenHostLoopbackV6 = "::1"
 
+// ExplicitProxyPort is the sidecar's loopback HTTP proxy for applications that
+// delegate destination DNS to the configured upstream proxy.
+const ExplicitProxyPort = 18082
+
 // systemScriptPath: bundled system addon shipped via the egress Dockerfile
 // (COPY components/egress/mitmscripts /var/egress/mitmscripts). Always loaded.
 const systemScriptPath = "/var/egress/mitmscripts/system.py"
@@ -338,6 +342,9 @@ func buildMitmdumpArgs(cfg Config) []string {
 	}
 	if host == listenHostLoopback && cfg.ListenV6 != nil && *cfg.ListenV6 {
 		args = append(args, "--mode", fmt.Sprintf("transparent@%s:%d", listenHostLoopbackV6, cfg.ListenPort))
+	}
+	if strings.TrimSpace(cfg.ListenHost) == "" && strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
+		args = append(args, "--mode", fmt.Sprintf("regular@127.0.0.1:%d", ExplicitProxyPort))
 	}
 	args = append(args,
 		"--listen-port", strconv.Itoa(cfg.ListenPort),

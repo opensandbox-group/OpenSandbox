@@ -156,6 +156,25 @@ func TestStartActiveSocketServerResolveRoute(t *testing.T) {
 	require.Equal(t, "POST", resp.Header.Get("Allow"))
 }
 
+func TestStartActiveSocketServerProxyPolicyRoute(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	_, cleanup, err := StartActiveSocketServerRequestAware(
+		func(http.ResponseWriter, *http.Request) {}, nil, socketPath, -1,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("host") != "code.invalid" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, cleanup(context.Background())) }()
+	resp, _ := httpGetUnix(t, socketPath, "/egress/authorize?host=code.invalid&port=443")
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp, _ = httpGetUnix(t, socketPath, "/egress/authorize?host=blocked.invalid&port=443")
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 func TestStartActiveSocketServerResolveHandlerNilForbidden(t *testing.T) {
 	socketPath := shortSocketPath(t)
 	t.Cleanup(func() { _ = os.Remove(socketPath) })

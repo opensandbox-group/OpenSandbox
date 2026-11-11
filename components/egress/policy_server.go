@@ -163,7 +163,7 @@ func startPolicyServer(
 		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServerRequestAware(
 			handler.handleCredentialVaultActive,
 			credentialvault.NewResolveHandler(handler.resolveVaultAccess),
-			socketPath, int(mitmGID))
+			socketPath, int(mitmGID), http.HandlerFunc(handler.handleProxyAuthorize))
 		if err != nil {
 			return nil, nil, fmt.Errorf("credential vault active socket: %w", err)
 		}
