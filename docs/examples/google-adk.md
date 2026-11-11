@@ -32,12 +32,12 @@ opensandbox-server
 
 ## Run the example
 
-```shell
-# Install OpenSandbox + Google ADK deps
-uv pip install "google-adk[opensandbox]>=2.13.0"
+The agent uses DeepSeek through ADK's `LiteLlm` adapter. Install the connector and its MCP runtime dependency:
 
-# Set the Gemini API key and local server address
-export GOOGLE_API_KEY="your-gemini-api-key"
+```shell
+uv pip install "google-adk[opensandbox,extensions]>=2.13.0" "mcp>=2.2,<3"
+
+export OPENAI_API_KEY="your-deepseek-api-key"
 export SANDBOX_DOMAIN="localhost:8080"
 # Set SANDBOX_API_KEY too if your server requires authentication
 
@@ -45,21 +45,9 @@ export SANDBOX_DOMAIN="localhost:8080"
 uv run python examples/google-adk/main.py
 ```
 
+The default model is `openai/deepseek-flash` at `https://api.deepseek.com/v1`. To use another OpenAI-compatible endpoint, set `GOOGLE_ADK_MODEL` with the `openai/` prefix and set `OPENAI_BASE_URL`. The endpoint must support tool calling.
+
 The script writes `/workspace/math.py`, executes it to produce `5754`, then writes and reads back `ADK + OpenSandbox` from `/workspace/notes.txt`. All prompts share one session and workspace. Tool events and model responses are printed to the terminal.
-
-## Use DeepSeek instead of Gemini
-
-Install ADK's LiteLLM connector with its MCP runtime dependency and select an OpenAI-compatible model with the `openai/` prefix:
-
-```shell
-uv pip install "google-adk[opensandbox,extensions]>=2.13.0" "mcp>=2.2,<3"
-export GOOGLE_ADK_MODEL="openai/deepseek-flash"
-export OPENAI_BASE_URL="https://api.deepseek.com/v1"
-export OPENAI_API_KEY="your-deepseek-api-key"
-uv run python examples/google-adk/main.py
-```
-
-This path uses ADK's `LiteLlm` adapter and does not require `GOOGLE_API_KEY`. The sandbox tools and lifecycle are unchanged. The selected endpoint must support tool calling.
 
 ## Native ADK integration
 
@@ -81,7 +69,7 @@ toolset = EnvironmentToolset(
 
 ADK provides `Execute`, `WriteFile`, `ReadFile`, and `EditFile`. The toolset initializes the environment lazily. Relative paths resolve under `/workspace`; commands also run there. The environment creates a sandbox with a 300-second lifetime and renews it before command execution. The example closes the toolset in `finally`, destroying the sandbox it created even when a request fails.
 
-Earlier versions of this example wrapped the OpenSandbox SDK in three custom functions. The example now uses ADK's native environment integration while retaining the same entry point and environment variables. It explicitly passes `ConnectionConfig`, so the existing `SANDBOX_*` names continue to work.
+Earlier versions of this example wrapped the OpenSandbox SDK in three custom functions. The example now uses ADK's native environment integration while retaining the same entry point and sandbox environment variables. It explicitly passes `ConnectionConfig`, so the existing `SANDBOX_*` names continue to work.
 
 ## Environment Variables
 
@@ -90,10 +78,9 @@ Earlier versions of this example wrapped the OpenSandbox SDK in three custom fun
 | `SANDBOX_DOMAIN` | `localhost:8080` | Sandbox service address |
 | `SANDBOX_API_KEY` | _(optional for local)_ | API key if your server requires authentication |
 | `SANDBOX_IMAGE` | `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.1.0` | Sandbox image to use |
-| `GOOGLE_API_KEY` | _(required for Gemini)_ | Gemini API key |
-| `GOOGLE_ADK_MODEL` | `gemini-2.5-flash` | Gemini model name, or an `openai/`-prefixed model for an OpenAI-compatible endpoint |
-| `OPENAI_API_KEY` | _(required for `openai/` models)_ | API key for the selected endpoint |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL for `openai/` models |
+| `GOOGLE_ADK_MODEL` | `openai/deepseek-flash` | Model name with the `openai/` prefix |
+| `OPENAI_API_KEY` | _(required)_ | API key for the selected endpoint |
+| `OPENAI_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI-compatible endpoint base URL |
 
 ## References
 

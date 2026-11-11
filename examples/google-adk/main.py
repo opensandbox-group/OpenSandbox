@@ -18,6 +18,7 @@ from datetime import timedelta
 from google.adk.agents import Agent
 from google.adk.apps import App
 from google.adk.integrations.opensandbox import OpenSandboxEnvironment
+from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.tools.environment import EnvironmentToolset
@@ -41,18 +42,11 @@ async def main() -> None:
         "SANDBOX_IMAGE",
         "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.1.0",
     )
-    model_name = os.getenv("GOOGLE_ADK_MODEL", "gemini-2.5-flash")
-    if model_name.startswith("openai/"):
-        from google.adk.models.lite_llm import LiteLlm
-
-        model = LiteLlm(
-            model=model_name,
-            api_key=_required_env("OPENAI_API_KEY"),
-            api_base=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        )
-    else:
-        _required_env("GOOGLE_API_KEY")
-        model = model_name
+    model = LiteLlm(
+        model=os.getenv("GOOGLE_ADK_MODEL", "openai/deepseek-flash"),
+        api_key=_required_env("OPENAI_API_KEY"),
+        api_base=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
+    )
 
     config = ConnectionConfig(
         domain=domain,
