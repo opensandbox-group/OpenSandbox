@@ -889,7 +889,7 @@ class PVC(BaseModel):
             "Name of the volume on the target platform. "
             "In Kubernetes this is the PVC name; in Docker this is the named volume name."
         ),
-        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
         max_length=253,
     )
 

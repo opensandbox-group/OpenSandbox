@@ -415,6 +415,17 @@ class TestEnsureValidPvcName:
         assert ensure_valid_pvc_name("data-volume") is None
         assert ensure_valid_pvc_name("pvc1") is None
 
+    def test_dns_subdomain_name_is_valid(self):
+        assert ensure_valid_pvc_name("my.models") is None
+        assert ensure_valid_pvc_name("a.b.c") is None
+
+    @pytest.mark.parametrize("name", [".models", "models.", "my..models", "-models", "models-"])
+    def test_invalid_dns_subdomain_raises(self, name):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_pvc_name(name)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
+
     @pytest.mark.parametrize(
         "name",
         ["", "a" * 254, "MyPVC", "my_pvc"],
