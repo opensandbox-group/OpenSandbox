@@ -203,7 +203,7 @@ func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
 		// intentionally: the disabled path has no reader for this prefix.
 		return env
 	}
-	clean := make([]string, 0, len(env)+7)
+	clean := make([]string, 0, len(env)+11)
 	for _, value := range env {
 		name, _, _ := strings.Cut(value, "=")
 		if !strings.HasPrefix(name, subjectRevisionEnvPrefix) {

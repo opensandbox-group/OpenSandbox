@@ -21,9 +21,12 @@ class SubjectHarness(h.LiveRuntimeHarness):
     sequence = 0
 
     def env(self, drain_seconds=1):
-        # The subject child must not inherit the sidecar's static passthrough
-        # value: production strips it and ships its own handoff, so inheriting
-        # "[]" here would hide a missing admission handoff field.
+        # Mirror buildMitmdumpChildEnv instead of inheriting the sidecar bundle:
+        # production strips the inherited passthrough value and, with admission
+        # on, ships an empty policy explicitly. Inheriting it would hide a
+        # missing handoff field; omitting it is a combination production never
+        # produces. The Go emission is guarded by
+        # TestSubjectAdmissionStaticPassthroughHandoff.
         env = {k: v for k, v in super().env().items()
                if not k.startswith("OPENSANDBOX_EGRESS_REVISION_")
                and k != "OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS"}
@@ -32,6 +35,7 @@ class SubjectHarness(h.LiveRuntimeHarness):
                       MAX_SNAPSHOT_BYTES="1048576", RETAINED_PAYLOAD_BUDGET="4194304",
                       TLS_ADMISSION="true", TLS_CAPACITY="2", PROCESS_TLS_CAPACITY="2")
         env.update({"OPENSANDBOX_EGRESS_SUBJECT_REVISION_" + k: v for k, v in values.items()})
+        env["OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS"] = "[]"
         return env
 
     def start(self, **kwargs):

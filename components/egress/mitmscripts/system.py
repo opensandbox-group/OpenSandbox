@@ -1931,6 +1931,9 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
         if (getattr(client, "tls", False) or flow.request.scheme == "https"
                 or getattr(client, "alpn", None) == b"h2"):
             flow.metadata[FLOW_REJECTION_KEY] = True
+            # killable is always true here: HttpStream sets flow.live = True
+            # before yielding HttpRequestHeadersHook, and an already-killed
+            # flow is not forwarded either. The guard stays defensive.
             if flow.killable:
                 flow.kill()
             ctx.log.warn("credential proxy: request denied reason=subject_requests_disabled")
