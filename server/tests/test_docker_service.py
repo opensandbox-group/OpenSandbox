@@ -110,6 +110,13 @@ def test_parse_memory_limit_handles_units():
     assert parse_memory_limit("2gi") == 2 * 1024**3
     assert parse_memory_limit("invalid") is None
 
+
+def test_parse_memory_limit_rejects_values_above_int64():
+    assert parse_memory_limit("9223372036854775807") == (1 << 63) - 1
+    assert parse_memory_limit("8192Gi") == 8192 * 1024**3
+    assert parse_memory_limit("9223372036854775808") is None
+    assert parse_memory_limit("999999999999999999999Gi") is None
+
 def test_parse_nano_cpus():
     assert parse_nano_cpus("500m") == 500_000_000
     assert parse_nano_cpus("2") == 2_000_000_000
