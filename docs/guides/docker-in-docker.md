@@ -195,7 +195,7 @@ for i in $(seq 1 60); do
 done
 ```
 
-The trailing `wait` is load-bearing, not cleanup: bootstrap considers the sandbox's user command finished once this script returns, and a template-mode pod stops when it returns — without it the sandbox terminates right after a successful readiness check. Waiting in the foreground keeps the sandbox alive for as long as the daemon runs; the trap forwards stop signals (which arrive at this script, not the daemon); and after a signal interrupts the first wait, the bounded loop keeps the script alive until dockerd's graceful shutdown finishes — while a daemon crash on its own (wait rc 1–127) propagates a non-zero exit instead of looking like success.
+The trailing `wait` is load-bearing, not cleanup: bootstrap considers the sandbox's user command finished once this script returns, and a template-mode pod stops when it returns — without it the sandbox terminates right after a successful readiness check. Waiting in the foreground keeps the sandbox alive for as long as the daemon runs; the trap forwards stop signals (which arrive at this script, not the daemon); and after a signal interrupts the first wait, the bounded loop keeps the script alive until dockerd's graceful shutdown finishes. A daemon crash on its own — any non-zero exit status with no delivered stop, including signal deaths (an OOM kill's 137 or a segfault's 139) — skips the drain loop and propagates a non-zero exit instead of looking like success.
 
 Verify the driver actually in use:
 
