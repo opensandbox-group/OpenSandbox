@@ -1564,7 +1564,7 @@ export interface components {
              */
             group?: string;
             /**
-             * @description File permissions in octal
+             * @description Octal permission digits 0-7777 written as a decimal integer (e.g., 644 or 4755). The 4000/2000/1000 digits apply setuid/setgid/sticky bits. Explicit 0 sets mode 0000; omitting the field or sending null skips chmod, though chown can still clear existing special bits.
              * @example 755
              */
             mode?: number;
@@ -2629,6 +2629,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description An invalid mode or an unknown POSIX owner/group returns 400 INVALID_FILE_METADATA before any target directory or file for that pair is touched. */
             400: components["responses"]["BadRequest"];
             500: components["responses"]["InternalServerError"];
         };
@@ -3202,6 +3203,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description An invalid mode or an unknown POSIX owner/group returns 400 INVALID_FILE_METADATA before any target directory or file for that pair is touched. */
             400: components["responses"]["BadRequest"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */

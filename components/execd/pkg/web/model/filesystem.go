@@ -14,7 +14,10 @@
 
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type FileInfo struct {
 	Path       string    `json:"path,omitempty"`
@@ -29,10 +32,46 @@ type FileMetadata struct {
 	Path       string `json:"path,omitempty"`
 	Permission `json:",inline"`
 
-	// ModeSet records that the decoded metadata carried a mode, so an explicit
-	// 0 can be told apart from no mode. It is set by the upload handler and is
-	// never encoded.
+	// ModeSet reports whether the last mode field was non-null, so an
+	// explicit 0 can be told apart from omission. It is never encoded.
 	ModeSet bool `json:"-"`
+}
+
+// UnmarshalJSON records mode presence along with the decoded permissions.
+func (m *FileMetadata) UnmarshalJSON(data []byte) error {
+	type plain FileMetadata
+	aux := struct {
+		*plain
+		Mode fileMetadataMode `json:"mode"`
+	}{
+		plain: (*plain)(m),
+		Mode:  fileMetadataMode{value: m.Mode},
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	m.Mode = aux.Mode.value
+	m.ModeSet = aux.Mode.set
+	return nil
+}
+
+// fileMetadataMode preserves int decoding semantics across duplicate keys:
+// null clears presence without discarding an earlier numeric value.
+type fileMetadataMode struct {
+	value int
+	set   bool
+}
+
+func (m *fileMetadataMode) UnmarshalJSON(data []byte) error {
+	var mode *int
+	if err := json.Unmarshal(data, &mode); err != nil {
+		return err
+	}
+	m.set = mode != nil
+	if mode != nil {
+		m.value = *mode
+	}
+	return nil
 }
 
 type Permission struct {

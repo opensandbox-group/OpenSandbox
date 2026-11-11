@@ -206,13 +206,6 @@ func parseUploadMetadata(header *multipart.FileHeader) (*model.FileMetadata, *up
 			fmt.Sprintf("invalid metadata format. %v", err),
 		)
 	}
-	// Mode is a plain int, so decoding into it cannot tell an explicit 0 from
-	// no mode at all.
-	var sent struct {
-		Mode *int `json:"mode"`
-	}
-	_ = json.Unmarshal(metaBytes, &sent) // cannot fail: the same bytes just decoded into meta
-	meta.ModeSet = sent.Mode != nil
 	if meta.Path == "" {
 		return nil, newUploadError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, "metadata path is empty")
 	}

@@ -124,7 +124,7 @@ The regular upload handler serves `POST /files/upload` and, on Linux, `/v1/files
 
 After writing, the handler applies ownership before the explicit mode, so chown cannot clear newly requested setuid/setgid bits. It translates the 4000, 2000, and 1000 digits to Go's setuid, setgid, and sticky flags and applies an explicit `mode: 0`. An omitted or null mode skips chmod: new files use the existing 0777 creation mode subject to umask and filesystem rules, and existing ordinary permission bits are retained. Writes or chown can still clear existing special bits.
 
-Validation is per pair: earlier pairs are not rolled back, multipart parsing may already have created temporary files, and later filesystem or permission failures can leave target changes behind. Windows continues to ignore owner/group and use Windows chmod semantics. The isolated-session upload handler uses its separate write path and is unchanged.
+Validation is per pair: earlier pairs are not rolled back, multipart parsing may already have created temporary files, and later filesystem or permission failures can leave target changes behind. Windows continues to ignore owner/group and use Windows chmod semantics. The isolated-session upload handler keeps its separate write path and permission policy; it ignores `ModeSet` and does not run this permission preflight.
 
 ## Isolated sessions
 
