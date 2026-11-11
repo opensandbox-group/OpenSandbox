@@ -227,6 +227,9 @@ func (b *BindView) Open(path string) (*os.File, error) {
 // relative to the source root, matching MergedView.Search's convention; the
 // router rebases rewritten-route results onto the namespace mount path.
 func (b *BindView) Search(root, pattern string) ([]string, error) {
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return nil, err
+	}
 	rootP, err := b.resolve(root)
 	if err != nil {
 		return nil, err

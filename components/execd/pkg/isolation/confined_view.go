@@ -274,6 +274,9 @@ func (c *ConfinedView) Open(path string) (*os.File, error) {
 // and are skipped) and returns root-relative paths; the router rebases
 // rewritten-route results onto the namespace mount path.
 func (c *ConfinedView) Search(rootPath, pattern string) ([]string, error) {
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return nil, err
+	}
 	base, err := c.rel(rootPath)
 	if err != nil {
 		return nil, err
