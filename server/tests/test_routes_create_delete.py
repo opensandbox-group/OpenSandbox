@@ -412,7 +412,7 @@ def test_create_docker_rejects_invalid_network_policy_actions(
     )
 
     assert response.status_code == 400
-    assert response.json() == {"code": "GENERAL::UNKNOWN_ERROR", "message": message}
+    assert response.json() == {"code": "SANDBOX::INVALID_PARAMETER", "message": message}
     docker_policy_runtime.api.create_container.assert_not_called()
 
 

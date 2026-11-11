@@ -532,7 +532,13 @@ def normalize_network_policy_action(action: Optional[str], field: str) -> str:
     """Normalize action names using the existing Fast Sandbox deny fallback."""
     normalized = (action or "deny").strip().lower() or "deny"
     if normalized not in ("allow", "deny"):
-        raise HTTPException(400, detail=f"{field} must be allow or deny.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": f"{field} must be allow or deny.",
+            },
+        )
     return normalized
 
 
