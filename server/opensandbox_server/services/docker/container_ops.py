@@ -26,7 +26,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from docker.errors import DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound
 from docker.types import DeviceRequest
 from fastapi import HTTPException, status
 
@@ -357,13 +357,21 @@ class DockerContainerOpsMixin:
 
     def _resolve_resource_limits(
         self, request: CreateSandboxRequest
-    ) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    ) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
         resource_limits = (request.resource_limits.root if request.resource_limits else None) or {}
+        # `disk` is the canonical writable-layer quota key; `storage` and
+        # `ephemeral-storage` are accepted as aliases with the same precedence the
+        # Windows profile resolves them, so callers can move between runtimes
+        # without changing keys.
+        for alias in ("storage", "ephemeral-storage"):
+            if "disk" not in resource_limits and alias in resource_limits:
+                resource_limits = {**resource_limits, "disk": resource_limits[alias]}
         resolved: dict[str, Optional[int]] = {}
         for key, parser in (
             ("memory", parse_memory_limit),
             ("cpu", parse_nano_cpus),
             ("gpu", parse_gpu_request),
+            ("disk", parse_memory_limit),
         ):
             if key not in resource_limits:
                 resolved[key] = None
@@ -386,7 +394,7 @@ class DockerContainerOpsMixin:
                     },
                 )
             resolved[key] = parsed
-        return resolved["memory"], resolved["cpu"], resolved["gpu"]
+        return resolved["memory"], resolved["cpu"], resolved["gpu"], resolved["disk"]
 
     def _profile_security_opts(self) -> list[str]:
         """Return the ``security_opt`` entries for the configured AppArmor/seccomp profiles.
@@ -409,6 +417,7 @@ class DockerContainerOpsMixin:
         nano_cpus: Optional[int],
         network_mode: str,
         gpu_count: Optional[int] = None,
+        disk_quota: Optional[int] = None,
     ) -> Dict[str, Any]:
         host_config_kwargs: Dict[str, Any] = {"network_mode": network_mode}
         security_opts: list[str] = []
@@ -433,6 +442,15 @@ class DockerContainerOpsMixin:
             host_config_kwargs["device_requests"] = [
                 DeviceRequest(count=gpu_count, capabilities=[["gpu"]])
             ]
+        if disk_quota is not None:
+            # Bounds the container's writable layer (upper dir) via HostConfig
+            # StorageOpt; bind mounts, named volumes, and read-only image layers
+            # are not covered. The quota is sent in bytes so the value is
+            # storage-driver independent. If the node's storage driver cannot
+            # enforce it (for example overlay2 without pquota), the Engine fails
+            # the create call and _create_and_start_container maps that to a 400
+            # instead of silently ignoring the request.
+            host_config_kwargs["storage_opt"] = {"size": str(disk_quota)}
         if self.docker_runtime:
             logger.info(
                 f"Using Docker runtime '{self.docker_runtime}' for container creation"
@@ -564,6 +582,24 @@ class DockerContainerOpsMixin:
                         "message": (
                             "The configured Docker client/daemon does not support "
                             f"platform-aware container create for '{docker_platform}'."
+                        ),
+                    },
+                ) from exc
+
+            if isinstance(exc, APIError) and "storage-opt" in str(exc):
+                # The Engine rejects HostConfig.StorageOpt when the node's storage
+                # driver cannot enforce a writable-layer quota (for example
+                # overlay2 over ext4, or XFS without pquota). Fail fast with a
+                # clear 400 instead of silently dropping resourceLimits.disk.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            "The Docker daemon rejected resourceLimits.disk: "
+                            f"{str(exc)}. The node's Docker storage driver must "
+                            "support writable-layer quotas (for example overlay2 "
+                            "on XFS with pquota, devicemapper, or zfs)."
                         ),
                     },
                 ) from exc
