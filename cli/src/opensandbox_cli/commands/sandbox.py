@@ -1015,12 +1015,20 @@ def _parse_metric_stream_line(line: str) -> tuple[SandboxMetrics | None, str | N
     if not payload:
         return None, None
 
-    decoded: Any = json.loads(payload)
+    try:
+        decoded: Any = json.loads(payload)
+    except json.JSONDecodeError:
+        return None, "Metrics stream error: invalid JSON"
+
     if isinstance(decoded, dict) and decoded.get("error"):
         return None, f"Metrics stream error: {decoded['error']}"
-    if isinstance(decoded, dict) and "cpu_used_pct" in decoded:
-        return MetricsModelConverter.to_sandbox_metrics(Metrics.from_dict(decoded)), None
-    return SandboxMetrics.model_validate(decoded), None
+
+    try:
+        if isinstance(decoded, dict) and "cpu_used_pct" in decoded:
+            return MetricsModelConverter.to_sandbox_metrics(Metrics.from_dict(decoded)), None
+        return SandboxMetrics.model_validate(decoded), None
+    except (KeyError, TypeError, ValueError, ValidationError) as exc:
+        return None, f"Metrics stream error: {exc}"
 
 
 def _describe_create_timeout(
