@@ -790,6 +790,8 @@ Each `StreamEvent` contains:
 
 Return a non-nil error from the handler to stop processing the stream early.
 
+Foreground `RunCommand` calls close the stream after delivering an `execution_complete` event with `exit_code`, or an `error` event with `error.exit_code`. These fields confirm that modern execd has finished draining command output, so callers do not wait for the server to close the HTTP response. Older servers that omit these fields are read through EOF to preserve trailing output. Background calls still return on the startup acknowledgement, which does not report the process exit status.
+
 ## Client Options
 
 All client constructors accept optional `Option` functions. Custom HTTP clients and health checks must honor context cancellation for timeouts to take effect:
