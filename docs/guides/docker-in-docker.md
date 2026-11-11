@@ -19,7 +19,7 @@ Under Kata the sandbox runs as a full VM, so a nested `dockerd` runs against the
 
 ## Prerequisites
 
-- The sandbox image must contain the daemon and CLI (for example `docker:27-dind`, or a custom image with `dockerd` and `docker` installed).
+- The sandbox image must contain the daemon and CLI (for example `docker:27-dind`, or a custom image with `dockerd` and `docker` installed). One caveat on the Kubernetes/BatchSandbox path: the image's own entrypoint never runs. The server overrides the container command with its bootstrap script and hands it the sandbox request's `entrypoint`, so the official image's automatic `dind` wrapper does not come along — daemon startup and delegation belong in the entrypoint you send (see [cgroup delegation](#cgroup-delegation-make-memory-and-cpus-enforce)).
 - The server must be configured with a Kata secure runtime. The runtime type and RuntimeClass must be paired correctly:
 
   | `secure_runtime.type` | `k8s_runtime_class` | Container rootfs inside the guest |
@@ -48,6 +48,8 @@ Under Kata the sandbox runs as a full VM, so a nested `dockerd` runs against the
 
   The target namespace must also run Pod Security Admission at the `privileged` enforce level (`pod-security.kubernetes.io/enforce=privileged`); `baseline` and `restricted` reject privileged containers and added capabilities.
 
+  The template grant reaches **template-mode** sandboxes only. A request carrying `extensions.poolRef` is served from a Pool instead: the provider builds the sandbox from the Pool's pod spec and returns before the template extras are read, so neither the template's `securityContext` nor the server-injected RuntimeClass reaches a pooled sandbox — following the template route alone still leaves `dockerd` unable to start there. For pool mode, put `privileged: true` and the Kata `runtimeClassName` on the Pool's own pod template (`spec.template.spec` of the `Pool` resource, a standard PodSpec — see the [shipped Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml)). Pooled sandboxes also reject `network_policy` and `volumes` requests outright, so the [policy interaction](#dind-and-network-policy-are-mutually-exclusive) below is a template-mode concern.
+
   ::: warning Verification status
   This guide documents the standard DinD-on-Kubernetes pattern — a privileged sandbox pod running the official Docker `dind` image, paired with `privileged_without_host_devices = true` on the Kata runtime handler. It has not yet been verified end to end on an OpenSandbox + Kata deployment; capability, storage, and cgroup behavior vary with the Kata, containerd, and kernel versions in your cluster. Create a sandbox, run `docker info` inside, check the storage driver, and run a nested `docker run` before relying on this setup in production.
   :::
@@ -66,11 +68,23 @@ A `dockerd --bridge=none --iptables=false` daemon starts without `NET_ADMIN`, bu
 
 ## Storage driver: give `/var/lib/docker` a filesystem `overlay2` can use
 
-Under Kata, the sandbox container's root filesystem is not a local filesystem inside the guest VM: on `kata-qemu` the rootfs is shared into the guest over virtio-fs, and on `kata-fc` it is a devmapper block device. Neither can host `dockerd`'s `overlay2` data directory — overlay upper/work layers are not supported on a virtio-fs share, and the devmapper rootfs layout is not a filesystem the driver can build on. Started against the container rootfs, the daemon silently falls back to the `vfs` driver, which is significantly slower and uses far more disk.
+`overlay2` needs a filesystem it can build on — `ext4`, or `xfs` with `ftype=1` — living inside the guest VM. What the container rootfs presents depends on how the runtime hands it over, so probe it instead of assuming from the runtime class alone:
 
-The same limitation applies to any directory shared into the guest over virtio-fs — including a regular sandbox volume or PVC-backed mount — so "mount a volume" is not automatically a fix for the storage driver. What the daemon needs is a filesystem that lives inside the guest and supports `overlay2`.
+- **`kata-qemu`**: the rootfs is shared into the guest over virtio-fs. A virtio-fs share is not a valid `overlay2` backing — a daemon started against the container rootfs silently falls back to the `vfs` driver, which is significantly slower and uses far more disk.
+- **`kata-fc`**: the rootfs is a devmapper snapshot device attached to the guest as a block device — device-mapper is only the block backing layer, and the filesystem on the device is what the daemon sees. The snapshotter formats snapshot devices `ext4` by default (`xfs` is a configured option — see the [containerd devmapper snapshotter docs](https://github.com/containerd/containerd/blob/main/docs/snapshotters/devmapper.md)), and an `ext4` (or `xfs ftype=1`) mount inside the guest **can** host `overlay2`. Whether a given cluster's devmapper setup does that is configuration, so verify before relying on it:
 
-For short-lived sandboxes, put `/var/lib/docker` on a `tmpfs` — with its size chosen to fit **inside the sandbox memory limit**: under Kata a tmpfs consumes guest VM memory and counts against the pod's memory limit, so an oversized `size=` (for example `32g` on a small sandbox) will OOM the sandbox long before the tmpfs fills.
+  ```bash
+  findmnt -no FSTYPE -T /var/lib/docker
+  # ext4 → overlay2 can use it; xfs → also check ftype below; virtiofs/nfs → not usable
+  xfs_info /var/lib/docker | grep -o 'ftype=[01]'
+  # for xfs: overlay2 requires ftype=1
+  ```
+
+  The deciding check is the daemon itself: after startup, `docker info` names the driver in use (`vfs` means the backing did not qualify).
+
+The same limitation applies to any directory shared into the guest over virtio-fs — including a regular sandbox volume or PVC-backed mount — so "mount a volume" is not automatically a fix for the storage driver.
+
+For short-lived sandboxes where the probe says the rootfs can't host `overlay2`, put `/var/lib/docker` on a `tmpfs` — with its size chosen to fit **inside the sandbox memory limit**: under Kata a tmpfs consumes guest VM memory and counts against the pod's memory limit, so an oversized `size=` (for example `32g` on a small sandbox) will OOM the sandbox long before the tmpfs fills.
 
 For long-lived sandboxes with larger image caches, a block-device-backed filesystem would be the durable option, but OpenSandbox sandboxes currently have no supported way to expose a raw block device (raw block PVCs are not wired into the sandbox pod, and the sandbox volume API does not cover block devices), so this has to be provisioned by the platform image or bootstrap layer rather than from the sandbox API.
 
@@ -80,27 +94,46 @@ The complete bootstrap, in the required order (storage mount and cgroup delegati
 
 The nested daemon creates cgroups for its containers under the guest kernel's cgroup v2 hierarchy, and it detects the delegated controllers when it starts. For limits to be enforced, the controllers must be enabled in `cgroup.subtree_control` **before** `dockerd` starts — enabling them afterwards has no effect on the running daemon without a restart.
 
-On cgroup v2 that write normally fails with `EBUSY`: the kernel's no-internal-process rule forbids enabling controllers on a cgroup that still contains processes, and the shell that starts the daemon lives in that cgroup. The official `docker:dind` image handles this in its `dind` helper by first moving every process into a child cgroup (`/sys/fs/cgroup/init`) and only then enabling the controllers — see the [`dind` wrapper script](https://github.com/moby/moby/blob/master/hack/dind). The image's `dockerd-entrypoint.sh` invokes that helper automatically, so sandboxes started from an official `docker:N-dind` image with the image's entrypoint get the delegation for free. The delegation also needs `/sys/fs/cgroup` to be writable inside the container — one more reason the pod must run privileged (see [Prerequisites](#prerequisites)).
+On cgroup v2 that write normally fails with `EBUSY`: the kernel's no-internal-process rule forbids enabling controllers on a cgroup that still contains processes, and the shell that starts the daemon lives in that cgroup. The official `docker:dind` image handles this in its `dind` helper by first moving every process into a child cgroup (`/sys/fs/cgroup/init`) and only then enabling the controllers — see the [`dind` wrapper script](https://github.com/moby/moby/blob/master/hack/dind). On OpenSandbox's Kubernetes/BatchSandbox path, that helper does **not** run for you: the server overrides the container command with its bootstrap script — in template mode and in pool mode alike — and passes the sandbox request's `entrypoint` to it, so the image's `dockerd-entrypoint.sh`/`dind` wrapper never executes. An official `docker:N-dind` image still contributes the `dockerd`/`docker` binaries, but the delegation and the daemon startup are yours to perform in the entrypoint the sandbox request sends (below) or in the platform bootstrap. The delegation also needs `/sys/fs/cgroup` to be writable inside the container — one more reason the pod must run privileged (see [Prerequisites](#prerequisites)).
 
-If you start `dockerd` yourself (custom image or platform bootstrap), reproduce the same two steps — process move, then enable controllers — before launching the daemon:
+Reproduce the same two steps — process move, then enable controllers — in the script that launches `dockerd`:
 
 ```bash
 # --- storage: put /var/lib/docker on a tmpfs sized within the memory limit ---
+# (only when the probe in the storage section says the rootfs can't host overlay2)
 mkdir -p /var/lib/docker
 mount -t tmpfs -o size=4g tmpfs /var/lib/docker
 
 # --- cgroup delegation (must run before dockerd starts) ---
 if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
-    mkdir -p /sys/fs/cgroup/init
+    # /sys/fs/cgroup must be writable here. If it is not, the pod is not
+    # privileged (or the runtime handler blocks the mount) and there is
+    # nothing to retry — fail loudly instead of spinning.
+    if ! mkdir -p /sys/fs/cgroup/init 2> /tmp/cgroup.err; then
+        echo "cannot create /sys/fs/cgroup/init — /sys/fs/cgroup not writable? error:" >&2
+        cat /tmp/cgroup.err >&2
+        exit 1
+    fi
     # Move the processes out of the root group (otherwise writing
     # subtree_control fails with EBUSY), then enable every controller.
-    # The loop retries because exec sessions spawn new processes in the
-    # root group while the move is in flight.
-    while ! {
-        xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs || :
-        sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers \
-            > /sys/fs/cgroup/cgroup.subtree_control
-    }; do true; done
+    # The retries settle the race where exec sessions spawn new processes
+    # into the root group while the move is in flight — and terminate with
+    # the captured errors if the write never succeeds.
+    delegated=0
+    for _ in $(seq 1 20); do
+        xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>> /tmp/cgroup.err || :
+        if sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers \
+            > /sys/fs/cgroup/cgroup.subtree_control 2>> /tmp/cgroup.err; then
+            delegated=1
+            break
+        fi
+        sleep 0.5
+    done
+    if [ "$delegated" -ne 1 ]; then
+        echo "cgroup controller delegation failed after 20 attempts — last errors:" >&2
+        tail -n 5 /tmp/cgroup.err >&2
+        exit 1
+    fi
 fi
 
 # --- start the daemon and wait, bounded ---
@@ -143,7 +176,7 @@ docker run --rm --memory 256m python:3.11 sh -c 'cat /sys/fs/cgroup/memory.max 2
 # Expected: 268435456
 ```
 
-If your platform auto-starts the nested daemon for DinD-style images, prefer images whose entrypoint performs the delegation (the official `dind` image does), or add these steps to the platform bootstrap — sandbox users should not need to configure this manually.
+On OpenSandbox the image entrypoint does not run (see [Prerequisites](#prerequisites)), so DinD-style images do not get the delegation for free: fold the storage mount, the delegation, and the daemon startup into the entrypoint your sandbox request sends, or into the platform bootstrap — sandbox users should not need to configure this manually.
 
 ## Build-context ownership
 
@@ -173,7 +206,7 @@ The nested daemon's pulls are ordinary sandbox egress traffic:
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `docker info` shows `Driver: vfs` | `/var/lib/docker` not on a filesystem `overlay2` can use (daemon started against the virtio-fs/devmapper rootfs) | Mount the tmpfs (sized within the memory limit) before starting `dockerd`; recreate the sandbox if it already fell back |
+| `docker info` shows `Driver: vfs` | `/var/lib/docker` not on a filesystem `overlay2` can use (daemon started against a virtio-fs share, or a devmapper rootfs whose filesystem does not qualify) | Probe the backing (`findmnt -no FSTYPE -T /var/lib/docker`, `xfs_info` for xfs); mount the tmpfs (sized within the memory limit) before starting `dockerd`; recreate the sandbox if it already fell back |
 | Daemon dies during startup (readiness wait reports "dockerd exited") | Pod not privileged, or another prerequisite (mount/cgroup) is wrong | Check `/tmp/dockerd.log`; verify the template sets `privileged: true`, the namespace PSA level is `privileged`, and the containerd Kata handler sets `privileged_without_host_devices = true` (see Prerequisites) |
 | `--memory`/`mem_limit` fails or is ignored | Controllers not delegated before the daemon started | Run the delegation snippet (process move, then enable controllers) before starting `dockerd`; restart the daemon if it already started without them |
 | `failed to Lchown ... for UID <large N>` on COPY | Large-UID owners in the build context under a userns-capped runtime | Normalize ownership (`tar --owner=0 --group=0`) or use a Kata sandbox |
