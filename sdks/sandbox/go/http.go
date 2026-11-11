@@ -170,7 +170,9 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // WithHeaders adds custom HTTP headers to all requests. These are applied
-// before the auth and content-type headers, so they cannot override those.
+// before the content-type and accept headers, so they cannot override those.
+// An entry matching the auth header name (case-insensitively) takes
+// precedence over the configured API key.
 func WithHeaders(headers map[string]string) Option {
 	return func(cl *Client) {
 		if cl.headers == nil {
@@ -180,6 +182,14 @@ func WithHeaders(headers map[string]string) Option {
 			cl.headers[k] = v
 		}
 	}
+}
+
+// hasHeaderName reports whether headers already carries a value for name,
+// matched case-insensitively via MIME canonicalization. A present-but-empty
+// value counts as present.
+func hasHeaderName(headers http.Header, name string) bool {
+	_, ok := headers[http.CanonicalHeaderKey(name)]
+	return ok
 }
 
 // WithAuthHeader overrides the default auth header name. Use this when the
@@ -401,7 +411,9 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
-	if c.apiKey != "" {
+	// A caller-supplied auth header entry (any casing, including empty)
+	// takes precedence over the configured API key.
+	if c.apiKey != "" && !hasHeaderName(req.Header, c.authHeader) {
 		req.Header.Set(c.authHeader, c.apiKey)
 	}
 	if body != nil {
@@ -472,7 +484,9 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 		for k, v := range c.headers {
 			req.Header.Set(k, v)
 		}
-		if c.apiKey != "" {
+		// A caller-supplied auth header entry (any casing, including empty)
+		// takes precedence over the configured API key.
+		if c.apiKey != "" && !hasHeaderName(req.Header, c.authHeader) {
 			req.Header.Set(c.authHeader, c.apiKey)
 		}
 		if body != nil {
