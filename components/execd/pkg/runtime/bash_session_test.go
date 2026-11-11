@@ -772,6 +772,56 @@ func TestBashSession_DeleteBashSessionKillsRunningProcess(t *testing.T) {
 	require.ErrorIs(t, err, ErrContextNotFound)
 }
 
+func TestBashSession_InterruptKillsRunWithoutDeletingSession(t *testing.T) {
+	requireBash(t)
+
+	c := NewController("", "")
+	sessionID, err := c.CreateBashSession(&CreateContextRequest{})
+	require.NoError(t, err)
+
+	require.NoError(t, c.RunInBashSession(context.Background(), &ExecuteCodeRequest{
+		Language: Bash,
+		Context:  sessionID,
+		Code:     "export KEEP=yes",
+		Timeout:  10 * time.Second,
+		Hooks:    ExecuteResultHook{},
+	}))
+
+	runDone := make(chan error, 1)
+	safego.Go(func() {
+		runDone <- c.RunInBashSession(context.Background(), &ExecuteCodeRequest{
+			Language: Bash,
+			Context:  sessionID,
+			Code:     "sleep 30",
+			Timeout:  60 * time.Second,
+			Hooks:    ExecuteResultHook{},
+		})
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	require.NoError(t, c.Interrupt(sessionID))
+
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		require.Fail(t, "RunInBashSession did not return within 3s after Interrupt")
+	}
+
+	require.NotNil(t, c.getBashSession(sessionID), "interrupt deleted the bash session")
+
+	var stdout strings.Builder
+	require.NoError(t, c.RunInBashSession(context.Background(), &ExecuteCodeRequest{
+		Language: Bash,
+		Context:  sessionID,
+		Code:     `printf '%s' "$KEEP"`,
+		Timeout:  10 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(line string) { stdout.WriteString(line) },
+		},
+	}))
+	require.Contains(t, stdout.String(), "yes")
+}
+
 func TestBashSession_CloseWithNoActiveRun(t *testing.T) {
 	session := newBashSession("", nil)
 	require.NoError(t, session.start())

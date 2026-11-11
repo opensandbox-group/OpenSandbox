@@ -727,6 +727,21 @@ func splitEnvPair(kv string) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
+// interrupt kills the active run and leaves the session, its cwd, and its
+// environment in place. close deletes the session.
+func (s *bashSession) interrupt() error {
+	s.mu.Lock()
+	pid := s.currentProcessPid
+	s.mu.Unlock()
+	if pid <= 0 {
+		return errors.New("bash session is not running")
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
 func (s *bashSession) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
