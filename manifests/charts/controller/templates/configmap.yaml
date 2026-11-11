@@ -3,6 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: feature-flags
+  namespace: {{ include "opensandbox.namespace" . }}
   labels:
     {{- include "opensandbox.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller-manager

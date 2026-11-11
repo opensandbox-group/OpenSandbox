@@ -99,12 +99,13 @@ Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), ren
 | `fast-sandbox` | all-in-one control plane (reconcilers + FastPath), janitor, firecracker node installer, runtime-agent + DART |
 | `server` | lifecycle server: fsb runtime config (rendered `configToml`), NodePort |
 | `ingress-gateway` | fsb provider + FastPath + shared signing key, NodePort |
+| `node-agent` | source-built vm-console collector (DaemonSet on both runtime nodes, file sink; `sources=[vm-console]`, `vmConsoleRoot` = the fast-sandbox chart's `runtime.stateRoot`) |
 
 ## Stage order
 
-`up`: preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → **MITM CA material (Secret + echo leaf cert)** → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → **TLS echo endpoint (kind-network container)** → SandboxTemplate golden image **built through the server `POST /templates` API, CA baked** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check, **pinned CA fingerprint**).
+`up`: preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress + **nodeagent from source**) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → **MITM CA material (Secret + echo leaf cert)** → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → **node-agent DaemonSet (vm-console collection)** → **TLS echo endpoint (kind-network container)** → SandboxTemplate golden image **built through the server `POST /templates` API, CA baked** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check, **pinned CA fingerprint**).
 
-`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → **execd-as-init in-guest process verify** (PID 1 = guest init; execd `--init` supervises the workload; orphan reparented and reaped; hardening report `init_mode=subreaper`) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
+`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → **execd-as-init in-guest process verify** (PID 1 = guest init; execd `--init` supervises the workload; orphan reparented and reaped; hardening report `init_mode=subreaper`) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip → **vm-console collection verify** (a marker echoed to the guest's `/dev/console` must land in the node-agent's file sink under `_streams/vm-console/`; the matrix's last stage asserts the killed e2e sandbox's stream finalized with `status: complete` — the Source's 30s disappearance grace elapses behind the stages in between).
 
 `verify-overlaybd`: overlaybd SandboxTemplate build (oci:// publication) → the same verify matrix against the overlaybd template.
 
@@ -127,6 +128,8 @@ The RustFS migration replaces the previous `MINIO_*` and `MC_IMAGE` overrides. B
 | `SERVER_HOST_PORT` / `GATEWAY_HOST_PORT` | `18080` / `18081` | host-side publishes for server / gateway (loopback only) |
 | `SERVER_IMAGE` | `docker.io/opensandbox/server:env` | server image tag (built from `server/`) |
 | `INGRESS_IMAGE` | `docker.io/opensandbox/ingress:env` | ingress image tag (built from `components/ingress`) |
+| `NODEAGENT_IMAGE` | `opensandbox/nodeagent:env` | node-agent image tag (built from `components/nodeagent`) |
+| `NODEAGENT_CLUSTER_ID` | `fsb-integration` | cluster name stamped into collected records; the vm-console verify derives the file-sink tree from it |
 | `IMAGE_RUNTIME` | `opensandbox/fsb-firecracker-runtime:dev` | firecracker runtime image (passed to the fast-sandbox chart) |
 | — | agent-config defaults pinned by the chart | Firecracker asset version/kernel live in the runtime agent config (`runtime.config` chart value), hot-reloadable |
 | `POOL_MIN` / `POOL_MAX` | `2` / `2` | pool capacity (auto `1`/`1` when `KIND_SINGLE=1`) |

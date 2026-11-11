@@ -237,6 +237,9 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 	atomic.AddInt32(&p.inFlight, 1)
 	p.mu.Unlock()
 	defer atomic.AddInt32(&p.inFlight, -1)
+	if err := ctx.Err(); err != nil {
+		return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: err}
+	}
 
 	// Resolve policy.
 	policy := p.config.EmptyBehavior
@@ -269,6 +272,12 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 	loopExhausted := true
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Built-in in-memory stores need not observe cancellation themselves.
+		// Do not consume an idle candidate for a caller that has already left.
+		if err := ctx.Err(); err != nil {
+			go p.killDiscardedAliveSandboxes(pendingKill)
+			return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: err}
+		}
 		takeResult, takeErr := p.tryTakeIdle(ctx, minTTL)
 		if takeErr != nil {
 			// Under FailFast / RetryNextIdle (no fallback), propagate the store error immediately.
@@ -395,6 +404,9 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 	}
 
 	// DIRECT_CREATE / RETRY_NEXT_IDLE_THEN_CREATE fallthrough.
+	if err := ctx.Err(); err != nil {
+		return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: err}
+	}
 	p.config.Logger.Debug("acquire: falling through to direct create",
 		"pool_name", p.config.PoolName,
 		"policy", policy,
@@ -845,12 +857,16 @@ func (p *DefaultSandboxPool) Shutdown(ctx context.Context, graceful bool) error 
 	_ = p.config.StateStore.ReleasePrimaryLock(ctx, p.config.PoolName, p.config.OwnerID)
 
 	// Wait for in-flight operations to drain.
+	var drainErr error
 	if p.config.DrainTimeout > 0 {
 		deadline := time.After(p.config.DrainTimeout)
 		pollTicker := time.NewTicker(100 * time.Millisecond)
 		defer pollTicker.Stop()
 		for atomic.LoadInt32(&p.inFlight) > 0 {
 			select {
+			case <-ctx.Done():
+				drainErr = ctx.Err()
+				goto done
 			case <-deadline:
 				p.config.Logger.Warn("pool shutdown: drain timeout expired with in-flight operations",
 					"pool_name", p.config.PoolName,
@@ -875,7 +891,7 @@ done:
 			close(sdCh)
 		}
 	}
-	return nil
+	return drainErr
 }
 
 // ensureNamespaceActive returns *PoolDestroyedError when a destroy has fenced or

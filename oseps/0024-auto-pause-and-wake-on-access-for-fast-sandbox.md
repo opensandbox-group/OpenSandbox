@@ -4,7 +4,7 @@ authors:
   - "@Pangjiping"
 creation-date: 2026-10-09
 last-updated: 2026-10-13
-status: implementing
+status: implemented
 ---
 
 # OSEP-0024: Auto-Pause and Wake-on-Access for Fast Sandbox

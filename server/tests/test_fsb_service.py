@@ -992,12 +992,19 @@ def test_http_policy_patch_and_delete_match_sidecar_semantics(persisted_fsb):
         fake.policy_records[sid]["revision"] += 1
         return state
 
+    policy_before = deepcopy(fake.policy_records[sandbox_id]["policy"])
+    revision_before = fake.policy_records[sandbox_id]["revision"]
     policy_relay_module._relay_get_full = racy_get_full
     try:
-        response = client.patch(url, json=[{"action": "deny", "target": "d.com"}])
+        response = client.patch(url, json=[{"action": "deny", "ports": [25, 587]}])
     finally:
         policy_relay_module._relay_get_full = real_get_full
     assert response.status_code == 409
+    assert fake.last_relay.method == "PUT"
+    payload = json.loads(fake.last_relay.payload)
+    assert payload["expectedRevision"] == revision_before
+    assert payload["policy"]["egress"][-1] == {"action": "deny", "target": "", "ports": [25, 587]}
+    assert fake.policy_records[sandbox_id]["policy"] == policy_before
 
 
 def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
@@ -1018,20 +1025,143 @@ def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
         set_current_tenant(previous)
 
 
-def test_policy_rejects_port_scoped_rules(persisted_fsb):
-    """Fast Sandbox enforcement does not cover port-scoped rules yet; accepting
-    them would silently drop deny rules (fail-open), so both PUT and PATCH
-    reject them until the fastlet path catches up."""
+def test_http_create_port_scopes_roundtrip_through_egress_binding(http_fsb):
+    client, fake, _ = http_fsb
+    policy = {
+        "defaultAction": "deny",
+        "egress": [
+            {"action": "deny", "ports": [25, 587]},
+            {"action": "allow", "target": "10.0.0.0/24", "ports": [443, 80]},
+            {"action": "allow", "target": "Example.COM"},
+        ],
+    }
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "networkPolicy": policy,
+        },
+    )
+    assert response.status_code == 202
+    sandbox_id = response.json()["id"]
+    expected = deepcopy(policy)
+    expected["egress"][0]["target"] = ""
+    assert len(fake.last_create.action_bindings) == 1
+    binding = fake.last_create.action_bindings[0]
+    assert binding.handler == "egress"
+    assert json.loads(binding.input) == expected
+    assert fake.policy_records[sandbox_id]["policy"] == expected
+    assert client.get(f"/v1/sandboxes/{sandbox_id}/networkpolicy").json() == {
+        "status": "ok", "mode": "enforcing", "policy": expected,
+    }
+
+
+@pytest.mark.parametrize("default_action", ["allow", "deny"])
+def test_policy_supports_port_scoped_rules(persisted_fsb, default_action):
     client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
-    port_only = {"action": "deny", "ports": [25]}
-    scoped = {"action": "allow", "target": "10.0.0.5", "ports": [22]}
-    assert client.put(url, json={"defaultAction": "deny", "egress": [port_only]}).status_code == 400
-    assert client.put(url, json={"defaultAction": "deny", "egress": [scoped]}).status_code == 400
-    assert client.patch(url, json=[port_only]).status_code == 400
-    assert client.patch(url, json=[scoped]).status_code == 400
+    bindings_before = deepcopy(fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"])
+    policy = {
+        "defaultAction": default_action,
+        "egress": [
+            {"action": "deny", "ports": [25, 587]},
+            {"action": "allow", "target": "", "ports": [443]},
+            {"action": "deny", "target": "10.0.0.5"},
+            {"action": "deny", "target": "10.0.0.5", "ports": [443, 80]},
+            {"action": "allow", "target": "10.0.0.5", "ports": [22]},
+            {"action": "allow", "target": "10.0.0.0/24", "ports": [8080]},
+            {"action": "allow", "target": "2001:db8::5", "ports": [8443]},
+            {"action": "deny", "target": "Example.COM"},
+        ],
+    }
+    expected = deepcopy(policy)
+    expected["egress"][0]["target"] = ""
+    replaced = client.put(url, json=policy)
+    assert replaced.status_code == 200
+    assert replaced.json()["policy"] == expected
+    assert json.loads(fake.last_relay.payload) == {"policy": expected}
+    assert client.get(url).json() == replaced.json()
+
+    # Same sorted ports replace one scope; neither portless nor other port
+    # sets are evicted. The first incoming rule wins, retaining its port order.
+    patched = client.patch(url, json=[
+        {"action": "allow", "target": "10.0.0.5", "ports": [80, 443]},
+        {"action": "deny", "target": "10.0.0.5", "ports": [443, 80]},
+        {"action": "allow", "ports": [587, 25]},
+        {"action": "deny", "target": "", "ports": [25, 587]},
+        {"action": "allow", "target": "example.com"},
+        {"action": "deny", "target": "EXAMPLE.COM"},
+        {"action": "deny", "ports": [3306]},
+    ])
+    expected["egress"][0] = {"action": "allow", "target": "", "ports": [587, 25]}
+    expected["egress"][3] = {"action": "allow", "target": "10.0.0.5", "ports": [80, 443]}
+    expected["egress"][7] = {"action": "allow", "target": "example.com"}
+    expected["egress"].append({"action": "deny", "target": "", "ports": [3306]})
+    assert patched.status_code == 200
+    assert patched.json()["policy"] == expected
+    assert json.loads(fake.last_relay.payload) == {"policy": expected, "expectedRevision": 2}
+    assert client.get(url).json() == patched.json()
+
+    # A missing target does not implicitly remove port-only rules.
+    assert client.request("DELETE", url, json=["missing.com"]).json()["policy"] == expected
+    deleted = client.request("DELETE", url, json=["", " EXAMPLE.COM "])
+    expected["egress"] = [r for r in expected["egress"] if r["target"] not in ("", "example.com")]
+    assert deleted.status_code == 200
+    assert deleted.json()["policy"] == expected
+    assert client.get(url).json() == deleted.json()
+    assert client.request("DELETE", url, json=[""]).json()["policy"] == expected
+
+    # Target deletion removes both portless and port-scoped IP rules.
+    deleted_ip = client.request("DELETE", url, json=["10.0.0.5"])
+    expected["egress"] = [r for r in expected["egress"] if r["target"] != "10.0.0.5"]
+    assert deleted_ip.status_code == 200
+    assert deleted_ip.json()["policy"] == expected
+    assert client.get(url).json() == deleted_ip.json()
     assert fake.last_update is None
-    assert fake.last_relay is None or fake.last_relay.method == "GET"
+    assert fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"] == bindings_before
+
+
+@pytest.mark.parametrize("method", ["CREATE", "PUT", "PATCH"])
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"action": "deny", "ports": []},
+        {"action": "deny", "ports": [0]},
+        {"action": "deny", "ports": [65536]},
+        {"action": "deny", "ports": [80, 80]},
+        {"action": "deny", "ports": list(range(1, 258))},
+        {"action": "allow", "target": "example.com", "ports": [443]},
+        {"action": "allow", "target": "*.example.com", "ports": [443]},
+    ],
+    ids=["empty", "too-low", "too-high", "duplicate", "too-many", "domain", "wildcard"],
+)
+def test_policy_invalid_ports_rejected_before_write(persisted_fsb, method, rule):
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+    records_before = deepcopy(fake.policy_records)
+    create_before = fake.last_create
+    if method == "CREATE":
+        response = client.post(
+            "/v1/sandboxes",
+            json={
+                "image": {"uri": "python:3.11"},
+                "entrypoint": ["python"],
+                "timeout": 3600,
+                "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+                "networkPolicy": {"egress": [rule]},
+            },
+        )
+    else:
+        response = client.request(method, url, json=[rule] if method == "PATCH" else {"egress": [rule]})
+
+    assert response.status_code == 422
+    assert fake.last_create is create_before
+    assert fake.last_relay is None
+    assert fake.last_update is None
+    assert fake.policy_records == records_before
 
 
 def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fsb, monkeypatch):

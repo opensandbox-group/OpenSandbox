@@ -95,7 +95,10 @@ jobs:
             TestDynamicElementRenewal \
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
-            TestNftRealMissingTableFallback
+            TestNftRealMissingTableFallback \
+            TestNftEstablishedDropKernelRuleOrder
+          bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
+            TestResolvedIPRenewalExtendsKernelExpiry
           bash scripts/ci-nft-go-test.sh ./pkg/iptables \
             TestGatewayDNSRedirectKernelPrivateNS
           bash scripts/ci-nft-go-test.sh . \

@@ -147,9 +147,12 @@ def _handle_execution_error(
     help="Run a command in a sandbox. Use `--` before the sandbox command payload.",
     epilog=(
         "Separator rule: use `--` before the sandbox command payload.\n\n"
-        "By default the payload is joined into one shell command string. Add "
-        "`--argv` to pass the arguments to the executable as-is (no shell), so "
-        "literal `$HOME`, quotes, and empty strings are preserved; this needs a "
+        "By default each payload word is quoted as a single shell token and "
+        "the tokens are joined into one shell command line, so shell syntax "
+        "such as redirects or pipes must ride inside an explicit word "
+        "(for example: -- sh -c 'echo hi > /tmp/x'). Add `--argv` to pass "
+        "the arguments to the executable as-is (no shell), so literal "
+        "`$HOME`, quotes, and empty strings are preserved; this needs a "
         "sandbox image whose execd accepts argv requests."
     ),
 )

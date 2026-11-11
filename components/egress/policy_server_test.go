@@ -97,6 +97,9 @@ type stubNft struct {
 	onApply     func(*policy.NetworkPolicy)
 	deadline    time.Time
 	hasDeadline bool
+	domains     map[string][]netip.Addr
+	lastDrops   nftables.EstablishedDrops
+	dropMatched int
 }
 
 func (s *stubNft) Quiesce() { s.quiesces++ }
@@ -109,6 +112,29 @@ func (s *stubNft) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 		s.onApply(p)
 	}
 	return s.err
+}
+
+func (s *stubNft) ApplyStaticDropEstablished(ctx context.Context, p *policy.NetworkPolicy, drops nftables.EstablishedDrops) (int, error) {
+	s.lastDrops = drops
+	err := s.ApplyStatic(ctx, p)
+	return s.dropMatched, err
+}
+
+func (s *stubNft) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldPol, newPol *policy.NetworkPolicy) (int, error) {
+	prior := s.SnapshotResolvedDomains()
+	drops := nftables.ComputeEstablishedDrops(oldPol, newPol, prior)
+	return s.ApplyStaticDropEstablished(ctx, newPol, drops)
+}
+
+func (s *stubNft) SnapshotResolvedDomains() map[string][]netip.Addr {
+	if s.domains == nil {
+		return map[string][]netip.Addr{}
+	}
+	out := make(map[string][]netip.Addr, len(s.domains))
+	for domain, addrs := range s.domains {
+		out[domain] = append([]netip.Addr(nil), addrs...)
+	}
+	return out
 }
 
 func TestReloadAlwaysRules_NftFailurePreservesRulesAndRetriesBeforeProxyPublish(t *testing.T) {
@@ -479,6 +505,76 @@ func TestHandlePatch_DistinctPortScopedRulesCoexist(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w2.Result().StatusCode, "expected 200")
 	require.Len(t, proxy.updated.Egress, 3, "the two prior port-scoped rules must survive a later unrelated patch")
+}
+
+// An unrelated PATCH must keep every rule of an untouched scope: nft is
+// deny-wins for IP/CIDR/port rules, so dropping a later same-scope deny would
+// open traffic that was blocked (#2663).
+func TestHandlePatch_UnrelatedPatchKeepsShadowingDeny(t *testing.T) {
+	cases := []struct {
+		name     string
+		scope    string
+		denyIPv4 string
+	}{
+		{"ip", `"target":"10.0.0.5"`, "10.0.0.5"},
+		{"cidr", `"target":"10.0.0.0/24"`, "10.0.0.0/24"},
+		{"ip_ports", `"target":"10.0.0.5","ports":[443]`, ""},
+		{"port_only", `"ports":[443]`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow",` + tc.scope + `},{"action":"deny",` + tc.scope + `}]}`)
+			require.NoError(t, err)
+			proxy := &stubProxy{updated: initial}
+			nft := &stubNft{}
+			srv := &policyServer{proxy: proxy, nft: nft, enforcementMode: "dns+nft"}
+
+			req := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(`[{"action":"allow","target":"192.0.2.1"}]`))
+			w := httptest.NewRecorder()
+			srv.handlePolicy(w, req)
+
+			require.Equal(t, http.StatusOK, w.Result().StatusCode, w.Body.String())
+			require.Len(t, proxy.updated.Egress, 3, "both base rules of the untouched scope must survive")
+			require.Equal(t, "192.0.2.1", proxy.updated.Egress[0].Target, "patch rules keep higher priority")
+			require.Equal(t, policy.ActionAllow, proxy.updated.Egress[1].Action)
+			require.Equal(t, policy.ActionDeny, proxy.updated.Egress[2].Action)
+
+			require.NotNil(t, nft.applied)
+			portDeny, _ := nft.applied.PortScopedRules()
+			_, _, denyV4, _ := nft.applied.StaticIPSets()
+			if tc.denyIPv4 != "" {
+				require.Equal(t, []string{tc.denyIPv4}, denyV4, "the shadowing deny must still reach nft")
+			} else {
+				require.Len(t, portDeny, 1, "the shadowing port-scoped deny must still reach nft")
+				require.Equal(t, []int{443}, portDeny[0].Ports)
+			}
+		})
+	}
+}
+
+func TestHandlePatch_OverrideReplacesEverySameScopeRule(t *testing.T) {
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[
+		{"action":"allow","target":"10.0.0.5","ports":[443]},
+		{"action":"allow","target":"10.0.0.9"},
+		{"action":"deny","target":"10.0.0.5","ports":[443]}
+	]}`)
+	require.NoError(t, err)
+	proxy := &stubProxy{updated: initial}
+	nft := &stubNft{}
+	srv := &policyServer{proxy: proxy, nft: nft, enforcementMode: "dns+nft"}
+
+	req := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(`[{"action":"deny","target":"10.0.0.5","ports":[443]},{"action":"allow","target":"10.0.0.5","ports":[443]}]`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+
+	require.Equal(t, http.StatusOK, w.Result().StatusCode, w.Body.String())
+	require.Len(t, proxy.updated.Egress, 2, "every base rule of the patched scope is replaced by the first patch rule")
+	require.Equal(t, policy.ActionDeny, proxy.updated.Egress[0].Action)
+	require.Equal(t, "10.0.0.5", proxy.updated.Egress[0].Target)
+	require.Equal(t, []int{443}, proxy.updated.Egress[0].Ports)
+	require.Equal(t, "10.0.0.9", proxy.updated.Egress[1].Target)
+	_, portAllow := nft.applied.PortScopedRules()
+	require.Empty(t, portAllow, "the replaced same-scope allow must not survive")
 }
 
 func TestMaxEgressRulesFromEnv(t *testing.T) {

@@ -231,6 +231,12 @@ image_tag() { printf '%s' "${1##*:}"; }
 OSB_NS="opensandbox-system"
 IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
 IMG_INGRESS="${INGRESS_IMAGE:-docker.io/opensandbox/ingress:env}"
+# Source-built node-agent local tag (no registry behind it; NODEAGENT_IMAGE is
+# the override knob, same convention as SERVER_IMAGE/INGRESS_IMAGE).
+IMG_NODEAGENT="${NODEAGENT_IMAGE:-opensandbox/nodeagent:env}"
+# Cluster name stamped into collected records and the file-sink family root;
+# the vm-console verify assertions derive the sink tree from it.
+NODEAGENT_CLUSTER_ID="${NODEAGENT_CLUSTER_ID:-fsb-integration}"
 FASTPATH_ENDPOINT="fast-sandbox-fastpath.opensandbox-system.svc:9090"
 SERVER_API_KEY="fast-sandbox-env"
 
@@ -547,6 +553,19 @@ failure_dump() {
 		kubectl logs -n "$OSB_NS" deploy/opensandbox-server --tail=80 2>&1 || true
 		echo "--- ingress gateway logs (tail) ---"
 		kubectl logs -n "$OSB_NS" deploy/opensandbox-ingress-gateway --tail=80 2>&1 || true
+		echo "--- node-agent pods + logs (every pod, tail) ---"
+		local npod
+		for npod in $(node_agent_pods 2>/dev/null || true); do
+			echo "### $npod"
+			kubectl get pod -n "$OSB_NS" "$npod" -o wide 2>&1 || true
+			kubectl logs -n "$OSB_NS" "$npod" -c nodeagent --tail=80 2>&1 || true
+		done
+		echo "--- node-agent file-sink tree (collected vm-console families) ---"
+		for npod in $(node_agent_pods 2>/dev/null || true); do
+			echo "### $npod"
+			kubectl exec -n "$OSB_NS" "$npod" -c nodeagent -- \
+				find "/var/lib/opensandbox/nodeagent-data" -maxdepth 6 2>&1 || true
+		done
 		echo "--- pool ---"
 		kubectl get sandboxpool -n "$RESOURCE_NS" -o yaml 2>&1 || true
 		echo "--- rustfs docker logs (tail) ---"
@@ -772,6 +791,13 @@ build_images() {
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 		-f "$OSB_ROOT/components/ingress/Dockerfile" -t "$IMG_INGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "ingress image build failed"
+	log "building the OpenSandbox node-agent image from source ($IMG_NODEAGENT)"
+	# Context is the repo root: the Dockerfile multi-stage-builds
+	# components/nodeagent + components/internal with its pinned Go toolchain.
+	# shellcheck disable=SC2086
+	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		-f "$OSB_ROOT/components/nodeagent/Dockerfile" -t "$IMG_NODEAGENT" "$OSB_ROOT" >/dev/null \
+		|| die "node-agent image build failed"
 	pass "images built (fast-sandbox + OpenSandbox)"
 }
 
@@ -871,11 +897,12 @@ render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 	local src="$MANIFESTS_DIR/cluster/kind-cluster.yaml" out="$GEN_DIR/kind-cluster.yaml"
 	mkdir -p "$GEN_DIR"
 	cp "$src" "$out"
-	# OCI_STACK=1 binds the host /dev into every node (FIRST extraMount, so
-	# the private /dev/shm mount below it shadows the host shm again): the
-	# kernel creates ublk device nodes on the host devtmpfs at add time and
-	# this kernel registers no block major, so a static node list cannot
-	# track them.
+	# OCI_STACK=1 binds the host /dev into every node (rendered FIRST, so
+	# the host-shm bind below it shadows the /dev bind back at /dev/shm,
+	# restoring a real shm mount — that bind is the host's shared shm
+	# passed through, not a private per-node tmpfs): the kernel creates
+	# ublk device nodes on the host devtmpfs at add time and this kernel
+	# registers no block major, so a static node list cannot track them.
 	if [[ "$OCI_STACK" == 1 ]]; then
 		awk '
 			/^  # @UBLK_DEV_MOUNT@$/ {
@@ -1294,6 +1321,7 @@ import http.server
 import json
 import ssl
 import sys
+import threading
 
 port, cert, key = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 
@@ -1313,6 +1341,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+
+for http_port in (18082, 18083):
+    http_server = http.server.ThreadingHTTPServer(("0.0.0.0", http_port), Handler)
+    threading.Thread(target=http_server.serve_forever, daemon=True).start()
 
 httpd = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -2506,6 +2538,33 @@ opensandbox_up() {
 	pass "server + ingress gateway up (fsb runtime, gateway routes signed with key 'a')"
 }
 
+# --- stage: node-agent (vm-console collection) ------------------------------------------------
+
+# Source-built DaemonSet on both kind nodes (the control-plane taint is
+# removed in kind_up). The chart's vmConsole root equals the fast-sandbox
+# chart's runtime.stateRoot, which every kind node exposes through its
+# per-node bind (control-plane/ or worker/), so the agent sees exactly the
+# jailer layout the FC driver writes —
+# jails/firecracker/<uid[:32]>/root/{firecracker.log,fast-sandbox.json}.
+# vm-console needs no Kubernetes RBAC; the file sink writes inside each node
+# container and the verify assertions read it back through kubectl exec.
+node_agent_up() {
+	kind load docker-image "$IMG_NODEAGENT" --name "$KIND_CLUSTER" >/dev/null
+	apply_ns "$OSB_NS"
+	helm_render node-agent "$OSB_ROOT/manifests/charts/node-agent" "$OSB_NS" \
+		"$GEN_DIR/osb-node-agent.yaml" \
+		--set fullnameOverride=node-agent \
+		--set image.repository="$(image_repo "$IMG_NODEAGENT")" \
+		--set image.tag="$(image_tag "$IMG_NODEAGENT")" \
+		--set 'config.sources[0]=vm-console' \
+		--set config.clusterID="$NODEAGENT_CLUSTER_ID" \
+		--set hostPaths.vmConsole=/var/lib/fast-sandbox/firecracker
+	kubectl apply -f "$GEN_DIR/osb-node-agent.yaml" >/dev/null
+	wait_for "node-agent daemonset ready" 120 \
+		kubectl -n "$OSB_NS" rollout status daemonset/node-agent --timeout=10s
+	pass "node-agent up (source=vm-console, sink=file, cluster=$NODEAGENT_CLUSTER_ID, vmConsoleRoot=/var/lib/fast-sandbox/firecracker)"
+}
+
 # Raw curl, kept for the calls the CLI cannot express (networkpolicy
 # replace PUT, metadata merge-patch, snapshot re-entry fence).
 server_api() { # method path [json-body]
@@ -2738,6 +2797,102 @@ dump_latency_evidence() {
 	cat "$out"
 }
 
+# --- vm-console collection assertions (ride the e2e matrix's own sandboxes) ----
+#
+# The node-agent DaemonSet (deployed by up) collects each sandbox's
+# Firecracker guest serial through the driver-owned firecracker.log,
+# discovered by directory scan of fast-sandbox.json. Two assertions:
+#
+#   collect — vm_console_collect_check runs inside opensandbox_verify on a
+#     sandbox the matrix already created (ids[0], still alive): a marker
+#     echoed to /dev/console in-guest must surface as raw bytes in the
+#     file-sink family
+#     <cluster>/_streams/vm-console/<ns>/<sandbox_id>/<sandbox_uid>/console.log
+#     within seconds (1s scan + 1s batch cadence). No dedicated sandbox.
+#
+#   finalize — vm_console_finalize_verify runs as the verify matrix's LAST
+#     stage: the e2e kill loop already removed the VM directory, and the
+#     source's 30s disappearance grace elapsed for free while the remaining
+#     stages ran, so the closing marker check is a confirmation, not a wait.
+#     The sink must have published console.finalized.1.json with status
+#     "complete" (no gaps, no drops).
+VMCONSOLE_SINK_ROOT="/var/lib/opensandbox/nodeagent-data/$NODEAGENT_CLUSTER_ID/_streams/vm-console"
+VMCONSOLE_FAMILY=""
+
+node_agent_pods() {
+	kubectl -n "$OSB_NS" get pods -l app.kubernetes.io/component=node-agent \
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+}
+
+# Read a collected-sink file from whichever agent pod holds it (the sandbox
+# may live on either kind node; the DS runs on both).
+vm_console_read_file() { # <path>
+	local pod
+	for pod in $(node_agent_pods); do
+		if kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- test -f "$1" 2>/dev/null; then
+			kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- cat "$1" && return 0
+		fi
+	done
+	return 1
+}
+
+vm_console_marker_collected() { # <marker>
+	local pod
+	for pod in $(node_agent_pods); do
+		if kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- \
+			grep -rq -- "$1" "$VMCONSOLE_SINK_ROOT" 2>/dev/null; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+vm_console_finalize_check() { # reads VMCONSOLE_FAMILY
+	local closing status
+	closing="$(vm_console_read_file "$VMCONSOLE_FAMILY/console.finalized.1.json")" || return 1
+	status="$(printf '%s' "$closing" | jq -r '.status // empty')"
+	[[ "$status" == "complete" ]]
+}
+
+vm_console_collect_check() { # <sandbox-id> — a live e2e-matrix sandbox
+	local id="$1" marker family
+	kubectl -n "$OSB_NS" get daemonset node-agent >/dev/null 2>&1 \
+		|| die "node-agent daemonset not found (re-run 'up' to deploy it; vm-console collection is part of the verify matrix)"
+	# Unique guest serial byte: echo straight to /dev/console — exactly the
+	# firecracker.log line the Source tails. The CLI joins command-run words
+	# with shlex.quote, so `sh -c <script>` must ride as separate words (one
+	# quoted string would be executed as a single program name and exit 127 —
+	# the same trap mitm_ca_guest_echo documents for curl).
+	marker="vm-console-marker-$id"
+	osb_api command run "$id" -- sh -c "echo $marker > /dev/console" >/dev/null \
+		|| fail "vm-console verify: guest console marker write failed for $id"
+	wait_for "node-agent collected the guest console marker" 30 vm_console_marker_collected "$marker"
+	# Locate the collected file across BOTH agent pods: the sandbox may live
+	# on either kind node, and the pod that holds the marker is not known
+	# before the grep answers. The miss on one pod is EXPECTED — guard the
+	# pipeline (`|| true`) so the empty find cannot trip the ERR trap through
+	# the assignment under `set -euEo pipefail`.
+	family=""
+	local pod
+	for pod in $(node_agent_pods); do
+		family="$(kubectl -n "$OSB_NS" exec "$pod" -c nodeagent -- \
+			grep -rl -- "$marker" "$VMCONSOLE_SINK_ROOT" 2>/dev/null | head -1 || true)"
+		[[ -n "$family" ]] && break
+	done
+	[[ "$family" == *"/_streams/vm-console/"*"/$id/"*"/console.log" ]] \
+		|| fail "vm-console verify: unexpected family layout: ${family:-none}"
+	VMCONSOLE_FAMILY="${family%/*}"
+	pass "vm-console collected: ${family#"$VMCONSOLE_SINK_ROOT"/} (marker $marker)"
+}
+
+vm_console_finalize_verify() {
+	[[ -n "$VMCONSOLE_FAMILY" ]] \
+		|| fail "vm-console finalize verify: no family recorded by the e2e stage"
+	wait_for "vm-console stream finalized (status=complete) for ${VMCONSOLE_FAMILY#"$VMCONSOLE_SINK_ROOT"/}" 15 \
+		vm_console_finalize_check
+	pass "vm-console closing marker complete (raw bytes, no gaps, no drops)"
+}
+
 opensandbox_verify() {
 	# Optional template override: the overlaybd second pass calls this with
 	# the OCI template id; the default stays the native template. Cold create
@@ -2759,6 +2914,12 @@ opensandbox_verify() {
 	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
 	dump_latency_evidence
 	verify_lifecycle_ops "${ids[0]}"
+	# vm-console collection rides this stage's own sandbox (ids[0], still
+	# alive): the marker assertion costs seconds. The finalize assertion for
+	# the same stream runs as the matrix's last stage — the kill loop below
+	# starts the source's 30s disappearance grace, which elapses for free
+	# behind the later stages.
+	vm_console_collect_check "${ids[0]}"
 	for id in "${ids[@]}"; do
 		VERIFY_ID="$id"
 		osb_api sandbox kill "$id" >/dev/null 2>&1 \
@@ -3756,6 +3917,12 @@ sdk_e2e() {
 		template_ids+=("$template_id")
 		template_origins+=("fast-sandbox-env")
 	fi
+	local egress_target_ip
+	egress_target_ip="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{end}}' "$MITM_ECHO_CONTAINER")" \
+		|| die "could not inspect the MITM echo container (run up first)"
+	[[ -n "$egress_target_ip" ]] || die "MITM echo container has no IP (run up first)"
+	export OPENSANDBOX_TEST_FSB_EGRESS_TARGET_IP="$egress_target_ip"
+	export OPENSANDBOX_TEST_FSB_EGRESS_TARGET_DOMAIN="$MITM_ECHO_DOMAIN"
 	export OPENSANDBOX_TEST_DOMAIN="127.0.0.1:$SERVER_HOST_PORT"
 	export OPENSANDBOX_TEST_PROTOCOL="http"
 	export OPENSANDBOX_TEST_API_KEY="$SERVER_API_KEY"
@@ -3826,6 +3993,9 @@ verify_native() {
 	run_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" exchange_resolver_verify
 	run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
 	run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
+	# Last on purpose: the e2e kill loop started the source's 30s disappearance
+	# grace; every stage above consumed it, so this is a near-free confirmation.
+	run_stage "vm-console finalize verify (node-agent completeness marker)" vm_console_finalize_verify
 }
 
 # Capture each node's counters so successful CI logs prove warm-device reuse.
@@ -3884,6 +4054,9 @@ verify_overlaybd() {
 	run_stage "exchange resolver verify (overlaybd template, OSEP-0025)" exchange_resolver_verify "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
+	# Same placement rationale as verify_native: the family recorded by this
+	# matrix's opensandbox_verify pass was killed stages ago.
+	run_stage "vm-console finalize verify (overlaybd, node-agent completeness marker)" vm_console_finalize_verify
 }
 
 # --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware) ---------------
@@ -3922,43 +4095,78 @@ ra_aggregate_memory_budget() { # max(defaultRequest * maxSandboxesPerPod, defaul
 	echo "$limit"
 }
 
-ra_cg_read() { # <fastlet-pod> <rel-path-under-pod-cgroup> <file>
-	local pod="$1" rel="$2" file="$3" node uid out base
+ra_pod_cgroup_dir() { # <fastlet-pod> -> "<node>\n<pod-cgroup-dir>" (absolute, inside the node)
+	local pod="$1" node uid cand
 	node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)" || return 1
 	uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 1
-	# The egress sidecar's unequal requests/limits make every fastlet Pod
-	# Burstable; try the Burstable and Guaranteed forms on both drivers.
-	for base in \
+	# Node-side discovery is the primary: the kubelet slice prefix varies by
+	# distribution (kubelet-kubepods-* on newer kubeadm, kubepods-* classic)
+	# and the Pod UID suffix is systemd-escaped; the fast-sandbox aggregate
+	# under the pod dir is the stable marker.
+	dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 5 -type d -name 'fast-sandbox' \( -path '*${uid//-/_}*' -o -path '*${uid}*' \) 2>/dev/null | head -1")"
+	if [[ -n "$dir" ]]; then
+		printf '%s\n%s\n' "$node" "${dir%/fast-sandbox}"
+		return 0
+	fi
+	# Classic-layout fallbacks (Guaranteed/Burstable x systemd/cgroupfs).
+	for cand in \
 		"kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod${uid//-/_}.slice" \
 		"kubepods.slice/kubepods-pod${uid//-/_}.slice" \
 		"kubepods/burstable/pod${uid}" \
 		"kubepods/pod${uid}"; do
-		out="$(docker exec "$node" cat "/sys/fs/cgroup/$base/$rel/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
+		if docker exec "$node" test -d "/sys/fs/cgroup/$cand/fast-sandbox" 2>/dev/null; then
+			printf '%s\n%s\n' "$node" "/sys/fs/cgroup/$cand"
+			return 0
+		fi
 	done
 	return 1
 }
 
-ra_leaf_read() { # <sandbox-id> <cgroup-file> — from the fastlet hosting the sandbox
-	local sid="$1" file="$2" pod out
-	local leaf="fsb-$(printf '%s' "$sid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
+ra_leaf_read() { # <sandbox-id> <cgroup-file> -> value, from the fastlet hosting the sandbox
+	# The leaf name hashes the SANDBOX OBJECT UID (Identity.SandboxUID),
+	# not the sandbox name.
+	local sid="$1" file="$2" pod node dir out suid
+	suid="$(kubectl -n "$RESOURCE_NS" get sandbox "$sid" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$suid" ]] || return 1
+	local leaf="fsb-$(printf '%s' "$suid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
 	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-		out="$(ra_cg_read "$pod" "fast-sandbox/$leaf" "$file")" && { printf '%s' "$out"; return 0; }
+		dir="$(ra_pod_cgroup_dir "$pod")" || continue
+		node="${dir%%$'\n'*}"; dir="${dir#*$'\n'}"
+		out="$(docker exec "$node" cat "$dir/fast-sandbox/$leaf/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
 	done
 	return 1
 }
 
-ra_aggregate_read() { # <cgroup-file> — from the first fastlet's VM pool aggregate
-	local file="$1" pod out
+ra_aggregate_read() { # <cgroup-file> -> value, from the first fastlet's VM pool aggregate
+	local file="$1" pod node dir out
 	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-		out="$(ra_cg_read "$pod" "fast-sandbox" "$file")" && { printf '%s' "$out"; return 0; }
+		dir="$(ra_pod_cgroup_dir "$pod")" || continue
+		node="${dir%%$'\n'*}"; dir="${dir#*$'\n'}"
+		out="$(docker exec "$node" cat "$dir/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
 	done
 	return 1
+}
+
+ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read failure
+	local sid="$1" pod node uid leaf
+	leaf="fsb-$(printf '%s' "$sid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
+	log "ra debug: sandbox=$sid leaf=$leaf pool=$POOL_NAME ns=$RESOURCE_NS"
+	log "ra debug: fastlet pods: $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo '<selector matched none>')"
+	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+		node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+		uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+		log "ra debug: pod=$pod node=$node uid=$uid"
+		log "ra debug: node cgroup roots: $(docker exec "$node" ls /sys/fs/cgroup 2>&1 | head -c 200 | tr '\n' ' ')"
+		log "ra debug: node pod dirs: $(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 3 -type d -name '*${uid}*' 2>/dev/null" | tr '\n' ' ')"
+		log "ra debug: node fast-sandbox dirs: $(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 5 -type d -name 'fast-sandbox' 2>/dev/null" | tr '\n' ' ')"
+	done
 }
 
 _ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
 
 ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
-	local cpu="$1" memory="$2" created phase attempts=0 cache="$WORK/ra-template-$cpu-$memory.id"
+	local cpu="$1" memory="$2" created phase attempts=0
+	local cache="$WORK/ra-template-$cpu-$memory.id"
 	if [[ -s "$cache" ]]; then
 		RA_TEMPLATE_ID="$(<"$cache")"
 		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
@@ -4014,17 +4222,23 @@ ra_forward_verify() {
 		|| fail "Sandbox CR spec.resources.limits mismatch: cpu=$cpu memory=$memory (want 2 / 1Gi)"
 	pass "Sandbox CR carries the forwarded limits (cpu=2, memory=1Gi)"
 
+	local cpu_max cpu_weight pids_max want_mem_budget got_mem_budget
 	weight="$(ra_expected_cpu_weight 500)" # request = ceil(2000m / ratio 4) = 500m
-	[[ "$(ra_leaf_read "$id" cpu.max)" == "200000 100000" ]] \
-		|| fail "cgroup leaf cpu.max mismatch: $(ra_leaf_read "$id" cpu.max 2>/dev/null) (want '200000 100000' for 2 cores)"
-	[[ "$(ra_leaf_read "$id" cpu.weight)" == "$weight" ]] \
-		|| fail "cgroup leaf cpu.weight mismatch: $(ra_leaf_read "$id" cpu.weight 2>/dev/null) (want $weight for the 500m derived request)"
-	[[ "$(ra_leaf_read "$id" pids.max)" == "128" ]] \
-		|| fail "cgroup leaf pids.max mismatch (want pool pids 128)"
-	local want_mem_budget
+	# Reads may legitimately fail (|| true): the debug dump below must run
+	# before the failure is finalized.
+	cpu_max="$(ra_leaf_read "$id" cpu.max || true)"
+	cpu_weight="$(ra_leaf_read "$id" cpu.weight || true)"
+	pids_max="$(ra_leaf_read "$id" pids.max || true)"
+	got_mem_budget="$(ra_aggregate_read memory.max || true)"
 	want_mem_budget="$(ra_aggregate_memory_budget)"
-	[[ "$(ra_aggregate_read memory.max)" == "$want_mem_budget" ]] \
-		|| fail "aggregate memory.max mismatch: $(ra_aggregate_read memory.max 2>/dev/null) (want $want_mem_budget = max(256Mi*$MAX_SANDBOXES_PER_POD, 512Mi))"
+	[[ -z "$cpu_max$cpu_weight$pids_max$got_mem_budget" ]] && ra_debug_cgroup "$id"
+	if [[ "$cpu_max" == "200000 100000" && "$cpu_weight" == "$weight" \
+		&& "$pids_max" == "128" && "$got_mem_budget" -ge "$want_mem_budget" ]]; then
+		pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
+	else
+		ra_debug_cgroup "$id"
+		fail "cgroup enforcement mismatch: cpu.max='$cpu_max' cpu.weight='$cpu_weight' (want $weight) pids.max='$pids_max' memory.max='$got_mem_budget' (want $want_mem_budget)"
+	fi
 	pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
 
 	wait_for "resource-aware sandbox execd /ping" 60 execd_ping_ok
@@ -4370,7 +4584,7 @@ case "$ACTION" in
 			echo "sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES ociStack=$OCI_STACK registry=$([[ "$OCI_STACK" == 1 ]] && echo "$OCI_REGISTRY_HOST" || echo off)"
 			echo "pool=$POOL_NAME mode=$POOL_MODE poolMin=$POOL_MIN egress=$IMG_EGRESS"
 			echo "server=$IMG_SERVER ingress=$IMG_INGRESS fastpath=$FASTPATH_ENDPOINT"
-			echo "images: controller=$IMG_CONTROLLER runtime=$IMG_RUNTIME"
+			echo "images: controller=$IMG_CONTROLLER runtime=$IMG_RUNTIME nodeagent=$IMG_NODEAGENT"
 		} > "$LOGS_DIR/environment.txt" 2>&1 || true
 		if [[ -n "$(kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" || true)" ]] \
 			|| docker ps -a --format '{{.Names}}' | grep -qx "$RUSTFS_CONTAINER"; then
@@ -4401,6 +4615,7 @@ case "$ACTION" in
 		run_stage "firecracker runtime readiness + DART (P2P)" runtime_up
 		run_stage "idle-pause Redis (OSEP-0024 profile)" redis_up
 		run_stage "OpenSandbox server + ingress gateway" opensandbox_up
+		run_stage "OpenSandbox node-agent (vm-console collection)" node_agent_up
 		run_stage "TLS echo endpoint (cert signed by the pinned CA)" mitm_echo_up
 		run_stage "SandboxTemplate build (opensandbox CLI)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up

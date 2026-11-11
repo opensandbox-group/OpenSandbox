@@ -299,7 +299,7 @@ func TestEffectivePolicyInputDiagnostics(t *testing.T) {
 			in.user.Egress[0].Target = "raw-target-private.example.com"
 		}, []string{"parse user policy", `unsupported action "invalid"`}, true},
 		{"user empty target", func(in *effectivePolicyInputs) { in.user.Egress[0].Target = "" }, []string{"parse user policy", "egress target cannot be empty"}, true},
-		{"user default", func(in *effectivePolicyInputs) { in.user.DefaultAction = "invalid" }, []string{"user policy", `unsupported default action "invalid"`}, false},
+		{"user default", func(in *effectivePolicyInputs) { in.user.DefaultAction = "invalid" }, []string{"parse user policy", `unsupported defaultAction "invalid"`}, true},
 	}
 	for _, list := range []string{"alwaysDeny", "alwaysAllow", "telemetryAllow"} {
 		for _, failure := range []string{"parse action", "empty target", "wrong action"} {

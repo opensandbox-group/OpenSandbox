@@ -444,10 +444,18 @@ func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn 
 		// attempt's wait for response headers is bounded by the remaining
 		// overall budget, not only the waits between attempts.
 		if wakeAttempts > 0 && wakeDeadline >= 0 {
-			// A generic backoff may have spent the rest of the budget. Nothing
-			// is sent then, so the wake timeout is still safe to retry.
+			// A wait or scheduler delay may have spent the rest of the budget.
 			remaining := wakeDeadline - time.Since(started)
 			if remaining <= 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				var apiErr *APIError
+				if !errors.As(lastErr, &apiErr) || !apiErr.WakeExpired {
+					// An ordinary failure may have reached the sandbox. Keep it
+					// rather than claiming the request was never forwarded.
+					return lastErr
+				}
 				return &SandboxWakeTimeoutError{
 					Attempts: wakeAttempts,
 					Waited:   time.Since(started),
@@ -513,6 +521,14 @@ func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn 
 		}
 		retriesUsed++
 		delay := retryDelay(c.retry, retriesUsed-1, lastErr)
+		if wakeAttempts > 0 && wakeDeadline >= 0 && delay >= wakeDeadline-time.Since(started) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			// Do not sleep past the wake budget or shorten server back-pressure
+			// to squeeze in another request. Preserve the last ordinary failure.
+			return lastErr
+		}
 		if err := retrySleep(ctx, delay); err != nil {
 			return err
 		}

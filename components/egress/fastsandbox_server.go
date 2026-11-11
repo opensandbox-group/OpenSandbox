@@ -593,7 +593,7 @@ func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence sub
 			if s.vaultFiles != nil && s.vaultFiles.isSealed(subj) {
 				e.sealed = true
 			}
-			s.vaults[subj] = e
+			s.setSubjectVaultEntryLocked(subj, e)
 			return e.store
 		}
 		delete(s.vaults, subj)
@@ -604,7 +604,7 @@ func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence sub
 	if s.vaultFiles != nil && s.vaultFiles.isSealed(subj) {
 		e.sealed = true
 	}
-	s.vaults[subj] = e
+	s.setSubjectVaultEntryLocked(subj, e)
 	return v
 }
 

@@ -378,6 +378,10 @@ jobs:
     env:
       # Covers up, both e2e steps, and the failure diagnostics.
       IDLE_PAUSE: "1"
+      # LegacySlot E2E regression lives here on purpose: the PR integration
+      # lane (fast-sandbox-test.yml) switched to the ResourceAware profile
+      # (OSEP-0026); keep this nightly on the legacy pool shape.
+      POOL_MODE: "legacy"
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)

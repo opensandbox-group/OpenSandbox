@@ -156,6 +156,9 @@ func normalizePolicy(p *NetworkPolicy) error {
 	if p.DefaultAction == "" {
 		p.DefaultAction = ActionDeny
 	}
+	if p.DefaultAction != ActionAllow && p.DefaultAction != ActionDeny {
+		return fmt.Errorf("unsupported defaultAction %q", p.DefaultAction)
+	}
 
 	for i := range p.Egress {
 		r := &p.Egress[i]

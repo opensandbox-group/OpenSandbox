@@ -282,7 +282,7 @@ osb command logs <sandbox-id> <execution-id> -o json
 
 Background start errors or a stream ending before startup confirmation make the CLI exit non-zero without success metadata. After a successful start, use `command status` and `command logs` to check the process's eventual result.
 
-By default the payload after `--` is joined into one shell command string, so pipelines, redirection, and `$VAR` expansion work as in a terminal. Add `--argv` to pass the arguments to the executable as a literal argv list (no shell) when values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the process unchanged. `--argv` needs a sandbox image whose execd accepts argv requests:
+By default each payload word after `--` is quoted as a single shell token and the tokens are joined into one shell command line that the sandbox's shell runs. Shell syntax such as pipelines or redirection must therefore ride inside an explicit word (`-- sh -c 'echo hi > /tmp/x'`); an unquoted `$VAR` is expanded by your own terminal before the CLI sees it, while a quoted one reaches the sandbox shell literally. Add `--argv` to pass the arguments to the executable as a literal argv list (no shell) when values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the process unchanged. `--argv` needs a sandbox image whose execd accepts argv requests:
 
 ```bash
 osb command run <sandbox-id> -o raw --argv -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""

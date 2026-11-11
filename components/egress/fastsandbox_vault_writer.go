@@ -114,7 +114,8 @@ func (s *fastSandboxPolicyServer) readWriterOwner(w http.ResponseWriter, r *http
 			entry.v2Verified = false
 			entry.vaultStateUnknown = true
 			entry.store = credentialvault.NewSubjectStore()
-			s.vaults[subj] = entry
+			s.setSubjectVaultEntryLocked(subj, entry)
+			s.markSubjectVaultUnknownLocked(subj, expected)
 		}
 		s.mu.Unlock()
 		s.policyCommitMu.Unlock()
@@ -178,6 +179,13 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 		if !s.fenceMatchesLocked(subj, expected) {
 			return func() { http.Error(w, "owner not registered", 412) }
 		}
+		previous, existed := s.vaults[subj]
+		wasKnown := existed && previous.fence == expected && !previous.vaultStateUnknown
+		markUnknown := func() {
+			if wasKnown && s.vaults[subj].vaultStateUnknown {
+				s.markSubjectVaultUnknownLocked(subj, expected)
+			}
+		}
 		if req.Fresh {
 			if record.VaultContract != nil {
 				return func() { http.Error(w, "initialization grant already consumed; verify instead", 409) }
@@ -224,9 +232,10 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 				}
 				return func() { http.Error(w, "initialization owner persistence not confirmed", 503) }
 			}
-			s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
+			s.setSubjectVaultEntryLocked(subj, vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true})
 			payload, encodeErr := credentialvault.EncodeVaultFileV2(credentialvault.VaultFile{Incarnation: expected.RuntimeInstanceID, AttachmentID: expected.AttachmentID, State: credentialvault.FileStateEmpty, StateLineage: req.Contract.Lineage, StateRevision: 1, InitializationID: req.Contract.InitializationID}, credentialvault.VaultFileBody{})
 			if encodeErr != nil {
+				markUnknown()
 				return func() { http.Error(w, "invalid initial state", 500) }
 			}
 			state, saveErr = fs.SaveRaw(payload)
@@ -236,35 +245,43 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 					switch {
 					case rollbackErr == nil && rollbackState == policy.FileCommitted:
 						if hadEntry {
-							s.vaults[subj] = beforeEntry
+							s.setSubjectVaultEntryLocked(subj, beforeEntry)
 						} else {
 							delete(s.vaults, subj)
 						}
+						// A transient unknown publication already queued suspend.
+						// Confirmed rollback restores the previous authority too.
+						s.recordSubjectSnapshotLocked(subj, expected)
 					case rollbackState == policy.FileUnchanged:
-						s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true, degraded: "initialization owner rollback not published; teardown required"}
+						s.setSubjectVaultEntryLocked(subj, vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true, degraded: "initialization owner rollback not published; teardown required"})
 					default:
 						s.requireVaultRecoveryLocked("initialization owner rollback uncertain")
 					}
 				} else {
 					s.requireVaultRecoveryLocked("initial Vault persistence uncertain")
 				}
+				markUnknown()
 				return func() { http.Error(w, "initial Vault persistence not confirmed", 503) }
 			}
 		} else if record.VaultContract == nil || *record.VaultContract != req.Contract {
 			return func() { http.Error(w, "initialization contract mismatch", 412) }
 		}
-		s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true}
+		s.setSubjectVaultEntryLocked(subj, vaultEntry{store: credentialvault.NewSubjectStore(), fence: expected, vaultStateUnknown: true, vaultStateProtected: true})
 		vf, body, err := s.writerFile(subj, record)
 		if err != nil {
+			markUnknown()
 			return func() { http.Error(w, "Vault verification requires recovery", 503) }
 		}
 		store := credentialvault.NewSubjectStore()
 		if vf.State == credentialvault.FileStateActive {
 			if err := store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
+				markUnknown()
 				return func() { http.Error(w, "Vault verification rejected", 503) }
 			}
 		}
-		s.vaults[subj] = vaultEntry{store: store, fence: expected, fileMeta: metadataForWriter(vf), vaultStateProtected: true, v2Verified: true}
+		s.setSubjectVaultEntryLocked(subj, vaultEntry{store: store, fence: expected, fileMeta: metadataForWriter(vf), vaultStateProtected: true, v2Verified: true})
+		s.clearSubjectVaultUnknownLocked(subj)
+		s.recordSubjectSnapshotLocked(subj, expected)
 		reply := s.writerReply(record, vf, nil)
 		return func() { writeJSON(w, 200, reply) }
 	}()
@@ -328,7 +345,8 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 			entry.v2Verified = false
 			entry.vaultStateUnknown = true
 			entry.store = credentialvault.NewSubjectStore()
-			s.vaults[subj] = entry
+			s.setSubjectVaultEntryLocked(subj, entry)
+			s.markSubjectVaultUnknownLocked(subj, entry.fence)
 			return func() { http.Error(w, "Vault persistent state requires recovery", 503) }
 		}
 		if r.Method == http.MethodGet {
@@ -390,13 +408,14 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 			state, commitErr = entry.store.CommitCandidate(candidate)
 			if commitErr == nil {
 				entry.fileMeta = metadataForWriter(vf)
-				s.vaults[subj] = entry
+				s.setSubjectVaultEntryLocked(subj, entry)
 			}
 			return commitErr
 		})
 		if err != nil {
 			return func() { http.Error(w, "Vault persistence not confirmed", 503) }
 		}
+		s.recordSubjectSnapshotLocked(subj, entry.fence)
 		status := http.StatusNoContent
 		if r.Method == http.MethodPost || r.Method == http.MethodPut && candidate.Created() {
 			status = http.StatusCreated
@@ -444,6 +463,7 @@ func (s *fastSandboxPolicyServer) retireWriterVault(subj subject.Subject, record
 		}
 	}
 	delete(s.vaults, subj)
+	s.clearSubjectVaultUnknownLocked(subj)
 	return nil
 }
 

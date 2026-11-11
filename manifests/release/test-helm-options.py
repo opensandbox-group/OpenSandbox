@@ -17,14 +17,13 @@
 
 import argparse
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 CHARTS = Path(__file__).resolve().parents[1] / "charts"
 PACKAGE: Path | None = None

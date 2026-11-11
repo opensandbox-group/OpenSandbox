@@ -68,6 +68,9 @@ class ImageAuth(BaseModel):
     username: str = Field(..., description="Registry username or service account")
     password: str = Field(..., description="Registry password or authentication token")
 
+    class Config:
+        extra = "forbid"
+
 
 class ImageSpec(BaseModel):
     """
@@ -84,6 +87,9 @@ class ImageSpec(BaseModel):
         description="Registry authentication credentials (required for private registries)",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class PlatformSpec(BaseModel):
     """
@@ -99,6 +105,9 @@ class PlatformSpec(BaseModel):
         description="Target CPU architecture (for example 'amd64' or 'arm64').",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 # ============================================================================
 # Resource Limits
@@ -106,14 +115,63 @@ class PlatformSpec(BaseModel):
 
 class ResourceLimits(RootModel[Dict[str, str]]):
     """
-    Runtime resource constraints as key-value pairs.
+    Runtime resource constraints as key-value pairs. Similar to Kubernetes resource specifications,
+    allows flexible definition of resource limits. Common resource types include:
+    - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
+    - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
+    - `gpu`: Number of GPU devices (e.g., "1")
+    - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
+      `ephemeral-storage` are accepted as aliases. On the Docker runtime this
+      bounds only the container's writable layer via HostConfig.StorageOpt —
+      bind mounts, named volumes, and read-only image layers are not covered —
+      and requires a quota-capable storage driver (for example overlay2 on XFS
+      with pquota); the create request fails with INVALID_PARAMETER if the
+      daemon cannot enforce it. On the Windows profile this maps to the
+      sandbox disk size.
 
-    Similar to Kubernetes resource specifications, allows flexible definition
-    of resource limits. Common resource types include cpu, memory, and gpu.
+    New resource types can be added without API changes.
     """
     root: Dict[str, str] = Field(
         default_factory=dict,
         example={"cpu": "500m", "memory": "512Mi", "gpu": "1"},
+    )
+
+
+class FsbTemplateResourceLimits(RootModel[Dict[str, str]]):
+    """
+    Guest machine sizing for a Fast Sandbox template, as key-value pairs:
+    - `cpu`: guest vCPUs (e.g., "1")
+    - `memory`: guest memory (e.g., "512Mi")
+    - `disk`: logical size of the guest rootfs (e.g., "2Gi"); the artifact
+      set is stored and P2P-pulled at this size, so keep it just above the
+      expanded source image.
+
+    Defaults when omitted: cpu `1`, memory `512Mi`, disk `2Gi`.
+    Only these three keys are accepted: `storage` and `ephemeral-storage`
+    are sandbox writable-layer quota aliases and are not template keys —
+    the request fails with HTTP 400 if they are set here.
+    """
+    root: Dict[str, str] = Field(
+        default_factory=dict,
+        example={"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
+    )
+
+
+class ResourceRequests(RootModel[Dict[str, str]]):
+    """
+    Resource reservations for the sandbox, as key-value pairs in Kubernetes
+    resource specification syntax (same key space as `resourceLimits`):
+    - `cpu`: CPU reservation (e.g., "250m" for 0.25 CPU cores)
+    - `memory`: Memory reservation (e.g., "512Mi", "1Gi")
+
+    On Kubernetes-based runtimes these become the sandbox container's
+    `requests` — scheduling guarantees, not hard caps. This field is
+    ignored by the Docker runtime, which reads only `resourceLimits`, so
+    a `disk` reservation here does not create a writable-layer quota.
+    """
+    root: Dict[str, str] = Field(
+        default_factory=dict,
+        example={"cpu": "500m", "memory": "512Mi"},
     )
 
 
@@ -215,6 +273,7 @@ class CredentialProxyConfig(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 # ============================================================================
@@ -749,6 +808,9 @@ class Host(BaseModel):
         pattern=r"^(/|[A-Za-z]:[\\/])",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class PVC(BaseModel):
     """
@@ -823,6 +885,7 @@ class PVC(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 class OSSFS(BaseModel):
@@ -872,6 +935,7 @@ class OSSFS(BaseModel):
     )
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
     @model_validator(mode="after")
     def validate_inline_credentials(self) -> "OSSFS":
@@ -930,6 +994,7 @@ class Volume(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
     @model_validator(mode="after")
     def validate_exactly_one_backend(self) -> "Volume":
@@ -1022,13 +1087,14 @@ class CreateSandboxRequest(BaseModel):
         alias="resourceLimits",
         description="Runtime resource constraints (hard caps) for the sandbox instance. Optional when poolRef is provided.",
     )
-    resource_requests: Optional[ResourceLimits] = Field(
+    resource_requests: Optional[ResourceRequests] = Field(
         None,
         alias="resourceRequests",
         description=(
             "Resource reservations (guaranteed minimums) for the sandbox instance. "
             "When provided, used as Kubernetes resource requests, enabling Burstable QoS. "
-            "When omitted, resourceLimits values are used for both limits and requests."
+            "When omitted, resourceLimits values are used for both limits and requests. "
+            "Ignored by the Docker runtime, which reads only resourceLimits."
         ),
     )
     env: Optional[Dict[str, Optional[str]]] = Field(
@@ -1331,6 +1397,9 @@ class CreateSnapshotRequest(BaseModel):
         description="Optional human-readable snapshot name",
     )
 
+    class Config:
+        extra = "forbid"
+
 
 class Snapshot(BaseModel):
     """
@@ -1491,6 +1560,7 @@ class RenewSandboxExpirationRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+        extra = "forbid"
 
 
 class RenewSandboxExpirationResponse(BaseModel):
@@ -1712,7 +1782,7 @@ class CreateFsbTemplateRequest(BaseModel):
         min_length=1,
         description="Source OCI image reference the golden image is built from",
     )
-    resource_limits: Optional[ResourceLimits] = Field(
+    resource_limits: Optional[FsbTemplateResourceLimits] = Field(
         None,
         alias="resourceLimits",
         description=(
@@ -1720,7 +1790,9 @@ class CreateFsbTemplateRequest(BaseModel):
             "disk -> logical size of the guest rootfs. The artifact set is "
             "stored and P2P-pulled at the disk size, so keep it just above "
             "the expanded source image. Defaults: cpu 1, memory 512Mi, "
-            "disk 2Gi."
+            "disk 2Gi. Only cpu/memory/disk are accepted; the sandbox "
+            "writable-layer quota aliases storage/ephemeral-storage are "
+            "rejected with HTTP 400."
         ),
     )
     entrypoint: Optional[List[str]] = Field(
@@ -1799,7 +1871,7 @@ class FsbTemplate(BaseModel):
     """
     template_id: str = Field(..., alias="templateId", description="Server-generated template ID (tpl_<uuid>)")
     image: str = Field(..., description="Source OCI image reference")
-    resource_limits: Optional[ResourceLimits] = Field(None, alias="resourceLimits")
+    resource_limits: Optional[FsbTemplateResourceLimits] = Field(None, alias="resourceLimits")
     entrypoint: Optional[List[str]] = Field(None, description="Guest business command (argv)")
     env: Optional[Dict[str, str]] = Field(
         None, description="Environment variables baked into the golden image"

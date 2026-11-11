@@ -16,7 +16,12 @@ In addition to the Project Maintainers above:
 - [@Generalwin](https://github.com/Generalwin)
 - [@Spground](https://github.com/Spground)
 - [@fengcone](https://github.com/fengcone)
+- [@jianpingpei](https://github.com/jianpingpei)
 - [@kevinlynx](https://github.com/kevinlynx)
+
+## Emeritus Maintainers
+
+None.
 
 ## Membership Changes
 

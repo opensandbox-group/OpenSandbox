@@ -127,6 +127,26 @@ func TestFilesystemControllerSearchFiles(t *testing.T) {
 	require.Equal(t, "file", files[0].Type)
 }
 
+func TestFilesystemControllerSearchFilesRejectsInvalidPattern(t *testing.T) {
+	populated := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(populated, "alpha.txt"), []byte("alpha"), 0o644))
+
+	for name, dir := range map[string]string{"populated": populated, "empty": t.TempDir()} {
+		t.Run(name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/search?path=%s&pattern=%s", url.QueryEscape(dir), url.QueryEscape("["))
+			ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+			ctrl.SearchFiles()
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+			require.Equal(t, "invalid pattern [", resp.Message)
+		})
+	}
+}
+
 func TestFilesystemControllerSearchFilesHidesUploadStaging(t *testing.T) {
 	tmpDir := t.TempDir()
 	visible := filepath.Join(tmpDir, "visible.txt")

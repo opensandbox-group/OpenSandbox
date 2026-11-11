@@ -392,6 +392,14 @@ func (c *FilesystemController) SearchFiles() {
 	if pattern == "" {
 		pattern = "**"
 	}
+	if !glob.ValidPattern(pattern) {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("invalid pattern %s", pattern),
+		)
+		return
+	}
 
 	files := make([]model.FileInfo, 0, 16)
 	err = filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {

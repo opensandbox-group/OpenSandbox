@@ -4,7 +4,7 @@ authors:
   - "@Pangjiping"
 creation-date: 2026-07-22
 last-updated: 2026-07-22
-status: implementing
+status: implemented
 ---
 
 # OSEP-0017: Resilient SDK Transport
