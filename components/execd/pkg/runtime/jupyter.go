@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -181,7 +182,7 @@ func (c *Controller) searchKernel(client *jupyter.Client, language Language) (st
 		}
 	}
 	if kernelName == "" {
-		return "", errors.New("no kernel specs found")
+		return "", fmt.Errorf("%w: no kernel spec for %q", ErrUnsupportedLanguage, language)
 	}
 
 	return kernelName, nil

@@ -34,7 +34,7 @@ import (
 
 // runCommand executes shell commands and streams their output on Windows.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	stdout, stderr, err := c.stdLogDescriptor(session)
@@ -46,14 +46,25 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	defer func() {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		removeCommandOutputFiles(stdoutPath, stderrPath)
+		removeCommandOutputFilesWithID(session, stdoutPath, stderrPath)
 	}()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
+	}
+
+	var timedOut bool
+	cancel := cmd.Cancel
+	cmd.Cancel = func() error {
+		deadline := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		err := cancel()
+		// Wait joins this callback before reading timedOut. A successful kill
+		// can still coincide with an independent process exit.
+		timedOut = deadline && err == nil
+		return err
 	}
 
 	cmd.Stdout = stdout
@@ -76,7 +87,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		close(done)
 		wg.Wait()
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
-		log.Error("command: start failed: %v", err)
+		log.ErrorWithCommandID(session, "command: start failed: %v", err)
 		return nil
 	}
 
@@ -92,8 +103,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	c.storeCommandKernel(session, kernel)
 
 	err = cmd.Wait()
-	// Capture the deadline before output callbacks finish draining.
-	timedOut := ctx.Err() == context.DeadlineExceeded
 	close(done)
 	wg.Wait()
 	if err == nil {
@@ -105,7 +114,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	var eName, eValue string
 	eCode := 1
 	var exitCodePtr *int
-	var traceback []string
 
 	var exitError *exec.ExitError
 	if errors.As(err, &exitError) {
@@ -118,26 +126,27 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		eName = "CommandExecError"
 		eValue = err.Error()
 	}
-	traceback = []string{err.Error()}
+	errorMessage := err.Error()
 	if timedOut {
 		eName = "CommandTimeout"
+		errorMessage = fmt.Sprintf("command timed out after %s: %s", request.Timeout, errorMessage)
 	}
 
 	request.Hooks.OnExecuteError(&execute.ErrorOutput{
 		EName:     eName,
 		EValue:    eValue,
-		Traceback: traceback,
+		Traceback: []string{errorMessage},
 		ExitCode:  exitCodePtr,
 	})
 
-	log.Error("command: run failed: %v", err)
-	c.markCommandFinished(session, eCode, err.Error())
+	log.ErrorWithCommandID(session, "command: run failed: %s", errorMessage)
+	c.markCommandFinished(session, eCode, errorMessage)
 	return nil
 }
 
 // runBackgroundCommand executes shell commands in detached mode on Windows.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
@@ -148,7 +157,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stderrPath := c.combinedOutputFileName(session)
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		pipe.Close() // best-effort
@@ -166,7 +175,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	// callers find the session immediately.
 	err = cmd.Start()
 	if err != nil {
-		log.Error("command: start failed: %v", err)
+		log.ErrorWithCommandID(session, "command: start failed: %v", err)
 		pipe.Close() // best-effort
 		cancel()
 		return fmt.Errorf("failed to start commands: %w", err)
@@ -197,7 +206,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		devNull.Close() // best-effort
 
 		if err != nil {
-			log.Error("command: run failed: %v", err)
+			log.ErrorWithCommandID(session, "command: run failed: %v", err)
 			exitCode := 1
 			var exitError *exec.ExitError
 			if errors.As(err, &exitError) {

@@ -281,13 +281,17 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles, IDownloadSandbo
         var contentLength = response.Content.Headers.ContentLength ?? -1;
         var lineBased = options?.Offset != null || options?.Limit != null;
         var contentRange = isPartial ? ParseContentRange(GetContentHeader(response, "Content-Range")) : null;
+        var encodings = response.Content.Headers.ContentEncoding;
+        var encoded = encodings.Any(value => !string.Equals(value, "identity", StringComparison.OrdinalIgnoreCase));
+        // HttpClientHandler removes both headers when it transparently decompresses a response.
+        var encodingUnknown = isPartial && contentLength < 0 && !encodings.Any();
         return new ReadBytesResponse<T>(
             Body: body,
             StatusCode: (int)response.StatusCode,
             ContentType: GetContentHeader(response, "Content-Type"),
             ContentDisposition: GetContentHeader(response, "Content-Disposition"),
             ContentLength: contentLength,
-            TotalSize: isPartial ? contentRange?.Total ?? -1 : lineBased ? -1 : contentLength,
+            TotalSize: encoded || encodingUnknown ? -1 : isPartial ? contentRange?.Total ?? -1 : lineBased ? -1 : contentLength,
             ContentRange: contentRange);
     }
 

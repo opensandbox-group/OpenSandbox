@@ -403,7 +403,7 @@ def ensure_valid_host_path(
     _windows_drive_match = re.match(r"^[A-Za-z]:/", _path_fwd)
     _tail_fwd = _path_fwd[2:] if _windows_drive_match else _path_fwd
 
-    if "/.." in _tail_fwd or _tail_fwd == "/..":
+    if ".." in _tail_fwd.split("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={

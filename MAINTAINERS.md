@@ -19,6 +19,10 @@ In addition to the Project Maintainers above:
 - [@jianpingpei](https://github.com/jianpingpei)
 - [@kevinlynx](https://github.com/kevinlynx)
 
+## Emeritus Maintainers
+
+None.
+
 ## Membership Changes
 
 Follow [GOVERNANCE.md](GOVERNANCE.md#becoming-a-maintainer) for nominations and advancement, and [Maintainer Inactivity and Removal](GOVERNANCE.md#maintainer-inactivity-and-removal) for departures. Update this file and [CODEOWNERS](.github/CODEOWNERS) together when membership changes.

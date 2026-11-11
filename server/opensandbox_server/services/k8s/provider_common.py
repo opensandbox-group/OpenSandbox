@@ -51,6 +51,15 @@ _GPU_RESOURCE_LIMIT_KEY = "gpu"
 # (e.g. amd.com/gpu, gpu.intel.com/i915) can be added as a follow-up.
 _K8S_NVIDIA_GPU_RESOURCE = "nvidia.com/gpu"
 
+# resourceLimits disk-quota aliases, resolved with the same precedence as the
+# Docker runtime (_resolve_resource_limits) and the Windows profile
+# (windows_common). Kubernetes only accepts the canonical container resource
+# name `ephemeral-storage`, so the aliases must be translated instead of being
+# passed through verbatim as unknown resource keys (which the API server
+# rejects).
+_DISK_RESOURCE_LIMIT_KEYS = ("disk", "storage", "ephemeral-storage")
+_K8S_EPHEMERAL_STORAGE_RESOURCE = "ephemeral-storage"
+
 
 def _translate_resource_limits_for_k8s(
     resource_limits: Dict[str, str],
@@ -67,7 +76,10 @@ def _translate_resource_limits_for_k8s(
 
     Returns:
         A new dict with the ``gpu`` key translated to ``nvidia.com/gpu``
-        and any unparseable GPU value dropped. Other keys (cpu, memory, ...)
+        and any unparseable GPU value dropped. The disk-quota keys
+        (``disk`` / ``storage`` / ``ephemeral-storage``) are translated to
+        the canonical ``ephemeral-storage`` container resource with the same
+        precedence the Docker runtime resolves. Other keys (cpu, memory, ...)
         are passed through unchanged.
 
     Raises:
@@ -82,8 +94,17 @@ def _translate_resource_limits_for_k8s(
     translated: Dict[str, str] = {
         key: value
         for key, value in resource_limits.items()
-        if key != _GPU_RESOURCE_LIMIT_KEY
+        if key != _GPU_RESOURCE_LIMIT_KEY and key not in _DISK_RESOURCE_LIMIT_KEYS
     }
+
+    # The portable disk-quota key (canonical name `disk`, aliases `storage` /
+    # `ephemeral-storage`) becomes the Kubernetes container storage resource;
+    # the value keeps its Docker/Kubernetes-style quantity form, which the
+    # API server's quantity parser accepts.
+    for alias in _DISK_RESOURCE_LIMIT_KEYS:
+        if alias in resource_limits:
+            translated[_K8S_EPHEMERAL_STORAGE_RESOURCE] = resource_limits[alias]
+            break
 
     raw_gpu = resource_limits.get(_GPU_RESOURCE_LIMIT_KEY)
     if raw_gpu is None:

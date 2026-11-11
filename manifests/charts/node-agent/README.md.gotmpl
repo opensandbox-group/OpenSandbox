@@ -19,6 +19,15 @@ Node-local checkpoint state and source-data retention jointly define the
 delivery guarantee. Do not remove the state host path, rotate durable-file
 outputs externally, or change a sink target without draining the Agent.
 
+Rendered resource names join the release and chart names: a standalone
+`helm install node-agent ...` yields `node-agent-opensandbox-node-agent` —
+set `fullnameOverride` (or `nameOverride`) when scripting against the
+DaemonSet. A `sources` list containing only `vm-console` renders no RBAC
+rules; any other combination renders the Pod-watch ClusterRole and
+binding. Either way the DaemonSet must schedule on every firecracker
+runtime node, so set `nodeSelector`/`tolerations` when those nodes carry
+taints.
+
 {{ template "chart.valuesSection" . }}
 
 {{- define "chart.valuesSection" }}## Configuration

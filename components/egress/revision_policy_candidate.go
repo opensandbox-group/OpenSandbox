@@ -164,9 +164,6 @@ func freezeEffectivePolicyInputs(inputs effectivePolicyInputs) (effectivePolicyI
 	if err != nil {
 		return effectivePolicyInputs{}, fmt.Errorf("%w: parse user policy: %w", errInvalidEffectivePolicyCandidate, err)
 	}
-	if user.DefaultAction != policy.ActionAllow && user.DefaultAction != policy.ActionDeny {
-		return effectivePolicyInputs{}, fmt.Errorf("%w: user policy: unsupported default action %q", errInvalidEffectivePolicyCandidate, user.DefaultAction)
-	}
 	freezeRules := func(name string, rules []policy.EgressRule, action string) ([]policy.EgressRule, error) {
 		out := make([]policy.EgressRule, len(rules))
 		for i, rule := range rules {

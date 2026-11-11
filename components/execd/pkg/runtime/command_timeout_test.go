@@ -58,12 +58,21 @@ func TestCommandTimeoutClassification(t *testing.T) {
 			require.Equal(t, strconv.Itoa(tc.exitCode), got.EValue)
 			require.NotNil(t, got.ExitCode)
 			require.Equal(t, tc.exitCode, *got.ExitCode)
-			require.NotEmpty(t, got.Traceback)
+			wantError := "signal: killed"
+			if tc.exitCode == 7 {
+				wantError = "exit status 7"
+			}
+			if tc.errorName == "CommandTimeout" {
+				wantError = "command timed out after 100ms: " + wantError
+			}
+			require.Equal(t, []string{wantError}, got.Traceback)
 			require.Equal(t, "before", output)
 			require.False(t, complete)
 			status, err := c.GetCommandStatus(session)
 			require.NoError(t, err)
 			require.False(t, status.Running)
+			require.Equal(t, wantError, status.Error)
+			require.Equal(t, tc.exitCode, *status.ExitCode)
 			require.NoFileExists(t, c.stdoutFileName(session))
 			require.NoFileExists(t, c.stderrFileName(session))
 		})

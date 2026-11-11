@@ -145,16 +145,17 @@ Per-request `networkPolicy` is not supported when the lifecycle API creates a sa
 :::
 
 ```python
-from opensandbox import Sandbox, NetworkPolicy, EgressRule
+from opensandbox import Sandbox
+from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule
 
 sandbox = await Sandbox.create(
     image="python:3.11",
     network_policy=NetworkPolicy(
         default_action="deny",
         egress=[
-            EgressRule(action="deny", target="10.244.0.0/16"),   # Deny Pod CIDR
-            EgressRule(action="deny", target="10.96.0.0/12"),   # Deny Service CIDR
-            EgressRule(action="allow", target="*.example.com"),  # Allow external domains
+            NetworkRule(action="deny", target="10.244.0.0/16"),   # Deny Pod CIDR
+            NetworkRule(action="deny", target="10.96.0.0/12"),   # Deny Service CIDR
+            NetworkRule(action="allow", target="*.example.com"),  # Allow external domains
         ],
     ),
 )

@@ -307,6 +307,23 @@ def test_create_rejects_native_oci_before_side_effects(service, crs):
     assert not crs.created
 
 
+@pytest.mark.parametrize("alias", ["storage", "ephemeral-storage"])
+def test_create_rejects_sandbox_disk_quota_aliases(service, crs, alias):
+    """The sandbox writable-layer quota aliases are not template keys.
+
+    Template resourceLimits describe guest machine sizing (disk = guest
+    rootfs size), and the shared sandbox-create component must not promise
+    the aliases here.
+    """
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(resourceLimits={"cpu": "1", alias: "10G"}))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+    assert alias in excinfo.value.detail["message"]
+    assert "cpu, memory, disk" in excinfo.value.detail["message"]
+    assert not crs.created
+
+
 @pytest.mark.parametrize("manifest_ref", [
     None,
     "oci://registry.example.com/team/templates:latest",

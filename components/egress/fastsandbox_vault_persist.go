@@ -506,7 +506,7 @@ func (s *fastSandboxPolicyServer) vaultRecoveryActive() bool {
 func (s *fastSandboxPolicyServer) clearVaultDegradedLocked(subj subject.Subject) {
 	if e, ok := s.vaults[subj]; ok {
 		e.degraded = ""
-		s.vaults[subj] = e
+		s.setSubjectVaultEntryLocked(subj, e)
 	}
 }
 
@@ -576,7 +576,7 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			s.mu.Lock()
 			entry, live := s.vaults[subj]
 			if !live || entry.fence != fence {
-				s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, degraded: "strict owner authority unavailable"}
+				s.setSubjectVaultEntryLocked(subj, vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, degraded: "strict owner authority unavailable"})
 			}
 			s.mu.Unlock()
 			return
@@ -585,7 +585,7 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			s.mu.Lock()
 			entry, live := s.vaults[subj]
 			if !live || entry.fence != fence || !entry.v2Verified {
-				s.vaults[subj] = vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, vaultStateProtected: true, degraded: "Vault initialization verification required"}
+				s.setSubjectVaultEntryLocked(subj, vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, vaultStateProtected: true, degraded: "Vault initialization verification required"})
 			}
 			s.mu.Unlock()
 			return
@@ -603,7 +603,6 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			protectedBefore = e.vaultStateProtected
 			previousMeta = e.fileMeta
 		}
-		delete(s.vaults, subj)
 	}
 	entry := vaultEntry{
 		store: credentialvault.NewSubjectStore(), fence: fence,
@@ -613,7 +612,7 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 	if err != nil {
 		entry.degraded = fmt.Sprintf("vault file store unavailable: %v", err)
 		entry.vaultStateUnknown = true
-		s.vaults[subj] = entry
+		s.setSubjectVaultEntryLocked(subj, entry)
 		log.Warnf("subject %s: %s", subj, entry.degraded)
 		return
 	}
@@ -725,7 +724,7 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 		entry.sealed = true
 		log.Infof("subject %s: seal restored from marker (exported bundle pending)", subj)
 	}
-	s.vaults[subj] = entry
+	s.setSubjectVaultEntryLocked(subj, entry)
 }
 
 // quarantineVaultFile unlinks a file that can never load again. Best effort:

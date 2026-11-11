@@ -62,6 +62,7 @@ from .fsb_template_env import FsbTemplateEnv
 from .fsb_template_format import FsbTemplateFormat
 from .fsb_template_metadata import FsbTemplateMetadata
 from .fsb_template_readiness import FsbTemplateReadiness
+from .fsb_template_resource_limits import FsbTemplateResourceLimits
 from .fsb_template_status import FsbTemplateStatus
 from .fsb_template_status_phase import FsbTemplateStatusPhase
 from .host import Host
@@ -93,6 +94,7 @@ from .renew_sandbox_expiration_request import RenewSandboxExpirationRequest
 from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
 from .renewal_policy import RenewalPolicy
 from .resource_limits import ResourceLimits
+from .resource_requests import ResourceRequests
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
 from .sandbox_lifecycle import SandboxLifecycle
@@ -149,6 +151,7 @@ __all__ = (
     "FsbTemplateFormat",
     "FsbTemplateMetadata",
     "FsbTemplateReadiness",
+    "FsbTemplateResourceLimits",
     "FsbTemplateStatus",
     "FsbTemplateStatusPhase",
     "Host",
@@ -180,6 +183,7 @@ __all__ = (
     "RenewSandboxExpirationRequest",
     "RenewSandboxExpirationResponse",
     "ResourceLimits",
+    "ResourceRequests",
     "Sandbox",
     "SandboxExtensions",
     "SandboxLifecycle",

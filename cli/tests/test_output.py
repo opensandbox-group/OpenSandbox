@@ -101,6 +101,16 @@ class TestTableOutput:
         captured = capsys.readouterr()
         assert "-" in captured.out
 
+    def test_print_rows_none_renders_dash(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=False)
+        fmt.print_rows(
+            [{"id": "sb-1", "image": None, "expires_at": None}],
+            columns=["id", "image", "expires_at"],
+        )
+        captured = capsys.readouterr()
+        assert "None" not in captured.out
+        assert captured.out.split().count("-") >= 2
+
     def test_print_models_shows_headers(self, capsys: pytest.CaptureFixture[str]) -> None:
         fmt = OutputFormatter("table", color=False)
         items = [FakeItem(id="1", name="a", score=10)]

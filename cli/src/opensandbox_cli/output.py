@@ -317,7 +317,8 @@ class OutputFormatter:
         for row in rows:
             cells: list[Text | str] = []
             for col in columns:
-                val = str(row.get(col, "-"))
+                raw = row.get(col)
+                val = "-" if raw is None else str(raw)
                 if col in _STATUS_COLUMNS:
                     cells.append(_style_value(col, val))
                 else:

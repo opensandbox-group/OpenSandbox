@@ -71,7 +71,7 @@ export interface ByteRange {
   start: number;
   /** Inclusive last byte offset, or -1 if parsing failed. */
   end: number;
-  /** Complete file size, or -1 if unknown or parsing failed. */
+  /** Complete representation size from Content-Range, or -1 if unknown or invalid. */
   total: number;
   /** Original Content-Range header value. */
   raw: string;
@@ -82,7 +82,7 @@ export interface ReadBytesResponse<TBody> {
   statusCode: number;
   contentType?: string;
   contentDisposition?: string;
-  /** Response body size, or -1 if the Content-Length header is unavailable. */
+  /** Content-Length header in bytes, or -1 if unavailable. */
   contentLength: number;
   /** Complete file size, or -1 if unknown. */
   totalSize: number;
