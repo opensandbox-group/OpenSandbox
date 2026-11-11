@@ -14,6 +14,7 @@
 
 """Kubernetes Pool service for pre-warmed sandbox resource pools."""
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +39,22 @@ from opensandbox_server.services.k8s.client import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _invalid_pool_spec(e: ApiException, action: str) -> HTTPException:
+    """Map an API-server validation rejection (400/422) to a client error."""
+    message = e.reason
+    try:
+        message = json.loads(e.body).get("message") or message
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={
+            "code": SandboxErrorCodes.INVALID_PARAMETER,
+            "message": f"Failed to {action} pool: {message}",
+        },
+    )
 
 
 class PoolService:
@@ -132,6 +149,8 @@ class PoolService:
                         "message": f"Pool '{request.name}' already exists.",
                     },
                 ) from e
+            if e.status in (400, 422):
+                raise _invalid_pool_spec(e, "create") from e
             logger.error(f"Kubernetes API error creating pool {request.name}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -262,6 +281,8 @@ class PoolService:
                         "message": f"Pool '{pool_name}' not found.",
                     },
                 ) from e
+            if e.status in (400, 422):
+                raise _invalid_pool_spec(e, "update") from e
             logger.error(f"Kubernetes API error updating pool {pool_name}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
