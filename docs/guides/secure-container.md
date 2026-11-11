@@ -840,7 +840,6 @@ kubectl get pod <pod-name> -o jsonpath='{.spec.runtimeClassName}'
 
 Workloads that need their own Docker daemon inside the sandbox — building images, `docker compose` stacks, CI jobs that spawn helper containers — are covered in the dedicated [Docker-in-Docker on Kata Sandboxes](/guides/docker-in-docker) guide, including the privileged prerequisite, storage-driver selection, and cgroup delegation.
 
-
 ---
 
 ## Administrator Guide
