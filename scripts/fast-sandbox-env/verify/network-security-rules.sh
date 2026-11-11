@@ -24,9 +24,9 @@
 # to unload the rules — so the restrictive baseline never leaks into the
 # other verify stages or the SDK e2e suites.
 #
-# Proven while the baseline is active: kernel-side (mount, startup logs,
-# port-cap complement in the dispatch chain, subject deny set), then live —
-# a default-deny sandbox resolves example.com but not github.com
+# Proven while the baseline is active: kernel-side (mount, port-cap
+# complement in the dispatch chain, subject deny set), then live — a
+# default-deny sandbox resolves example.com but not github.com
 # (allow.always), and a default-allow sandbox reaches the TLS echo endpoint
 # while the Kubernetes API ClusterIP and a non-whitelisted node port stay
 # dropped (deny.always and the port cap beat the user policy).
@@ -46,16 +46,6 @@ network_security_rules_files_mounted() { # <pod>
 	[[ "$out" == *"deny.always"* && "$out" == *"allow.always"* && "$out" == *"reachable.ports.cap"* ]]
 }
 
-network_security_rules_startup_logged() { # <pod>
-	local out
-	out="$(kubectl -n "$RESOURCE_NS" logs "pod/$1" -c egress 2>/dev/null)" || return 1
-	[[ "$out" == *"always-deny rule(s) from /var/egress/rules/deny.always"* \
-		&& "$out" == *"always-allow rule(s) from /var/egress/rules/allow.always"* \
-		&& "$out" == *"loaded port floor from /var/egress/rules/reachable.ports.cap"* ]]
-}
-
-# reachable.ports.cap whitelists TCP 53/80/443; the complement must show up
-# as one drop rule in the master dispatch chain.
 network_security_rules_floor_chain() { # <pod>
 	local out
 	out="$(kubectl -n "$RESOURCE_NS" exec "pod/$1" -c egress -- \
@@ -112,9 +102,12 @@ network_security_rules_verify() {
 	# restrictive baseline active for the later verify stages / SDK suites.
 	trap 'kubectl -n "$RESOURCE_NS" delete configmap "$RULES_CONFIGMAP" --ignore-not-found >/dev/null 2>&1 || true' EXIT
 
-	wait_for "rule files mounted into the egress container" 30 network_security_rules_files_mounted "$pod"
-	wait_for "rule files parsed at egress startup" 30 network_security_rules_startup_logged "$pod"
-	wait_for "port-cap complement in the master dispatch chain" 30 network_security_rules_floor_chain "$pod"
+	# The ConfigMap lands on already-running pods: kubelet syncs the files
+	# within its sync period and the next reload tick (≤60s) picks them up —
+	# no egress restart, hence no startup-load logs; the kernel probes below
+	# are the parsed proof.
+	wait_for "rule files mounted into the egress container" 60 network_security_rules_files_mounted "$pod"
+	wait_for "port-cap complement in the master dispatch chain" 60 network_security_rules_floor_chain "$pod"
 
 	# Live probes need the TLS echo endpoint (positive control) and the
 	# cluster endpoints the deny checks target.
