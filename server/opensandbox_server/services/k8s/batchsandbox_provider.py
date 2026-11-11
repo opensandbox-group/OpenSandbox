@@ -503,7 +503,6 @@ class BatchSandboxProvider(WorkloadProvider):
         extra_mounts: list[Dict[str, Any]],
         extra_security_context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Merge template-provided volumes, mounts, and securityContext into runtime pod spec."""
         try:
             spec = batchsandbox["spec"]["template"]["spec"]
         except KeyError:
@@ -857,7 +856,8 @@ class BatchSandboxProvider(WorkloadProvider):
             return None
 
     def _expired_status(self, workload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Running is pod readiness, not TTL. A past expireTime must leave Running.
+        """Running is pod readiness, not TTL: once expireTime passes the sandbox
+        must stop being reported as Running.
 
         last_transition_at is the expireTime itself so wall-clock billing stops
         at the configured timeout instead of creation time or "now".

@@ -72,11 +72,6 @@ def test_format_ingress_endpoint_header():
     assert endpoint.headers == {OPEN_SANDBOX_INGRESS_HEADER: "sid-8080"}
 
 
-# ============================================================
-# Signed ingress endpoints
-# ============================================================
-
-
 def test_format_signed_ingress_endpoint_wildcard():
     cfg = IngressConfig(
         mode=INGRESS_MODE_GATEWAY,

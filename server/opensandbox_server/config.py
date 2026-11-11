@@ -64,7 +64,8 @@ SECURE_ACCESS_ACTIVE_KEY_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY"
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.(?!-)[A-Za-z0-9-]{1,63})*$")
 _WILDCARD_DOMAIN_RE = re.compile(r"^\*\.(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
 _IPV4_WITH_PORT_RE = re.compile(r"^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?::(?P<port>\d{1,5}))?$")
-# ``parse_quantity`` is intentionally permissive (for example, it accepts NaN and the unsupported decimal suffix K), so guard it with Kubernetes' grammar.
+# ``parse_quantity`` is intentionally permissive (it accepts NaN and the unsupported decimal
+# suffix K), so guard it with Kubernetes' grammar.
 _KUBERNETES_QUANTITY_RE = re.compile(
     r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
     r"(?:(?:[eE][+-]?\d+)|(?:[numkMGTPE]|[KMGTPE]i)?)$"
@@ -469,8 +470,9 @@ class GatewayRouteModeConfig(BaseModel):
         description="Routing mode used by the gateway (wildcard, header, uri).",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
 
 
 class GatewayConfig(BaseModel):
@@ -1301,7 +1303,6 @@ class SecureRuntimeConfig(BaseModel):
             return self
 
         if self.type == "firecracker":
-            # Firecracker is Kubernetes-only
             if self.k8s_runtime_class is None:
                 raise ValueError(
                     "secure_runtime.k8s_runtime_class is required when secure_runtime.type is 'firecracker'."

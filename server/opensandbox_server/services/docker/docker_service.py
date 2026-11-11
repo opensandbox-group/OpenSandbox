@@ -203,7 +203,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._ossfs_mount_ref_counts: Dict[str, int] = {}
         self._restore_existing_sandboxes()
 
-        # Initialize secure runtime resolver
         self.resolver = SecureRuntimeResolver(self.app_config)
         self.docker_runtime = self.resolver.get_docker_runtime()
 
@@ -271,8 +270,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
         except DockerNotFound as exc:
             # Container disappeared between list-summary and inspect; treat as
-            # not found rather than surfacing a 500. See list_sandboxes for
-            # the full-table variant of this fix.
+            # not found rather than surfacing a 500.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
@@ -451,7 +449,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             managed_volumes = []
 
         self._remove_expiration_tracking(sandbox_id)
-        # Ensure sidecar is also cleaned up on expiration
         self._cleanup_egress_sidecar(sandbox_id)
         self._cleanup_windows_oem_volume(sandbox_id, labels)
         self._release_ossfs_mounts(mount_keys)

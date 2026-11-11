@@ -118,13 +118,10 @@ def parse_nano_cpus(value: Optional[str]) -> Optional[int]:
 
 
 def parse_gpu_request(value: Optional[str]) -> Optional[int]:
-    """Convert GPU limit string to a device count.
+    """Convert a GPU limit string to a device count.
 
-    Accepts a positive integer string (e.g. ``"1"``, ``"2"``) or the literal
-    ``"all"`` to request every available GPU. Returns ``-1`` for ``"all"``
-    (the sentinel the Docker Engine uses for unbounded device requests),
-    a positive int for a numeric count, and ``None`` when unset or the
-    value cannot be parsed.
+    ``"all"`` returns ``-1`` (the Docker Engine sentinel for unbounded device
+    requests); ``None`` when unset or unparseable.
     """
     if not value:
         return None
@@ -172,7 +169,7 @@ def parse_timestamp(timestamp: Optional[str]) -> datetime:
         else:
             frac = rest[:tz_sep]
             tz = rest[tz_sep:]
-        frac = frac[:6]  # truncate to microseconds precision
+        frac = frac[:6]
         normalized = f"{main}.{frac:0<6}{tz}" if frac else f"{main}{tz}"
 
     try:

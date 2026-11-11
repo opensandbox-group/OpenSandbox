@@ -23,6 +23,7 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,6 +77,44 @@ func TestGetCommandStatus_MissingID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
 	require.Equal(t, "missing command execution id", resp.Message)
+}
+
+func TestGetBackgroundCommandOutput_UnknownIDReturnsNotFound(t *testing.T) {
+	previous := codeRunner
+	codeRunner = runtime.NewController("", "")
+	t.Cleanup(func() { codeRunner = previous })
+
+	ctrl, w := setupCommandController(http.MethodGet, "/command/missing/logs")
+	ctrl.ctx.Params = gin.Params{{Key: "id", Value: "missing"}}
+
+	ctrl.GetBackgroundCommandOutput()
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Contains(t, resp.Message, "command not found")
+}
+
+func TestGetBackgroundCommandOutput_RejectsInvalidCursor(t *testing.T) {
+	cases := map[string]string{
+		"abc": "cursor must be an integer",
+		"1.5": "cursor must be an integer",
+		"-1":  "cursor cannot be negative",
+	}
+	for cursor, message := range cases {
+		t.Run(cursor, func(t *testing.T) {
+			ctrl, w := setupCommandController(http.MethodGet, "/command/cmd-1/logs?cursor="+cursor)
+			ctrl.ctx.Params = gin.Params{{Key: "id", Value: "cmd-1"}}
+
+			ctrl.GetBackgroundCommandOutput()
+
+			require.Equal(t, http.StatusBadRequest, w.Code)
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+			require.Equal(t, message, resp.Message)
+		})
+	}
 }
 
 func TestGetBackgroundCommandOutput_MissingID(t *testing.T) {

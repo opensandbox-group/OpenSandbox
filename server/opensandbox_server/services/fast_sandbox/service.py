@@ -370,10 +370,6 @@ class FastSandboxService(SandboxService, ExtensionService):
             self._pool_mode_cache[key] = (aware, time.monotonic())
         return aware
 
-    def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
-        """Return the resource profile declared by the selected SandboxPool."""
-        return self._pool_resources_from_info(self._pool_info(namespace, pool_ref))
-
     @staticmethod
     def _pool_resources_from_info(pool: pb2.PoolInfo) -> dict:
         resources: dict = {}

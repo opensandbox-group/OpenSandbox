@@ -85,6 +85,14 @@ func (c *CodeInterpretingController) CreateContext() {
 		Language: runtime.Language(request.Language),
 		Cwd:      request.Cwd,
 	})
+	if errors.Is(err, runtime.ErrUnsupportedLanguage) {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("error creating code context. %v", err),
+		)
+		return
+	}
 	if err != nil {
 		c.RespondError(
 			http.StatusInternalServerError,
