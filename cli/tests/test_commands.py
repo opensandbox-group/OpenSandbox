@@ -35,7 +35,12 @@ import websockets
 from click.testing import CliRunner
 from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
-from opensandbox.models.execd import Execution, ExecutionComplete, ExecutionError
+from opensandbox.models.execd import (
+    CommandLogs,
+    Execution,
+    ExecutionComplete,
+    ExecutionError,
+)
 from opensandbox.models.sandboxes import (
     PagedSnapshotInfos,
     PaginationInfo,
@@ -2377,6 +2382,41 @@ class TestCommandRun:
         )
         assert result.exit_code != 0
         assert "Allowed values: raw" in result.output
+
+
+class TestCommandLogs:
+    @pytest.mark.parametrize("cursor", [0, 424242])
+    def test_table_includes_next_cursor(self, runner: CliRunner, cursor: int) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_background_command_logs.return_value = CommandLogs(
+            content="hello-from-exec",
+            cursor=cursor,
+        )
+
+        result = _invoke(
+            runner, ["command", "logs", "sb-1", "exec-1"], sandbox=mock_sb
+        )
+
+        assert result.exit_code == 0
+        assert "hello-from-exec" in result.output
+        assert str(cursor) in result.output.split()
+
+    def test_raw_logs_stay_the_payload(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_background_command_logs.return_value = CommandLogs(
+            content="hello-from-exec",
+            cursor=424242,
+        )
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1", "-o", "raw"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert "hello-from-exec" in result.output
+        assert "424242" not in result.output
 
 
 class TestCommandInterrupt:

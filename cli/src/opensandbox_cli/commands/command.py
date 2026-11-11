@@ -246,7 +246,9 @@ def command_logs(
         elif obj.output.fmt == "raw":
             click.echo(logs.content)
         else:
-            obj.output.panel(logs.content, title="Command Logs")
+            # The next cursor is the only way to continue an incremental read.
+            obj.output.print_dict({"cursor": logs.cursor}, title="Command Logs")
+            obj.output.panel(logs.content, title="Content")
     finally:
         sandbox.close()
 
